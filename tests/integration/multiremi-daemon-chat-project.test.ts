@@ -1,17 +1,49 @@
+import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { startMultiremiServer } from "@multiremi/api.js";
-import { MultiremiDaemon } from "@multiremi/daemon.js";
+import { startMultiremiServer as startServer } from "../fixtures/daemon-protocol.js";
+import type { MultiremiDaemonOptions } from "@multiremi/daemon.js";
+import { TestMultiremiDaemon } from "../fixtures/daemon-protocol.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import { workDirectory, workRoot } from "@daemon/agent-runtime/workspace/layout.js";
+import { PROVIDER_INSTRUCTIONS_MARKER } from "@daemon/agent-runtime/workspace/runtime-context.js";
 
 const roots: string[] = [];
 const databases: Database[] = [];
+const activeDaemons = new Set<TestMultiremiDaemon>();
+const activeServers = new Set<ReturnType<typeof startServer>>();
 
-afterEach(() => {
+class MultiremiDaemon extends TestMultiremiDaemon {
+  constructor(options: MultiremiDaemonOptions) {
+    super(options);
+    activeDaemons.add(this);
+  }
+}
+
+function startMultiremiServer(...options: Parameters<typeof startServer>) {
+  const server = startServer(...options);
+  activeServers.add(server);
+  return server;
+}
+
+async function stopDaemons() {
+  while (activeDaemons.size) {
+    const daemons = [...activeDaemons];
+    for (const daemon of daemons) daemon.stop();
+    await Promise.all(daemons.map((daemon) => daemon.stopAndDrainTestWork()));
+    for (const daemon of daemons) activeDaemons.delete(daemon);
+  }
+}
+
+afterEach(async () => {
+  await stopDaemons();
+  for (const server of activeServers) server.stop(true);
+  activeServers.clear();
   for (const db of databases.splice(0)) db.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -23,9 +55,10 @@ describe("Project-bound Chat daemon startup", () => {
       : "starts Project Chat with a diagnostic when automatic repository sync fails", async () => {
       const root = mkdtempSync(join(tmpdir(), "multiremi-bound-project-chat-"));
       roots.push(root);
-      const db = new Database(":memory:");
+      const db = openSqliteDatabase(":memory:");
       databases.push(db);
       const store = new MultiremiStore(db);
+    store.ensureLocalWorkspace();
       store.ensureLocalWorkspace();
       const repoUrl = "https://example.test/catalog-only-repo.git";
       store.updateWorkspace("local", {
@@ -46,6 +79,8 @@ describe("Project-bound Chat daemon startup", () => {
       });
       store.createProjectDoc(project.id, { kind: "wiki", title: "Project guide", path: "guide.md", body: "Current Project Wiki." });
       const agent = store.createAgent({ name: "Chat Project worker", provider: "claude" });
+      const skill = store.createSkill({ name: "Chat Skill", content: "# Chat Skill\n" });
+      store.setAgentSkills(agent.id, { skill_ids: [skill.id!] });
       const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
       const sent = store.sendChatMessage(chat.id, { body: "Read this Project context." });
       expect(store.getTaskWithAgent(sent.task.id)).toMatchObject({
@@ -56,17 +91,22 @@ describe("Project-bound Chat daemon startup", () => {
       const credential = await store.createAccessToken({ name: "Chat Project test daemon", type: "daemon", workspaceId: "local", daemonId });
       const server = startMultiremiServer({ store, scheduler: null, authToken: "chat-project-test", hostname: "127.0.0.1", port: 0 });
       let prompt = "";
+      let instructions = "";
       let cwd = "";
       let envProject: string | undefined;
+      let providerHome = "";
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
         daemonId, runtimeId: "rt_chat_project", runtimeName: "Chat Project runtime", provider: "claude", workspaceId: "local",
         once: true, daemonPort: 0, workspacesRoot: join(root, "workspaces"), repoCacheRoot: join(root, ".repo-cache"),
         providerFactory: (options) => ({
           async *sendStream(message) {
             prompt = message;
+            instructions = providerInstructions(options.env);
             cwd = options.cwd!;
             envProject = options.env?.MULTIREMI_PROJECT_ID;
+            providerHome = options.env?.CLAUDE_CONFIG_DIR ?? "";
             yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Project received." }] } as any;
           },
           getLastResponse: () => ({ text: "Project received.", sessionId: "chat-project-session", requestId: "chat-project-request" }),
@@ -80,41 +120,50 @@ describe("Project-bound Chat daemon startup", () => {
         if (localDirectory) {
           expect(sync).not.toHaveBeenCalled();
           expect(checkout).not.toHaveBeenCalled();
+          // The user's folder is not Remi's: the Agent's skill is in the provider home, nothing skill-related here.
+          for (const entry of [".claude", ".agents", ".remi-skills.json"]) expect(existsSync(join(localPath, entry))).toBe(false);
+          expect(readFileSync(join(providerHome, "skills", "chat-skill", "SKILL.md"), "utf8")).toContain("# Chat Skill");
         } else {
+          expect(existsSync(join(cwd, ".claude", "skills", "chat-skill", "SKILL.md"))).toBe(true);
           // MUL-310 now requires an automatic attempt for bound daemon-owned
           // Chat; the earlier zero-eager-Git contract still applies to user dirs.
           expect(sync).toHaveBeenCalledTimes(1);
           expect(sync.mock.calls[0]![0]).toBe("local");
           expect(sync.mock.calls[0]![1]).toEqual([{ url: repoUrl }]);
           expect(checkout).not.toHaveBeenCalled();
-          expect(prompt).toContain("## Repository Availability Warnings");
+          // ADR 0023: the failure is this turn's, so the turn input says it and AGENTS.md does not.
+          expect(instructions).not.toContain("Authentication failed for Project repository");
+          expect(prompt).toStartWith("Read this Project context.\n\n(Repository warnings, diagnostic only: ");
           expect(prompt).toContain("Authentication failed for Project repository");
-          expect(prompt).toContain("Chat can continue without these repositories");
-          expect(prompt).toContain("run `remi repo checkout <repo-id>` explicitly");
+          expect(prompt).toContain("`remi repo checkout <repo-id>` retries a failed checkout");
         }
         expect(envProject).toBe(project.id);
-        expect(cwd).toBe(localDirectory ? localPath : join(root, "workspaces", "chats", chat.id));
-        expect(prompt).toContain("This Chat is bound to project: Selected Chat Project");
-        expect(prompt).toContain("Follow these Chat Project instructions.");
-        expect(prompt).toContain("## Available Repositories");
-        expect(prompt).toContain(repoUrl);
-        expect(prompt).toContain("remi memory search");
-        expect(prompt).not.toContain("## Issue");
+        expect(cwd).toBe(localDirectory ? localPath : workDirectory(join(root, "workspaces"), { kind: "chat", id: chat.id }));
+        // ADR 0023: the turn is the user's text; the Project notes are in the provider home's AGENTS.md.
+        if (localDirectory) expect(prompt).toBe("Read this Project context.");
+        expect(instructions).toContain("This Chat is bound to project: Selected Chat Project");
+        expect(instructions).toContain("Follow these Chat Project instructions.");
+        expect(instructions).toContain("## Available Repositories");
+        expect(instructions).toContain(repoUrl);
+        expect(instructions).toContain("remi memory search");
+        expect(instructions).not.toContain("## Issue");
         if (localDirectory) {
-          expect(prompt).toContain("Automatic repository checkout is disabled for this working directory");
-          expect(prompt).toContain("Project Wiki has not been materialized in this working directory");
+          expect(instructions).toContain("Automatic repository checkout is disabled for this working directory");
+          expect(instructions).toContain("Project Wiki has not been materialized in this working directory");
           expect(existsSync(join(cwd, "wiki"))).toBe(false);
           expect(existsSync(join(cwd, ".multiremi", "wiki-base"))).toBe(false);
           expect(existsSync(join(cwd, ".multiremi", "chat-repos.json"))).toBe(false);
           expect(existsSync(join(cwd, "catalog-only-repo"))).toBe(false);
-          expect(JSON.parse(readFileSync(join(cwd, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+          expect(existsSync(join(cwd, ".multiremi", "gc.json"))).toBe(false);
         } else {
-          expect(prompt).toContain("Project Wiki is materialized in `./wiki`");
+          expect(instructions).toContain("Project Wiki is materialized in `$MULTIREMI_WORKSPACE_ROOT/wiki`");
           expect(readFileSync(join(cwd, "wiki", "guide.md"), "utf8")).toBe("Current Project Wiki.\n");
         }
       } finally {
+        await daemon.stopAndDrainTestWork();
         sync.mockRestore();
         checkout.mockRestore();
+        await stopDaemons();
         server.stop(true);
       }
     });
@@ -123,9 +172,10 @@ describe("Project-bound Chat daemon startup", () => {
   it("checks out explicit Project repos once and reuses the stable Chat branch after a daemon restart", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-chat-repo-reuse-"));
     roots.push(root);
-    const db = new Database(":memory:");
+    const db = openSqliteDatabase(":memory:");
     databases.push(db);
     const store = new MultiremiStore(db);
+    store.ensureLocalWorkspace();
     store.ensureLocalWorkspace();
     const repoUrl = "https://example.test/explicit-chat-repo.git";
     const catalogOnlyUrl = "https://example.test/catalog-only.git";
@@ -155,17 +205,18 @@ describe("Project-bound Chat daemon startup", () => {
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
     const credential = await store.createAccessToken({ name: "Chat repo daemon", type: "daemon", workspaceId: "local", daemonId });
     const server = startMultiremiServer({ store, scheduler: null, authToken: "chat-repo-test", hostname: "127.0.0.1", port: 0 });
-    const chatPath = join(root, "workspaces", "chats", chat.id);
+    const chatPath = workDirectory(join(root, "workspaces"), { kind: "chat", id: chat.id });
     const repoPath = join(chatPath, "explicit-chat-repo");
-    const prompts: string[] = [];
+    const instructions: string[] = [];
     const cwds: string[] = [];
     const createDaemon = () => new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
       daemonId, runtimeId, runtimeName: "Chat repo runtime", provider: "claude", workspaceId: "local",
       once: true, daemonPort: 0, workspacesRoot: join(root, "workspaces"), repoCacheRoot: join(root, ".repo-cache"),
       providerFactory: (options) => ({
-        async *sendStream(message) {
-          prompts.push(message);
+        async *sendStream() {
+          instructions.push(providerInstructions(options.env));
           cwds.push(options.cwd!);
           expect(readFileSync(join(repoPath, "README.md"), "utf8")).toBe("Initial Project source.\n");
           yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Repository ready." }] } as any;
@@ -198,14 +249,15 @@ describe("Project-bound Chat daemon startup", () => {
           repoUrl, branchName: `chat/${chat.id}`, reuseExisting: true, skipFetch: true,
         });
         expect(git(repoPath, ["branch", "--show-current"])).toBe(`chat/${chat.id}`);
-        expect(prompts[0]).toContain(`at \`${repoPath}\` on branch \`chat/${chat.id}\``);
-        expect(prompts[0]).toContain("already checked out on the Chat session branch");
-        expect(prompts[0]).not.toContain(catalogOnlyUrl);
+        expect(instructions[0]).toContain(`at \`${repoPath}\` on branch \`chat/${chat.id}\``);
+        expect(instructions[0]).toContain("already checked out on the Chat session branch");
+        expect(instructions[0]).not.toContain(catalogOnlyUrl);
         expect(cache.lookup("local", catalogOnlyUrl)).toBeNull();
         expect(JSON.parse(readFileSync(join(chatPath, ".multiremi", "chat-repos.json"), "utf8")).entries).toEqual([
           { projectId: project.id, repoUrl, path: repoPath },
         ]);
       } finally {
+        await firstDaemon.stopAndDrainTestWork();
         sync.mockRestore();
         checkout.mockRestore();
       }
@@ -227,13 +279,15 @@ describe("Project-bound Chat daemon startup", () => {
         expect(git(repoPath, ["branch", "--show-current"])).toBe(`chat/${chat.id}`);
         expect(readFileSync(join(repoPath, "uncommitted.txt"), "utf8")).toBe("Keep this local work.\n");
         expect(cwds).toEqual([chatPath, chatPath]);
-        expect(prompts).toHaveLength(2);
+        expect(instructions).toHaveLength(2);
         expect(secondCache.lookup("local", catalogOnlyUrl)).toBeNull();
       } finally {
+        await secondDaemon.stopAndDrainTestWork();
         secondSync.mockRestore();
         secondCheckout.mockRestore();
       }
     } finally {
+      await stopDaemons();
       server.stop(true);
     }
   });
@@ -243,9 +297,10 @@ describe("Project-bound Chat daemon startup", () => {
       it(`cold-starts once after a completed ${localDirectory ? "local-directory" : "managed"} Chat's Project is ${unavailable}, preserving its files`, async () => {
         const root = mkdtempSync(join(tmpdir(), "multiremi-chat-unavailable-project-"));
         roots.push(root);
-        const db = new Database(":memory:");
+        const db = openSqliteDatabase(":memory:");
         databases.push(db);
         const store = new MultiremiStore(db);
+    store.ensureLocalWorkspace();
         store.ensureLocalWorkspace();
         const repoUrl = "https://example.test/preserved-chat-repo.git";
         store.updateWorkspace("local", {
@@ -276,18 +331,20 @@ describe("Project-bound Chat daemon startup", () => {
         const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
         const credential = await store.createAccessToken({ name: "Preserved Chat daemon", type: "daemon", workspaceId: "local", daemonId });
         const server = startMultiremiServer({ store, scheduler: null, authToken: "preserved-chat-test", hostname: "127.0.0.1", port: 0 });
-        const chatPath = join(root, "workspaces", "chats", chat.id);
+        const chatPath = workDirectory(join(root, "workspaces"), { kind: "chat", id: chat.id });
         const originalPath = localDirectory ? sourcePath : join(chatPath, "preserved-chat-repo");
-        const seen: Array<{ cwd: string; sessionId: string | null; projectId: string | undefined; prompt: string }> = [];
+        const seen: Array<{ cwd: string; sessionId: string | null; projectId: string | undefined; prompt: string; instructions: string; mode?: string }> = [];
         const runTurn = async (turn: number) => {
           const sent = store.sendChatMessage(chat.id, { body: `Run turn ${turn}.` });
           const daemon = new MultiremiDaemon({
+            sshMeshManager: disabledSshMeshRuntime(),
             serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
             daemonId, runtimeId, runtimeName: "Preserved Chat runtime", provider: "claude", workspaceId: "local",
             once: true, daemonPort: 0, workspacesRoot: join(root, "workspaces"), repoCacheRoot: join(root, ".repo-cache"),
             providerFactory: (options) => ({
               async *sendStream(message, sendOptions) {
-                seen.push({ cwd: options.cwd!, sessionId: sendOptions?.sessionId ?? null, projectId: options.env?.MULTIREMI_PROJECT_ID, prompt: message });
+                seen.push({ cwd: options.cwd!, sessionId: sendOptions?.sessionId ?? null, projectId: options.env?.MULTIREMI_PROJECT_ID,
+                  prompt: message, instructions: providerInstructions(options.env) });
                 yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Turn finished." }] } as any;
               },
               getLastResponse: () => ({ text: "Turn finished.", sessionId: turn === 0 ? "bound-project-provider" : "fallback-provider", requestId: `preserved-request-${turn}` }),
@@ -308,9 +365,11 @@ describe("Project-bound Chat daemon startup", () => {
             await daemon.start();
             expect(store.getTask(sent.task.id)?.status).toBe("completed");
             expect(seen).toHaveLength(turn + 1);
+            seen[turn]!.mode = store.getTaskPrompt(sent.task.id)?.mode;
             expect(sync).toHaveBeenCalledTimes(!localDirectory && turn === 0 ? 1 : 0);
             expect(checkout).toHaveBeenCalledTimes(!localDirectory && turn === 0 ? 1 : 0);
           } finally {
+            await daemon.stopAndDrainTestWork();
             sync.mockRestore();
             checkout.mockRestore();
           }
@@ -318,13 +377,15 @@ describe("Project-bound Chat daemon startup", () => {
         try {
           await runTurn(0);
           expect(seen[0]).toMatchObject({ cwd: localDirectory ? sourcePath : chatPath, sessionId: null, projectId: project.id });
+          expect(seen[0]!.instructions).toContain("Use this private Project context.");
+          expect(seen[0]!.instructions).toContain("This Chat is bound to project:");
           expect(store.getChatSession(chat.id)).toMatchObject({ sessionId: "bound-project-provider", workDir: localDirectory ? sourcePath : chatPath });
           writeFileSync(join(originalPath, "uncommitted.txt"), "Preserve this unpublished work.\n");
           const before = directoryContents(originalPath);
           const repoMetadata = localDirectory ? null : readFileSync(join(chatPath, ".multiremi", "chat-repos.json"), "utf8");
           const wikiBefore = localDirectory ? null : directoryContents(join(chatPath, "wiki"));
           if (localDirectory) {
-            expect(JSON.parse(readFileSync(join(sourcePath, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+            expect(existsSync(join(sourcePath, ".multiremi", "gc.json"))).toBe(false);
             expect(existsSync(join(sourcePath, "wiki"))).toBe(false);
           }
           if (unavailable === "archived") store.archiveProject(project.id);
@@ -334,16 +395,21 @@ describe("Project-bound Chat daemon startup", () => {
             await runTurn(turn);
             expect(seen[turn]).toMatchObject({ cwd: chatPath, sessionId: turn === 1 ? null : "fallback-provider" });
             expect(seen[turn]!.projectId).toBeUndefined();
-            expect(seen[turn]!.prompt).toStartWith(turn === 1 ? "# Bootstrap Prompt" : "# Delta Prompt");
-            if (turn === 1) expect(seen[turn]!.prompt).toContain("Repositories are not fetched for Chat startup");
-            expect(seen[turn]!.prompt).not.toContain("Use this private Project context.");
-            expect(seen[turn]!.prompt).not.toContain("This Chat is bound to project:");
+            // A fresh provider session first, then a resumed one, both with the same Project-less notes.
+            expect(seen[turn]!.mode).toBe(turn === 1 ? "bootstrap" : "delta");
+            expect(seen[turn]!.prompt).toContain(`Run turn ${turn}.`);
+            expect(seen[turn]!.instructions).toContain("Repositories are not fetched for Chat startup");
+            if (turn === 2) expect(seen[turn]!.instructions).toBe(seen[1]!.instructions);
+            for (const text of [seen[turn]!.prompt, seen[turn]!.instructions]) {
+              expect(text).not.toContain("Use this private Project context.");
+              expect(text).not.toContain("This Chat is bound to project:");
+            }
             expect(directoryContents(originalPath)).toEqual(before);
             expect(readFileSync(join(originalPath, "uncommitted.txt"), "utf8")).toBe("Preserve this unpublished work.\n");
             if (localDirectory) {
               // Compare the entire user directory, including Git files and
-              // platform metadata. The old local-directory GC marker stays true.
-              expect(JSON.parse(readFileSync(join(sourcePath, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+              // platform metadata; the daemon never writes its own into it.
+              expect(existsSync(join(sourcePath, ".multiremi", "gc.json"))).toBe(false);
               expect(existsSync(join(chatPath, "wiki"))).toBe(false);
             } else {
               expect(readFileSync(join(chatPath, ".multiremi", "chat-repos.json"), "utf8")).toBe(repoMetadata!);
@@ -355,6 +421,7 @@ describe("Project-bound Chat daemon startup", () => {
             });
           }
         } finally {
+          await stopDaemons();
           server.stop(true);
         }
       });
@@ -367,9 +434,10 @@ describe("Project-bound Chat local-directory assignment changes", () => {
   it("retires an existing Chat's selected directory when only resource position changes, while new Chats adopt the new first directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-chat-directory-order-"));
     roots.push(root);
-    const db = new Database(":memory:");
+    const db = openSqliteDatabase(":memory:");
     databases.push(db);
     const store = new MultiremiStore(db);
+    store.ensureLocalWorkspace();
     store.ensureLocalWorkspace();
     store.updateWorkspace("local", { settings: { github_enabled: false }, repos: [] });
     const workspacesRoot = join(root, "workspaces");
@@ -401,7 +469,7 @@ describe("Project-bound Chat local-directory assignment changes", () => {
     const resourceB = store.listProjectResources(project.id)[1]!;
     const agent = store.createAgent({ name: "Ordered directory worker", provider: "claude" });
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
-    const chatPath = join(workspacesRoot, "chats", chat.id);
+    const chatPath = workDirectory(workspacesRoot, { kind: "chat", id: chat.id });
     const server = startMultiremiServer({ store, scheduler: null, authToken: "directory-order-test", hostname: "127.0.0.1", port: 0 });
     const runTurn = async (chatId: string, turn: number) => {
       const sent = store.sendChatMessage(chatId, { body: `Run ordered directory turn ${turn}.` });
@@ -412,6 +480,7 @@ describe("Project-bound Chat local-directory assignment changes", () => {
       expect(host).toBeDefined();
       let observed: { cwd: string; sessionId: string | null; prompt: string } | undefined;
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`, token: credentials.get(runtimeId)!,
         ...host, runtimeName: host.runtimeId, provider: "claude", workspaceId: "local",
         once: true, daemonPort: 0, workspacesRoot, repoCacheRoot: join(root, ".repo-cache"),
@@ -433,8 +502,9 @@ describe("Project-bound Chat local-directory assignment changes", () => {
         expect(observed).toBeDefined();
         expect(sync).not.toHaveBeenCalled();
         expect(checkout).not.toHaveBeenCalled();
-        return { ...observed!, runtimeId, lockPaths: acquire.mock.calls.map((args) => args[0]) };
+        return { ...observed!, runtimeId, mode: store.getTaskPrompt(sent.task.id)?.mode, lockPaths: acquire.mock.calls.map((args) => args[0]) };
       } finally {
+        await daemon.stopAndDrainTestWork();
         acquire.mockRestore();
         sync.mockRestore();
         checkout.mockRestore();
@@ -445,7 +515,7 @@ describe("Project-bound Chat local-directory assignment changes", () => {
       expect(first).toMatchObject({ cwd: directoryA, sessionId: null, runtimeId: hosts[0]!.runtimeId });
       expect(first.lockPaths).toEqual([directoryA]);
       expect(store.getChatSession(chat.id)).toMatchObject({ sessionId: "ordered-local-provider", workDir: directoryA });
-      expect(JSON.parse(readFileSync(join(directoryA, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+      expect(existsSync(join(directoryA, ".multiremi", "gc.json"))).toBe(false);
       const beforeA = directoryContents(directoryA);
       const beforeB = directoryContents(directoryB);
       store.updateProjectResource(project.id, resourceB.id, { position: 0 });
@@ -456,7 +526,7 @@ describe("Project-bound Chat local-directory assignment changes", () => {
         expect(result.cwd).toBe(chatPath);
         expect(result.cwd).not.toBe(directoryB);
         expect(result.sessionId).toBe(turn === 1 ? null : "ordered-managed-provider");
-        expect(result.prompt).toStartWith(turn === 1 ? "# Bootstrap Prompt" : "# Delta Prompt");
+        expect(result.mode).toBe(turn === 1 ? "bootstrap" : "delta");
         expect(result.lockPaths).toEqual([]);
         expect(directoryContents(directoryA)).toEqual(beforeA);
         expect(directoryContents(directoryB)).toEqual(beforeB);
@@ -464,7 +534,7 @@ describe("Project-bound Chat local-directory assignment changes", () => {
           expect(existsSync(join(directory, "wiki"))).toBe(false);
           expect(existsSync(join(directory, ".multiremi", "wiki-base"))).toBe(false);
         }
-        expect(JSON.parse(readFileSync(join(directoryA, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+        expect(existsSync(join(directoryA, ".multiremi", "gc.json"))).toBe(false);
         expect(store.getChatSession(chat.id)).toMatchObject({ workDir: chatPath, sessionId: "ordered-managed-provider" });
       }
 
@@ -474,11 +544,12 @@ describe("Project-bound Chat local-directory assignment changes", () => {
       const newFirst = await runTurn(newChat.id, 0);
       expect(newFirst).toMatchObject({ cwd: directoryB, sessionId: null, runtimeId: hosts[1]!.runtimeId });
       expect(newFirst.lockPaths).toEqual([directoryB]);
-      expect(JSON.parse(readFileSync(join(directoryB, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+      expect(existsSync(join(directoryB, ".multiremi", "gc.json"))).toBe(false);
       expect(existsSync(join(directoryB, "wiki"))).toBe(false);
       expect(existsSync(join(directoryB, ".multiremi", "wiki-base"))).toBe(false);
       expect(directoryContents(directoryA)).toEqual(beforeA);
     } finally {
+      await stopDaemons();
       server.stop(true);
     }
   });
@@ -488,13 +559,14 @@ describe("Project-bound Chat local-directory assignment changes", () => {
       it(`cold-starts once in its managed directory after local-directory ${mutation}, preserving the user directory ${insideWorkspacesRoot ? "inside" : "outside"} the workspaces root`, async () => {
         const root = mkdtempSync(join(tmpdir(), "multiremi-chat-directory-transition-"));
         roots.push(root);
-        const db = new Database(":memory:");
+        const db = openSqliteDatabase(":memory:");
         databases.push(db);
         const store = new MultiremiStore(db);
+    store.ensureLocalWorkspace();
         store.ensureLocalWorkspace();
         store.updateWorkspace("local", { settings: { github_enabled: false }, repos: [] });
         const workspacesRoot = join(root, "workspaces");
-        const userPath = join(insideWorkspacesRoot ? workspacesRoot : root, "user-owned-directory");
+        const userPath = join(insideWorkspacesRoot ? workRoot(workspacesRoot) : root, "user-owned-directory");
         const replacementPath = join(root, "replacement-user-directory");
         mkdirSync(userPath, { recursive: true });
         mkdirSync(replacementPath);
@@ -516,21 +588,23 @@ describe("Project-bound Chat local-directory assignment changes", () => {
         const resource = store.listProjectResources(project.id).find((entry) => entry.resourceType === "local_directory")!;
         const agent = store.createAgent({ name: "Directory transition worker", provider: "claude" });
         const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
-        const chatPath = join(workspacesRoot, "chats", chat.id);
+        const chatPath = workDirectory(workspacesRoot, { kind: "chat", id: chat.id });
         const credential = await store.createAccessToken({ name: "Directory transition daemon", type: "daemon", workspaceId: "local", daemonId });
         const server = startMultiremiServer({ store, scheduler: null, authToken: "directory-transition-test", hostname: "127.0.0.1", port: 0 });
-        const seen: Array<{ cwd: string; sessionId: string | null; projectId: string | undefined; prompt: string }> = [];
+        const seen: Array<{ cwd: string; sessionId: string | null; projectId: string | undefined; prompt: string; instructions: string; mode?: string }> = [];
         const runTurn = async (turn: number) => {
           const sent = store.sendChatMessage(chat.id, { body: `Run directory transition turn ${turn}.` });
           // Every turn starts a new daemon, so successful continuation cannot
           // depend on an in-memory directory or provider-session cache.
           const daemon = new MultiremiDaemon({
+            sshMeshManager: disabledSshMeshRuntime(),
             serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
             daemonId, runtimeId, runtimeName: "Directory transition runtime", provider: "claude", workspaceId: "local",
             once: true, daemonPort: 0, workspacesRoot, repoCacheRoot: join(root, ".repo-cache"),
             providerFactory: (options) => ({
               async *sendStream(message, sendOptions) {
-                seen.push({ cwd: options.cwd!, sessionId: sendOptions?.sessionId ?? null, projectId: options.env?.MULTIREMI_PROJECT_ID, prompt: message });
+                seen.push({ cwd: options.cwd!, sessionId: sendOptions?.sessionId ?? null, projectId: options.env?.MULTIREMI_PROJECT_ID,
+                  prompt: message, instructions: providerInstructions(options.env) });
                 yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Directory turn finished." }] } as any;
               },
               getLastResponse: () => ({ text: "Directory turn finished.", sessionId: turn === 0 ? "local-directory-provider" : "managed-directory-provider", requestId: `directory-transition-request-${turn}` }),
@@ -544,10 +618,12 @@ describe("Project-bound Chat local-directory assignment changes", () => {
             await daemon.start();
             expect(store.getTask(sent.task.id)?.status).toBe("completed");
             expect(seen).toHaveLength(turn + 1);
+            seen[turn]!.mode = store.getTaskPrompt(sent.task.id)?.mode;
             expect(acquire).toHaveBeenCalledTimes(turn === 0 ? 1 : 0);
             expect(sync).not.toHaveBeenCalled();
             expect(checkout).not.toHaveBeenCalled();
           } finally {
+            await daemon.stopAndDrainTestWork();
             acquire.mockRestore();
             sync.mockRestore();
             checkout.mockRestore();
@@ -557,7 +633,7 @@ describe("Project-bound Chat local-directory assignment changes", () => {
           await runTurn(0);
           expect(seen[0]).toMatchObject({ cwd: userPath, sessionId: null });
           expect(store.getChatSession(chat.id)).toMatchObject({ sessionId: "local-directory-provider", workDir: userPath });
-          expect(JSON.parse(readFileSync(join(userPath, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+          expect(existsSync(join(userPath, ".multiremi", "gc.json"))).toBe(false);
           expect(existsSync(join(userPath, "wiki"))).toBe(false);
           expect(existsSync(join(userPath, ".multiremi", "wiki-base"))).toBe(false);
           const userBefore = directoryContents(userPath);
@@ -572,18 +648,22 @@ describe("Project-bound Chat local-directory assignment changes", () => {
           for (const turn of [1, 2]) {
             await runTurn(turn);
             expect(seen[turn]).toMatchObject({ cwd: chatPath, sessionId: turn === 1 ? null : "managed-directory-provider", projectId: project.id });
-            expect(seen[turn]!.prompt).toStartWith(turn === 1 ? "# Bootstrap Prompt" : "# Delta Prompt");
-            if (turn === 1) expect(seen[turn]!.prompt).toContain("This Project remains available after its directory changes.");
+            // A fresh provider session first, then a resumed one; the Project notes stay in AGENTS.md for both.
+            expect(seen[turn]!.mode).toBe(turn === 1 ? "bootstrap" : "delta");
+            expect(seen[turn]!.prompt).toContain(`Run directory transition turn ${turn}.`);
+            expect(seen[turn]!.instructions).toContain("This Project remains available after its directory changes.");
+            if (turn === 2) expect(seen[turn]!.instructions).toBe(seen[1]!.instructions);
             // Equality includes all metadata, arbitrary binary files, symlink
             // targets and structure. Never traverse a user-owned symlink.
             expect(directoryContents(userPath)).toEqual(userBefore);
             expect(directoryContents(replacementPath)).toEqual(replacementBefore);
-            expect(JSON.parse(readFileSync(join(userPath, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+            expect(existsSync(join(userPath, ".multiremi", "gc.json"))).toBe(false);
             expect(existsSync(join(userPath, "wiki"))).toBe(false);
             expect(existsSync(join(userPath, ".multiremi", "wiki-base"))).toBe(false);
             expect(store.getChatSession(chat.id)).toMatchObject({ projectId: project.id, workDir: chatPath, sessionId: "managed-directory-provider" });
           }
         } finally {
+          await stopDaemons();
           server.stop(true);
         }
       });
@@ -594,18 +674,18 @@ describe("Project-bound Chat local-directory assignment changes", () => {
 
 describe("Daemon-only inherited Chat path rejection", () => {
   for (const inheritedPathKind of ["external directory", "managed alias to an external directory"] as const) {
-    it(`retries a delta as a full bootstrap before any provider or user-directory write for an ${inheritedPathKind}`, async () => {
+    it(`retries a resumed turn in a fresh provider session before any provider or user-directory write for an ${inheritedPathKind}`, async () => {
       const root = mkdtempSync(join(tmpdir(), "multiremi-chat-unsafe-delta-"));
       roots.push(root);
-      const db = new Database(":memory:");
+      const db = openSqliteDatabase(":memory:");
       databases.push(db);
       const store = new MultiremiStore(db);
+    store.ensureLocalWorkspace();
       store.ensureLocalWorkspace();
       store.updateWorkspace("local", { settings: { github_enabled: false }, repos: [] });
       const workspacesRoot = join(root, "workspaces");
       const userPath = join(root, "private-user-directory");
-      mkdirSync(join(userPath, ".multiremi"), { recursive: true });
-      writeFileSync(join(userPath, ".multiremi", "gc.json"), JSON.stringify({ local_directory: true }));
+      mkdirSync(userPath);
       writeFileSync(join(userPath, "unpublished.bin"), Buffer.from([0, 255, 23, 128, 10]));
       symlinkSync("unpublished.bin", join(userPath, "unpublished-link"));
       const userBefore = directoryContents(userPath);
@@ -616,53 +696,71 @@ describe("Daemon-only inherited Chat path rejection", () => {
       const instructions = "Use these original agent instructions after a workspace recovery.";
       const agent = store.createAgent({ name: "Unsafe delta worker", provider: "claude", instructions });
       const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
-      const chatPath = join(workspacesRoot, "chats", chat.id);
+      const chatPath = workDirectory(workspacesRoot, { kind: "chat", id: chat.id });
       const credential = await store.createAccessToken({ name: "Unsafe delta daemon", type: "daemon", workspaceId: "local", daemonId });
       const server = startMultiremiServer({ store, scheduler: null, authToken: "unsafe-delta-test", hostname: "127.0.0.1", port: 0 });
-      const seen: Array<{ cwd: string; sessionId: string | null; prompt: string }> = [];
+      const seen: Array<{ cwd: string; sessionId: string | null; prompt: string; instructions: string }> = [];
+      const offeredFrom = new Map<number, number>();
       let providerCreations = 0;
+      let recoveredReadSeq = 0;
+      const realNow = Date.now;
+      let clockOffset = 0;
+      const clock = spyOn(Date, "now").mockImplementation(() => realNow() + clockOffset);
       const runDaemon = async (run: number, rejectInheritedPath = false) => {
         const daemon = new MultiremiDaemon({
+          sshMeshManager: disabledSshMeshRuntime(),
           serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
           daemonId, runtimeId, runtimeName: "Unsafe delta runtime", provider: "claude", workspaceId: "local",
           once: true, daemonPort: 0, workspacesRoot, repoCacheRoot: join(root, ".repo-cache"),
+          protocolClientOptions: { onFrame: frame => {
+            if (frame.type !== "task.offer") return;
+            const task = frame.payload;
+            offeredFrom.set(run, Number(task.input_from_seq));
+            if (rejectInheritedPath) {
+              expect((task.session_projection as any)?.mode).toBe("delta");
+              expect(task.session_id).toBe("safe-original-provider");
+              expect(task.work_dir).toBe(chatPath);
+              task.work_dir = inheritedPathKind === "external directory" ? userPath : join(workspacesRoot, "inherited-alias");
+            }
+            if (run === 2) {
+              expect((task.session_projection as any)?.mode).toBe("bootstrap");
+              expect(task.session_id ?? null).toBeNull();
+              expect(task.work_dir ?? null).toBeNull();
+            }
+          } },
           providerFactory: (options) => {
             providerCreations++;
             return {
               async *sendStream(message, sendOptions) {
-                seen.push({ cwd: options.cwd!, sessionId: sendOptions?.sessionId ?? null, prompt: message });
+                seen.push({ cwd: options.cwd!, sessionId: sendOptions?.sessionId ?? null, prompt: message, instructions: providerInstructions(options.env) });
+                if (run === 2) {
+                  const range = message.match(/remi message list (\S+) --from (\d+) --to (\d+)/)!;
+                  expect(range[1]).toBe(chat.id); expect(range[2]).toBe("0");
+                  expect(message).not.toContain("你上次读到");
+                  expect(store.getSessionAgentReadProgress(chat.id, agent.id)).toEqual({ seq: 0, offset: 0 });
+                  const running = store.listTasks().find(task => task.chatSessionId === chat.id && task.status === "running")!;
+                  const access = await store.createTaskAccessToken(running, "local");
+                  const response = await fetch(`http://127.0.0.1:${server.port}/api/sessions/${chat.id}/messages?from=${range[2]}&to=${range[3]}`,
+                    { headers: { Authorization: `Bearer ${access.token}` } });
+                  expect(response.status).toBe(200);
+                  const page = await response.json() as any;
+                  expect(page.next_cursor).toBeNull();
+                  expect(page.entries.map((entry: any) => entry.body_md)).toContain("Earlier managed Chat message.");
+                  recoveredReadSeq = Number(range[3]);
+                  expect(store.getSessionAgentReadProgress(chat.id, agent.id)).toEqual({ seq: recoveredReadSeq, offset: 0 });
+                }
                 yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: run === 0 ? "Earlier managed Chat answer." : "Recovered Chat answer." }] } as any;
               },
               getLastResponse: () => ({ text: run === 0 ? "Earlier managed Chat answer." : "Recovered Chat answer.", sessionId: run === 0 ? "safe-original-provider" : "safe-recovered-provider", requestId: `unsafe-delta-request-${run}` }),
             };
           },
         });
-        const client = (daemon as any).client;
-        const originalClaim = client.claimTask.bind(client);
-        const claim = spyOn(client, "claimTask").mockImplementation(async (runtime: string) => {
-          const task = await originalClaim(runtime);
-          expect(task).not.toBeNull();
-          if (rejectInheritedPath) {
-            // The server's resources and persisted lineage remain unchanged.
-            // Only this host sees an inherited path that no longer belongs to it.
-            expect(task.sessionProjection?.mode).toBe("delta");
-            expect(task.sessionId).toBe("safe-original-provider");
-            expect(task.workDir).toBe(chatPath);
-            return { ...task, workDir: inheritedPathKind === "external directory" ? userPath : join(workspacesRoot, "inherited-alias") };
-          }
-          if (run === 2) {
-            expect(task.sessionProjection?.mode).toBe("bootstrap");
-            expect(task.sessionId).toBeNull();
-            expect(task.workDir).toBeNull();
-          }
-          return task;
-        });
         const prepare = spyOn(daemon as any, "prepareTaskWorkspace");
         try {
           await daemon.start();
           if (rejectInheritedPath) expect(prepare).not.toHaveBeenCalled();
         } finally {
-          claim.mockRestore();
+          await daemon.stopAndDrainTestWork();
           prepare.mockRestore();
         }
       };
@@ -684,14 +782,19 @@ describe("Daemon-only inherited Chat path rejection", () => {
         expect(retries).toHaveLength(1);
         expect(retries[0]).toMatchObject({ attempt: 2, sessionId: null, workDir: null });
 
+        // The first --once daemon rejects its newly queued retry as draining.
+        // Advance the mandated runtime cooldown without extending the test deadline.
+        clockOffset += 30_000;
         await runDaemon(2);
         expect(store.getTask(retries[0]!.id)?.status).toBe("completed");
         expect(seen).toHaveLength(2);
         expect(seen[1]).toMatchObject({ cwd: chatPath, sessionId: null });
-        expect(seen[1]!.prompt).toStartWith("# Bootstrap Prompt");
-        expect(seen[1]!.prompt).toContain(instructions);
-        expect(seen[1]!.prompt).toContain('"body":"Earlier managed Chat message."');
-        expect(seen[1]!.prompt).toContain('"body":"Earlier managed Chat answer."');
+        // ADR 0023: the retry starts a fresh provider session whose AGENTS.md carries the Agent's instructions.
+        expect(store.getTaskPrompt(retries[0]!.id)?.mode).toBe("bootstrap");
+        expect(seen[1]!.instructions).toContain(instructions);
+        expect(seen[1]!.prompt).not.toContain(instructions);
+        expect(seen[1]!.prompt).not.toContain('"body":"Earlier managed Chat message."');
+        expect(seen[1]!.prompt).not.toContain('"body":"Earlier managed Chat answer."');
         expect(seen[1]!.prompt).toContain("Recover this conversation safely.");
         expect(directoryContents(userPath)).toEqual(userBefore);
 
@@ -700,17 +803,36 @@ describe("Daemon-only inherited Chat path rejection", () => {
         expect(store.getTask(continued.task.id)?.status).toBe("completed");
         expect(seen).toHaveLength(3);
         expect(seen[2]).toMatchObject({ cwd: chatPath, sessionId: "safe-recovered-provider" });
-        expect(seen[2]!.prompt).toStartWith("# Delta Prompt");
+        expect(store.getTaskPrompt(continued.task.id)?.mode).toBe("delta");
+        expect(seen[2]!.instructions).toBe(seen[1]!.instructions);
+        // Its only unread message is inline in full, offered from the recovered read high-water.
+        expect(seen[2]!.prompt).toBe("Continue the recovered conversation.");
+        expect(offeredFrom.get(3)).toBe(recoveredReadSeq);
         expect(directoryContents(userPath)).toEqual(userBefore);
-        expect(JSON.parse(readFileSync(join(userPath, ".multiremi", "gc.json"), "utf8")).local_directory).toBe(true);
+        expect(existsSync(join(userPath, ".multiremi", "gc.json"))).toBe(false);
         expect(existsSync(join(userPath, "wiki"))).toBe(false);
         expect(existsSync(join(userPath, ".multiremi", "wiki-base"))).toBe(false);
       } finally {
+        await stopDaemons();
         server.stop(true);
+        clock.mockRestore();
       }
     });
   }
 });
+
+/**
+ * ADR 0023: the session's fixed notes are the AGENTS.md the daemon writes into the Claude
+ * config dir before every provider start; Claude reads it through a CLAUDE.md that imports it.
+ */
+function providerInstructions(env: Record<string, string | undefined> | undefined): string {
+  const home = env?.CLAUDE_CONFIG_DIR;
+  if (!home) throw new Error("CLAUDE_CONFIG_DIR is not set");
+  expect(readFileSync(join(home, "CLAUDE.md"), "utf8")).toBe("@AGENTS.md\n");
+  const content = readFileSync(join(home, "AGENTS.md"), "utf8");
+  expect(content).toStartWith(`${PROVIDER_INSTRUCTIONS_MARKER}\n`);
+  return content;
+}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, {

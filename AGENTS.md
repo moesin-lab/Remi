@@ -20,14 +20,15 @@
 - 新增顶层主题域需同步 Registry 帮助与 `docs/cli-command-migration.md`；
   弃用旧命令路径必须注册 deprecated alias 并保留至少一个发版周期，
   服务端注入 prompt 与文档只使用 canonical 命令。
+  用户明确要求一步到位时，旧命令登记为 `retired`（只报替代命令、不执行），仍纳入 Registry 与 manifest。
 
-## 云友与 Skill 配置规范
+## Agent 与 Skill 配置规范
 
 - 新增或修改 agent 模板（`packages/server/src/api/agent-templates/*.json`）与仓库内
   SKILL.md（`.remi/pipeline/skills/`、`frontend/.agents/skills/`）时，必须遵循
   `docs/agent-config-spec.md`：提示词六段骨架，description 必填且写明触发条件；
   `bun test tests/arch/agent-config-metadata.test.ts` 必须通过。
-- 变更工作区云友（DB 中的 instructions/头像）同样以该规范为 checklist；
+- 变更工作区 Agent（DB 中的 instructions/头像）同样以该规范为 checklist；
   可复制的提示词模板见 `docs/templates/agent-prompt.md.example`。
 
 ## 版本与发版
@@ -36,7 +37,13 @@
   必须一致且不得复用 tag，平台部署与 daemon CLI 发版分开处理。
 - 发版必须使用公共依赖源和固定 Bun 版本，并先通过
   `.github/workflows/release-build-check.yml` 的完整检查；失败时不得发版。
+  完整检查指目标 main SHA 的 main push 运行或 main 上的手动运行：合并请求按路径选择后端全套 `bun test`，仍不能作为发版依据（见 [TESTING.md](TESTING.md) 的 CI 覆盖）。
 - 每次发版（包括夜间发版）先运行 `bun run release:prepare --version <下一版本>`，
   查询并验证最新稳定 ACP / Claude SDK / CC / Codex，更新 `package.json` 与
   `packages/acp/src/runtime-versions.json`，同批提交后再跑 CI、打 tag。
   不得只改版本号跳过依赖准备，也不得在 tag 构建或 daemon 运行时重新解析 latest。
+- 平台应用打包时计算 `dataSchema`，普通源码 PR 不提交指纹或回退声明。发版负责人
+  应优先使用同目标 SHA 的可信 main 混版 CI 证据生成 rollbackSafeFrom；发布脚本通过
+  `PLATFORM_SCHEMA_ROLLBACK_EVIDENCE` 显式接收该证据。没有自动证据时，必须相对上一个已发布平台版本取得人工审阅确认，将目标 SHA、旧版 manifest 指纹、
+  审阅者及依据作为 `platform-rollback-review.json` 附件上传到目标 Release；操作见
+  [发版回退审核](deploy/README.md#release-rollback-review)。缺少声明时不允许跨指纹更新。

@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, realpathSync, unlinkSync } from 'node:fs';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, fsyncSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, lstatSync, statSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { isIPv4 } from 'node:net';
+import { canonicalSchemaLevel } from '../packages/platform-updater/src/schema-fingerprint.mjs';
+import { assertDeploymentSchema, readDeploymentSchema } from '../packages/platform-updater/src/schema-preflight.mjs';
+import { loadCiImages } from './ci-images.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profilesRoot = resolve(process.env.REMI_PROFILES_ROOT || join(homedir(), '.remi', 'profiles'));
+let runtimeProxy = null;
 const settings = {
   stable: { webPort: 13000, apiPort: 16120, hostname: '127.0.0.1', backgroundJobs: '1' },
   dev: { webPort: 14000, apiPort: 16220, hostname: 'localhost', backgroundJobs: '0' },
@@ -44,19 +48,43 @@ function execute(command, args, options = {}) {
     const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') || 'Path';
     environment[pathKey] = `${helpers}${delimiter}${environment[pathKey] || ''}`;
   }
-  const result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...options });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${command} ${args[0] || ''} failed (${result.status})`);
-  return typeof result.stdout === 'string' ? result.stdout.trim() : result.stdout;
+  const { preserveWhitespace = false, environmentOverrides = {}, redact = [], detectPortBinding = false, ...spawnOptions } = options;
+  Object.assign(environment, environmentOverrides);
+  let result;
+  if (redact.length || detectPortBinding) {
+    const secrets = [...redact, ...['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'].map((key) => process.env[key]).filter(Boolean)];
+    for (const value of [...secrets]) {
+      try { const url = new URL(value); secrets.push(url.username, url.password, decodeURIComponent(url.username), decodeURIComponent(url.password)); } catch {}
+    }
+    result = spawnSync(process.execPath, [join(repository, 'scripts/proxy-command.mjs'), '--run'], {
+      cwd: repository, env: environment, windowsHide: true, stdio: ['pipe', 'inherit', 'inherit'],
+      input: JSON.stringify({ command, args, input: spawnOptions.input, secrets, cwd: repository, detectPortBinding }),
+    });
+  } else result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...spawnOptions });
+  if (result.error) throw new Error(redact.length ? 'Docker runtime proxy command could not start' : result.error.message);
+  if (result.status !== 0) {
+    const error = new Error(`${command} ${args[0] || ''} failed (${result.status})`);
+    error.portBinding = detectPortBinding && result.status === 98;
+    throw error;
+  }
+  return typeof result.stdout === 'string' && !preserveWhitespace ? result.stdout.trim() : result.stdout;
 }
 
 function capture(command, args) {
   return execute(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-function saveJson(path, value) {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+function savePrivateFile(path, contents) {
+  const temporary = `${path}.tmp-${process.pid}`;
+  const descriptor = openSync(temporary, 'w', 0o600);
+  try {
+    writeFileSync(descriptor, contents);
+    fsyncSync(descriptor);
+  } finally { closeSync(descriptor); }
+  renameSync(temporary, path);
 }
+
+function saveJson(path, value) { savePrivateFile(path, `${JSON.stringify(value, null, 2)}\n`); }
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -109,10 +137,102 @@ function composeArgs(root, ...args) {
   }
   const flags = ['compose', '-p', `remi-${deployment.profile}`, '--env-file', join(root, 'compose.env'), '-f', join(root, 'compose.yml')];
   if (deployment.profile === 'dev') flags.push('-f', join(root, 'compose.dev.yml'));
+  if (deployment.profile === 'stable' && existsSync(join(root, 'compose.host-control.yml'))) flags.push('-f', join(root, 'compose.host-control.yml'));
+  if (deployment.profile === 'stable' && existsSync(join(root, 'compose.application.json'))) flags.push('-f', join(root, 'compose.application.json'));
+  if (deployment.profile === 'stable' && existsSync(join(root, 'compose.internal-updates.yml'))) {
+    if (existsSync(join(root, 'compose.application.json')) || existsSync(join(root, 'compose.host-control.yml'))) throw new Error('Internal updates cannot be combined with host updater overlays');
+    flags.push('-f', join(root, 'compose.internal-updates.yml'));
+  }
+  if (deployment.profile === 'stable' && args[0] === 'up' && !args.includes('--build')) args = [args[0], '--no-build', ...args.slice(1)];
   return [...flags, ...args];
 }
 
-function compose(root, ...args) { return execute('docker', composeArgs(root, ...args)); }
+function runtimeProxyEnvironment(environment) {
+  const result = {};
+  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY']) {
+    const value = environment[key] || environment[key.toLowerCase()];
+    if (!value) continue;
+    let url;
+    try {
+      url = new URL(value);
+      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || /[\r\n]/u.test(value)) throw new Error();
+    } catch { throw new Error(`Invalid proxy URL in ${key}`); }
+    const host = url.hostname.toLowerCase();
+    if (host === 'localhost' || host === '[::1]' || (isIPv4(host) && host.startsWith('127.'))) url.hostname = 'host.docker.internal';
+    result[key] = result[key.toLowerCase()] = url.href;
+  }
+  if (!Object.keys(result).length) throw new Error('--runtime-proxy true requires HTTP_PROXY or HTTPS_PROXY');
+  const defaults = ['postgres', 'api', 'web', 'updater', 'localhost', '127.0.0.1', '::1', 'host.docker.internal', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16', 'fc00::/7', 'fe80::/10'];
+  const entries = [...defaults, environment.NO_PROXY || '', environment.no_proxy || ''].flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean);
+  if (entries.some((value) => /[\r\n]/u.test(value))) throw new Error('Invalid NO_PROXY');
+  result.NO_PROXY = result.no_proxy = [...new Set(entries)].join(',');
+  return result;
+}
+
+function compose(root, ...args) {
+  const command = composeArgs(root, ...args);
+  const builds = args[0] === 'build' || args[0] === 'watch' || (args[0] === 'up' && args.includes('--build'));
+  const runtime = runtimeProxy && ['up', 'config', 'watch'].includes(args[0]);
+  const override = runtime ? { services: { api: {
+    environment: Object.fromEntries(Object.keys(runtimeProxy).map((key) => [key, '${REMI_RUNTIME_' + key.toUpperCase() + '}'])),
+    extra_hosts: ['host.docker.internal:host-gateway'],
+  } } } : { services: {} };
+  const invoke = () => {
+    const hasOverride = Object.keys(override.services).length > 0;
+    const invocation = [...command];
+    if (hasOverride) invocation.splice(invocation.indexOf(args[0]), 0, '-f', '-');
+    const options = { detectPortBinding: args[0] === 'up' };
+    if (hasOverride) Object.assign(options, { input: JSON.stringify(override), stdio: ['pipe', 'inherit', 'inherit'] });
+    if (runtime) options.environmentOverrides = Object.fromEntries(Object.entries(runtimeProxy).map(([key, value]) => ['REMI_RUNTIME_' + key.toUpperCase(), value]));
+    if (runtimeProxy) {
+      // Stream diagnostics through a separate redactor without a finite
+      // spawnSync output buffer, including for long-running watch sessions.
+      options.redact = Object.values(runtimeProxy);
+    }
+    return execute('docker', invocation, options);
+  };
+  const start = () => {
+    const delays = [1000, 2000, 4000];
+    for (let attempt = 0; ; attempt++) {
+      try { return invoke(); }
+      catch (error) {
+        if (!error.portBinding) throw error;
+        if (attempt === delays.length) {
+          throw new Error('Compose up failed: port binding conflict persisted after 3 retries; check the port owner and retry. Data volumes were retained.');
+        }
+        console.error(`Compose up hit a port binding conflict; retrying in ${delays[attempt] / 1000}s (${attempt + 1}/${delays.length}).`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[attempt]);
+      }
+    }
+  };
+  if (!builds) return start();
+
+  // Null Compose build args inherit the environment without putting credentials
+  // in argv, profile files, or the override. Keep Docker's predefined proxy args
+  // undeclared in Dockerfiles so BuildKit excludes them from history/cache keys.
+  // Windows environment lookups ignore case: emit each predefined arg once.
+  // POSIX hosts can intentionally supply both spellings.
+  const proxyKeys = process.platform === 'win32'
+    ? ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY']
+    : ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
+  const keys = proxyKeys.filter((key) => process.env[key]);
+  let network = process.env.REMI_BUILD_NETWORK || undefined;
+  if (network && !['host', 'default', 'none'].includes(network)) {
+    throw new Error('REMI_BUILD_NETWORK must be host, default, or none');
+  }
+  const loopback = keys.filter((key) => key.toLowerCase() !== 'no_proxy').some((key) => {
+    try {
+      const host = new URL(process.env[key]).hostname.toLowerCase();
+      return host === 'localhost' || host === '[::1]' || (isIPv4(host) && host.startsWith('127.'));
+    } catch { throw new Error(`Invalid proxy URL in ${key}`); }
+  });
+  if (!network && loopback && process.platform === 'linux') network = 'host';
+  if (!keys.length && !network) return start();
+  const build = { ...(keys.length ? { args: Object.fromEntries(keys.map((key) => [key, null])) } : {}), ...(network ? { network } : {}) };
+  override.services.api = { ...override.services.api, build };
+  override.services.web = { build };
+  return start();
+}
 
 function writeComposeEnvironment(root, deployment) {
   const config = settings[deployment.profile];
@@ -157,6 +277,7 @@ function prepare(profile, ref, lanHost) {
       execute('git', ['archive', '--format=tar', '--output', archive, sha]);
       execute('tar', ['-xf', archive, '-C', source]);
       writeFileSync(join(source, '.remi-profile-source'), `${sha}\n`);
+      try { unlinkSync(archive); } catch (error) { console.warn(`Release archive cleanup failed: ${error.message}`); }
     }
   }
   const version = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')).version;
@@ -181,25 +302,897 @@ function prepare(profile, ref, lanHost) {
   return root;
 }
 
-function backup(root) {
+function backup(root, operationId = null) {
   const timestamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
   const backupDir = join(root, 'backups', timestamp);
   mkdirSync(backupDir, { recursive: true, mode: 0o700 });
   for (const name of ['api.env', 'credentials.json', 'compose.env', 'deployment.json', 'active.json', 'compose.yml', 'compose.dev.yml']) {
     if (existsSync(join(root, name))) copyFileSync(join(root, name), join(backupDir, name));
   }
+  // Persist immutable image identities with the matching data snapshot. A tag
+  // alone cannot prove that a later rollback is running the backed-up code.
+  const deployment = withImageIdentities(readJson(join(root, 'deployment.json')));
+  saveJson(join(backupDir, 'deployment.json'), deployment);
+  saveJson(join(backupDir, 'active.json'), deployment);
   const db = openSync(join(backupDir, 'postgres.dump'), 'w', 0o600);
   try {
     execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_dump', '-U', 'multiremi', '-d', 'multiremi', '-Fc'), { stdio: ['ignore', db, 'inherit'] });
   } finally { closeSync(db); }
-  const files = openSync(join(backupDir, 'api-home.tar'), 'w', 0o600);
+  const controlPlane = openSync(join(backupDir, 'control-plane.dump'), 'w', 0o600);
+  try {
+    execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_dump', '-U', 'multiremi', '-d', 'multiremi', '-Fc',
+      '--table=public.multiremi_platform_operations', '--table=public.multiremi_platform_maintenance', '--table=public.multiremi_platform_state'),
+    { stdio: ['ignore', controlPlane, 'inherit'] });
+  } finally { closeSync(controlPlane); }
+  const apiFiles = openSync(join(backupDir, 'api-home.tar'), 'w', 0o600);
   try {
     const deployment = readJson(join(root, 'deployment.json'));
-    execute('docker', ['run', '--rm', '--network', 'none', '--mount', `type=volume,src=remi-${deployment.profile}_api-home,dst=/backup,readonly`, '--entrypoint', 'tar', deployment.apiImage, '-C', '/backup', '-cf', '-', '.'], { stdio: ['ignore', files, 'inherit'] });
-  } finally { closeSync(files); }
-  saveJson(join(backupDir, 'complete.json'), { completedAt: new Date().toISOString() });
+    execute('docker', ['run', '--rm', '--network', 'none', '--mount', `type=volume,src=remi-${deployment.profile}_api-home,dst=/backup,readonly`, '--entrypoint', 'tar', deployment.apiImage, '-C', '/backup', '-cf', '-', '.'], { stdio: ['ignore', apiFiles, 'inherit'] });
+  } finally { closeSync(apiFiles); }
+  const files = {};
+  for (const name of readdirSync(backupDir)) {
+    if (name === 'complete.json') continue;
+    const path = join(backupDir, name);
+    if (!statSync(path).isFile()) continue;
+    files[name] = { size: statSync(path).size, sha256: fileSha256(path) };
+  }
+  saveJson(join(backupDir, 'complete.json'), {
+    schemaVersion: 2,
+    completedAt: new Date().toISOString(),
+    operationId,
+    files,
+    restoreCommand: `node scripts/local-profile.mjs ${deployment.profile} host-rollback-stage --operation-id <new-operation-id> --ref ${deployment.ref}`,
+  });
   console.log(`Backup: ${backupDir}`);
   return backupDir;
+}
+
+const managedProfileFiles = ['api.env', 'credentials.json', 'compose.env', 'deployment.json', 'active.json', 'compose.yml', 'compose.dev.yml'];
+const switchPhases = new Set(['switching', 'backup_complete', 'activating', 'rolling_back']);
+const updaterAuthKeys = ['MULTIREMI_TOKEN', 'MULTIREMI_PLATFORM_UPDATER_TOKEN'];
+
+function validateUpdaterAuth(values) {
+  for (const key of updaterAuthKeys) {
+    if (typeof values[key] !== 'string' || !values[key].trim() || /[\r\n\0]/u.test(values[key])) {
+      throw new Error(`Host updater credential ${key} is missing or invalid`);
+    }
+  }
+  return values;
+}
+
+function readHostUpdaterAuth(path) {
+  // Match Compose env_file format: raw. Dotenv parsing would strip a '#' or
+  // quotes from opaque credential values that must be preserved byte-for-byte.
+  return Object.fromEntries(readFileSync(path, 'utf8').split(/\r?\n/u).filter(Boolean).map((line) => {
+    const separator = line.indexOf('=');
+    if (separator < 1) throw new Error('The captured host updater credentials are invalid');
+    return [line.slice(0, separator), line.slice(separator + 1)];
+  }));
+}
+
+function captureHostUpdaterAuth(root, operationId, refreshFromProfile = false) {
+  const controlRoot = join(root, 'host-control');
+  const authPath = join(controlRoot, 'updater-auth.env');
+  const receiptPath = join(controlRoot, 'auth-operation.json');
+  mkdirSync(controlRoot, { recursive: true, mode: 0o700 });
+  if (!refreshFromProfile && existsSync(receiptPath) && readJson(receiptPath).operationId === operationId) {
+    // The profile may already contain historic credentials after restore. A
+    // resumed operation must use the durable pre-switch capture, or fail shut.
+    if (!existsSync(authPath)) throw new Error('The captured host updater credentials are missing');
+    validateUpdaterAuth(readHostUpdaterAuth(authPath));
+    return authPath;
+  }
+  const fromProfile = parseEnv(readFileSync(join(root, 'api.env'), 'utf8'));
+  const currentOverlay = !refreshFromProfile && existsSync(authPath) ? readHostUpdaterAuth(authPath) : {};
+  // Compose reads this env_file last, so its values are the actual effective
+  // credentials even after a rollback has restored an older api.env.
+  const effective = validateUpdaterAuth({ ...fromProfile, ...currentOverlay });
+  savePrivateFile(authPath, updaterAuthKeys.map((key) => `${key}=${effective[key]}`).join('\n') + '\n');
+  saveJson(receiptPath, { operationId, capturedAt: new Date().toISOString() });
+  return authPath;
+}
+
+function installHostWriteFence(root, operationId) {
+  const controlRoot = join(root, 'host-control');
+  const marker = join(controlRoot, 'write-fence.json');
+  if (existsSync(marker) && readJson(marker).operationId !== operationId) {
+    throw new Error('Another host operation still owns the write fence');
+  }
+  mkdirSync(controlRoot, { recursive: true, mode: 0o700 });
+  const authPath = captureHostUpdaterAuth(root, operationId);
+  copyFileSync(join(repository, 'deploy/docker/host-write-fence.ts'), join(controlRoot, 'host-write-fence.ts'));
+  // This host-owned mount survives restoring old application configuration and
+  // works with older API images that predate the in-process maintenance guard.
+  const override = {
+    services: {
+      api: {
+        env_file: [{ path: authPath.replaceAll('\\', '/'), format: 'raw' }],
+        volumes: [{ type: 'bind', source: controlRoot.replaceAll('\\', '/'), target: '/remi-host', read_only: true }],
+        command: ['bun', 'run', '--preload', '/remi-host/host-write-fence.ts', 'apps/server/main.ts', 'serve'],
+      },
+    },
+  };
+  saveJson(join(root, 'compose.host-control.yml'), override);
+  saveJson(marker, { operationId });
+}
+
+function hostAuthRefresh(profile) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    if (existsSync(join(root, 'host-control', 'write-fence.json'))) throw new Error('Cannot rotate host updater credentials during a fenced operation');
+    if (!existsSync(join(root, 'compose.host-control.yml'))) throw new Error('Host control must be installed before refreshing its credentials');
+    captureHostUpdaterAuth(root, null, true);
+  } finally { release(); }
+}
+
+function hostFinalize(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    const state = readJson(operationPath(root, operationId));
+    if (!['succeeded', 'rolled_back', 'failed', 'cancelled'].includes(state.status)) {
+      throw new Error('Host operation is not terminal; its write fence must remain installed');
+    }
+    const marker = join(root, 'host-control', 'write-fence.json');
+    if (!existsSync(marker)) return;
+    if (readJson(marker).operationId !== operationId) throw new Error('Host operation does not own the write fence');
+    unlinkSync(marker);
+  } finally { release(); }
+}
+
+function fileSha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function safeOperationId(value) {
+  if (!/^[A-Za-z0-9_-]{3,128}$/u.test(value || '')) throw new Error('--operation-id is invalid');
+  return value;
+}
+
+function operationDirectory(root, operationId) {
+  const base = join(root, 'host-operations');
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  const directory = resolve(base, safeOperationId(operationId));
+  if (dirname(directory) !== resolve(base)) throw new Error('Operation path escapes the profile root');
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return directory;
+}
+
+function operationPath(root, operationId) {
+  return join(operationDirectory(root, operationId), 'operation.json');
+}
+
+function saveOperation(root, state, change = {}) {
+  const next = { ...state, ...change, updatedAt: new Date().toISOString() };
+  saveJson(operationPath(root, next.operationId), next);
+  return next;
+}
+
+function snapshotProfile(root, destination) {
+  rmSync(destination, { recursive: true, force: true });
+  mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const files = managedProfileFiles.filter((name) => existsSync(join(root, name)));
+  for (const name of files) copyFileSync(join(root, name), join(destination, name));
+  saveJson(join(destination, 'files.json'), { files });
+}
+
+function restoreProfileSnapshot(root, source) {
+  const { files } = readJson(join(source, 'files.json'));
+  for (const name of managedProfileFiles) {
+    const target = join(root, name);
+    if (existsSync(target)) unlinkSync(target);
+  }
+  for (const name of files) copyFileSync(join(source, name), join(root, name));
+}
+
+function acquireHostLock(root) {
+  const path = join(root, 'host-update.lock');
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const descriptor = openSync(path, 'wx', 0o600);
+      writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`);
+      return () => {
+        try { closeSync(descriptor); } catch {}
+        try { unlinkSync(path); } catch {}
+      };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let active = true;
+      try {
+        const pid = Number(readJson(path).pid);
+        process.kill(pid, 0);
+      } catch (probe) {
+        active = probe?.code === 'EPERM';
+      }
+      if (active) throw new Error('Another local-profile host operation holds the lock');
+      unlinkSync(path);
+    }
+  }
+  throw new Error('Unable to acquire the local-profile host lock');
+}
+
+// Parse the user unit without invoking systemctl. Unsupported executable
+// expansions fail closed: pruning is optional, losing a daemon executable is not.
+function daemonReleaseRefs(releases, keep) {
+  const config = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  const unit = join(config, 'systemd/user/multiremi-daemon.service');
+  const optional = (path, read) => {
+    try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    return read(path);
+  };
+  const base = optional(unit, path => readFileSync(path, 'utf8'));
+  const dropins = optional(`${unit}.d`, path => readdirSync(path)) ?? [];
+  const files = base === null ? [] : [[unit, base]];
+  for (const name of dropins.filter(name => name.endsWith('.conf')).sort()) {
+    // Unlike an absent unit/directory, a missing or unreadable listed drop-in
+    // is an incomplete configuration snapshot and must abort the plan.
+    files.push([join(`${unit}.d`, name), readFileSync(join(`${unit}.d`, name), 'utf8')]);
+  }
+  const words = (value) => {
+    const tokens = [];
+    let token = '', quote = null, started = false;
+    for (let i = 0; i < value.length; i++) {
+      let c = value[i];
+      if (c === '\\') {
+        c = value[++i];
+        const escapes = { a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', s: ' ', '\\': '\\', '"': '"', "'": "'" };
+        if (c in escapes) token += escapes[c];
+        else if (c === 'x' && /^[a-f0-9]{2}$/iu.test(value.slice(i + 1, i + 3))) {
+          token += String.fromCharCode(parseInt(value.slice(i + 1, i + 3), 16)); i += 2;
+        } else throw new Error('Unsupported daemon ExecStart escape');
+        started = true;
+      } else if (quote) {
+        if (c === quote) quote = null; else token += c;
+      } else if (c === '"' || c === "'") {
+        if (started) throw new Error('Invalid daemon ExecStart quoting');
+        quote = c; started = true;
+      } else if (/\s/u.test(c)) {
+        if (started) { tokens.push(token); token = ''; started = false; }
+      } else { token += c; started = true; }
+    }
+    if (quote) throw new Error('Unterminated daemon ExecStart quote');
+    if (started) tokens.push(token);
+    return tokens;
+  };
+  const refFor = (value) => {
+    const tokens = words(value);
+    if (!tokens.length) throw new Error('Empty daemon ExecStart command');
+    let executable = tokens[0].replace(/^[-@:+!|]+/u, '');
+    executable = executable.replace(/%./gu, specifier => {
+      if (specifier === '%%') return '%';
+      if (specifier === '%h') return homedir();
+      if (specifier === '%E') return config;
+      throw new Error('Unsupported daemon ExecStart specifier');
+    });
+    if (!executable || /[$%\x00-\x1f]/u.test(executable)) throw new Error('Unresolved daemon ExecStart executable');
+    if (!isAbsolute(executable)) {
+      if (executable.includes('/')) throw new Error('Invalid daemon ExecStart executable');
+      return null; // systemd search-path executable, outside profile releases
+    }
+    const path = relative(resolve(releases), resolve(executable));
+    const ref = path.split(/[\\/]/u)[0];
+    return /^[a-f0-9]{40}$/u.test(ref) ? ref : null;
+  };
+  let effective = [];
+  const history = [];
+  for (const [path, content] of files) {
+    let section = '', pending = '';
+    for (const raw of content.split(/\r?\n/u)) {
+      const line = raw.trim();
+      if (!line || /^[#;]/u.test(line)) continue;
+      const logical = pending + line;
+      if ((logical.match(/\\+$/u)?.[0].length ?? 0) % 2) {
+        pending = `${logical.slice(0, -1)} `; continue;
+      }
+      pending = '';
+      if (/^\[[^\]]+\]$/u.test(logical)) { section = logical.slice(1, -1); continue; }
+      const assignment = /^([^=\s]+)\s*=(.*)$/u.exec(logical);
+      if (!assignment || !section) throw new Error(`Invalid daemon unit syntax: ${path}`);
+      if (section !== 'Service' || assignment[1] !== 'ExecStart') continue;
+      const value = assignment[2].trim();
+      if (!value) effective = [];
+      else effective.push(refFor(value));
+    }
+    if (pending) throw new Error(`Unterminated daemon unit continuation: ${path}`);
+    history.push([...effective]);
+  }
+  const refs = new Set(effective.filter(Boolean));
+  const recent = new Set();
+  for (const snapshot of history.reverse()) for (const ref of snapshot.filter(Boolean).reverse()) {
+    if (recent.size < keep) recent.add(ref);
+  }
+  for (const ref of recent) refs.add(ref);
+  return refs;
+}
+
+// Caller holds host-update.lock, including during automatic post-activation cleanup.
+function pruneReleases(root, dryRun = false) {
+  try {
+    const keep = Number(process.env.REMI_RELEASES_KEEP ?? 3);
+    if (!Number.isSafeInteger(keep) || keep < 0) throw new Error('REMI_RELEASES_KEEP must be a non-negative integer');
+    const releases = join(root, 'releases');
+    if (!existsSync(releases)) return;
+    if (canonicalPath(releases) !== join(canonicalPath(root), 'releases')) throw new Error('Release path escapes profile root');
+    const protectedRefs = new Set();
+    const protect = (source, refs = protectedRefs) => {
+      if (!source) return;
+      const path = resolve(source);
+      if (dirname(path) === resolve(releases)) refs.add(basename(path));
+      // A missing release is harmless, but an existing link whose target cannot
+      // be resolved must abort the entire plan before any deletion takes place.
+      try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      const canonical = realpathSync(path);
+      if (dirname(canonical) === canonicalPath(releases)) refs.add(basename(canonical));
+    };
+    const readOptional = (path) => existsSync(path) ? readJson(path) : null;
+    for (const name of ['active.json', 'deployment.json']) protect(readOptional(join(root, name))?.source);
+    if (existsSync(join(root, 'compose.env'))) protect(parseEnv(readFileSync(join(root, 'compose.env'), 'utf8')).REMI_SOURCE_DIR);
+    const operations = join(root, 'host-operations');
+    if (existsSync(operations)) for (const name of readdirSync(operations)) {
+      const operation = join(operations, name);
+      const state = readJson(join(operation, 'operation.json'));
+      if (['running', 'recovery_required'].includes(state.status)) {
+        for (const side of ['previous', 'candidate']) protect(readOptional(join(operation, side, 'deployment.json'))?.source);
+      }
+    }
+    const backups = join(root, 'backups');
+    const backupRefs = new Set();
+    if (existsSync(backups)) for (const name of readdirSync(backups).sort().reverse()) {
+      if (backupRefs.size >= keep) break;
+      const active = readOptional(join(backups, name, 'active.json'));
+      if (!active?.ref || backupRefs.has(active.ref)) continue;
+      backupRefs.add(active.ref);
+      protect(active.source);
+      protectedRefs.add(active.ref);
+    }
+    const daemonRefs = new Set();
+    for (const ref of daemonReleaseRefs(releases, keep)) protect(join(releases, ref), daemonRefs);
+    for (const ref of daemonRefs) protectedRefs.add(ref);
+    // Validate the entire deletion plan before changing anything. Only real
+    // source directories and regular tar files are eligible; never follow links.
+    const candidates = readdirSync(releases).filter(name => /^[a-f0-9]{40}(\.tar)?$/u.test(name))
+      .filter(name => !protectedRefs.has(name.replace(/\.tar$/u, '')))
+      .filter(name => {
+        const stat = lstatSync(join(releases, name));
+        return name.endsWith('.tar') ? stat.isFile() : stat.isDirectory();
+      })
+      .map(name => {
+        const path = join(releases, name);
+        if (dirname(canonicalPath(path)) !== canonicalPath(releases)) throw new Error(`Release path escapes releases: ${name}`);
+        return path;
+      });
+    if (dryRun) for (const ref of daemonRefs) {
+      console.log(`Keeping release for daemon reference: ${join(releases, ref)}`);
+    }
+    for (const path of candidates) {
+      console.log(`${dryRun ? 'Would remove' : 'Removing'} release: ${path}`);
+      if (!dryRun) rmSync(path, { recursive: true, force: true });
+    }
+  } catch (error) { console.warn(`Release pruning failed: ${error.message}`); }
+}
+
+function validateHostCapacity(root) {
+  const minimum = Number(process.env.REMI_HOST_MIN_FREE_BYTES || 5 * 1024 * 1024 * 1024);
+  const stats = statfsSync(root);
+  const available = Number(stats.bavail) * Number(stats.bsize);
+  if (!Number.isFinite(minimum) || minimum < 1) throw new Error('REMI_HOST_MIN_FREE_BYTES is invalid');
+  if (available < minimum) throw new Error(`Insufficient disk space: ${available} bytes available, ${minimum} required`);
+  const expected = (process.env.REMI_HOST_EXPECTED_ARCH || process.arch).toLowerCase();
+  const actual = process.arch.toLowerCase();
+  const aliases = { amd64: 'x64', x86_64: 'x64', aarch64: 'arm64' };
+  if ((aliases[expected] || expected) !== (aliases[actual] || actual)) {
+    throw new Error(`Host architecture ${actual} does not match required ${expected}`);
+  }
+  const dockerArchitecture = capture('docker', ['info', '--format', '{{.Architecture}}']).trim().toLowerCase();
+  if (dockerArchitecture && (aliases[dockerArchitecture] || dockerArchitecture) !== (aliases[expected] || expected)) {
+    throw new Error(`Docker architecture ${dockerArchitecture} does not match required ${expected}`);
+  }
+}
+
+async function validateReleaseArtifact(url, expectedSha256) {
+  const parsed = validateReleaseArtifactInput(url, expectedSha256);
+  const response = await fetch(parsed, { signal: AbortSignal.timeout(120_000) });
+  const ok = response.ok ?? (response.status >= 200 && response.status < 300);
+  if (!ok) throw new Error(`Release source returned HTTP ${response.status}`);
+  const digest = createHash('sha256').update(Buffer.from(await response.arrayBuffer())).digest('hex');
+  if (digest !== expectedSha256.toLowerCase()) throw new Error('Release source checksum mismatch');
+}
+
+function validateReleaseArtifactInput(url, expectedSha256) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('Release source URL is invalid'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('Release source URL must use HTTPS without credentials, query, or fragment');
+  }
+  if (!/^[a-f0-9]{64}$/iu.test(expectedSha256 || '')) throw new Error('Release source SHA-256 is invalid');
+  return parsed;
+}
+
+function profileSchema(ref) {
+  if (!/^[a-f0-9]{40}$/iu.test(ref || '')) throw new Error('Data schema requires an immutable commit');
+  let declaration;
+  try { declaration = execute('git', ['show', `${ref}:packages/server/src/store/schema-compatibility.json`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], preserveWhitespace: true }); }
+  catch { /* Pre-protocol release: verify its historical source stream. */ }
+  if (declaration !== undefined) return createHash('sha256').update(canonicalSchemaLevel(JSON.parse(declaration))).digest('hex');
+  const inputs = readJson(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'));
+  const source = inputs.map(path => execute('git', ['show', `${ref}:${path}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], preserveWhitespace: true })).join('').replaceAll('\r\n', '\n');
+  if (!source) throw new Error('Data schema source is unavailable');
+  return createHash('sha256').update(source).digest('hex');
+}
+
+function resultRelease(deployment) {
+  return {
+    dataSchema: deployment.dataSchema ?? null,
+    version: deployment.version.split('-stable.')[0],
+    ref: deployment.ref,
+    publishedAt: new Date().toISOString(),
+    releaseUrl: null,
+    manifestUrl: null,
+    apiImage: deployment.apiImage,
+    webImage: deployment.webImage,
+  };
+}
+
+async function verifyProfileHealth(profile) {
+  const root = join(profilesRoot, profile);
+  verifyServiceImages(root, false);
+  const config = settings[profile];
+  for (const [service, url] of [['api', `http://127.0.0.1:${config.apiPort}/readyz`], ['web', `http://127.0.0.1:${config.webPort}/login`]]) {
+    let last = `${service} did not become ready`;
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+        const ok = response.ok ?? (response.status >= 200 && response.status < 300);
+        if (ok) { last = ''; break; }
+        last = `${service} returned HTTP ${response.status}`;
+      } catch (error) { last = error.message; }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2_500));
+    }
+    if (last) throw new Error(last);
+  }
+  // `restart` returns before Docker's next health probe, unlike compose up
+  // --wait. Allow that probe to catch up after both HTTP endpoints are ready.
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    try { verifyServiceImages(root); return; }
+    catch (error) {
+      if (attempt === 23) throw error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2_500));
+    }
+  }
+}
+
+function withImageIdentities(deployment) {
+  const next = { ...deployment };
+  for (const service of ['api', 'web']) {
+    const id = capture('docker', ['image', 'inspect', '--format', '{{.Id}}', deployment[`${service}Image`]]);
+    if (!/^sha256:[a-f0-9]{64}$/u.test(id)) throw new Error(`${service} image is unavailable or has an invalid identity`);
+    if (deployment[`${service}ImageId`] && deployment[`${service}ImageId`] !== id) {
+      throw new Error(`${service} image no longer matches the recorded release`);
+    }
+    next[`${service}ImageId`] = id;
+  }
+  return next;
+}
+
+function assertReleaseImageRevision(deployment, service) {
+  const image = deployment[`${service}Image`];
+  const labels = JSON.parse(capture('docker', ['image', 'inspect', '--format', '{{json .Config.Labels}}', image]));
+  if (labels?.['org.opencontainers.image.revision'] !== deployment.ref) {
+    throw new Error(`${service} image ${image} revision does not match the requested commit; refusing to overwrite a fixed release tag`);
+  }
+}
+
+function buildMissingReleaseImages(root, deployment) {
+  const missing = [];
+  for (const service of ['api', 'web']) {
+    const image = deployment[`${service}Image`];
+    // Listing distinguishes an absent image (successful empty response) from
+    // Docker/permission errors. Never treat a failed inspection as cache miss.
+    const cached = capture('docker', ['image', 'ls', '--quiet', '--no-trunc', '--filter', `reference=${image}`]);
+    if (cached) assertReleaseImageRevision(deployment, service);
+    else missing.push(service);
+  }
+  // Validate every existing tag before building anything. Rebuilding a fixed
+  // commit tag could change the image ID already recorded by an older backup.
+  if (missing.length > 0) compose(root, 'build', ...missing);
+  for (const service of ['api', 'web']) assertReleaseImageRevision(deployment, service);
+}
+
+function prepareDeploymentImages(root, flags) {
+  const deployment = readJson(join(root, 'deployment.json'));
+  if (deployment.profile !== 'stable' || flags['--build-local'] === 'true') {
+    buildMissingReleaseImages(root, deployment);
+    return deployment;
+  }
+  const manifest = loadCiImages({ deployment, manifestPath: flags['--image-manifest'], root, capture, execute });
+  if (manifest.version !== deployment.version) throw new Error('CI image version does not match the commit package version');
+  const candidate = { ...deployment, apiImage: manifest.apiImage, webImage: manifest.webImage, imageSource: 'ci' };
+  for (const service of ['api', 'web']) {
+    execute('docker', ['pull', candidate[`${service}Image`]]);
+    assertReleaseImageRevision(candidate, service);
+  }
+  const labels = JSON.parse(capture('docker', ['image', 'inspect', '--format', '{{json .Config.Labels}}', candidate.webImage]));
+  if (labels['io.remi.local-profile.hostname'] !== networkSettings(deployment).hostname) throw new Error('CI Web image hostname label mismatch');
+  const verified = withImageIdentities(candidate);
+  saveJson(join(root, 'deployment.json'), verified);
+  writeComposeEnvironment(root, verified);
+  return verified;
+}
+
+function verifyServiceImages(root, requireHealthy = true) {
+  const deployment = withImageIdentities(readJson(join(root, 'deployment.json')));
+  for (const service of ['api', 'web']) {
+    const ids = capture('docker', composeArgs(root, 'ps', '--all', '--quiet', service)).split(/\r?\n/u).filter(Boolean);
+    if (ids.length !== 1) throw new Error(`${service} must have exactly one running container`);
+    const image = JSON.parse(capture('docker', ['inspect', '--format', '{{json .Image}}', ids[0]]));
+    const state = JSON.parse(capture('docker', ['inspect', '--format', '{{json .State}}', ids[0]]));
+    if (image !== deployment[`${service}ImageId`]) throw new Error(`${service} container is running a different release image`);
+    if (!state.Running || (requireHealthy && state.Health?.Status !== 'healthy')) throw new Error(`${service} container is not healthy`);
+  }
+}
+
+function verifyCompleteBackup(backupDir) {
+  const marker = readJson(join(backupDir, 'complete.json'));
+  if (marker.schemaVersion !== 2 || !marker.files || typeof marker.files !== 'object') {
+    throw new Error(`Backup ${backupDir} lacks a verifiable v2 completion manifest`);
+  }
+  for (const [name, expected] of Object.entries(marker.files)) {
+    if (!/^[A-Za-z0-9.-]+$/u.test(name) || dirname(resolve(backupDir, name)) !== resolve(backupDir)) {
+      throw new Error('Backup completion manifest contains an invalid file name');
+    }
+    const path = join(backupDir, name);
+    if (!existsSync(path) || statSync(path).size !== expected.size || fileSha256(path) !== expected.sha256) {
+      throw new Error(`Backup integrity check failed for ${name}`);
+    }
+  }
+  for (const required of ['postgres.dump', 'api-home.tar', 'deployment.json', 'active.json', 'api.env', 'credentials.json', 'compose.env', 'compose.yml']) {
+    if (!marker.files[required] || marker.files[required].size < 1) throw new Error(`Backup completion manifest is missing or empty: ${required}`);
+  }
+  return marker;
+}
+
+function checkedBackupDirectory(root, backupDir) {
+  const backupsRoot = resolve(root, 'backups');
+  const resolvedBackup = resolve(backupDir);
+  if (dirname(resolvedBackup) !== backupsRoot) throw new Error('Backup path escapes the profile backup root');
+  return resolvedBackup;
+}
+
+function restoreBackup(root, backupDir, controlPlaneBackupDir = null, preserveData = false) {
+  backupDir = checkedBackupDirectory(root, backupDir);
+  verifyCompleteBackup(backupDir);
+  let controlPlaneDump = null;
+  if (controlPlaneBackupDir && resolve(controlPlaneBackupDir) !== backupDir) {
+    controlPlaneBackupDir = checkedBackupDirectory(root, controlPlaneBackupDir);
+    const marker = verifyCompleteBackup(controlPlaneBackupDir);
+    if (!marker.files['control-plane.dump']?.size) throw new Error('Rollback rescue backup lacks the current control plane');
+    controlPlaneDump = join(controlPlaneBackupDir, 'control-plane.dump');
+  }
+  // Refuse an unavailable/mutated old image before stopping the current pair or
+  // replacing any data. Both services must be recoverable from this snapshot.
+  const savedDeployment = withImageIdentities(readJson(join(backupDir, 'deployment.json')));
+  for (const name of managedProfileFiles) {
+    const source = join(backupDir, name);
+    const target = join(root, name);
+    if (existsSync(target)) unlinkSync(target);
+    if (existsSync(source)) copyFileSync(source, target);
+  }
+  const deployment = readJson(join(root, 'deployment.json'));
+  saveJson(join(root, 'deployment.json'), savedDeployment);
+  if (preserveData) {
+    // Automatic rollback changes application containers only. Current business
+    // data and API-home volumes must never be replaced by a historical snapshot.
+    compose(root, 'up', '-d', '--no-deps', '--wait', '--wait-timeout', '240', 'api', 'web');
+    saveJson(join(root, 'active.json'), savedDeployment);
+    return;
+  }
+  compose(root, 'stop', 'web', 'api');
+  compose(root, 'up', '-d', '--wait', 'postgres');
+  execute('docker', [
+    'run', '--rm', '--network', 'none',
+    '--mount', `type=volume,src=remi-${deployment.profile}_api-home,dst=/restore`,
+    '--mount', `type=bind,src=${backupDir},dst=/snapshot,readonly`,
+    '--entrypoint', 'sh', deployment.apiImage,
+    '-c', 'find /restore -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -xf /snapshot/api-home.tar -C /restore',
+  ]);
+  // --clean only drops objects present in the old dump; new-version tables
+  // would survive it. Recreate the database and restore atomically instead.
+  compose(root, 'exec', '-T', 'postgres', 'dropdb', '-U', 'multiremi', '--if-exists', '--force', 'multiremi');
+  compose(root, 'exec', '-T', 'postgres', 'createdb', '-U', 'multiremi', '--owner=multiremi', '--template=template0', 'multiremi');
+  // Omit a filename so pg_restore owns stdin directly. /dev/stdin makes its
+  // archive-format probe reopen an already-consumed Docker pipe.
+  execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_restore', '-U', 'multiremi', '-d', 'multiremi', '--exit-on-error', '--single-transaction'), {
+    input: readFileSync(join(backupDir, 'postgres.dump')),
+    stdio: ['pipe', 'inherit', 'inherit'],
+  });
+  if (controlPlaneDump) {
+    // These three tables have no external foreign keys. Keep the current
+    // operation and drain fence when business data is rolled back to an older
+    // point in time; otherwise the new API could start accepting writes early.
+    execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_restore', '-U', 'multiremi', '-d', 'multiremi',
+      '--clean', '--if-exists', '--exit-on-error', '--single-transaction'), {
+      input: readFileSync(controlPlaneDump), stdio: ['pipe', 'inherit', 'inherit'],
+    });
+  }
+  compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+  saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+}
+
+async function hostStage(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const ref = flags['--ref'];
+  const version = flags['--version'];
+  const dataSchema = flags['--data-schema'];
+  if (dataSchema && !/^[a-f0-9]{64}$/iu.test(dataSchema)) throw new Error('--data-schema must be SHA-256');
+  if (!/^[a-f0-9]{40}$/iu.test(ref || '')) throw new Error('--ref must be a full Git commit');
+  if (!/^v?\d+\.\d+\.\d+$/u.test(version || '')) throw new Error('--version must be SemVer');
+  validateReleaseArtifactInput(flags['--source-url'], flags['--source-sha256']);
+  const root = initialize(profile);
+  if (!existsSync(join(root, 'active.json'))) throw new Error('The stable profile must be active before a host update');
+  const release = acquireHostLock(root);
+  try {
+    const path = operationPath(root, operationId);
+    let state = existsSync(path) ? readJson(path) : null;
+    if (state) {
+      if (state.kind !== 'update' || state.targetRef !== ref || state.targetVersion !== version || state.dataSchema !== dataSchema) {
+        throw new Error('Operation ID was already used with different update parameters');
+      }
+      if (state.status === 'succeeded' || state.phase === 'built') return;
+      if (state.status !== 'running') throw new Error(state.error || `Host operation is ${state.status}`);
+    } else {
+      state = {
+        schemaVersion: 1,
+        operationId,
+        kind: 'update',
+        status: 'running',
+        phase: 'requested',
+        targetRef: ref.toLowerCase(),
+        targetVersion: version.replace(/^v/u, ''),
+        dataSchema,
+        sourceUrl: flags['--source-url'],
+        sourceSha256: flags['--source-sha256']?.toLowerCase(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        error: null,
+        backupDir: null,
+        resultRelease: null,
+      };
+      saveJson(path, state);
+    }
+    const directory = operationDirectory(root, operationId);
+    const previous = join(directory, 'previous');
+    const candidate = join(directory, 'candidate');
+    try {
+      validateHostCapacity(root);
+      await validateReleaseArtifact(state.sourceUrl, state.sourceSha256);
+      execute('git', ['fetch', '--no-tags', 'origin', ref]);
+      const resolved = capture('git', ['rev-parse', '--verify', `${ref}^{commit}`]).toLowerCase();
+      if (resolved !== ref.toLowerCase()) throw new Error('Fetched Git object does not match the requested commit');
+      if (dataSchema) {
+        if (profileSchema(ref) !== dataSchema || profileSchema(readJson(join(root, 'active.json')).ref) !== dataSchema) {
+          throw new Error('Data schema is unknown or incompatible; automatic update refused');
+        }
+      }
+      state = saveOperation(root, state, { phase: 'fetched' });
+      if (!existsSync(join(previous, 'files.json'))) snapshotProfile(root, previous);
+      else restoreProfileSnapshot(root, previous);
+      prepare(profile, ref);
+      let deployment = readJson(join(root, 'deployment.json'));
+      if (!deployment.version.startsWith(`${state.targetVersion}-stable.`)) {
+        throw new Error(`Commit package version ${deployment.version} does not match manifest ${state.targetVersion}`);
+      }
+      state = saveOperation(root, state, { phase: 'prepared' });
+      deployment = prepareDeploymentImages(root, flags);
+      if (dataSchema) deployment.dataSchema = dataSchema;
+      saveJson(join(root, 'deployment.json'), withImageIdentities(deployment));
+      snapshotProfile(root, candidate);
+      restoreProfileSnapshot(root, previous);
+      saveOperation(root, state, { phase: 'built' });
+    } catch (error) {
+      if (existsSync(join(previous, 'files.json'))) restoreProfileSnapshot(root, previous);
+      saveOperation(root, state, { status: 'failed', phase: 'failed', error: error.message });
+      throw error;
+    }
+  } finally { release(); }
+}
+
+async function rollbackInterruptedUpdate(root, state, reason) {
+  const directory = operationDirectory(root, state.operationId);
+  const previous = join(directory, 'previous');
+  let next = saveOperation(root, state, { status: 'recovery_required', phase: 'rolling_back', error: reason });
+  try {
+    if (next.backupDir) restoreBackup(root, next.backupDir, null, Boolean(next.dataSchema));
+    else {
+      restoreProfileSnapshot(root, previous);
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240', ...(next.dataSchema ? ['--no-deps', 'api', 'web'] : []));
+      saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+    }
+    await verifyProfileHealth('stable');
+    next = saveOperation(root, next, { status: 'rolled_back', phase: 'rolled_back', error: reason, resultRelease: resultRelease(readJson(join(root, 'active.json'))) });
+    return next;
+  } catch (rollbackError) {
+    saveOperation(root, next, {
+      status: 'recovery_required',
+      phase: 'rolling_back',
+      error: `${reason}; automatic rollback failed: ${rollbackError.message}`,
+    });
+    throw rollbackError;
+  }
+}
+
+async function hostActivate(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    let state = readJson(operationPath(root, operationId));
+    if (state.kind !== 'update') throw new Error('Host operation is not an update');
+    if (state.status === 'succeeded') return;
+    if (state.status !== 'running' || state.phase !== 'built') throw new Error(state.error || `Host operation cannot activate from ${state.phase}`);
+    const directory = operationDirectory(root, operationId);
+    const previous = join(directory, 'previous');
+    const candidate = join(directory, 'candidate');
+    try {
+      withImageIdentities(readJson(join(candidate, 'deployment.json')));
+      withImageIdentities(readJson(join(previous, 'deployment.json')));
+      restoreProfileSnapshot(root, previous);
+      installHostWriteFence(root, operationId);
+      state = saveOperation(root, state, { phase: 'switching' });
+      compose(root, 'stop', 'web', 'api');
+      compose(root, 'up', '-d', '--wait', 'postgres');
+      const saved = backup(root, operationId);
+      state = saveOperation(root, state, { phase: 'backup_complete', backupDir: saved });
+      restoreProfileSnapshot(root, candidate);
+      state = saveOperation(root, state, { phase: 'activating' });
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240', ...(state.dataSchema ? ['--no-deps', 'api', 'web'] : []));
+      await verifyProfileHealth(profile);
+      const deployment = readJson(join(root, 'deployment.json'));
+      saveJson(join(root, 'active.json'), deployment);
+      saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+      pruneReleases(root);
+    } catch (error) {
+      if (switchPhases.has(state.phase)) await rollbackInterruptedUpdate(root, state, `Update failed: ${error.message}`);
+      else saveOperation(root, state, { status: 'failed', phase: 'failed', error: error.message });
+      throw error;
+    }
+  } finally { release(); }
+}
+
+function findBackupForTarget(root, target) {
+  const backupsRoot = join(root, 'backups');
+  const names = existsSync(backupsRoot) ? readdirSync(backupsRoot).sort().reverse() : [];
+  for (const name of names) {
+    const backupDir = join(backupsRoot, name);
+    try {
+      verifyCompleteBackup(backupDir);
+      const deployment = readJson(join(backupDir, 'active.json'));
+      if (deployment.ref === target || deployment.version === target || deployment.version.startsWith(`${target}-`)) return backupDir;
+    } catch {}
+  }
+  throw new Error(`No verified complete backup matches ${target}`);
+}
+
+function hostRollbackStage(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const target = flags['--ref'];
+  const preserveData = flags['--preserve-data'] === 'true';
+  if (!target) throw new Error('--ref is required');
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    const path = operationPath(root, operationId);
+    if (existsSync(path)) {
+      const state = readJson(path);
+      if (state.kind !== 'rollback' || state.targetRef !== target || Boolean(state.preserveData) !== preserveData) throw new Error('Operation ID was already used with different rollback parameters');
+      if (state.status === 'succeeded' || state.phase === 'rollback_ready') return;
+      throw new Error(state.error || `Host rollback is ${state.status}`);
+    }
+    validateHostCapacity(root);
+    const backupDir = findBackupForTarget(root, target);
+    if (preserveData && profileSchema(readJson(join(root, 'active.json')).ref) !== profileSchema(readJson(join(backupDir, 'active.json')).ref)) {
+      throw new Error('Data schema is incompatible; automatic rollback refused');
+    }
+    withImageIdentities(readJson(join(backupDir, 'deployment.json')));
+    snapshotProfile(root, join(operationDirectory(root, operationId), 'previous'));
+    saveJson(path, {
+      schemaVersion: 1, operationId, kind: 'rollback', status: 'running', phase: 'rollback_ready',
+      targetRef: target, backupDir, fallbackBackupDir: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      preserveData,
+      error: null, resultRelease: null,
+    });
+  } finally { release(); }
+}
+
+async function hostRollbackActivate(profile, flags) {
+  const operationId = safeOperationId(flags['--operation-id']);
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    let state = readJson(operationPath(root, operationId));
+    if (state.kind !== 'rollback') throw new Error('Host operation is not a rollback');
+    if (state.status === 'succeeded') return;
+    if (state.status !== 'running' || state.phase !== 'rollback_ready') throw new Error(state.error || `Host rollback cannot activate from ${state.phase}`);
+    installHostWriteFence(root, operationId);
+    state = saveOperation(root, state, { status: 'recovery_required', phase: 'rollback_backing_up' });
+    try {
+      compose(root, 'stop', 'web', 'api');
+      compose(root, 'up', '-d', '--wait', 'postgres');
+      const fallbackBackupDir = backup(root, operationId);
+      state = saveOperation(root, state, { phase: 'rolling_back', fallbackBackupDir, controlPlaneBackupDir: fallbackBackupDir });
+      restoreBackup(root, state.backupDir, state.controlPlaneBackupDir, state.preserveData);
+      await verifyProfileHealth(profile);
+      const deployment = readJson(join(root, 'active.json'));
+      saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+      pruneReleases(root);
+    } catch (error) {
+      await recoverFailedRollback(root, state, `Rollback failed: ${error.message}`);
+      throw error;
+    }
+  } finally { release(); }
+}
+
+async function recoverFailedRollback(root, state, reason) {
+  const next = saveOperation(root, state, { status: 'recovery_required', phase: 'rollback_recovering', error: reason });
+  try {
+    if (next.fallbackBackupDir) restoreBackup(root, next.fallbackBackupDir, null, next.preserveData);
+    else {
+      restoreProfileSnapshot(root, join(operationDirectory(root, state.operationId), 'previous'));
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240', ...(next.preserveData ? ['--no-deps', 'api', 'web'] : []));
+      saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+    }
+    await verifyProfileHealth('stable');
+    saveOperation(root, next, { status: 'failed', phase: 'failed', resultRelease: resultRelease(readJson(join(root, 'active.json'))) });
+  } catch (error) {
+    saveOperation(root, next, { error: `${reason}; restoring pre-rollback state failed: ${error.message}` });
+    throw error;
+  }
+}
+
+async function hostRecover(profile) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const root = join(profilesRoot, profile);
+  if (!existsSync(root)) return;
+  const release = acquireHostLock(root);
+  try {
+    const operations = join(root, 'host-operations');
+    if (!existsSync(operations)) return;
+    for (const operationId of readdirSync(operations).sort()) {
+      const path = join(operations, operationId, 'operation.json');
+      if (!existsSync(path)) continue;
+      const state = readJson(path);
+      if (!['running', 'recovery_required'].includes(state.status)) continue;
+      if (state.kind === 'update' && switchPhases.has(state.phase)) {
+        installHostWriteFence(root, operationId);
+        await rollbackInterruptedUpdate(root, state, state.error || 'Host executor was interrupted during the switch');
+      } else if (state.kind === 'update' && ['requested', 'fetched', 'prepared'].includes(state.phase)) {
+        const previous = join(operationDirectory(root, operationId), 'previous');
+        if (existsSync(join(previous, 'files.json'))) restoreProfileSnapshot(root, previous);
+        saveOperation(root, state, { status: 'failed', phase: 'failed', error: 'Host executor was interrupted while staging; the active release was preserved' });
+      } else if (state.kind === 'rollback' && ['rollback_backing_up', 'rollback_recovering'].includes(state.phase)) {
+        installHostWriteFence(root, operationId);
+        await recoverFailedRollback(root, state, state.error || 'Host executor was interrupted before rollback completed');
+      } else if (state.kind === 'rollback' && state.phase === 'rolling_back') {
+        installHostWriteFence(root, operationId);
+        try {
+          restoreBackup(root, state.backupDir, state.controlPlaneBackupDir);
+          await verifyProfileHealth(profile);
+          const deployment = readJson(join(root, 'active.json'));
+          saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+          pruneReleases(root);
+        } catch (error) {
+          await recoverFailedRollback(root, state, `Rollback recovery failed: ${error.message}`);
+        }
+      }
+    }
+  } finally { release(); }
 }
 
 async function status(root) {
@@ -223,8 +1216,10 @@ async function status(root) {
 async function main() {
   const [profile, action, ...args] = process.argv.slice(2);
   if (!Object.hasOwn(settings, profile) || !action || action === '--help') {
-    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|status|logs|watch|backup|token> [--ref <commit>] [--lan-host <private IPv4>]');
-    console.log('stable deploy: archive a fixed commit, build, back up existing data, then update containers.');
+    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|prune-releases|stop|restart|status|logs|watch|backup|token|host-preflight|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
+    console.log('stable deploy: pull verified CI images for a fixed commit, back up data, then update containers.');
+    console.log('--image-manifest <path>: use a downloaded stable-images.json; --build-local true: explicitly compile locally.');
+    console.log('--runtime-proxy true: opt in to API runtime HTTP(S)_PROXY for deploy/up/watch; repeat on each container recreation.');
     console.log('dev deploy + dev watch: build current source, then sync changes without touching stable.');
     console.log('stable --lan-host: bind Web/API to 0.0.0.0 and persist the advertised LAN address across deploys.');
     return;
@@ -233,23 +1228,64 @@ async function main() {
   const flags = {};
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
+    if (key === '--dry-run' && !Object.hasOwn(flags, key)) { flags[key] = true; index -= 1; continue; }
     const value = args[index + 1];
-    if (!['--ref', '--lan-host'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
-      throw new Error('Only --ref <commit> and --lan-host <private IPv4> are supported, once each');
+    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256', '--data-schema', '--preserve-data', '--image-manifest', '--build-local', '--runtime-proxy'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
+      throw new Error('Unsupported, missing, or duplicate --ref/--lan-host/host option');
     }
     flags[key] = value;
   }
-  if (args.length && !['prepare', 'deploy'].includes(action)) throw new Error('--ref and --lan-host are only valid with prepare/deploy');
+  const actionOptions = {
+    prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host', '--image-manifest', '--build-local', '--runtime-proxy'],
+    'prune-releases': ['--dry-run'],
+    up: ['--runtime-proxy'], watch: ['--runtime-proxy'],
+    'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256', '--data-schema', '--image-manifest', '--build-local'],
+    'host-activate': ['--operation-id'],
+    'host-rollback-stage': ['--operation-id', '--ref', '--preserve-data'],
+    'host-rollback-activate': ['--operation-id'],
+    'host-finalize': ['--operation-id'],
+  };
+  const acceptedOptions = actionOptions[action] || [];
+  if (flags['--build-local'] && flags['--build-local'] !== 'true') throw new Error('--build-local only accepts true');
+  if (flags['--preserve-data'] && flags['--preserve-data'] !== 'true') throw new Error('--preserve-data only accepts true');
+  if (flags['--image-manifest'] && (profile !== 'stable' || flags['--build-local'])) throw new Error('--image-manifest is for stable CI deployments only');
+  if (Object.keys(flags).some((key) => !acceptedOptions.includes(key))) throw new Error(`--ref and --lan-host or host options are not valid with ${action}`);
   if (profile === 'dev' && flags['--ref'] && flags['--ref'] !== 'HEAD') throw new Error('dev runs the working tree; use stable to deploy a fixed ref');
   if (flags['--lan-host']) {
     if (profile !== 'stable') throw new Error('--lan-host is only valid for stable; dev stays on loopback');
     validateLanHost(flags['--lan-host']);
   }
+  if (flags['--runtime-proxy'] && !['true', 'false'].includes(flags['--runtime-proxy'])) throw new Error('--runtime-proxy only accepts true or false');
+  if (flags['--runtime-proxy'] === 'true') runtimeProxy = runtimeProxyEnvironment(process.env);
   const root = join(profilesRoot, profile);
-  if (action === 'prepare') {
+  if (profile === 'stable' && existsSync(join(root, 'compose.internal-updates.yml'))
+    && (action.startsWith('host-') || ['prepare', 'deploy', 'build', 'restart', 'backup'].includes(action))) {
+    throw new Error('This profile uses internal updates. Use Web settings or remi platform operation create for updates, restart and backups; base-image maintenance requires an explicit migration.');
+  }
+  const releaseLock = ['prepare', 'build', 'deploy', 'up', 'prune-releases'].includes(action) ? acquireHostLock(root) : null;
+  try { await runAction(profile, action, flags, root); } finally { releaseLock?.(); }
+}
+
+async function runAction(profile, action, flags, root) {
+  if (action === 'prune-releases') pruneReleases(root, flags['--dry-run'] === true);
+  else if (action === 'host-stage') await hostStage(profile, flags);
+  else if (action === 'host-activate') await hostActivate(profile, flags);
+  else if (action === 'host-recover') await hostRecover(profile);
+  else if (action === 'host-rollback-stage') hostRollbackStage(profile, flags);
+  else if (action === 'host-rollback-activate') await hostRollbackActivate(profile, flags);
+  else if (action === 'host-finalize') hostFinalize(profile, flags);
+  else if (action === 'host-auth-refresh') hostAuthRefresh(profile);
+  else if (action === 'host-preflight') {
+    if (profile !== 'stable') throw new Error('The host updater only manages stable');
+    validateHostCapacity(root);
+    withImageIdentities(readJson(join(root, 'active.json')));
+    if (capture('docker', ['info', '--format', '{{.OSType}}']).trim() !== 'linux') throw new Error('Linux containers are required');
+  }
+  else if (action === 'prepare') {
     if (existsSync(join(root, 'active.json'))) throw new Error('An activated profile must be upgraded with deploy');
     prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);
   } else if (action === 'deploy') {
+    if (profile === 'stable' && existsSync(join(root, 'compose.application.json'))) throw new Error('This profile uses application bundles. Update through Web settings or remi platform operation create; base-image maintenance requires reconciling the application installation.');
     const oldFiles = new Map();
     for (const name of ['deployment.json', 'compose.env', 'compose.yml', 'compose.dev.yml']) {
       if (existsSync(join(root, name))) oldFiles.set(name, readFileSync(join(root, name)));
@@ -257,7 +1293,16 @@ async function main() {
     const previous = existsSync(join(root, 'active.json')) ? readJson(join(root, 'active.json')) : null;
     prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);
     try {
-      compose(root, 'build', 'api', 'web');
+      if (profile === 'dev') compose(root, 'build', 'api', 'web');
+      else prepareDeploymentImages(root, flags);
+      if (previous) {
+        withImageIdentities(previous); // Confirm rollback images before any downtime.
+        const candidate = readJson(join(root, 'deployment.json'));
+        const target = JSON.parse(capture('docker', ['run', '--rm', '--network', 'none', '--entrypoint', '/bin/sh', candidate.apiImage,
+          '-ec', 'if [ -f /app/packages/server/src/store/schema-compatibility.json ]; then cat /app/packages/server/src/store/schema-compatibility.json; else printf null; fi']));
+        const schema = await readDeploymentSchema(sql => capture('docker', composeArgs(root, 'exec', '-T', 'postgres', 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'multiremi', '-d', 'multiremi', '-c', sql)));
+        assertDeploymentSchema(target, schema);
+      }
     } catch (error) {
       for (const [name, contents] of oldFiles) writeFileSync(join(root, name), contents);
       throw error;
@@ -278,10 +1323,23 @@ async function main() {
     }
     try { compose(root, 'up', '-d', '--wait', '--wait-timeout', '240'); }
     catch (error) {
-      console.error(saved ? `Restore the matching data and configuration from ${saved} before rolling code back.` : 'Start failed; data volumes were retained.');
+      console.error('Start failed; data volumes were retained.');
+      if (previous) {
+        try {
+          compose(root, 'stop', 'web', 'api');
+          for (const [name, contents] of oldFiles) writeFileSync(join(root, name), contents);
+          compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+          await verifyProfileHealth(profile);
+          console.error(`Previous release ${previous.ref} restored; current database and API home retained.`);
+        } catch (rollbackError) {
+          throw new Error(`Deployment failed: ${error.message}; automatic container rollback failed: ${rollbackError.message}. Data retained; manual recovery required. Backup: ${saved || 'none'}`);
+        }
+      }
+      if (saved) console.error(`Pre-deploy backup: ${saved}. Startup failure alone does not establish that migrations ran.`);
       throw error;
     }
     saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+    pruneReleases(root);
     await status(root);
   } else if (action === 'build') compose(root, 'build', 'api', 'web');
   else if (action === 'up') {
@@ -291,8 +1349,13 @@ async function main() {
     }
     compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
     saveJson(join(root, 'active.json'), candidate);
+    pruneReleases(root);
   }
   else if (action === 'stop') compose(root, 'stop');
+  else if (action === 'restart') {
+    compose(root, 'restart', 'api', 'web');
+    await verifyProfileHealth(profile);
+  }
   else if (action === 'status') await status(root);
   else if (action === 'logs') compose(root, 'logs', '--tail', '80', 'api', 'web');
   else if (action === 'watch') {

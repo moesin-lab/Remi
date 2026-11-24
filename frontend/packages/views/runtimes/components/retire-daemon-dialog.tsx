@@ -370,6 +370,15 @@ function PlanBody({
                 plan.impact.chat_sessions_reset,
             })}
           />
+          {plan.traces_to_lose > 0 && (
+            <ImpactRow
+              icon={AlertTriangle}
+              warning
+              label={t(($) => $.machine.retire.impact_traces, {
+                count: plan.traces_to_lose,
+              })}
+            />
+          )}
           <ImpactRow
             icon={KeyRound}
             label={t(($) => $.machine.retire.impact_tokens, {
@@ -412,6 +421,8 @@ function PlanBody({
   );
 }
 
+const ABANDONABLE_BLOCKING_REASONS = new Set(["active_issue_workspaces"]);
+
 function isIssueWorkspaceOnlyBlocker(plan: DaemonRetirementPlan): boolean {
   return plan.can_abandon_issue_workspaces === true
     && plan.can_retire !== true
@@ -419,7 +430,7 @@ function isIssueWorkspaceOnlyBlocker(plan: DaemonRetirementPlan): boolean {
     && plan.active_tasks.length === 0
     && plan.local_directory_resources.length === 0
     && plan.blocking_reasons.length > 0
-    && plan.blocking_reasons.every((reason) => reason === "active_issue_workspaces");
+    && plan.blocking_reasons.every((reason) => ABANDONABLE_BLOCKING_REASONS.has(reason));
 }
 
 function BlockerRow({ label, detail }: { label: string; detail?: string }) {
@@ -436,13 +447,15 @@ function BlockerRow({ label, detail }: { label: string; detail?: string }) {
 function ImpactRow({
   icon: Icon,
   label,
+  warning = false,
 }: {
   icon: typeof Server;
   label: string;
+  warning?: boolean;
 }) {
   return (
     <div className="flex items-center gap-2 py-2.5 text-sm">
-      <Icon className="size-4 text-muted-foreground" />
+      <Icon className={warning ? "size-4 text-amber-600" : "size-4 text-muted-foreground"} />
       <span>{label}</span>
     </div>
   );

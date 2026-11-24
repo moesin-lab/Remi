@@ -1,3 +1,8 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
+import { createResponsibleTestIssue } from './helpers.js';
+import { requestMessageBody, taskRequestPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
+import { taskOfferResponse } from "../../fixtures/task-offer.js";
 import { codexNativeModel } from "../../fixtures/codex-native-catalog.js";
 import { refreshPreNativeCodexSnapshots } from "@multiremi/relay/discovery.js";
 import { runtimeModelsWithCatalogError } from "@multiremi/worker/daemon.js";
@@ -25,6 +30,10 @@ function setup() {
     // A stale runtime report must not resurrect a member removed by the native catalog.
     models: inventory.map(id => ({ id, label: id, provider: "openai", default: id === "executable-model" })),
   });
+  // Keep these pre-existing group catalog tests independent of the new
+  // configuration acknowledgement protocol; discovery no longer creates groups.
+  store.saveExecutionGroup("local", { name: "catalog-group", provider: "codex", profile_id: null, runtime_ids: [runtime.id] }, "catalog-group");
+  db!.run("UPDATE multiremi_execution_groups SET managed = 0 WHERE id = ?", ["catalog-group"]);
   const app = createMultiremiApp({ store });
   const discover = (nativeIds = ["executable-model"], nativeStatus = 200) => discoverGatewayModels(
     store, "local", "codex", async url => url.endsWith("/backend-api/codex/models")
@@ -112,13 +121,13 @@ describe("Codex native model membership through API and dispatch", () => {
       store.onTaskEvent(({ type, task }) => { if (type === "task:dispatch") dispatches.push(task.id); });
       await discover();
 
-      const created = await app.request("/api/multiremi/tasks", { method: "POST", headers,
-        body: JSON.stringify({ agentId: saved.id, prompt: "Must retain requested model", priority: 100 }),
+      const created = await app.request(taskRequestPath(store, {issueId:createResponsibleTestIssue(store, {title:"Dispatch fixture",workspaceId:"local"}).id}), { method: "POST", headers,
+        body: JSON.stringify(requestMessageBody(store, { agentId: saved.id, prompt: "Must retain requested model", priority: 100 })),
       });
-      expect(created.status).toBe(201);
-      const { task: waiting } = await created.json();
+      expect(created.status).toBe(200);
+      const waiting = sentTask(store,await created.json());
       expect(store.runtimeCanRunAgent(runtime, saved)).toBe(false);
-      const emptyClaim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+      const emptyClaim = await taskOfferResponse(store, runtime.id);
       expect(emptyClaim.status).toBe(200);
       expect((await emptyClaim.json()).task).toBeNull();
       expect(store.getTask(waiting.id)?.status).toBe("queued");
@@ -150,7 +159,7 @@ describe("Codex native model membership through API and dispatch", () => {
     const agent = store.createAgent({ name: "Lost claim response", provider: "codex", model: "inventory-only-route" });
     const task = store.createTask({ agentId: agent.id, prompt: "Not started" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     await discover();
     expect(store.claimTask(runtime.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
@@ -190,7 +199,7 @@ describe("Codex native model membership through API and dispatch", () => {
         expect((await rejected.json()).code).toBe("model_not_in_execution_catalog");
       }
       expect(store.runtimeCanRunAgent(refreshed, saved)).toBe(false);
-      const emptyClaim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+      const emptyClaim = await taskOfferResponse(store, runtime.id);
       expect((await emptyClaim.json()).task).toBeNull();
       expect(store.getTask(waiting.id)?.status).toBe("queued");
       expect(dispatches).toEqual([]);

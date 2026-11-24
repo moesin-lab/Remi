@@ -155,3 +155,80 @@ describe("pure merge helpers", () => {
     expect(() => mergeClaudeSettings({}, "{}", "")).not.toThrow();
   });
 });
+
+describe("mergeCodexSessionConfig codex feature switch", () => {
+  const providerFragment = [
+    'model_provider = "OpenAI"',
+    "[model_providers.OpenAI]",
+    'base_url = "https://vip.openremi.fun/v1"',
+    'wire_api = "responses"',
+    "requires_openai_auth = true",
+  ].join("\n");
+
+  it("adds default_mode_request_user_input when the baseline has no features table", () => {
+    const out = parseToml(mergeCodexSessionConfig('model = "gpt-test"\n', providerFragment, true)) as Record<string, any>;
+    expect(out.features).toEqual({ default_mode_request_user_input: true, plugins: false });
+  });
+
+  it("preserves other baseline features entries", () => {
+    const out = parseToml(mergeCodexSessionConfig([
+      "[features]",
+      "apps = true",
+      "browser_use = false",
+    ].join("\n") + "\n", providerFragment, true)) as Record<string, any>;
+    expect(out.features).toEqual({
+      apps: true,
+      browser_use: false,
+      plugins: false,
+      default_mode_request_user_input: true,
+    });
+  });
+
+  it("keeps an explicit false from the baseline", () => {
+    const out = parseToml(mergeCodexSessionConfig([
+      "[features]",
+      "default_mode_request_user_input = false",
+    ].join("\n") + "\n", providerFragment, true)) as Record<string, any>;
+    expect(out.features.default_mode_request_user_input).toBe(false);
+  });
+
+  it("keeps an explicit value from the Relay fragment", () => {
+    const fragment = `${providerFragment}\n[features]\ndefault_mode_request_user_input = false\n`;
+    const out = parseToml(mergeCodexSessionConfig("", fragment, true)) as Record<string, any>;
+    expect(out.features.default_mode_request_user_input).toBe(false);
+  });
+
+  it("leaves a non-table features value untouched instead of throwing", () => {
+    const text = mergeCodexSessionConfig('features = "on"\nmodel = "gpt-test"\n', providerFragment, true);
+    const out = parseToml(text) as Record<string, any>;
+    expect(out.features).toBe("on");
+  });
+
+  it("applies to both relay auth branches", () => {
+    const native = parseToml(mergeCodexSessionConfig("", "", false)) as Record<string, any>;
+    expect(native.features).toEqual({ default_mode_request_user_input: true, plugins: false });
+    const relay = parseToml(mergeCodexSessionConfig("", providerFragment, true)) as Record<string, any>;
+    expect(relay.features).toEqual({ default_mode_request_user_input: true, plugins: false });
+  });
+});
+
+describe("session curated plugins default", () => {
+  it("disables curated sync only for a home without Agent Plugins", () => {
+    const plain = parseToml(mergeCodexSessionConfig("", "", false)) as Record<string, any>;
+    expect(plain.features.plugins).toBe(false);
+    const installed = parseToml(mergeCodexSessionConfig("", "", false, undefined, true)) as Record<string, any>;
+    expect(installed.features.plugins).toBeUndefined();
+    expect(installed.features.default_mode_request_user_input).toBe(true);
+  });
+
+  it("preserves explicit user/Relay values, sibling features and non-tables", () => {
+    for (const value of [true, false]) {
+      for (const [current, relay] of [[`[features]\nplugins = ${value}\nother = true`, ""], ["", `[features]\nplugins = ${value}\nother = true`]]) {
+        const config = parseToml(mergeCodexSessionConfig(current!, relay!, false)) as Record<string, any>;
+        expect(config.features.plugins).toBe(value);
+        expect(config.features.other).toBe(true);
+      }
+    }
+    expect((parseToml(mergeCodexSessionConfig('features = "on"', "", false)) as any).features).toBe("on");
+  });
+});

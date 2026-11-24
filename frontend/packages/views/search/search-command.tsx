@@ -12,7 +12,6 @@ import {
   Plus,
   SearchIcon,
   Inbox,
-  CircleUser,
   ListTodo,
   FolderKanban,
   Library,
@@ -29,7 +28,7 @@ import { Command as CommandPrimitive } from "cmdk";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type {
-  MemberWithUser,
+  ChatSession,
   SearchIssueResult,
   SearchProjectResult,
 } from "@multiremi/core/types";
@@ -45,11 +44,13 @@ import { useWorkspacePaths } from "@multiremi/core/paths";
 import type { WorkspacePaths } from "@multiremi/core/paths";
 import { useModalStore } from "@multiremi/core/modals";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
-import { resolvePublicFileUrl } from "@multiremi/core/workspace/avatar-url";
+import { chatSessionsOptions } from "@multiremi/core/chat/queries";
+import { projectListOptions } from "@multiremi/core/projects/queries";
+import { runtimeWorkspacesOptions } from "@multiremi/core/runtimes/workspaces";
 import { StatusIcon } from "../issues/components";
 import { ProjectIcon } from "../projects/components/project-icon";
 import { STATUS_CONFIG } from "@multiremi/core/issues/config";
-import { ActorAvatar as ActorAvatarBase } from "@multiremi/ui/components/common/actor-avatar";
+import { ActorAvatar } from "../common/actor-avatar";
 import {
   Dialog,
   DialogContent,
@@ -61,7 +62,6 @@ import { useTheme } from "@multiremi/ui/components/common/theme-provider";
 import { copyText } from "@multiremi/ui/lib/clipboard";
 import { useNavigation } from "../navigation";
 import { useT } from "../i18n";
-import { matchesPinyin } from "../editor/extensions/pinyin-match";
 import { HighlightText } from "./highlight-text";
 import { useSearchStore } from "./search-store";
 
@@ -89,23 +89,24 @@ interface NavPage {
 
 type ThemeValue = "light" | "dark" | "system";
 
-function memberInitials(name: string) {
-  return name
-    .split(" ")
-    .map((word) => word[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
-}
 
-function matchesMember(member: MemberWithUser, query: string) {
-  const email = member.email?.toLowerCase() ?? "";
-  return (
-    member.name.toLowerCase().includes(query) ||
-    email.includes(query) ||
-    (query.length >= 3 && member.role.startsWith(query)) ||
-    matchesPinyin(member.name, query)
-  );
+
+/** Chat results share the palette with issues and projects; Codex caps them at 9. */
+export const CHAT_RESULT_LIMIT = 9;
+
+/**
+ * Chats whose title contains the query, case-insensitively (titles only for
+ * now). Active chats come before archived ones, newest first within each.
+ */
+export function matchChatSessions(sessions: readonly ChatSession[], query: string): ChatSession[] {
+  const q = query.trim().toLocaleLowerCase();
+  if (!q) return [];
+  return sessions
+    .filter((session) => (session.title ?? "").toLocaleLowerCase().includes(q))
+    .sort((a, b) =>
+      Number(a.status === "archived") - Number(b.status === "archived") ||
+      b.updated_at.localeCompare(a.updated_at))
+    .slice(0, CHAT_RESULT_LIMIT);
 }
 
 interface CommandItem {
@@ -133,7 +134,6 @@ export function SearchCommand() {
   const { t } = useT("search");
   const navPages: NavPage[] = [
     { key: "inbox", label: t(($) => $.pages.inbox), icon: Inbox, keywords: ["inbox", "notifications", "收件箱"] },
-    { key: "myIssues", label: t(($) => $.pages.my_issues), icon: CircleUser, keywords: ["my", "issues", "assigned", "我的"] },
     { key: "issues", label: t(($) => $.pages.issues), icon: ListTodo, keywords: ["issues", "tasks", "bugs"] },
     { key: "projects", label: t(($) => $.pages.projects), icon: FolderKanban, keywords: ["projects", "kanban", "项目"] },
     { key: "knowledge", label: t(($) => $.pages.knowledge), icon: Library, keywords: ["knowledge", "wiki", "memory", "知识库"] },
@@ -150,14 +150,24 @@ export function SearchCommand() {
   const recentItems = useRecentIssuesStore(selectRecentIssues(wsId));
   const p: WorkspacePaths = useWorkspacePaths();
   const { theme, setTheme } = useTheme();
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
+  useQuery(memberListOptions(wsId));
+  // MUL-472: the chat list is read only while the palette is open.
+  const { data: chatSessions = [] } = useQuery(chatSessionsOptions(wsId, "all", { enabled: open }));
 
   // Resolve each recent issue via its cached detail entry. Recent items are
   // typically already in the detail cache because the user has opened them;
   // if not, this triggers a lookup per id so Recent never depends on whether
   // the issue falls inside the paginated list cache.
+  //
+  // MUL-472 b: only while the panel is open. The recents store is local, but
+  // resolving up to 20 ids is up to 20 `GET /api/issues/:id` calls that used to
+  // fire on every page load before the user ever opened the palette — on a
+  // fresh browser profile the baseline measured exactly that.
   const recentDetailQueries = useQueries({
-    queries: recentItems.map((item) => issueDetailOptions(wsId, item.id)),
+    queries: recentItems.map((item) => ({
+      ...issueDetailOptions(wsId, item.id),
+      enabled: open,
+    })),
   });
   const recentIssues = useMemo(
     () =>
@@ -306,24 +316,27 @@ export function SearchCommand() {
     );
   }, [commands, query]);
 
-  const filteredMembers = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return [];
-    const wantsAllMembers =
-      q.length >= 3 &&
-      ("members".startsWith(q) ||
-        "people".startsWith(q) ||
-        "users".startsWith(q) ||
-        "team".startsWith(q));
-    return members
-      .filter((member) => wantsAllMembers || matchesMember(member, q))
-      .slice(0, 10);
-  }, [members, query]);
+  const filteredChats = useMemo(() => matchChatSessions(chatSessions, query), [chatSessions, query]);
+  // Location labels are read only for the chats on screen that have one.
+  const { data: chatProjects } = useQuery({
+    ...projectListOptions(wsId),
+    enabled: open && filteredChats.some((session) => !!session.project_id),
+  });
+  const { data: chatDirectories } = useQuery({
+    ...runtimeWorkspacesOptions(wsId),
+    enabled: open && Boolean(wsId) && filteredChats.some((session) => !!session.runtime_workspace_id),
+  });
+  const chatLocation = useCallback((session: ChatSession) => {
+    if (session.project_id) return chatProjects?.find((project) => project.id === session.project_id)?.title ?? "";
+    if (session.runtime_workspace_id)
+      return chatDirectories?.find((directory) => directory.id === session.runtime_workspace_id)?.name ?? "";
+    return "";
+  }, [chatProjects, chatDirectories]);
 
   const hasResults =
     results.issues.length > 0 ||
     results.projects.length > 0 ||
-    filteredMembers.length > 0;
+    filteredChats.length > 0;
 
   // Global Cmd+K / Ctrl+K shortcut
   useEffect(() => {
@@ -512,13 +525,14 @@ export function SearchCommand() {
     [push, setOpen, p],
   );
 
-  const handleMemberSelect = useCallback(
-    (userId: string) => {
-      push(p.memberDetail(userId));
+  const handleChatSelect = useCallback(
+    (sessionId: string) => {
       setOpen(false);
+      push(p.chat(sessionId));
     },
     [push, setOpen, p],
   );
+
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -599,36 +613,33 @@ export function SearchCommand() {
               </CommandPrimitive.Group>
             )}
 
-            {filteredMembers.length > 0 && (
+
+            {filteredChats.length > 0 && (
               <CommandPrimitive.Group className="p-2">
                 <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground">
-                  {t(($) => $.groups.members)}
+                  {t(($) => $.groups.chats)}
                 </div>
-                {filteredMembers.map((member) => (
-                  <CommandPrimitive.Item
-                    key={member.user_id}
-                    value={`member:${member.user_id}`}
-                    onSelect={() => handleMemberSelect(member.user_id)}
-                    className="flex cursor-default select-none items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-selected:bg-accent"
-                  >
-                    <ActorAvatarBase
-                      name={member.name}
-                      initials={memberInitials(member.name)}
-                      avatarUrl={resolvePublicFileUrl(member.avatar_url)}
-                      size={22}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate">
-                        <HighlightText text={member.name} query={query} />
-                      </div>
-                      {member.email && (
-                        <div className="truncate text-xs text-muted-foreground">
-                          <HighlightText text={member.email} query={query} />
-                        </div>
+                {filteredChats.map((session) => {
+                  const location = chatLocation(session);
+                  return (
+                    <CommandPrimitive.Item
+                      key={`chat:${session.id}`}
+                      value={`chat:${session.id}`}
+                      onSelect={() => handleChatSelect(session.id)}
+                      className="flex cursor-default select-none items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-selected:bg-accent"
+                    >
+                      <ActorAvatar actorType="agent" actorId={session.agent_id} size={20} profileLink={false} />
+                      <span className="min-w-0 flex-1 truncate">
+                        <HighlightText text={session.title} query={query} />
+                      </span>
+                      {location && (
+                        <span className="w-24 shrink-0 truncate text-right text-xs text-muted-foreground">
+                          {location}
+                        </span>
                       )}
-                    </div>
-                  </CommandPrimitive.Item>
-                ))}
+                    </CommandPrimitive.Item>
+                  );
+                })}
               </CommandPrimitive.Group>
             )}
 

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename } from "node:path";
+import { responsibilityCommandSpecs } from "./responsibility.js";
 import { CHAT_ATTACHMENT_MAX_BYTES } from "@multiremi/contracts/attachments.js";
 import type { MultiremiSessionInheritedContext } from "@multiremi/contracts/types.js";
 import {
@@ -15,6 +16,7 @@ import {
   type CommandSpec,
 } from "../core/index.js";
 import { parseArgs, type CliOptions } from "../multiremi/options.js";
+import { sessionResultMetadata } from "../multiremi/commands/issue.js";
 import {
   multiremiApiUploadFile,
   detectCliContentTypeFromFilename,
@@ -24,6 +26,7 @@ import {
 import {
   INPUT_OPTIONS,
   PAGE_OPTIONS,
+  TRACE_READ_OPTIONS,
   YES_OPTION,
   clientFor,
   commandOptions,
@@ -35,11 +38,13 @@ import {
   positional,
   queryOptions,
   renderResource,
+  renderTraceRead,
   requestBody,
   requireConfirmation,
   requiredWorkspace,
   stringOption,
   stringOptions,
+  traceReadQuery,
 } from "./resource-common.js";
 
 const HUMAN_TASK: readonly CliIdentity[] = ["human", "task"];
@@ -55,10 +60,14 @@ const ISSUE_LIST_OPTIONS: readonly CliOptionSpec[] = [
   { name: "project", type: "string", valueName: "project", description: "Project filter" },
   { name: "offset", type: "integer", valueName: "n", description: "Legacy offset" },
   { name: "metadata", type: "string", valueName: "k=v", repeatable: true, description: "Metadata filter" },
+  // MUL-400 E3: hierarchy filters for the list surfaces.
+  { name: "parent", type: "string", valueName: "issue", description: "Only direct sub-issues of this issue" },
+  { name: "top-level-only", type: "boolean", description: "Only issues without a parent" },
   { name: "full-id", type: "boolean", description: "Show complete IDs" },
 ];
 
 const ISSUE_FIELDS: readonly CliOptionSpec[] = [
+  { name: "responsible-member", type: "string", valueName: "member-id", description: "Deprecated no-op: Issues no longer designate a human; the value is ignored" },
   { name: "runtime-workspace", type: "string", valueName: "id", description: "Persistent Runtime workspace (immutable after execution)" },
   { name: "title", type: "string", valueName: "title", description: "Issue title" },
   { name: "description", type: "string", valueName: "text", description: "Issue description" },
@@ -69,7 +78,7 @@ const ISSUE_FIELDS: readonly CliOptionSpec[] = [
   { name: "project", type: "string", valueName: "project", description: "Project ID" },
   { name: "parent", type: "string", valueName: "issue", description: "Parent issue" },
   { name: "assignee", type: "string", valueName: "ref", description: "Assignee reference" },
-  { name: "assignee-type", type: "string", valueName: "agent|member|squad", description: "Assignee type" },
+  { name: "assignee-type", type: "string", valueName: "agent|squad", description: "Execution assignee type" },
   { name: "start-date", type: "string", valueName: "date", description: "Start date" },
   { name: "due-date", type: "string", valueName: "date", description: "Due date" },
   { name: "attachment", type: "string", valueName: "path", repeatable: true, description: "Attachment file" },
@@ -80,6 +89,10 @@ const ISSUE_FIELDS: readonly CliOptionSpec[] = [
 
 const ISSUE_CREATE_FIELDS: readonly CliOptionSpec[] = [
   ...ISSUE_FIELDS,
+  // MUL-400 E3: prerequisites declared at creation. An issue with an unmet
+  // prerequisite parks at backlog and the response says
+  // `dispatch_skipped_reason: dependencies_unmet`.
+  { name: "blocked-by", type: "string", valueName: "issue", repeatable: true, description: "Prerequisite issue (key or id) this issue waits for" },
   { name: "no-bind-topic", type: "boolean", description: "Create the Issue without moving the current Feishu topic workspace" },
   { name: "daemon-port", type: "integer", valueName: "port", description: "Local daemon helper port" },
 ];
@@ -129,6 +142,7 @@ export function collaborationCommandSpecs(): CommandSpec[] {
     ...labelCommandSpecs(),
     ...chatCommandSpecs(),
     ...taskCommandSpecs(),
+    ...responsibilityCommandSpecs(),
   ];
 }
 
@@ -143,18 +157,24 @@ function issueCompatibilitySpecs(): CommandSpec[] {
     legacySpec("issue.bind-topic", ["issue", "bind-topic"], "Resume a local Feishu topic workspace migration", "write", HUMAN_TASK, [refPositional("issue")], [
       { name: "daemon-port", type: "integer", valueName: "port", description: "Local daemon helper port" },
     ], ["issue", "bind-topic"]),
-    legacySpec("issue.update", ["issue", "update"], "Update an issue", "write", HUMAN_TASK, [refPositional("issue")], ISSUE_FIELDS, ["issue", "update"]),
+    legacySpec("issue.update", ["issue", "update"], "Update an issue", "write", HUMAN_TASK, [refPositional("issue")], [
+      ...ISSUE_FIELDS,
+      { name: "force", type: "boolean", description: "Override the unfinished-child and dependency guards as a member" },
+    ], ["issue", "update"]),
     legacySpec("issue.assign", ["issue", "assign"], "Assign or unassign an issue", "write", HUMAN_TASK, [refPositional("issue")], [
       { name: "to", type: "string", valueName: "ref", description: "Assignee reference" },
-      { name: "to-type", type: "string", valueName: "type", description: "Assignee type" },
+      { name: "to-type", type: "string", valueName: "agent|squad", description: "Execution assignee type" },
       { name: "unassign", type: "boolean", description: "Clear the assignee and cancel active tasks on this issue" },
     ], ["issue", "assign"]),
-    legacySpec("issue.status", ["issue", "status"], "Change issue status", "write", HUMAN_TASK, [refPositional("issue"), refPositional("status")], [], ["issue", "status"]),
+    legacySpec("issue.status", ["issue", "status"], "Change issue status", "write", HUMAN_TASK, [refPositional("issue"), refPositional("status")], [
+      { name: "force", type: "boolean", description: "Override the unfinished-child and dependency guards as a member" },
+    ], ["issue", "status"]),
     legacySpec("issue.delete", ["issue", "delete"], "Delete an issue", "destructive", HUMAN_TASK, [refPositional("issue")], [], ["issue", "delete"]),
     nativeSpec("issue.restore", ["issue", "restore"], "Restore an archived issue", "write", HUMAN, [refPositional("issue")], [], async (invocation) => {
       await mutateAndRender(invocation, "POST", `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/restore`, {});
     }),
     legacySpec("issue.rerun", ["issue", "rerun"], "Rerun an issue", "write", HUMAN, [refPositional("issue")], [
+      { name: "task-id", type: "string", valueName: "id", description: "Retry a failed or cancelled run with its original agent, Session and prompt" },
       { name: "agent-id", type: "string", valueName: "id", description: "Override agent" },
       { name: "prompt", type: "string", valueName: "text", description: "Override prompt" },
     ], ["issue", "rerun"]),
@@ -163,9 +183,6 @@ function issueCompatibilitySpecs(): CommandSpec[] {
     ], ["issue", "retitle"]),
     legacySpec("issue.cancel", ["issue", "cancel-task"], "Cancel an issue task", "destructive", HUMAN_TASK, [refPositional("task")], [], ["issue", "cancel-task"]),
     legacySpec("issue.task-runs", ["issue", "runs"], "List issue task runs", "read", HUMAN_TASK, [refPositional("issue")], [], ["issue", "runs"]),
-    legacySpec("task.messages", ["issue", "run-messages"], "List task execution messages", "read", HUMAN_TASK, [refPositional("task")], [
-      { name: "since", type: "integer", valueName: "seq", description: "First sequence number" },
-    ], ["issue", "run-messages"]),
   ];
 }
 
@@ -215,12 +232,13 @@ function commentCommandSpecs(): CommandSpec[] {
 }
 
 function sessionCommandSpecs(): CommandSpec[] {
-  return [
-    groupSpec("session", "Manage issue Sessions and published results"),
-    legacySpec("session.list", ["session", "list"], "List issue Sessions", "read", HUMAN_TASK, [refPositional("issue")], [], ["issue", "session", "list"], [compatAlias(["issue", "session", "list"], "remi session list")]),
-    nativeSpec("session.get", ["session", "get"], "Get an issue Session", "read", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [], async (invocation) => {
-      const issue = positional(invocation, 0, "issue");
-      await getAndRender(invocation, `/api/issues/${encodePath(issue)}/sessions/${encodePath(positional(invocation, 1, "session"))}`);
+  const specs = [
+    groupSpec("session", "Manage Sessions and published results"),
+    nativeSpec("session.list", ["session", "list"], "List Sessions owned by a Chat", "read", HUMAN_TASK, [refPositional("chat")], [], async (invocation) => {
+      await getAndRender(invocation, sessionCollectionPath(invocation), ["sessions"]);
+    }),
+    nativeSpec("session.get", ["session", "get"], "Get a Session owned by a Chat", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
+      await getAndRender(invocation, sessionPath(invocation));
     }),
     nativeSpec("session.show", ["session", "show"], "Show a Session and its inherited context", "read", HUMAN_TASK, [refPositional("session")], [], async (invocation) => {
       const client = await clientFor(invocation);
@@ -236,6 +254,8 @@ function sessionCommandSpecs(): CommandSpec[] {
           { header: "ID", value: (row) => row.id },
           { header: "TITLE", value: (row) => row.title },
           { header: "STATUS", value: (row) => row.status },
+          { header: "OWNER TYPE", value: (row) => row.owner_type },
+          { header: "OWNER ID", value: (row) => row.owner_id },
           { header: "PARENT", value: (row) => row.parent_session_id ?? "-" },
           { header: "WITH CODE", value: (row) => row.with_code ?? false },
           { header: "CODE RUNTIME", value: (row) => row.code_runtime_id ?? "-" },
@@ -278,7 +298,7 @@ function sessionCommandSpecs(): CommandSpec[] {
         ],
       });
     }),
-    nativeSpec("session.create", ["session", "create"], "Create an issue Session", "write", HUMAN, [refPositional("issue")], [
+    nativeSpec("session.create", ["session", "create"], "Create a Session owned by a Chat", "write", HUMAN, [refPositional("chat")], [
       ...INPUT_OPTIONS, ...titleStatusOptions(), discussionOption(),
       { name: "from", type: "string", valueName: "session-id", description: "Inherit parent Session context (implies --discussion; snapshot by default)" },
       { name: "inherit-mode", type: "string", valueName: "snapshot|follow", description: "Use a frozen snapshot or follow new parent events (requires --from)" },
@@ -292,56 +312,208 @@ function sessionCommandSpecs(): CommandSpec[] {
         inherit_mode: stringOption(invocation, "inherit-mode") ?? undefined,
         with_code: invocation.options["with-code"] === true ? true : undefined,
       });
-      await mutateAndRender(invocation, "POST", `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/sessions`, body);
+      await mutateAndRender(invocation, "POST", sessionCollectionPath(invocation), body);
     }),
-    nativeSpec("session.update", ["session", "update"], "Update an issue Session", "write", HUMAN, [refPositional("issue"), refPositional("session")], [...INPUT_OPTIONS, ...titleStatusOptions()], async (invocation) => {
+    nativeSpec("session.adopt", ["session", "adopt"], "Adopt an Issue-owned Session into a Chat", "write", HUMAN, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
+      await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/adopt`, {});
+    }),
+    nativeSpec("session.update", ["session", "update"], "Update a Session", "write", HUMAN, [refPositional("chat"), refPositional("session")], [...INPUT_OPTIONS, ...titleStatusOptions()], async (invocation) => {
       const body = await requestBody(invocation, { title: stringOption(invocation, "title") ?? undefined, status: stringOption(invocation, "status") ?? undefined });
       await mutateAndRender(invocation, "PATCH", sessionPath(invocation), body);
     }),
-    nativeSpec("session.participant.list", ["session", "participant", "list"], "List Session participants", "read", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [], async (invocation) => {
+    nativeSpec("session.participant.list", ["session", "participant", "list"], "List Session participants", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
       await getAndRender(invocation, `${sessionPath(invocation)}/participants`, ["participants"]);
     }),
-    nativeSpec("session.participant.add", ["session", "participant", "add"], "Add a Session participant", "write", HUMAN, [refPositional("issue"), refPositional("session")], [
+    nativeSpec("session.participant.add", ["session", "participant", "add"], "Add a Session participant", "write", HUMAN, [refPositional("chat"), refPositional("session")], [
       { name: "type", type: "string", valueName: "agent|member", description: "Participant type" },
       { name: "id", type: "string", valueName: "id", description: "Participant ID" },
     ], async (invocation) => {
       await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/participants`, { participant_type: requiredOption(invocation, "type"), participant_id: requiredOption(invocation, "id") });
     }),
-    nativeSpec("session.participant.remove", ["session", "participant", "remove"], "Remove a Session participant", "destructive", HUMAN, [refPositional("issue"), refPositional("session"), refPositional("type"), refPositional("participant")], [YES_OPTION], async (invocation) => {
+    nativeSpec("session.participant.remove", ["session", "participant", "remove"], "Remove a Session participant", "destructive", HUMAN, [refPositional("chat"), refPositional("session"), refPositional("type"), refPositional("participant")], [YES_OPTION], async (invocation) => {
       requireConfirmation(invocation);
       await mutateAndRender(invocation, "DELETE", `${sessionPath(invocation)}/participants/${encodePath(positional(invocation, 2, "type"))}/${encodePath(positional(invocation, 3, "participant"))}`);
     }),
-    nativeSpec("session.event.list", ["session", "event", "list"], "List Session events", "read", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [], async (invocation) => {
-      await getAndRender(invocation, `${sessionPath(invocation)}/events`, ["events"]);
+    nativeSpec("session.event.list", ["session", "event", "list"], "List Session events", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [
+      { name: "since-seq", type: "integer", valueName: "seq", description: "Events after this sequence" },
+      { name: "to-seq", type: "integer", valueName: "seq", description: "Last sequence to include" },
+    ], async (invocation) => {
+      await getAndRender(invocation, `${sessionPath(invocation)}/events`, ["events"], {
+        since_seq: integerOption(invocation, "since-seq"), to_seq: integerOption(invocation, "to-seq"),
+      });
     }),
-    nativeSpec("session.message.create", ["session", "message", "create"], "Post a Session message", "write", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [...INPUT_OPTIONS, ...COMMENT_BODY_OPTIONS], async (invocation) => {
+    nativeSpec("session.log.get", ["session", "log", "get"], "Read a complete Session log entry or unread range", "read", HUMAN_TASK, [refPositional("session"), { name: "entry", required: false }], [
+      { name: "from", type: "integer", valueName: "seq", description: "Read entries after this sequence" },
+      { name: "to", type: "integer", valueName: "seq", description: "Last sequence to include; automatically reads every page" },
+    ], async (invocation) => {
+      const from = integerOption(invocation, "from"), to = integerOption(invocation, "to");
+      if (from !== null || to !== null) {
+        if (from == null || to == null || from < 0 || to < from || invocation.positionals[1]) {
+          throw new CliError("usage", "Use either an entry or --from <seq> --to <seq>");
+        }
+        const client = await clientFor(invocation);
+        const entries: Array<Record<string, any>> = [];
+        let cursor: string | null = null;
+        do {
+          const page: { entries: Array<Record<string, any>>; next_cursor: string | null } = (await client.request<typeof page>({
+            method: "GET", path: `/api/sessions/${encodePath(positional(invocation, 0, "session"))}/log/entry`,
+            query: { from, to, ...(cursor ? { cursor } : {}) },
+          })).data;
+          for (const entry of page.entries) {
+            const previous = entries.at(-1);
+            if (entry.body_offset > 0 && previous && previous.seq === entry.seq) {
+              previous.body_md += entry.body_md;
+              previous.body_omitted_chars = entry.body_omitted_chars;
+            } else entries.push({ ...entry });
+          }
+          if (page.next_cursor && page.next_cursor === cursor) throw new CliError("conflict", "Session range cursor did not advance");
+          cursor = page.next_cursor;
+        } while (cursor);
+        const mode = outputMode(invocation);
+        if (mode !== "table") new CliRenderer().render(entries, { mode });
+        else for (const entry of entries) console.log(`${entry.seq} · ${entry.author_type} ${entry.author_id ?? ""}\n${entry.body_md}\n`);
+        return;
+      }
+      const entry = positional(invocation, 1, "entry");
+      const client = await clientFor(invocation);
+      const response = await client.request<{
+        session_id: string; seq: number; id: string; body_md: string;
+        metadata: Record<string, unknown>; delivered: boolean | null;
+      }>({
+        method: "GET",
+        path: `/api/sessions/${encodePath(positional(invocation, 0, "session"))}/log/entry`,
+        query: /^(0|[1-9]\d*)$/.test(entry) ? { seq: entry } : { id: entry },
+      });
+      const mode = outputMode(invocation);
+      if (mode !== "table") {
+        new CliRenderer().render(response.data, { mode });
+        return;
+      }
+      const logEntry = response.data;
+      console.log(`Session: ${logEntry.session_id}\nSeq: ${logEntry.seq}\nID: ${logEntry.id}`);
+      console.log(`Delivered: ${logEntry.delivered === null ? "未知（旧条目无收件人）" : logEntry.delivered ? "是" : "否"}`);
+      console.log(`Metadata: ${JSON.stringify(logEntry.metadata, null, 2)}\n\nBody:\n${logEntry.body_md}`);
+    }),
+    nativeSpec("session.log.window", ["session", "log", "window"], "Read a Session log window", "read", HUMAN_TASK, [refPositional("session")], [
+      { name: "anchor", type: "integer", valueName: "seq", description: "Anchor sequence" },
+      { name: "before", type: "integer", valueName: "n", description: "Entries at or before anchor" },
+      { name: "after", type: "integer", valueName: "n", description: "Entries after anchor" },
+      { name: "with-activity", type: "boolean", description: "Include Issue activity in the default Session window" },
+    ], async (invocation) => {
+      await getAndRender(invocation, `/api/sessions/${encodePath(positional(invocation, 0, "session"))}/log`, ["entries"], {
+        anchor: integerOption(invocation, "anchor"), before: integerOption(invocation, "before"), after: integerOption(invocation, "after"),
+        with_activity: invocation.options["with-activity"] === true ? 1 : undefined,
+      });
+    }, [
+      { path: ["chat", "message", "list"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi session log window" },
+    ]),
+    nativeSpec("session.log.locate", ["session", "log", "locate"], "Locate a Session log entry", "read", HUMAN_TASK, [refPositional("session"), refPositional("entry")], [], async (invocation) => {
+      await getAndRender(invocation, `/api/sessions/${encodePath(positional(invocation, 0, "session"))}/log/locate`, [], {
+        id: positional(invocation, 1, "entry"),
+      });
+    }),
+    nativeSpec("session.message.create", ["session", "message", "create"], "Post a Session message", "write", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [...INPUT_OPTIONS, ...COMMENT_BODY_OPTIONS], async (invocation) => {
       await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/messages`, await requestBody(invocation, { content: await contentOption(invocation) }));
     }),
-    nativeSpec("session.task.list", ["session", "task", "list"], "List Session tasks", "read", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [], async (invocation) => {
+    nativeSpec("session.task.list", ["session", "task", "list"], "List Session tasks", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
       await getAndRender(invocation, `${sessionPath(invocation)}/tasks`, ["tasks"]);
     }),
-    nativeSpec("session.task.create", ["session", "task", "create"], "Create a delegated Session task", "write", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [...INPUT_OPTIONS, ...agentPromptOptions()], async (invocation) => {
+    nativeSpec("session.task.create", ["session", "task", "create"], "Create a delegated Session task", "write", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [...INPUT_OPTIONS, ...agentPromptOptions()], async (invocation) => {
       await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/tasks`, await requestBody(invocation, { agent_id: requiredOption(invocation, "agent"), prompt: stringOption(invocation, "prompt") ?? undefined }));
     }),
-    legacySpec("session.result.list", ["session", "result", "list"], "List published Session results", "read", HUMAN_TASK, [refPositional("issue")], SESSION_RESULT_OPTIONS, ["issue", "session", "result", "list"], [compatAlias(["issue", "session", "result", "list"], "remi session result list")]),
-    legacySpec("session.result.publish", ["session", "result", "publish"], "Publish a reusable Session result", "write", HUMAN_TASK, [refPositional("issue")], SESSION_RESULT_OPTIONS, ["issue", "session", "result", "publish"], [compatAlias(["issue", "session", "result", "publish"], "remi session result publish")]),
-    legacySpec("session.archive.list", ["session", "archive", "list"], "List issue Session archives", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "list"], [compatAlias(["issue", "archive", "list"], "remi session archive list")]),
-    legacySpec("session.archive.status", ["session", "archive", "status"], "Show issue Session archive status", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "status"], [compatAlias(["issue", "archive", "status"], "remi session archive status")]),
-    legacySpec("session.archive.verify", ["session", "archive", "verify"], "Verify an issue Session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "verify"], [compatAlias(["issue", "archive", "verify"], "remi session archive verify")]),
-    legacySpec("session.archive.retry", ["session", "archive", "retry"], "Retry an issue Session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "retry"], [compatAlias(["issue", "archive", "retry"], "remi session archive retry")]),
-    nativeSpec("session.config.get", ["session", "config", "get"], "Get workspace Session archive settings", "read", HUMAN, [refPositional("workspace")], [], async (invocation) => {
-      await getAndRender(invocation, `/api/workspaces/${encodePath(positional(invocation, 0, "workspace"))}/session-archive`);
+    nativeSpec("session.result.list", ["session", "result", "list"], "List results published by a Session", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
+      await getAndRender(invocation, `${sessionPath(invocation)}/results`, ["results"]);
     }),
-    nativeSpec("session.config.update", ["session", "config", "update"], "Update workspace Session archive settings", "write", HUMAN, [refPositional("workspace")], INPUT_OPTIONS, async (invocation) => {
-      await mutateAndRender(invocation, "PUT", `/api/workspaces/${encodePath(positional(invocation, 0, "workspace"))}/session-archive`, await requestBody(invocation));
+    nativeSpec("session.result.publish", ["session", "result", "publish"], "Publish a reusable Session result", "write", HUMAN_TASK, [refPositional("chat"), refPositional("session")], SESSION_RESULT_OPTIONS, async (invocation) => {
+      const body = await contentOption(invocation);
+      if (invocation.spec.id === "issue.session.result.publish") {
+        if (!body?.trim()) throw new CliError("usage", "result body is required");
+        const metadata = sessionResultMetadata(invocation.options as CliOptions);
+        await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/results`, {
+          title: stringOption(invocation, "title") ?? "",
+          body,
+          ...(metadata ? { metadata } : {}),
+        });
+        return;
+      }
+      await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/results`, {
+        body,
+        title: stringOption(invocation, "title") ?? undefined,
+        metadata: {
+          type: stringOption(invocation, "type") ?? "other",
+          refs: invocation.options.ref ?? [],
+        },
+      });
     }),
   ];
+  return [...specs, ...issueSessionCommandSpecs(specs)];
+}
+
+function issueSessionCommandSpecs(specs: readonly CommandSpec[]): CommandSpec[] {
+  const commands = specs
+    .filter((spec) => spec.positionals?.[0]?.name === "chat" && spec.id !== "session.adopt")
+    .map((spec): CommandSpec => ({
+      ...spec,
+      id: `issue.${spec.id}`,
+      capability: `issue.${spec.id}`,
+      path: ["issue", ...spec.path],
+      description: spec.description.replace("a Chat", "an Issue"),
+      positionals: [refPositional("issue"), ...(spec.positionals?.slice(1) ?? [])],
+    }));
+  const resultList = commands.find((spec) => spec.id === "issue.session.result.list")!;
+  resultList.description = "List results published by Sessions owned by an Issue";
+  resultList.positionals = [refPositional("issue")];
+  resultList.options = commandOptions([SESSION_RESULT_OPTIONS[0]!], PAGE_OPTIONS);
+  resultList.run = async (invocation) => {
+    const client = await clientFor(invocation);
+    const response = await client.request({ method: "GET", path: issueSubpath(invocation, "session-results") });
+    const sessionId = stringOption(invocation, "session");
+    const data = sessionId
+      ? extractRecords(response.data, ["results"]).filter((row) => (row.source_session_id ?? row.sourceSessionId) === sessionId)
+      : response.data;
+    renderResource(invocation, data, ["results"]);
+  };
+
+  const resultPublish = commands.find((spec) => spec.id === "issue.session.result.publish")!;
+  resultPublish.positionals = [refPositional("issue"), optionalPositional("session")];
+  resultPublish.description = "Publish an Issue Session result (requires <session> or --session)";
+  return commands;
 }
 
 function issueExtendedSpecs(): CommandSpec[] {
   return [
-    nativeSpec("issue.grouped", ["issue", "grouped"], "List issues grouped for planning", "read", HUMAN_TASK, [], ISSUE_LIST_OPTIONS, async (invocation) => {
-      await getAndRender(invocation, "/api/issues/grouped", ["groups", "issues"], issueQuery(invocation));
+    nativeSpec("issue.status-pages", ["issue", "status-pages"], "List the first page of each issue status", "read", HUMAN_TASK, [], [
+      ...ISSUE_LIST_OPTIONS.filter((option) => !["offset", "metadata", "full-id"].includes(option.name)),
+      { name: "statuses", type: "string", valueName: "statuses", description: "Comma-separated statuses (default: all seven)" },
+      { name: "assignee-ids", type: "string", valueName: "refs", description: "Comma-separated assignee references" },
+      { name: "project-ids", type: "string", valueName: "ids", description: "Comma-separated project IDs" },
+      { name: "metadata", type: "string", valueName: "json", description: "Metadata equality filter as a JSON object" },
+      { name: "include-no-assignee", type: "boolean", description: "Only issues without an assignee" },
+      { name: "include-no-project", type: "boolean", description: "Only issues without a project" },
+      { name: "include-archived", type: "boolean", description: "Include archived issues in status pages" },
+      { name: "archived-only", type: "boolean", description: "Only archived issues in status pages" },
+      { name: "include-archived-total", type: "boolean", description: "Include the workspace-wide archived count" },
+    ], async (invocation) => {
+      await getAndRender(invocation, "/api/issues/status-pages", [], {
+        ...issueQuery(invocation),
+        assignee_types: stringOption(invocation, "assignee-type"),
+        assignee_ids: stringOption(invocation, "assignee-ids"),
+        project_ids: stringOption(invocation, "project-ids"),
+        statuses: stringOption(invocation, "statuses"),
+        parent_id: stringOption(invocation, "parent"),
+        metadata: stringOption(invocation, "metadata"),
+        ...Object.fromEntries(["top-level-only", "include-no-assignee", "include-no-project", "include-archived", "archived-only", "include-archived-total"]
+          .map((name) => [name.replaceAll("-", "_"), invocation.options[name] === true ? true : undefined])),
+      });
+    }),
+    nativeSpec("issue.grouped", ["issue", "grouped"], "List issues grouped for planning", "read", HUMAN_TASK, [], [
+      ...ISSUE_LIST_OPTIONS,
+      { name: "include-archived-total", type: "boolean", description: "Include the workspace-wide archived count" },
+    ], async (invocation) => {
+      await getAndRender(invocation, "/api/issues/grouped", ["groups", "issues"], {
+        ...issueQuery(invocation),
+        include_archived_total: invocation.options["include-archived-total"] === true ? true : undefined,
+      });
     }),
     nativeSpec("issue.children", ["issue", "children"], "List child issues", "read", HUMAN_TASK, [refPositional("issue")], [], async (invocation) => {
       await getAndRender(invocation, "/api/issues/children", ["issues"], { parent_ids: positional(invocation, 0, "issue") });
@@ -369,13 +541,56 @@ function issueExtendedSpecs(): CommandSpec[] {
     nativeSpec("issue.workspace", ["issue", "workspace"], "Show issue worktree state", "read", HUMAN_TASK, [refPositional("issue")], [], async (invocation) => {
       await getAndRender(invocation, `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/workspace`);
     }),
+    nativeSpec("issue.workspace.abandon", ["issue", "workspace", "abandon"], "Abandon an Issue workspace whose Runtime is gone; retain local files", "destructive", HUMAN_TASK, [refPositional("issue")], [YES_OPTION], async (invocation) => {
+      requireConfirmation(invocation);
+      await mutateAndRender(invocation, "POST", `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/workspace/abandon`, {});
+    }),
+    nativeSpec("issue.decision.request", ["issue", "decision", "request"], "Record a non-blocking decision request", "write", HUMAN_TASK, [refPositional("issue")], [
+      { name: "kind", type: "string", valueName: "kind", description: "permission|merge|production_change|question|criteria|other" },
+      { name: "title", type: "string", valueName: "title", description: "Decision title" },
+      { name: "body", type: "string", valueName: "text", description: "Decision context" },
+      { name: "body-stdin", type: "boolean", description: "Read decision context from stdin" },
+      { name: "option", type: "string", valueName: "choice", repeatable: true, description: "Available choice" },
+    ], async (invocation) => {
+      await mutateAndRender(invocation, "POST", issueSubpath(invocation, "decisions"), {
+        kind: requiredOption(invocation, "kind"), title: requiredOption(invocation, "title"),
+        body: invocation.options["body-stdin"] === true ? readFileSync(0, "utf8") : stringOption(invocation, "body"),
+        options: stringOptions(invocation, "option"),
+      });
+    }),
+    nativeSpec("issue.decision.list", ["issue", "decision", "list"], "List decisions and pending human requests", "read", HUMAN_TASK, [refPositional("issue")], [], async (invocation) => {
+      await getAndRender(invocation, issueSubpath(invocation, "decisions"));
+    }),
+    nativeSpec("issue.decision.answer", ["issue", "decision", "answer"], "Answer or revise a decision", "write", HUMAN_TASK, [refPositional("issue"), refPositional("decision")], [
+      { name: "text", type: "string", valueName: "answer", description: "Answer text" },
+      { name: "option", type: "string", valueName: "choice", description: "Chosen option" },
+      { name: "reason", type: "string", valueName: "text", description: "Reason for the answer (required for agents)" },
+      { name: "overturn", type: "string", valueName: "text", description: "How a human can overturn it (required for agents)" },
+    ], async (invocation) => {
+      const answer = stringOption(invocation, "text") ?? stringOption(invocation, "option");
+      if (!answer) throw new CliError("usage", "--text or --option is required");
+      await mutateAndRender(invocation, "POST", `${issueSubpath(invocation, "decisions")}/${encodePath(positional(invocation, 1, "decision"))}/answer`, {
+        answer, reason: stringOption(invocation, "reason"), overturn: stringOption(invocation, "overturn"),
+      });
+    }),
+    nativeSpec("issue.decision.escalate", ["issue", "decision", "escalate"], "Hand a pending decision to a member", "write", HUMAN_TASK, [refPositional("issue"), refPositional("decision")], [], async (invocation) => {
+      await mutateAndRender(invocation, "POST", `${issueSubpath(invocation, "decisions")}/${encodePath(positional(invocation, 1, "decision"))}/escalate`, {});
+    }),
+    nativeSpec("issue.decision.withdraw", ["issue", "decision", "withdraw"], "Withdraw an unanswered decision", "write", HUMAN_TASK, [refPositional("issue"), refPositional("decision")], [], async (invocation) => {
+      await mutateAndRender(invocation, "POST", `${issueSubpath(invocation, "decisions")}/${encodePath(positional(invocation, 1, "decision"))}/withdraw`, {});
+    }),
     nativeSpec("issue.dependency.list", ["issue", "dependency", "list"], "List issue dependencies", "read", HUMAN_TASK, [refPositional("issue")], [], async (invocation) => {
       await getAndRender(invocation, issueSubpath(invocation, "dependencies"), ["dependencies"]);
     }),
     nativeSpec("issue.dependency.add", ["issue", "dependency", "add"], "Add an issue dependency", "write", HUMAN_TASK, [refPositional("issue"), refPositional("dependency")], [
-      { name: "type", type: "string", valueName: "blocks|depends_on", description: "Dependency type" },
+      // MUL-400 E3: the server takes keys or ids, and normalizes `blocks` to the
+      // reverse `blocked_by` row so the table keeps a single direction.
+      { name: "type", type: "string", valueName: "blocked_by|blocks|related", description: "Dependency type (default blocked_by)" },
     ], async (invocation) => {
-      await mutateAndRender(invocation, "POST", issueSubpath(invocation, "dependencies"), { dependency_id: positional(invocation, 1, "dependency"), dependency_type: stringOption(invocation, "type") ?? "depends_on" });
+      await mutateAndRender(invocation, "POST", issueSubpath(invocation, "dependencies"), {
+        depends_on_issue_id: positional(invocation, 1, "dependency"),
+        type: stringOption(invocation, "type") ?? "blocked_by",
+      });
     }),
     nativeSpec("issue.dependency.remove", ["issue", "dependency", "remove"], "Remove an issue dependency", "destructive", HUMAN_TASK, [refPositional("issue"), refPositional("dependency")], [YES_OPTION], async (invocation) => {
       requireConfirmation(invocation);
@@ -412,6 +627,7 @@ function issueExtendedSpecs(): CommandSpec[] {
       await mutateAndRender(invocation, "POST", "/api/issues/batch-delete", await requestBody(invocation));
     }),
     nativeSpec("issue.quick-create", ["issue", "quick-create"], "Quick-create an issue", "write", HUMAN, [], [...INPUT_OPTIONS,
+      { name: "responsible-member", type: "string", valueName: "member-id", description: "Deprecated no-op: Issues no longer designate a human; the value is ignored" },
       { name: "agent", type: "string", valueName: "id", description: "Creator agent", conflictsWith: ["squad"] },
       { name: "squad", type: "string", valueName: "id", description: "Creator squad", conflictsWith: ["agent"] },
       { name: "prompt", type: "string", valueName: "text", description: "Work to plan" },
@@ -537,6 +753,18 @@ function shareCommandSpecs(): CommandSpec[] {
       if (token !== stringOption(invocation, "share")) throw new CliError("usage", "the share path token must match --share");
       await getAndRender(invocation, `/api/shares/${encodePath(token)}`);
     }),
+    nativeSpec("share.trace.read", ["share", "trace", "read"], "Read a task trace through a signed issue share", "read", ["human", "share"], [refPositional("task"), optionalPositional("token")], [
+      ...TRACE_READ_OPTIONS,
+    ], async (invocation) => {
+      const token = positionalOrOption(invocation, 1, "token", "share");
+      if (!stringOption(invocation, "share") || token !== stringOption(invocation, "share")) {
+        throw new CliError("usage", "share trace read requires a matching --share <signed-token>");
+      }
+      const query = traceReadQuery(invocation);
+      const client = await clientFor(invocation);
+      const response = await client.request({ method: "GET", path: `/api/shares/${encodePath(token)}/tasks/${encodePath(positional(invocation, 0, "task"))}/trace`, query });
+      renderTraceRead(invocation, response.data);
+    }),
   ];
 }
 
@@ -576,8 +804,9 @@ function chatCommandSpecs(): CommandSpec[] {
     groupSpec("chat", "Manage product chat Sessions"),
     nativeSpec("chat.list", ["chat", "list"], "List chats", "read", HUMAN, [], [
       { name: "status", type: "string", valueName: "active|all", description: "Archive filter" },
+      { name: "origin", type: "string", valueName: "user|automation|all", description: "Chat origin (default: user conversations only)" },
     ], async (invocation) => {
-      await getAndRender(invocation, "/api/chat/sessions", ["sessions"], { workspace_id: requiredWorkspace(invocation), status: stringOption(invocation, "status") });
+      await getAndRender(invocation, "/api/chat/sessions", ["sessions"], { workspace_id: requiredWorkspace(invocation), status: stringOption(invocation, "status"), origin: stringOption(invocation, "origin") });
     }),
     nativeSpec("chat.get", ["chat", "get"], "Get a chat", "read", HUMAN, [refPositional("chat")], [], async (invocation) => {
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
@@ -619,8 +848,14 @@ function chatCommandSpecs(): CommandSpec[] {
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
       await mutateAndRender(invocation, "DELETE", `/api/chat/sessions/${encodePath(String(chat.id))}`);
     }),
-    nativeSpec("chat.message.list", ["chat", "message", "list"], "List chat messages", "read", HUMAN, [refPositional("chat")], [], async (invocation) => {
-      await getAndRender(invocation, `/api/chat/sessions/${encodePath(positional(invocation, 0, "chat"))}/messages/page`, ["messages"], queryOptions(invocation, { limit: integerOption(invocation, "limit") }));
+    nativeSpec("chat.message.page", ["chat", "message", "page"], "Read a bounded page of chat messages", "read", HUMAN, [refPositional("chat")], [
+      { name: "limit", type: "integer", valueName: "count", description: "Page size (1-100)" },
+      { name: "before-id", type: "string", valueName: "id", description: "Cursor message ID" },
+      { name: "before-created-at", type: "string", valueName: "time", description: "Cursor creation timestamp" },
+    ], async (invocation) => {
+      await getAndRender(invocation, "/api/chat/sessions/" + encodePath(positional(invocation, 0, "chat")) + "/messages/page", ["messages"], {
+        limit: integerOption(invocation, "limit"), before_id: stringOption(invocation, "before-id"), before_created_at: stringOption(invocation, "before-created-at"),
+      });
     }),
     nativeSpec("chat.message.create", ["chat", "message", "create"], "Send a chat message", "write", HUMAN, [refPositional("chat")], [...INPUT_OPTIONS, ...COMMENT_BODY_OPTIONS], async (invocation) => {
       await mutateAndRender(invocation, "POST", `/api/chat/sessions/${encodePath(positional(invocation, 0, "chat"))}/messages`, await requestBody(invocation, { content: await contentOption(invocation) }));
@@ -765,6 +1000,18 @@ function taskCommandSpecs(): CommandSpec[] {
       { name: "force-answer", type: "boolean", description: "Ask the agent to wrap up and deliver its best conclusion now" },
       { name: "reason", type: "string", valueName: "text", description: "Organizer action criterion" },
     ], async (invocation) => {
+      // MUL-468: `task steer <task>` is the only write path that is also a
+      // command prefix (`task steer list`). A bare invocation used to POST an
+      // empty steer; fail here instead, before any request leaves the CLI.
+      const hasSteerInput = ["content", "content-file", "content-stdin", "force-answer"]
+        .some((name) => invocation.options[name] !== undefined);
+      if (!hasSteerInput) {
+        throw new CliError(
+          "usage",
+          "remi task steer requires --content, --content-file, --content-stdin, or --force-answer; "
+            + "use remi task steer list <task> to read the directives already sent",
+        );
+      }
       await mutateAndRender(invocation, "POST", `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/steer`, {
         content: await contentOption(invocation),
         ...(invocation.options["force-answer"] === true ? { force_answer: true } : {}),
@@ -774,11 +1021,19 @@ function taskCommandSpecs(): CommandSpec[] {
     nativeSpec("task.steer.list", ["task", "steer", "list"], "List steer directives sent to a task", "read", HUMAN_TASK, [refPositional("task")], [], async (invocation) => {
       await getAndRender(invocation, `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/steer`, ["messages"]);
     }),
-    nativeSpec("task.message.list", ["task", "message", "list"], "List task messages", "read", HUMAN_TASK, [refPositional("task")], [
-      { name: "since", type: "integer", valueName: "seq", description: "First sequence number" },
+    nativeSpec("task.trace.read", ["task", "trace", "read"], "Read a task trace window", "read", HUMAN_TASK, [refPositional("task")], [
+      ...TRACE_READ_OPTIONS,
+      { name: "since", type: "integer", valueName: "seq", description: "Deprecated alias for --after" },
     ], async (invocation) => {
-      await getAndRender(invocation, `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/messages`, ["messages"], { since: integerOption(invocation, "since") });
-    }, [{ path: ["task", "messages"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi task message list" }]),
+      const query = traceReadQuery(invocation, integerOption(invocation, "since"));
+      const client = await clientFor(invocation);
+      const response = await client.request({ method: "GET", path: `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/trace`, query });
+      renderTraceRead(invocation, response.data);
+    }, [
+      { path: ["task", "message", "list"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi task trace read" },
+      { path: ["task", "messages"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi task trace read" },
+      { path: ["issue", "run-messages"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi task trace read" },
+    ]),
     nativeSpec("task.inspect", ["task", "inspect"], "Inspect derived task health metadata", "read", HUMAN_TASK, [refPositional("task")], [], async (invocation) => {
       await getAndRender(invocation, `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/inspection`, ["inspection"]);
     }),
@@ -956,8 +1211,17 @@ async function contentOption(invocation: CommandInvocation): Promise<string | un
   return undefined;
 }
 
+function sessionCollectionPath(invocation: CommandInvocation): string {
+  return invocation.spec.path[0] === "issue"
+    ? issueSubpath(invocation, "sessions")
+    : `/api/multiremi/chats/${encodePath(positional(invocation, 0, "chat"))}/sessions`;
+}
+
 function sessionPath(invocation: CommandInvocation): string {
-  return `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/sessions/${encodePath(positional(invocation, 1, "session"))}`;
+  const sessionId = invocation.spec.id === "issue.session.result.publish"
+    ? positionalOrOption(invocation, 1, "session", "session")
+    : positional(invocation, 1, "session");
+  return `${sessionCollectionPath(invocation)}/${encodePath(sessionId)}`;
 }
 
 function issueSubpath(invocation: CommandInvocation, tail: string): string {
@@ -970,7 +1234,7 @@ function issueQuery(invocation: CommandInvocation): Record<string, string | numb
     status: stringOption(invocation, "status"),
     priority: stringOption(invocation, "priority"),
     assignee_id: stringOption(invocation, "assignee"),
-    assignee_type: stringOption(invocation, "assignee-type"),
+    assignee_types: stringOption(invocation, "assignee-type"),
     project_id: stringOption(invocation, "project"),
     limit: integerOption(invocation, "limit"),
     offset: integerOption(invocation, "offset"),

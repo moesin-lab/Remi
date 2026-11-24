@@ -1,14 +1,18 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { taskOfferResponse } from "../../fixtures/task-offer.js";
+import { reportFrame } from "../../fixtures/report-session.js";
 // Runtime metadata/usage, console scoping, delete cascade, and the async request
 // queues (model list, update, local skill list/import) plus register/deregister.
-import { afterEach, describe, expect, it } from "bun:test";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
+import { receiveRuntimeInputs } from "../../fixtures/runtime-downlinks.js";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, db, metricValue, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createSnapshotStore, db, metricValue, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi API — runtimes and runtime request queues", () => {
   it("accepts runtime model snapshots only from the bound daemon identity", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_daemon_models",
       name: "Daemon models runtime",
@@ -67,12 +71,17 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       ["cross-workspace daemon", remoteDaemon.token],
       ["PAT", pat.token],
     ] as const) {
-      const denied = await app.request(path, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body,
-      });
-      expect(denied.status, label).toBe(403);
+      const denied = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id, models: [{
+        id: "claude-live",
+        label: "Claude Live",
+        provider: "anthropic",
+        default: true,
+        thinking: {
+          supportedLevels: [{ value: "xhigh", label: "Extra high" }],
+          defaultLevel: "xhigh",
+        },
+      }], }, { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, authToken: "root-model-secret" });
+      expect(denied).toMatchObject({ ok: false, code: "authority_revoked", retryable: false });
     }
     expect(store.listRuntimeModels(runtime.id).map((model) => model.id)).toEqual(["old-model"]);
 
@@ -91,23 +100,13 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(claimed.status).toBe(200);
     expect(store.getRuntimeModelListRequest(runtime.id, request.id)?.status).toBe("running");
 
-    const deniedResult = await app.request(`${path}/${request.id}/result`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${wrongDaemon.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
-        models: [{ id: "hijacked-model", label: "Hijacked model", provider: "anthropic" }],
-      }),
-    });
-    expect(deniedResult.status).toBe(403);
+    const deniedResult = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id, request_id: request.id, status: "completed",
+        models: [{ id: "hijacked-model", label: "Hijacked model", provider: "anthropic" }], }, { headers: { Authorization: `Bearer ${wrongDaemon.token}`, "Content-Type": "application/json" }, authToken: "root-model-secret" });
+    expect(deniedResult).toMatchObject({ ok: false, code: "authority_revoked", retryable: false });
     expect(store.listRuntimeModels(runtime.id).map((model) => model.id)).toEqual(["old-model"]);
 
-    const cleanupResult = await app.request(`${path}/${request.id}/result`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${daemon.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "failed", error: "test cleanup" }),
-    });
-    expect(cleanupResult.status).toBe(200);
+    const cleanupResult = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id, request_id: request.id, status: "failed", error: "test cleanup" }, { headers: { Authorization: `Bearer ${daemon.token}`, "Content-Type": "application/json" }, authToken: "root-model-secret" });
+    expect(cleanupResult.ok).toBe(true);
 
     const takeover = await app.request("/api/multiremi/runtimes", {
       method: "POST",
@@ -123,20 +122,21 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(takeover.status).toBe(403);
     expect(store.getRuntime(runtime.id)?.daemonId).toBe("daemon-models");
 
-    const invalid = await app.request(path, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${daemon.token}`, "Content-Type": "application/json" },
-      body: "{",
-    });
-    expect(invalid.status).toBe(400);
+    const invalid = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id,  }, { headers: { Authorization: `Bearer ${daemon.token}`, "Content-Type": "application/json" }, authToken: "root-model-secret", rawPayload: "{" });
+    expect(invalid).toEqual({ closed: 4002 });
 
-    const accepted = await app.request(path, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${daemon.token}`, "Content-Type": "application/json" },
-      body,
-    });
-    expect(accepted.status).toBe(200);
-    expect((await accepted.json()).models[0]).toMatchObject({
+    const accepted = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id, models: [{
+        id: "claude-live",
+        label: "Claude Live",
+        provider: "anthropic",
+        default: true,
+        thinking: {
+          supportedLevels: [{ value: "xhigh", label: "Extra high" }],
+          defaultLevel: "xhigh",
+        },
+      }], }, { headers: { Authorization: `Bearer ${daemon.token}`, "Content-Type": "application/json" }, authToken: "root-model-secret" });
+    expect(accepted.ok).toBe(true);
+    expect(store.listRuntimeModels(runtime.id)[0]).toMatchObject({
       id: "claude-live",
       thinking: {
         supportedLevels: [{ value: "xhigh", label: "Extra high" }],
@@ -145,30 +145,45 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
     expect(store.listRuntimeModels(runtime.id).map((model) => model.id)).toEqual(["claude-live"]);
 
-    const masterAccepted = await app.request(path, {
-      method: "PUT",
-      headers: { Authorization: "Bearer root-model-secret", "Content-Type": "application/json" },
-      body,
-    });
-    expect(masterAccepted.status).toBe(200);
+    const masterAccepted = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id, models: [{
+        id: "claude-live",
+        label: "Claude Live",
+        provider: "anthropic",
+        default: true,
+        thinking: {
+          supportedLevels: [{ value: "xhigh", label: "Extra high" }],
+          defaultLevel: "xhigh",
+        },
+      }], }, { headers: { Authorization: "Bearer root-model-secret", "Content-Type": "application/json" }, authToken: "root-model-secret" });
+    expect(masterAccepted.ok).toBe(true);
 
     const openApp = createMultiremiApp({ store, authToken: "" });
-    const openAccepted = await openApp.request(path, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body,
-    });
-    expect(openAccepted.status).toBe(200);
-    const openPatDenied = await openApp.request(path, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${pat.token}`, "Content-Type": "application/json" },
-      body,
-    });
-    expect(openPatDenied.status).toBe(403);
+    const openAccepted = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id, models: [{
+        id: "claude-live",
+        label: "Claude Live",
+        provider: "anthropic",
+        default: true,
+        thinking: {
+          supportedLevels: [{ value: "xhigh", label: "Extra high" }],
+          defaultLevel: "xhigh",
+        },
+      }], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(openAccepted.ok).toBe(true);
+    const openPatDenied = await reportFrame(store, "runtime.model_list_result", { runtime_id: runtime.id, models: [{
+        id: "claude-live",
+        label: "Claude Live",
+        provider: "anthropic",
+        default: true,
+        thinking: {
+          supportedLevels: [{ value: "xhigh", label: "Extra high" }],
+          defaultLevel: "xhigh",
+        },
+      }], }, { headers: { Authorization: `Bearer ${pat.token}`, "Content-Type": "application/json" }, authToken: "" });
+    expect(openPatDenied).toMatchObject({ ok: false, code: "authority_revoked", retryable: false });
   });
 
   it("serves runtime metadata updates and usage endpoints", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const member = store.createWorkspaceMember({ name: "Ada", workspaceId: "local" });
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, prompt: "usage" });
@@ -220,15 +235,9 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
     expect((await updatedModels.json()).models[0].id).toBe("gpt-5.4");
 
-    const claim = await app.request("/api/daemon/runtimes/rt_api/tasks/claim", { method: "POST" });
-    expect((await claim.json()).task.id).toBe(task.id);
-    await app.request(`/api/daemon/tasks/${task.id}/usage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        usage: [{ provider: "codex", model: "gpt-5", input_tokens: 11, output_tokens: 5, cache_read_tokens: 2 }],
-      }),
-    });
+    const claim = await taskOfferResponse(store, "rt_api");
+    expect((await claim.json()).task.attempt_id).toBe(task.id);
+    await reportFrame(store, "task.usage", { task_id: task.id, usage: [{ provider: "codex", model: "gpt-5", input_tokens: 11, output_tokens: 5, cache_read_tokens: 2 }], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
 
     const detail = await app.request("/api/multiremi/runtimes/rt_api");
     const detailBody = await detail.json();
@@ -247,7 +256,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       output_tokens: 5,
       cache_read_tokens: 2,
       cache_write_tokens: 0,
-      total_tokens: 0,
+      total_tokens: 18,
     });
     expect(usageBody[0].runtimeId).toBeUndefined();
     expect(usageBody[0].cacheReadTokens).toBeUndefined();
@@ -261,7 +270,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       output_tokens: 5,
       cache_read_tokens: 2,
       cache_write_tokens: 0,
-      total_tokens: 0,
+      total_tokens: 18,
       task_count: 1,
     });
     expect(byAgentBody[0].agentId).toBeUndefined();
@@ -348,78 +357,51 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(await invalidCompatibilityPatch.json()).toEqual({ error: "visibility must be 'private' or 'public'" });
   });
 
-  // MUL-123: pre-0.2.49 daemons reported only the context-occupancy total, so
-  // historical rows carry `total_tokens` with all four splits at zero. The
-  // dashboard wire has always forwarded it; the runtime wire dropped it, which
-  // made the runtime usage page render "0 tokens" over a non-empty window.
-  it("forwards total-only token history through both runtime usage compatibility mappers", async () => {
-    const store = createStore();
+  // A legacy total cannot establish actual consumption or context occupancy.
+  it("retains ambiguous total-only evidence as unknown across runtime and dashboard APIs", async () => {
+    const store = createSnapshotStore();
     store.registerRuntime({ id: "rt_total_only", name: "Legacy runtime", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Legacy agent", provider: "claude", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "legacy usage" });
     const app = createMultiremiApp({ store });
 
-    const claim = await app.request("/api/daemon/runtimes/rt_total_only/tasks/claim", { method: "POST" });
-    expect((await claim.json()).task.id).toBe(task.id);
+    const claim = await taskOfferResponse(store, "rt_total_only");
+    expect((await claim.json()).task.attempt_id).toBe(task.id);
 
     // Exactly what a pre-0.2.49 daemon posts: a total, no splits.
-    const report = await app.request(`/api/daemon/tasks/${task.id}/usage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ usage: [{ provider: "claude", model: "opus", total_tokens: 78048 }] }),
-    });
-    expect(report.status).toBe(200);
+    const report = await reportFrame(store, "task.usage", { task_id: task.id, usage: [{ provider: "claude", model: "opus", total_tokens: 78048 }] }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(report.ok).toBe(true);
 
     const daily = await (await app.request("/api/runtimes/rt_total_only/usage")).json();
-    expect(daily).toHaveLength(1);
-    expect(daily[0]).toEqual({
-      runtime_id: "rt_total_only",
-      date: expect.any(String),
-      provider: "claude",
-      model: "opus",
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-      total_tokens: 78048,
-    });
-    expect(daily[0].totalTokens).toBeUndefined();
+    expect(daily).toEqual([]);
 
     const byAgent = await (await app.request("/api/runtimes/rt_total_only/usage/by-agent")).json();
-    expect(byAgent).toEqual([{
-      agent_id: agent.id,
-      model: "opus",
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-      total_tokens: 78048,
-      task_count: 1,
-    }]);
-    expect(byAgent[0].totalTokens).toBeUndefined();
+    expect(byAgent).toEqual([]);
 
     // The runtime endpoints must agree with the dashboard endpoints that read
     // the very same `listUsageDaily` / `listUsageByAgent` rollups.
     const dashboardDaily = await (await app.request("/api/dashboard/usage/daily?workspace_id=local")).json();
-    expect(dashboardDaily[0].total_tokens).toBe(daily[0].total_tokens);
+    expect(dashboardDaily).toEqual([]);
     const dashboardByAgent = await (await app.request("/api/dashboard/usage/by-agent?workspace_id=local")).json();
-    expect(dashboardByAgent[0].total_tokens).toBe(byAgent[0].total_tokens);
+    expect(dashboardByAgent).toEqual([]);
+    const canonical = await (await app.request("/api/usage/report?workspace_id=local&runtime_id=rt_total_only&days=all")).json();
+    expect(canonical.summary).toMatchObject({ actual_total_tokens: 0, unknown_task_count: 1, context_peak_tokens: null, complete: false });
+    expect(canonical.by_model).toContainEqual(expect.objectContaining({ model: null, requested_model: "opus", model_source: "requested" }));
+    expect(db!.query("SELECT reported_total_tokens,input_tokens,output_tokens,actual_unsplit_tokens,context_tokens FROM multiremi_usage_units WHERE task_id=?").get(task.id)).toEqual({
+      reported_total_tokens: 78048, input_tokens: null, output_tokens: null, actual_unsplit_tokens: null, context_tokens: null,
+    });
   });
 
   it("forwards total_tokens alongside splits when a modern daemon reports both", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.registerRuntime({ id: "rt_split", name: "Modern runtime", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Modern agent", provider: "claude", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "modern usage" });
     const app = createMultiremiApp({ store });
 
-    const claim = await app.request("/api/daemon/runtimes/rt_split/tasks/claim", { method: "POST" });
-    expect((await claim.json()).task.id).toBe(task.id);
-    const report = await app.request(`/api/daemon/tasks/${task.id}/usage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        usage: [{
+    const claim = await taskOfferResponse(store, "rt_split");
+    expect((await claim.json()).task.attempt_id).toBe(task.id);
+    const report = await reportFrame(store, "task.usage", { task_id: task.id, usage: [{
           provider: "claude",
           model: "opus",
           input_tokens: 1200,
@@ -427,10 +409,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
           cache_read_tokens: 5600,
           cache_write_tokens: 780,
           total_tokens: 7920,
-        }],
-      }),
-    });
-    expect(report.status).toBe(200);
+        }], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(report.ok).toBe(true);
 
     const daily = await (await app.request("/api/runtimes/rt_split/usage")).json();
     expect(daily[0]).toMatchObject({
@@ -451,8 +431,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
   });
 
-  it("scopes runtime console APIs by workspace and owner permissions", async () => {
-    const store = createStore();
+  it("shares runtime console controls within existing workspaces and preserves historical ownership", async () => {
+    const store = createSnapshotStore();
     store.createWorkspaceMember({ id: "alice", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ id: "bob", userId: "bob", name: "Bob", role: "member" });
     store.createWorkspaceMember({ id: "admin", userId: "admin", name: "Admin", role: "admin" });
@@ -501,9 +481,9 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
 
     const bobOwnedList = await app.request("/api/runtimes?owner=me", { headers: authHeaders(bobToken.token) });
-    expect((await bobOwnedList.json()).map((runtime: any) => runtime.id)).toEqual([bobPublic.id]);
+    expect((await bobOwnedList.json()).map((runtime: any) => runtime.id).sort()).toEqual([alicePrivate.id, bobPublic.id].sort());
     const bobOwnedNativeList = await app.request("/api/multiremi/runtimes?owner=me", { headers: authHeaders(bobToken.token) });
-    expect((await bobOwnedNativeList.json()).runtimes.map((runtime: any) => runtime.id)).toEqual([bobPublic.id]);
+    expect((await bobOwnedNativeList.json()).runtimes.map((runtime: any) => runtime.id).sort()).toEqual([alicePrivate.id, bobPublic.id].sort());
 
     const bobDetail = await app.request(`/api/runtimes/${alicePrivate.id}`, { headers: authHeaders(bobToken.token) });
     expect(bobDetail.status).toBe(200);
@@ -511,7 +491,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
 
     const remoteDetail = await app.request(`/api/runtimes/${remoteRuntime.id}`, { headers: authHeaders(aliceToken.token) });
     expect(remoteDetail.status).toBe(404);
-    expect(await remoteDetail.json()).toEqual({ error: "runtime not found" });
+    expect(await remoteDetail.json()).toEqual({ error: "workspace not found" });
 
     const bobUsage = await app.request(`/api/runtimes/${alicePrivate.id}/usage`, { headers: authHeaders(bobToken.token) });
     expect(bobUsage.status).toBe(200);
@@ -528,23 +508,15 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       headers: jsonHeaders(bobToken.token),
       body: JSON.stringify({ models: [{ id: "blocked", label: "Blocked" }] }),
     });
-    expect(bobModelCatalogWrite.status).toBe(403);
-    expect(await bobModelCatalogWrite.json()).toEqual({ error: "you can only edit your own runtimes" });
+    expect(bobModelCatalogWrite.status).toBe(200);
 
     const bobPatch = await app.request(`/api/runtimes/${alicePrivate.id}`, {
       method: "PATCH",
       headers: jsonHeaders(bobToken.token),
       body: JSON.stringify({ visibility: "public" }),
     });
-    expect(bobPatch.status).toBe(403);
-    expect(await bobPatch.json()).toEqual({ error: "you can only edit your own runtimes" });
-
-    const bobDelete = await app.request(`/api/runtimes/${alicePrivate.id}`, {
-      method: "DELETE",
-      headers: authHeaders(bobToken.token),
-    });
-    expect(bobDelete.status).toBe(403);
-    expect(await bobDelete.json()).toEqual({ error: "you can only delete your own runtimes" });
+    expect(bobPatch.status).toBe(200);
+    expect(store.getRuntime(alicePrivate.id)?.ownerId).toBe("alice");
 
     const alicePatch = await app.request(`/api/runtimes/${alicePrivate.id}`, {
       method: "PATCH",
@@ -569,8 +541,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       method: "POST",
       headers: authHeaders(adminToken.token),
     });
-    expect(adminLocalSkills.status).toBe(403);
-    expect(await adminLocalSkills.json()).toEqual({ error: "you can only access local skills from your own runtimes" });
+    expect(adminLocalSkills.status).toBe(200);
 
     const aliceLocalSkills = await app.request(`/api/runtimes/${alicePrivate.id}/local-skills`, {
       method: "POST",
@@ -578,10 +549,16 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
     expect(aliceLocalSkills.status).toBe(200);
     expect((await aliceLocalSkills.json()).status).toBe("pending");
+    const bobDelete = await app.request(`/api/runtimes/${alicePrivate.id}`, {
+      method: "DELETE", headers: authHeaders(bobToken.token),
+    });
+    expect(bobDelete.status).toBe(200);
+    expect(await bobDelete.json()).toMatchObject({ status: "ok" });
+    expect(store.getRuntime(alicePrivate.id)).toBeNull();
   });
 
   it("matches Go runtime delete cascade contracts", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_delete_contract", name: "Delete contract", provider: "codex" });
     const agent = store.createAgent({
       id: "agt_delete_contract",
@@ -652,7 +629,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       body: JSON.stringify({ expected_active_agent_ids: [agent.id] }),
     });
     expect(cascade.status).toBe(200);
-    expect(await cascade.json()).toEqual({ status: "ok", agents_archived: 1, tasks_cancelled: 2 });
+    expect(await cascade.json()).toEqual({ status: "ok", agents_archived: 1, tasks_cancelled: 2, issue_workspaces_abandoned: 0 });
     expect(store.getRuntime(runtime.id)).toBeNull();
     expect(store.getAgent(agent.id)).toMatchObject({ runtimeId: null });
     expect(store.getAgent(agent.id)?.archivedAt).not.toBeNull();
@@ -661,7 +638,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
   });
 
   it("fails closed when ordinary deletion would orphan an in-flight task", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_delete_in_flight",
       name: "Delete in-flight",
@@ -700,7 +677,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
   });
 
   it("rechecks active Agents after taking the Runtime lifecycle lock", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_delete_agent_race",
       name: "Delete Agent race",
@@ -734,7 +711,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
   });
 
   it("protects the last local daemon Runtime while leaving Cloud Runtime deletion unaffected", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const lastLocal = store.registerRuntime({
       id: "rt_last_local_daemon",
       name: "Last local daemon Runtime",
@@ -783,7 +760,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
   });
 
   it("serves runtime model list request flow", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.registerRuntime({
       id: "rt_models_flow",
       name: "Models runtime",
@@ -833,11 +810,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(claimedBody.request.id).toBe(createdBody.id);
     expect(claimedBody.request.status).toBe("running");
 
-    const reported = await app.request(`/api/daemon/runtimes/rt_models_flow/models/${createdBody.id}/result`, {
-      method: "POST",
-      headers: daemonHeaders,
-      body: JSON.stringify({
-        status: "completed",
+    const reported = await reportFrame(store, "runtime.model_list_result", { runtime_id: "rt_models_flow", request_id: createdBody.id, status: "completed",
         supported: true,
         models: [{
           id: "gpt-5.1-codex",
@@ -848,10 +821,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
             supported_levels: [{ value: "high", label: "High", description: "More reasoning" }],
             default_level: "high",
           },
-        }],
-      }),
-    });
-    expect(reported.status).toBe(200);
+        }], }, { headers: daemonHeaders, authToken: "" });
+    expect(reported.ok).toBe(true);
 
     const detail = await app.request(`/api/runtimes/rt_models_flow/models/${createdBody.id}`);
     const detailBody = await detail.json();
@@ -875,39 +846,23 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
 
     const failed = await app.request("/api/multiremi/runtimes/rt_models_flow/models", { method: "POST" });
     const failedBody = await failed.json();
-    await app.request(`/api/daemon/runtimes/rt_models_flow/models/${failedBody.id}/result`, {
-      method: "POST",
-      headers: daemonHeaders,
-      body: JSON.stringify({ status: "failed", error: "provider not available" }),
-    });
+    await reportFrame(store, "runtime.model_list_result", { runtime_id: "rt_models_flow", request_id: failedBody.id, status: "failed", error: "provider not available" }, { headers: daemonHeaders, authToken: "" });
     const failedDetail = await app.request(`/api/multiremi/runtimes/rt_models_flow/models/${failedBody.id}`);
     const failedDetailBody = await failedDetail.json();
     expect(failedDetailBody.status).toBe("failed");
     expect(failedDetailBody.error).toBe("provider not available");
 
-    const missingModelReport = await app.request("/api/daemon/runtimes/rt_models_flow/models/rml_missing/result", {
-      method: "POST",
-      headers: daemonHeaders,
-      body: "{",
-    });
-    expect(missingModelReport.status).toBe(404);
-    expect(await missingModelReport.json()).toEqual({ error: "request not found" });
+    const missingModelReport = await reportFrame(store, "runtime.model_list_result", { runtime_id: "rt_models_flow", request_id: "rml_missing",  }, { headers: daemonHeaders, authToken: "", rawPayload: "{" });
+    expect(missingModelReport).toEqual({ closed: 4002 });
+    expect(missingModelReport).toEqual({ closed: 4002 });
 
     const invalidJsonModelRequest = store.createRuntimeModelListRequest("rt_models_flow");
-    const invalidJsonModelReport = await app.request(`/api/daemon/runtimes/rt_models_flow/models/${invalidJsonModelRequest.id}/result`, {
-      method: "POST",
-      headers: daemonHeaders,
-      body: "{",
-    });
-    expect(invalidJsonModelReport.status).toBe(400);
-    expect(await invalidJsonModelReport.json()).toEqual({ error: "invalid request body" });
+    const invalidJsonModelReport = await reportFrame(store, "runtime.model_list_result", { runtime_id: "rt_models_flow", request_id: invalidJsonModelRequest.id,  }, { headers: daemonHeaders, authToken: "", rawPayload: "{" });
+    expect(invalidJsonModelReport).toEqual({ closed: 4002 });
+    expect(invalidJsonModelReport).toEqual({ closed: 4002 });
     expect(store.getRuntimeModelListRequest("rt_models_flow", invalidJsonModelRequest.id)?.status).toBe("pending");
-    const cleanupInvalidJsonModelRequest = await app.request(`/api/daemon/runtimes/rt_models_flow/models/${invalidJsonModelRequest.id}/result`, {
-      method: "POST",
-      headers: daemonHeaders,
-      body: JSON.stringify({ status: "failed", error: "invalid json test cleanup" }),
-    });
-    expect(cleanupInvalidJsonModelRequest.status).toBe(200);
+    const cleanupInvalidJsonModelRequest = await reportFrame(store, "runtime.model_list_result", { runtime_id: "rt_models_flow", request_id: invalidJsonModelRequest.id, status: "failed", error: "invalid json test cleanup" }, { headers: daemonHeaders, authToken: "" });
+    expect(cleanupInvalidJsonModelRequest.ok).toBe(true);
 
     const stalePending = store.createRuntimeModelListRequest("rt_models_flow");
     const oldPendingAt = new Date(Date.now() - 31_000).toISOString();
@@ -943,17 +898,13 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(staleRunningBody.status).toBe("timeout");
     expect(staleRunningBody.error).toBe("daemon did not finish within 60 seconds");
 
-    const lateModelReport = await app.request(`/api/daemon/runtimes/rt_models_flow/models/${staleRunning.id}/result`, {
-      method: "POST",
-      headers: daemonHeaders,
-      body: JSON.stringify({ status: "completed", models: [{ id: "late-model", label: "Late Model" }] }),
-    });
-    expect(lateModelReport.status).toBe(200);
+    const lateModelReport = await reportFrame(store, "runtime.model_list_result", { runtime_id: "rt_models_flow", request_id: staleRunning.id, status: "completed", models: [{ id: "late-model", label: "Late Model" }] }, { headers: daemonHeaders, authToken: "" });
+    expect(lateModelReport.ok).toBe(true);
     expect(store.getRuntimeModelListRequest("rt_models_flow", staleRunning.id)?.status).toBe("timeout");
   });
 
   it("serves runtime update request flow", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.registerRuntime({ id: "rt_update_flow", name: "Update runtime", provider: "codex" });
     const app = createMultiremiApp({ store });
 
@@ -1042,10 +993,12 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
     expect(running.status).toBe(200);
 
+    store.reportRuntimeUpdateResult("rt_update_flow", createdBody.id, { status: "restarting" });
+    store.recordDaemonProtocol("rt_update_flow", store.getRuntime("rt_update_flow")!.daemonId ?? "", 2, "1.2.3");
     const completed = await app.request(`/api/daemon/runtimes/rt_update_flow/update/${createdBody.id}/result`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "completed", output: "updated ok" }),
+      body: JSON.stringify({ status: "completed", self_check: true, output: "updated ok" }),
     });
     expect(completed.status).toBe(200);
 
@@ -1111,12 +1064,12 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(store.getRuntimeUpdateRequest("rt_update_flow", staleRunning.id)?.status).toBe("timeout");
   });
 
-  it("supports ACP-scope update requests (no target version, defaults to latest)", async () => {
-    const store = createStore();
+  it("supports ACP reinstallation with the legacy latest sentinel", async () => {
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_acp_update", name: "ACP update runtime", provider: "codex" });
     const app = createMultiremiApp({ store });
 
-    // ACP-bridge updates always pull @latest, so no target_version is required.
+    // No target is required for reinstallation of the daemon's release pins.
     const created = await app.request(`/api/runtimes/${runtime.id}/update`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1135,8 +1088,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
   });
 
   it("supports agent-scope update requests (runs the agent CLI updater)", async () => {
-    const store = createStore();
-    const runtime = store.registerRuntime({ id: "rt_agent_update", name: "Agent update runtime", provider: "claude" });
+    const store = createSnapshotStore();
+    const runtime = store.registerRuntime({ id: "rt_agent_update", name: "Agent update runtime", provider: "grok" });
     const app = createMultiremiApp({ store });
 
     const created = await app.request(`/api/runtimes/${runtime.id}/update`, {
@@ -1154,8 +1107,28 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(store.getRuntimeUpdateRequest(runtime.id, createdBody.id)?.scope).toBe("agent");
   });
 
+  it("rejects standalone Agent updates for release-managed runtimes before dispatch to old daemons", async () => {
+    const store = createSnapshotStore();
+    const app = createMultiremiApp({ store });
+    for (const provider of ["claude", "codex", "antigravity"] as const) {
+      const runtime = store.registerRuntime({ name: provider, provider });
+      for (const prefix of ["/api/runtimes", "/api/multiremi/runtimes"]) {
+        const response = await app.request(`${prefix}/${runtime.id}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: "agent", target_version: "latest" }),
+        });
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({
+          error: "Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead",
+        });
+      }
+      expect(store.heartbeatRuntime(runtime.id, { supportsBatchImport: true }).pending_update).toBeUndefined();
+    }
+  });
+
   it("serves runtime local skill list and import request flows", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ name: "skill-runtime", provider: "claude", workspaceId: "local" });
     const app = createMultiremiApp({ store });
 
@@ -1169,28 +1142,16 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(listClaimBody.request.id).toBe(listRequest.id);
     expect(listClaimBody.request.status).toBe("running");
 
-    const missingListReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/rls_missing/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{",
-    });
-    expect(missingListReport.status).toBe(404);
-    expect(await missingListReport.json()).toEqual({ error: "request not found" });
+    const missingListReport = await reportFrame(store, "runtime.local_skills_result", { runtime_id: runtime.id, request_id: "rls_missing",  }, { headers: { "Content-Type": "application/json" }, authToken: "", rawPayload: "{" });
+    expect(missingListReport).toEqual({ closed: 4002 });
+    expect(missingListReport).toEqual({ closed: 4002 });
 
-    const invalidJsonListReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/${listRequest.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{",
-    });
-    expect(invalidJsonListReport.status).toBe(400);
-    expect(await invalidJsonListReport.json()).toEqual({ error: "invalid request body" });
+    const invalidJsonListReport = await reportFrame(store, "runtime.local_skills_result", { runtime_id: runtime.id, request_id: listRequest.id,  }, { headers: { "Content-Type": "application/json" }, authToken: "", rawPayload: "{" });
+    expect(invalidJsonListReport).toEqual({ closed: 4002 });
+    expect(invalidJsonListReport).toEqual({ closed: 4002 });
     expect(store.getRuntimeLocalSkillListRequest(runtime.id, listRequest.id)?.status).toBe("running");
 
-    const listReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/${listRequest.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
+    const listReport = await reportFrame(store, "runtime.local_skills_result", { runtime_id: runtime.id, request_id: listRequest.id, status: "completed",
         skills: [{
           key: "review-helper",
           name: "Review Helper",
@@ -1198,10 +1159,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
           source_path: "/home/me/.claude/skills/review-helper",
           provider: "claude",
           file_count: 2,
-        }],
-      }),
-    });
-    expect(listReport.status).toBe(200);
+        }], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(listReport.ok).toBe(true);
 
     const listPoll = await app.request(`/api/runtimes/${runtime.id}/local-skills/${listRequest.id}`);
     const listPollBody = await listPoll.json();
@@ -1217,11 +1176,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
 
     const camelListRequest = store.createRuntimeLocalSkillListRequest(runtime.id);
     expect((await (await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/claim`, { method: "POST" })).json()).request.id).toBe(camelListRequest.id);
-    const camelListReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/${camelListRequest.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
+    const camelListReport = await reportFrame(store, "runtime.local_skills_result", { runtime_id: runtime.id, request_id: camelListRequest.id, status: "completed",
         skills: [{
           key: "camel-helper",
           name: "Camel Helper",
@@ -1229,10 +1184,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
           sourcePath: "/home/me/.claude/skills/camel-helper",
           provider: "claude",
           fileCount: 7,
-        }],
-      }),
-    });
-    expect(camelListReport.status).toBe(200);
+        }], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(camelListReport.ok).toBe(true);
     const camelListBody = await (await app.request(`/api/runtimes/${runtime.id}/local-skills/${camelListRequest.id}`)).json();
     expect(camelListBody.skills[0]).toMatchObject({
       key: "camel-helper",
@@ -1274,28 +1227,16 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(importClaimBody.requests[0].id).toBe(importRequest.id);
     expect(importClaimBody.requests[0].skillKey).toBe("review-helper");
 
-    const missingImportReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/rli_missing/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{",
-    });
-    expect(missingImportReport.status).toBe(404);
-    expect(await missingImportReport.json()).toEqual({ error: "request not found" });
+    const missingImportReport = await reportFrame(store, "runtime.local_skill_import_result", { runtime_id: runtime.id, request_id: "rli_missing",  }, { headers: { "Content-Type": "application/json" }, authToken: "", rawPayload: "{" });
+    expect(missingImportReport).toEqual({ closed: 4002 });
+    expect(missingImportReport).toEqual({ closed: 4002 });
 
-    const invalidJsonImportReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/${importRequest.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{",
-    });
-    expect(invalidJsonImportReport.status).toBe(400);
-    expect(await invalidJsonImportReport.json()).toEqual({ error: "invalid request body" });
+    const invalidJsonImportReport = await reportFrame(store, "runtime.local_skill_import_result", { runtime_id: runtime.id, request_id: importRequest.id,  }, { headers: { "Content-Type": "application/json" }, authToken: "", rawPayload: "{" });
+    expect(invalidJsonImportReport).toEqual({ closed: 4002 });
+    expect(invalidJsonImportReport).toEqual({ closed: 4002 });
     expect(store.getRuntimeLocalSkillImportRequest(runtime.id, importRequest.id)?.status).toBe("running");
 
-    const importReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/${importRequest.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
+    const importReport = await reportFrame(store, "runtime.local_skill_import_result", { runtime_id: runtime.id, request_id: importRequest.id, status: "completed",
         skill: {
           name: "Review Helper",
           description: "Daemon description",
@@ -1303,10 +1244,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
           provider: "claude",
           source_path: "/home/me/.claude/skills/review-helper",
           files: [{ path: "notes/check.md", content: "Check" }],
-        },
-      }),
-    });
-    expect(importReport.status).toBe(200);
+        }, }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(importReport.ok).toBe(true);
 
     const importPoll = await app.request(`/api/runtimes/${runtime.id}/local-skills/import/${importRequest.id}`);
     const importPollBody = await importPoll.json();
@@ -1322,21 +1261,15 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
 
     const camelImport = store.createRuntimeLocalSkillImportRequest(runtime.id, { skill_key: "camel-import", name: "Camel Import" });
     expect((await (await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/claim?limit=5`, { method: "POST" })).json()).requests[0].id).toBe(camelImport.id);
-    const camelImportReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/${camelImport.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
+    const camelImportReport = await reportFrame(store, "runtime.local_skill_import_result", { runtime_id: runtime.id, request_id: camelImport.id, status: "completed",
         skill: {
           name: "Camel Import",
           description: "Camel sourcePath should be ignored",
           content: "# Camel Import",
           provider: "claude",
           sourcePath: "/home/me/.claude/skills/camel-import",
-        },
-      }),
-    });
-    expect(camelImportReport.status).toBe(200);
+        }, }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(camelImportReport.ok).toBe(true);
     const camelImportBody = await (await app.request(`/api/runtimes/${runtime.id}/local-skills/import/${camelImport.id}`)).json();
     expect(camelImportBody.skill.config.origin).toMatchObject({
       type: "runtime_local",
@@ -1346,13 +1279,9 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
 
     const emptyImport = store.createRuntimeLocalSkillImportRequest(runtime.id, { skill_key: "empty-bundle", name: "Empty Bundle" });
-    const emptyImportReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/${emptyImport.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "completed" }),
-    });
-    expect(emptyImportReport.status).toBe(200);
-    expect(await emptyImportReport.json()).toEqual({ status: "ok" });
+    const emptyImportReport = await reportFrame(store, "runtime.local_skill_import_result", { runtime_id: runtime.id, request_id: emptyImport.id, status: "completed" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(emptyImportReport.ok).toBe(true);
+    expect(emptyImportReport).toEqual({ ok: true });
     const emptyImportDetail = store.getRuntimeLocalSkillImportRequest(runtime.id, emptyImport.id);
     expect(emptyImportDetail?.status).toBe("failed");
     expect(emptyImportDetail?.error).toBe("daemon returned an empty skill bundle");
@@ -1385,12 +1314,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(staleListRunningBody.status).toBe("timeout");
     expect(staleListRunningBody.error).toBe("daemon did not finish within 60 seconds");
 
-    const lateListReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/${staleListRunning.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "completed", skills: [] }),
-    });
-    expect(lateListReport.status).toBe(200);
+    const lateListReport = await reportFrame(store, "runtime.local_skills_result", { runtime_id: runtime.id, request_id: staleListRunning.id, status: "completed", skills: [] }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(lateListReport.ok).toBe(true);
     expect(store.getRuntimeLocalSkillListRequest(runtime.id, staleListRunning.id)?.status).toBe("timeout");
 
     const staleImportPending = store.createRuntimeLocalSkillImportRequest(runtime.id, { skill_key: "stale-pending" });
@@ -1419,30 +1344,24 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(staleImportRunningBody.status).toBe("timeout");
     expect(staleImportRunningBody.error).toBe("daemon did not finish within 60 seconds");
 
-    const lateImportReport = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/${staleImportRunning.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
+    const lateImportReport = await reportFrame(store, "runtime.local_skill_import_result", { runtime_id: runtime.id, request_id: staleImportRunning.id, status: "completed",
         skill: {
           name: "Late Import",
           description: "Should not be created",
           content: "# Late",
           provider: "claude",
           source_path: "/tmp/late",
-        },
-      }),
-    });
-    expect(lateImportReport.status).toBe(200);
+        }, }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(lateImportReport.ok).toBe(true);
     expect(store.getRuntimeLocalSkillImportRequest(runtime.id, staleImportRunning.id)?.status).toBe("timeout");
     expect(store.listSkills("local").some((skill) => skill.name === "Late Import")).toBe(false);
   });
 
-  it("serves original daemon heartbeat pending request protocol", async () => {
-    const store = createStore();
+  it("keeps HTTP heartbeat upgrade-only while v2 delivers pending requests", async () => {
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_heartbeat_flow", name: "Heartbeat runtime", provider: "codex" });
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
-    const issue = store.createIssue({ title: "Do not steal heartbeat requests" });
+    const issue = createResponsibleTestIssue(store, { title: "Do not steal heartbeat requests" });
     store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Claim task" });
     const app = createMultiremiApp({ store });
 
@@ -1478,12 +1397,15 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
     const camelBatchBody = await camelBatchHeartbeat.json();
     expect(camelBatchHeartbeat.status).toBe(200);
-    expect(camelBatchBody.pending_local_skill_import).toMatchObject({ id: camelBatchImportOne.id, skill_key: "camel-one" });
+    expect(camelBatchBody.pending_local_skill_import).toBeUndefined();
     expect(camelBatchBody.pending_local_skill_imports).toBeUndefined();
+    // The legacy selector still caps a non-batch claim at one entity.
+    expect(store.claimRuntimeLocalSkillImportRequests(camelBatchRuntime.id, 1))
+      .toEqual([expect.objectContaining({ id: camelBatchImportOne.id, skillKey: "camel-one" })]);
     expect(store.getRuntimeLocalSkillImportRequest(camelBatchRuntime.id, camelBatchImportOne.id)?.status).toBe("running");
     expect(store.getRuntimeLocalSkillImportRequest(camelBatchRuntime.id, camelBatchImportTwo.id)?.status).toBe("pending");
 
-    const taskClaim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const taskClaim = await taskOfferResponse(store, runtime.id);
     expect(taskClaim.status).toBe(200);
     expect(store.getRuntimeModelListRequest(runtime.id, modelRequest.id)?.status).toBe("pending");
     expect(store.getRuntimeUpdateRequest(runtime.id, updateRequest.id)?.status).toBe("pending");
@@ -1493,18 +1415,22 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ runtime_id: runtime.id, supports_batch_import: true }),
     });
-    const heartbeatBody = await heartbeat.json();
+    const httpAck = await heartbeat.json();
+    expect(httpAck.pending_model_list).toBeUndefined();
+    expect(httpAck.pending_local_skills).toBeUndefined();
+    expect(httpAck.pending_local_skill_import).toBeUndefined();
+    const heartbeatBody = await receiveRuntimeInputs(store, runtime.id);
 
     expect(heartbeat.status).toBe(200);
+    expect(httpAck.pending_update).toMatchObject({ id: updateRequest.id, target_version: "v9.9.9" });
     expect(heartbeatBody).toMatchObject({
       status: "ok",
-      pending_update: { id: updateRequest.id, target_version: "v9.9.9" },
       pending_model_list: { id: modelRequest.id },
       pending_local_skills: { id: localSkillRequest.id },
       pending_local_skill_import: { id: importOne.id, skill_key: "review-helper" },
     });
-    expect(heartbeatBody.runtime_id).toBeUndefined();
-    expect(heartbeatBody.pending_local_skill_imports.map((item: any) => item.id)).toEqual([importOne.id, importTwo.id]);
+    expect(heartbeatBody.runtime_id).toBe(runtime.id);
+    expect(heartbeatBody.pending_local_skill_imports!.map((item: any) => item.id)).toEqual([importOne.id, importTwo.id]);
     expect(store.getRuntimeModelListRequest(runtime.id, modelRequest.id)?.status).toBe("running");
     expect(store.getRuntimeUpdateRequest(runtime.id, updateRequest.id)?.status).toBe("running");
     expect(store.getRuntimeLocalSkillListRequest(runtime.id, localSkillRequest.id)?.status).toBe("running");
@@ -1522,9 +1448,11 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(legacyHeartbeat.status).toBe(200);
     expect(legacyHeartbeatBody).toMatchObject({
       status: "ok",
-      pending_local_skill_import: { id: legacyImportOne.id, skill_key: "legacy-one" },
     });
+    expect(legacyHeartbeatBody.pending_local_skill_import).toBeUndefined();
     expect(legacyHeartbeatBody.pending_local_skill_imports).toBeUndefined();
+    expect(store.claimRuntimeLocalSkillImportRequests(legacyRuntime.id, 1))
+      .toEqual([expect.objectContaining({ id: legacyImportOne.id, skillKey: "legacy-one" })]);
     expect(store.getRuntimeLocalSkillImportRequest(legacyRuntime.id, legacyImportOne.id)?.status).toBe("running");
     expect(store.getRuntimeLocalSkillImportRequest(legacyRuntime.id, legacyImportTwo.id)?.status).toBe("pending");
 
@@ -1535,7 +1463,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
   });
 
   it("records Go-style runtime_failed telemetry when daemon register persistence fails", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.ensureLocalWorkspace();
     const app = createMultiremiApp({ store });
     store.registerDaemonRuntimeBatch = (() => {
@@ -1578,3 +1506,8 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(store.listAnalyticsEvents({ includeMetricsOnly: false }).some((analyticsEvent) => analyticsEvent.name === "runtime_failed")).toBe(false);
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

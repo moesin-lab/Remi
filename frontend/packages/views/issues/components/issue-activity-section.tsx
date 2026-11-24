@@ -1,523 +1,372 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import { ArrowDown } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import type { Agent, IssueSession, MemberWithUser } from "@multiremi/core/types";
-import { useWorkspaceId } from "@multiremi/core/hooks";
-import { useActorName } from "@multiremi/core/workspace/hooks";
-import { issueSessionResultsOptions } from "@multiremi/core/issues/queries";
-import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
-import { useT, useTimeAgo } from "../../i18n";
-import { useIssueTimeline } from "../hooks/use-issue-timeline";
+import { useQueryClient } from "@tanstack/react-query";
+import { issueKeys } from "@multiremi/core/issues/queries";
+import type { Agent, Attachment, IssueSession, MemberWithUser, TimelineEntry } from "@multiremi/core/types";
+import { useCreateComment, useUpdateComment, useDeleteComment, useResolveComment, useToggleCommentReaction } from "@multiremi/core/issues/comment-mutations";
+import { useIssueLog } from "@multiremi/core/session-log/use-issue-log";
+import { useActivityPreferences } from "@multiremi/core/issues/stores";
+import { Switch } from "@multiremi/ui/components/ui/switch";
+import { IssueActivityEntrySchema, type IssueLogBootstrap, type SessionLogRow } from "@multiremi/core/api/schemas/session-log";
+import { AttachmentSchema, ReactionSchema } from "@multiremi/core/api/schemas";
+import { parseStrictResponse } from "@multiremi/core/api/schema";
+import { useWSEvent } from "@multiremi/core/realtime";
+import { SessionLogList } from "../../common/session-log/session-log-list";
+import type { SessionLogEntry } from "@multiremi/core/replica";
+import { eventLayoutEntry, eventSummary, metadataString } from "../../common/session-log/event-summary";
+import { useT } from "../../i18n";
 import { useResolvedThreads } from "../hooks/use-resolved-threads";
-import { useActivityExpansion } from "../hooks/use-activity-expansion";
 import { getSessionDisplayName } from "../utils/session-display";
-import {
-  buildTimelineView,
-  flattenGroups,
-  lastActivityGroupId,
-  type TimelineItem,
-} from "../utils/timeline-view";
-import { ActivityBlock } from "./activity-block";
-import { AgentLiveCard } from "./agent-live-card";
+import { quotePreview } from "../utils/quote-preview";
+import { formatActivity } from "../utils/format-activity";
+import { MessageHeader } from "../../common/message-header";
+import { isRedundantQuestionReminder, LinkedQuestion, linkedQuestionId, QuestionReplyReference } from "../../common/linked-question";
+import { questionReplyText } from "../../common/question-answer";
 import { CommentCard } from "./comment-card";
 import { CommentInput, type ReplyTarget } from "./comment-input";
-import { IssueResultActivityLines } from "./issue-key-results-section";
-import { IssueSubscribersControl } from "./issue-subscribers-control";
+import { IssueLogHead } from "./issue-log-head";
 import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { SessionAgentStreamRow } from "./session-agent-stream-row";
-import { SessionEmptyState, TimelineSkeleton, TimelineUnavailable } from "./timeline-states";
+import { NoLinkedSessions, TimelineSkeleton, TimelineUnavailable } from "./timeline-states";
+import { IssueSubscribersControl } from "./issue-subscribers-control";
+import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
+import { AgentLiveCard } from "./agent-live-card";
+import { useVisibleResults } from "./issue-key-results-section";
+import { IssueLogEventRow } from "./issue-log-event-row";
+import { firstTaskResponses, isSystemDetail } from "./issue-log-presentation";
+import { IssueTaskPromptDialog } from "./issue-task-prompt-dialog";
+import { activityTrails, groupEvents, placeActivities } from "../utils/issue-activity-presentation";
+import { IssueActivityTrail } from "./issue-activity-trail";
+import { buildLogRowModel, TrailSignatureCache } from "../utils/log-row-model";
+
+export const STICK_PIN_THRESHOLD_PX = 24;
 
 interface IssueActivitySectionProps {
+  log?: ReturnType<typeof useIssueLog>;
   issueId: string;
+  issueTitle: string;
   projectId: string | null;
   currentUserId?: string;
-  /**
-   * Workspace owners and admins moderate any comment authored by anyone
-   * (mirrors backend `comment.go:507-512`).
-   */
   canModerateComments: boolean;
   members: MemberWithUser[];
   agents: Agent[];
   activeIssueSessionId: string;
   activeIssueSession: IssueSession | null;
   sessionsPending: boolean;
+  sessionsError?: boolean;
   sessionsFetching: boolean;
   onRetrySessions: () => void;
-  /** Scroll parent handed to Virtuoso; null until the callback ref populates. */
+  onCreateSession: () => void;
   scrollContainerEl: HTMLDivElement | null;
-  /** When set, the timeline renders flat and scrolls to this comment. */
   highlightCommentId?: string;
+  initialLog?: IssueLogBootstrap;
   onShowKeyResults: () => void;
+  onScrollRoot: (el: HTMLDivElement | null) => void;
+  onContentReady?: () => void;
 }
 
-const ISSUE_TIMELINE_INITIAL_FIRST_ITEM_INDEX = 1_000_000;
+export function logRowToComment(row: SessionLogRow): TimelineEntry {
+  return {
+    type: "comment", id: row.id, issue_session_id: row.session_id,
+    actor_type: row.sender_type ?? row.author_type, actor_id: row.sender_id ?? row.author_id ?? "", task_id: row.task_id,
+    content: questionReplyText(row.body_md, row.metadata), parent_id: row.reply_to_id ?? row.parent_id, created_at: row.created_at, updated_at: row.updated_at,
+    resolved_at: row.resolved_at, resolved_by_id: row.resolved_by_id,
+    resolved_by_type: row.resolved_by_type === "member" || row.resolved_by_type === "agent" || row.resolved_by_type === "system" ? row.resolved_by_type : null,
+    reactions: ReactionSchema.array().safeParse(row.metadata.reactions).data ?? [],
+    attachments: parseStrictResponse<Attachment[]>(row.metadata.attachments ?? [], AttachmentSchema.array(), { endpoint: "log.metadata.attachments" }),
+  };
+}
 
-/**
- * The issue's conversation: subscribers header, live agent card, published
- * results, the timeline itself (virtualized or flat) and the single composer.
- */
-export function IssueActivitySection({
-  issueId,
-  projectId,
-  currentUserId,
-  canModerateComments,
-  members,
-  agents,
-  activeIssueSessionId,
-  activeIssueSession,
-  sessionsPending,
-  sessionsFetching,
-  onRetrySessions,
-  scrollContainerEl,
-  highlightCommentId,
-  onShowKeyResults,
+export function IssueActivitySection({ issueId, issueTitle, projectId, members, agents, onShowKeyResults, currentUserId, canModerateComments, activeIssueSessionId: sessionId,
+  log, activeIssueSession, sessionsPending, sessionsError = false, sessionsFetching, onRetrySessions, onCreateSession, highlightCommentId, initialLog, onScrollRoot, onContentReady,
 }: IssueActivitySectionProps) {
   const { t } = useT("issues");
-  const timeAgo = useTimeAgo();
-  const wsId = useWorkspaceId();
-  const { getActorName } = useActorName();
-
-  const {
-    timeline, latestTimeline, loading: timelineLoading,
-    fetchOlderTimeline, hasOlderTimeline, isFetchingOlderTimeline,
-    submitComment, submitReply,
-    editComment, deleteComment, toggleResolveComment, toggleReaction: handleToggleReaction,
-  } = useIssueTimeline(issueId, currentUserId, activeIssueSessionId || undefined, Boolean(activeIssueSessionId));
-
-  const resolvedThreads = useResolvedThreads();
-  const activityExpansion = useActivityExpansion();
-  const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  const didHighlightRef = useRef<string | null>(null);
-
-  // Published results render their own timeline lines (and panel cards), so an
-  // otherwise-empty timeline still has content when one exists. Same query key
-  // as those components — this shares their cache entry, it doesn't add a fetch.
-  const { data: publishedResults = [] } = useQuery(issueSessionResultsOptions(issueId));
-
-  // Resolve / unresolve must always clear the per-session expand entry so
-  // re-resolving an already-expanded thread folds it back to the bar (the
-  // expand Set is keyed only on commentId, not on resolution state). Without
-  // this wrapper, an expand → unresolve → resolve sequence keeps the thread
-  // visually expanded after the second resolve.
-  const clearResolvedExpand = resolvedThreads.clear;
-  const handleResolveToggle = useCallback(
-    (commentId: string, resolved: boolean) => {
-      clearResolvedExpand(commentId);
-      toggleResolveComment(commentId, resolved);
-    },
-    [clearResolvedExpand, toggleResolveComment],
-  );
-
-  // The session stream has exactly one composer, so "reply" is a context it
-  // carries: a row's toolbar sets the target, the composer shows it as a chip,
-  // and the send routes through `submitReply` (parent_id) instead of
-  // `submitComment`. Ephemeral by design — not persisted with the draft.
-  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
-  const handleStartReply = useCallback((target: ReplyTarget) => {
-    setReplyTo(target);
-  }, []);
-  const handleCancelReply = useCallback(() => setReplyTo(null), []);
-  // A target from another session (or another issue) would send a reply into a
-  // conversation the user is no longer looking at.
-  useEffect(() => {
-    setReplyTo(null);
-  }, [issueId, activeIssueSessionId]);
-  const handleComposerSubmit = useCallback(
-    async (content: string, attachmentIds?: string[]) => {
-      if (!replyTo) {
-        await submitComment(content, attachmentIds);
-        return;
-      }
-      await submitReply(replyTo.commentId, content, attachmentIds);
-      setReplyTo(null);
-    },
-    [replyTo, submitComment, submitReply],
-  );
-
-  // Memoized timeline projection. Kept in a useMemo so the objects handed to a
-  // memoized CommentCard keep their identity until the timeline itself changes.
-  const timelineView = useMemo(() => buildTimelineView(timeline), [timeline]);
-
-  // Flat array consumed by <Virtuoso>. Recomputed when the groups change
-  // (timeline events) or a resolved thread is toggled. Kept in a useMemo so
-  // Virtuoso's data identity is stable across unrelated re-renders.
-  const expandedResolved = resolvedThreads.expanded;
-  const items = useMemo<TimelineItem[]>(
-    () => flattenGroups(timelineView.groups, expandedResolved),
-    [timelineView.groups, expandedResolved],
-  );
-  const latestItems = useMemo<TimelineItem[]>(
-    () => flattenGroups(buildTimelineView(latestTimeline).groups, expandedResolved),
-    [latestTimeline, expandedResolved],
-  );
-  // Activity events can collapse into a single visual group. Derive the
-  // prepend delta from rendered rows so Virtuoso's logical index decreases by
-  // exactly the number of rows inserted above the current viewport.
-  const olderItemCount = Math.max(0, items.length - latestItems.length);
-  const firstItemIndex = items.length > 0
-    ? ISSUE_TIMELINE_INITIAL_FIRST_ITEM_INDEX - olderItemCount
-    : 0;
-
-  const highlightLoaded = !highlightCommentId
-    || timeline.some((entry) => entry.id === highlightCommentId);
-  useEffect(() => {
-    if (
-      !highlightCommentId
-      || highlightLoaded
-      || !hasOlderTimeline
-      || isFetchingOlderTimeline
-    ) return;
-    // The explicit deep-link render path is flat rather than virtualized, so
-    // it has no startReached callback to pull a target outside page zero.
-    void fetchOlderTimeline();
-  }, [
-    fetchOlderTimeline,
-    hasOlderTimeline,
-    highlightCommentId,
-    highlightLoaded,
-    isFetchingOlderTimeline,
-  ]);
-
-  // The initial window is chronological and mounts directly at its last row.
-  // There is no post-fetch imperative scroll, so opening does not first paint
-  // at the top and then jump to the bottom.
-  const virtuosoRef = useRef<VirtuosoHandle | null>(null);
-  const [atBottom, setAtBottom] = useState(true);
-  const atBottomRef = useRef(true);
-  const handleAtBottomStateChange = useCallback((nextAtBottom: boolean) => {
-    // Keep the ref in sync in the scroll callback itself. React state may not
-    // commit before a realtime append asks followOutput what to do.
-    atBottomRef.current = nextAtBottom;
-    setAtBottom(nextAtBottom);
-  }, []);
-
-  const jumpToLatest = useCallback(() => {
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
-  }, []);
-
-  const lastActivityId = useMemo(
-    () => lastActivityGroupId(timelineView.groups),
-    [timelineView.groups],
-  );
-
-  // Deep-link landing. Semantically equivalent to navigating to
-  // `#comment-${id}`: find the element with that id, scrollIntoView it.
-  // When `highlightCommentId` is set the timeline below renders flat (no
-  // virtualization), so every comment id is in the DOM by the time this
-  // effect runs after commit. Every comment — reply included — is its own
-  // timeline item now, so there is no enclosing thread to unfold first.
-  //
-  // `scrollContainerEl` is in deps because the surrounding panel renders a
-  // loading skeleton while the issue query is pending. The scroll-container
-  // ref populates only on the post-loading render, so it's the signal that
-  // the timeline (and the deep-link target id) has actually rendered.
-  useEffect(() => {
-    if (!highlightCommentId || items.length === 0) return;
-    if (didHighlightRef.current === highlightCommentId) return;
-
-    const el = document.getElementById(`comment-${highlightCommentId}`);
-    if (!el) return;
-
-    didHighlightRef.current = highlightCommentId;
-    el.scrollIntoView({ block: "center" });
-
-    setHighlightedId(highlightCommentId);
-    const fade = window.setTimeout(() => setHighlightedId(null), 2500);
-    return () => clearTimeout(fade);
-  }, [highlightCommentId, items, scrollContainerEl]);
-
-  // Reference-chip navigation: jump to the comment a reply answers and flash
-  // it. Same contract as the deep-link above, minus the one-shot guard — the
-  // user can follow the same chip repeatedly. A parent that isn't mounted
-  // (virtualized far off-screen, or outside the loaded window) is a no-op
-  // rather than a jump to the wrong place.
-  const parentFadeRef = useRef<number | null>(null);
-  const handleNavigateToParent = useCallback((parentId: string) => {
-    const el = document.getElementById(`comment-${parentId}`);
-    if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    setHighlightedId(parentId);
-    if (parentFadeRef.current !== null) clearTimeout(parentFadeRef.current);
-    parentFadeRef.current = window.setTimeout(() => setHighlightedId(null), 2500);
-  }, []);
-  useEffect(
-    () => () => {
-      if (parentFadeRef.current !== null) clearTimeout(parentFadeRef.current);
-    },
-    [],
-  );
-
-  // Cmd-F / Ctrl-F on a virtualized timeline only searches what's mounted in
-  // the viewport — off-screen comments are invisible to browser find-in-page.
-  // Intercept once per (session, issue) when the list is long enough that the
-  // user might actually try; let the keystroke pass through on short lists.
-  // Real fix is in-app search (separate PR); this is the toast stopgap.
-  useEffect(() => {
-    if (items.length <= 30) return;
-    const flagKey = `multimira_cmdF_warned:${issueId}`;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key !== "f" || !(e.metaKey || e.ctrlKey)) return;
-      if (sessionStorage.getItem(flagKey)) return;
-      e.preventDefault();
-      sessionStorage.setItem(flagKey, "1");
-      toast.message(t(($) => $.detail.cmdf_toast_title), {
-        description: t(($) => $.detail.cmdf_toast_description),
-      });
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [issueId, items.length, t]);
-
-  // Shared row renderer for both timeline render modes (flat / virtualized).
-  // The wrapper `id="comment-..."` is the deep-link target — equivalent to
-  // a native `<a href="#comment-...">` anchor.
-  const renderItem = (_i: number, item: TimelineItem): React.ReactElement => {
-    if (item.kind === "resolved-bar") {
-      return (
-        <div className="pb-3" id={`comment-${item.id}`}>
-          <ResolvedThreadBar
-            entry={item.entry}
-            onExpand={() => resolvedThreads.toggle(item.id, true)}
-          />
-        </div>
-      );
-    }
-    if (item.kind === "comment") {
-      const isResolved = !!item.entry.resolved_at;
-      return (
-        <div className="pb-3" id={`comment-${item.id}`}>
-          <CommentCard
-            issueId={issueId}
-            entry={item.entry}
-            parentRef={timelineView.parentRefs.get(item.id)}
-            onNavigateToParent={handleNavigateToParent}
-            hasReplies={timelineView.parentIds.has(item.id)}
-            currentUserId={currentUserId}
-            canModerate={canModerateComments}
-            onStartReply={handleStartReply}
-            onEdit={editComment}
-            onDelete={deleteComment}
-            onToggleReaction={handleToggleReaction}
-            onResolveToggle={handleResolveToggle}
-            onCollapseResolved={isResolved ? () => resolvedThreads.toggle(item.id, false) : undefined}
-            highlightedCommentId={highlightedId}
-          />
-        </div>
-      );
-    }
-    // activity-group
-    const expanded = activityExpansion.isExpanded(item.id, item.id === lastActivityId);
-    const truncateOlder = item.id === lastActivityId;
-    return (
-      <ActivityBlock
-        entries={item.entries}
-        expanded={expanded}
-        onToggle={() => activityExpansion.toggle(item.id, expanded)}
-        truncateOlder={truncateOlder}
-        showOlder={activityExpansion.isShowingOlder(item.id)}
-        onToggleShowOlder={() => activityExpansion.showOlder(item.id)}
-        getActorName={getActorName}
-        t={t}
-        timeAgo={timeAgo}
-      />
-    );
+  const queryClient = useQueryClient();
+  const { ready: preferencesReady, showSystemDetails: savedSystemDetails, setShowSystemDetails } = useActivityPreferences(currentUserId);
+  const [requestedCommentId, setActiveCommentId] = useState(highlightCommentId ?? null);
+  useEffect(() => setActiveCommentId(highlightCommentId ?? null), [highlightCommentId]);
+  const withActivity = activeIssueSession?.owner_type === "issue"
+    && activeIssueSession.owner_id === issueId && activeIssueSession.is_default === true;
+  const fallbackLog = useIssueLog(log ? "" : sessionId, log ? undefined : initialLog,
+    requestedCommentId ?? undefined, false, !log, withActivity);
+  const { replica, snapshot, error } = log ?? fallbackLog;
+  const rowModel = useMemo(() => buildLogRowModel(snapshot.entries), [snapshot.entries]);
+  const commentsById = useMemo(() => new Map(rowModel.rows.filter(row => row.kind === "message" && !isSystemDetail(row))
+    .map(row => [row.id, logRowToComment(row)])), [rowModel]);
+  const activeCommentId = replica.missingCommentId === requestedCommentId ? null : requestedCommentId;
+  const displayVisit = JSON.stringify([issueId, sessionId, currentUserId, activeCommentId]);
+  const taskLayout = useRef({ visit: displayVisit, seeded: queryClient.getQueryData(issueKeys.tasks(issueId)) !== undefined });
+  if (taskLayout.current.visit !== displayVisit) taskLayout.current = {
+    visit: displayVisit, seeded: queryClient.getQueryData(issueKeys.tasks(issueId)) !== undefined,
   };
-
-  return (
-    <div>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h2 className="text-base font-semibold">{t(($) => $.detail.activity_section)}</h2>
+  const [tasksReadyVisit, setTasksReadyVisit] = useState<string | null>(null);
+  const onTasksReady = useCallback(() => {
+    if (taskLayout.current.visit === displayVisit) setTasksReadyVisit(displayVisit);
+  }, [displayVisit]);
+  // With no task seed, the bar's natural height is part of first-paint layout.
+  // Resolve it before reveal instead of leaving an empty fixed-height box.
+  const tasksReady = taskLayout.current.seeded || tasksReadyVisit === displayVisit
+    || !snapshot.entries.some(entry => entry.seq === 0);
+  const [manualDetails, setManualDetails] = useState<{ visit: string; value: boolean } | null>(null);
+  const temporaryDetails = useRef({ visit: displayVisit, enabled: false });
+  if (temporaryDetails.current.visit !== displayVisit) temporaryDetails.current = { visit: displayVisit, enabled: false };
+  const targetEntry = activeCommentId ? snapshot.entries.find(entry => entry.id === activeCommentId) : undefined;
+  // Decide before rendering rows, including SSR; no persisted preference is
+  // changed. Keep the temporary display through paging until this visit ends.
+  if (targetEntry && isSystemDetail(targetEntry)) temporaryDetails.current.enabled = true;
+  const showSystemDetails = manualDetails?.visit === displayVisit
+    ? manualDetails.value : savedSystemDetails || temporaryDetails.current.enabled;
+  const displayReady = preferencesReady && (!activeCommentId || Boolean(targetEntry) || error);
+  const scrollRoot = useRef<HTMLDivElement | null>(null);
+  const toggleAnchor = useRef<{ pinned: true } | { id: string; top: number } | null>(null);
+  const setScrollRoot = useCallback((el: HTMLDivElement | null) => { scrollRoot.current = el; onScrollRoot(el); }, [onScrollRoot]);
+  const toggleSystemDetails = (value: boolean) => {
+    const root = scrollRoot.current;
+    if (root?.dataset.stickState === "pinned") toggleAnchor.current = { pinned: true };
+    else if (root) {
+      const top = root.getBoundingClientRect().top;
+      const survivor = [...root.querySelectorAll<HTMLElement>('[data-perf-item="message"]')]
+        .find(row => {
+          const entry = snapshot.entries.find(entry => entry.id === row.dataset.perfKey);
+          return entry && !isSystemDetail(entry) && row.getBoundingClientRect().bottom > top;
+        });
+      toggleAnchor.current = survivor ? { id: survivor.id, top: survivor.getBoundingClientRect().top } : null;
+    }
+    setManualDetails({ visit: displayVisit, value });
+    setShowSystemDetails(value);
+  };
+  useLayoutEffect(() => {
+    const anchor = toggleAnchor.current;
+    const root = scrollRoot.current;
+    toggleAnchor.current = null;
+    if (!root || !anchor) return;
+    if ("pinned" in anchor) root.scrollTop = root.scrollHeight;
+    else {
+      const row = document.getElementById(anchor.id);
+      if (row && root.contains(row)) root.scrollTop += row.getBoundingClientRect().top - anchor.top;
+    }
+  }, [showSystemDetails]);
+  const [revealedVisit, setRevealedVisit] = useState<string | null>(null);
+  const revealed = revealedVisit === displayVisit;
+  const results = useVisibleResults(issueId, revealed);
+  const resultsById = useMemo(() => new Map(results.map(result => [result.id, result])), [results]);
+  const actorNames = useMemo(() => new Map<string, string>([
+    ...agents.map(agent => [`agent:${agent.id}`, agent.name] as const),
+    ...members.flatMap(member => [[`member:${member.user_id}`, member.name], [`member:${member.id}`, member.name]] as const),
+  ]), [agents, members]);
+  const getActorName = useCallback((type: string, id: string) => actorNames.get(`${type}:${id}`) ?? "", [actorNames]);
+  const [promptRow, setPromptRow] = useState<SessionLogRow | null>(null);
+  const onRevealed = useCallback(() => {
+    setRevealedVisit(displayVisit);
+    onContentReady?.();
+  }, [displayVisit, onContentReady]);
+  const responseDecisions = useRef(new Map<string, SessionLogRow | null>());
+  const { responseTurns, taskAgents } = useMemo(() => {
+    const rows = rowModel.rows;
+    const candidates = firstTaskResponses(rows);
+    const loadedIds = new Set(rows.map(row => row.id));
+    const responseTurns = new Map<string, SessionLogRow>();
+    const taskAgents = new Map<string, string>();
+    for (const row of rows) {
+      if (row.kind === "turn" && row.task_id) taskAgents.set(row.task_id, metadataString(row.metadata.assignee_agent_id));
+      if (row.kind !== "message") continue;
+      const key = `${sessionId}:${row.id}`;
+      // Never insert a reference into an already visible comment when an older
+      // page arrives. Loaded-window metadata is sufficient on first appearance.
+      if (!responseDecisions.current.has(key)) responseDecisions.current.set(key, candidates.get(row.id) ?? null);
+      const turn = responseDecisions.current.get(key);
+      if (turn && loadedIds.has(turn.id)) responseTurns.set(row.id, turn);
+    }
+    return { responseTurns, taskAgents };
+  }, [rowModel, sessionId]);
+  const groupChoices = useRef(new Map<string, { expanded: boolean; showOlder: boolean; truncateOlder: boolean }>());
+  const revealedGroups = useRef(new Set<string>());
+  const [groupVersion, setGroupVersion] = useState(0);
+  const trailSignatures = useRef(new TrailSignatureCache());
+  const currentMemberId = members.find(member => member.user_id === currentUserId)?.id ?? currentUserId;
+  const presentation = useMemo(() => {
+    const rowIds = new Set(rowModel.rows.map(row => row.id));
+    const rows = rowModel.rows.filter(row => !isRedundantQuestionReminder(row, currentMemberId, sessionId, rowIds));
+    const view = activityTrails(groupEvents(placeActivities(rows, withActivity ? replica.window?.activities ?? [] : [], showSystemDetails)));
+    for (const groups of view.trailers.values()) for (const group of groups) {
+      const key = `${sessionId}:${group.id}`;
+      if (!groupChoices.current.has(key)) groupChoices.current.set(key, { expanded: group.id === view.latestGroupId, showOlder: false, truncateOlder: group.id === view.latestGroupId });
+      const revealKey = `${displayVisit}:${group.id}`;
+      if (activeCommentId && !revealedGroups.current.has(revealKey) && group.events.some(event => event.kind === "log" && event.entry.id === activeCommentId)) {
+        const choice = groupChoices.current.get(key)!;
+        choice.expanded = true; choice.showOlder = true;
+        revealedGroups.current.add(revealKey);
+      }
+    }
+    return view;
+  }, [rowModel, currentMemberId, replica, withActivity, showSystemDetails, sessionId, activeCommentId, displayVisit, groupVersion]);
+  const transformedEntries = useMemo(() => {
+    trailSignatures.current.retain(new Set(presentation.entries.map(entry => `${sessionId}:${entry.id}`)));
+    return presentation.entries.map(entry => {
+      const trails = presentation.trailers.get(entry.id) ?? [];
+      const signature = trailSignatures.current.signature(`${sessionId}:${entry.id}`, trails, id => groupChoices.current.get(`${sessionId}:${id}`));
+      const capSignature = entry.seq === 0 ? `:activity-cap:${Boolean(replica.window?.activities_truncated)}` : "";
+      // Head chrome moved outside its measured row and comments regained their
+      // borders/padding. Never reserve heights captured by the old flat layout.
+      entry = { ...entry, render_version: `${entry.render_version ?? ""}:issue-cards-v2${signature}${capSignature}` };
+      if (entry.seq > 0 && (entry.kind !== "message" || isSystemDetail(entry))) return eventLayoutEntry(entry);
+      // Q rows became one fixed-height summary line; never reserve the old button height.
+      if (linkedQuestionId(entry.id, entry.metadata)) return { ...entry, render_version: `${entry.render_version ?? ""}:question-line-v1` };
+      return responseTurns.has(entry.id) ? { ...entry, render_version: `${entry.render_version ?? ""}:issue-response-v1` } : entry;
+    });
+  }, [presentation, responseTurns, sessionId, replica]);
+  const transformEntries = useCallback((_entries: readonly SessionLogEntry[]) => transformedEntries, [transformedEntries]);
+  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
+  const [paging, setPaging] = useState(false);
+  const resolved = useResolvedThreads();
+  const create = useCreateComment(issueId, sessionId);
+  const { mutateAsync: update } = useUpdateComment(issueId, sessionId);
+  const { mutateAsync: remove } = useDeleteComment(issueId, sessionId);
+  const { mutateAsync: resolve } = useResolveComment(issueId, sessionId);
+  const { mutateAsync: reaction } = useToggleCommentReaction(issueId, sessionId);
+  const refresh = useCallback(() => { void replica.refreshVisible().catch(() => {}); }, [replica]);
+  useEffect(() => {
+    if ((!sessionId && !sessionsPending) || (error && !snapshot.ready)
+      || (sessionId && snapshot.ready && snapshot.entries.every(entry => entry.seq === 0))) onContentReady?.();
+  }, [sessionId, sessionsPending, error, snapshot.ready, snapshot.entries, onContentReady]);
+  const onLegacyUpdate = useCallback((payload: unknown) => {
+    const p = payload as { issue_id?: string; comment?: { issue_id?: string; issue_session_id?: string } };
+    if ((p.issue_id ?? p.comment?.issue_id) === issueId && (!p.comment?.issue_session_id || p.comment.issue_session_id === sessionId)) refresh();
+  }, [issueId, sessionId, refresh]);
+  useWSEvent("comment:created", onLegacyUpdate);
+  useWSEvent("comment:updated", onLegacyUpdate);
+  useWSEvent("comment:deleted", onLegacyUpdate);
+  useWSEvent("comment:resolved", onLegacyUpdate);
+  useWSEvent("comment:unresolved", onLegacyUpdate);
+  useWSEvent("reaction:added", onLegacyUpdate);
+  useWSEvent("reaction:removed", onLegacyUpdate);
+  const onActivity = useCallback((payload: unknown) => {
+    if (!withActivity || !payload || typeof payload !== "object") return;
+    const p = payload as { issue_id?: string; entry?: unknown };
+    if (p.issue_id !== issueId) return;
+    const parsed = IssueActivityEntrySchema.safeParse(p.entry);
+    if (parsed.success) replica.appendActivity(parsed.data);
+  }, [withActivity, issueId, replica]);
+  useWSEvent("activity:created", onActivity);
+  const run = useCallback(async (action: () => Promise<unknown>) => {
+    try { await action(); await replica.refreshVisible(); }
+    catch (error) { toast.error(error instanceof Error ? error.message : t($ => $.comment.update_failed)); throw error; }
+  }, [replica, t]);
+  const earlier = async () => {
+    setPaging(true);
+    try { await replica.earlier(); } catch { toast.error(t($ => $.comment.update_failed)); }
+    finally { setPaging(false); }
+  };
+  const newer = async () => {
+    setPaging(true);
+    try { await replica.newer(); } catch { toast.error(t($ => $.comment.update_failed)); }
+    finally { setPaging(false); }
+  };
+  const returnLatest = async () => {
+    setPaging(true);
+    try { await replica.loadTail(); setActiveCommentId(null); }
+    catch { toast.error(t($ => $.comment.update_failed)); }
+    finally { setPaging(false); }
+  };
+  const renderedRows = useMemo(() => {
+    const renderRow = (row: SessionLogRow): ReactNode => {
+      if (row.seq === 0) return <IssueLogHead issueId={issueId} title={issueTitle} entry={row} currentUserId={currentUserId} onSaved={() => replica.refreshHead()} />;
+      if (row.kind !== "message" || isSystemDetail(row)) {
+        if (row.metadata.type === "workspace_move_cleared") return <div data-log-kind={row.kind} className="py-2 text-xs text-muted-foreground" role="status">
+          {formatActivity({ type: "activity", id: row.id, action: "workspace_move_cleared", details: row.metadata,
+            actor_type: row.sender_type ?? row.author_type, actor_id: row.sender_id ?? row.author_id ?? "", created_at: row.created_at }, t)}
+        </div>;
+        return <IssueLogEventRow row={row} getActorName={getActorName} taskAgents={taskAgents}
+          results={resultsById} onShowKeyResults={onShowKeyResults} onOpenTask={setPromptRow} />;
+      }
+      const comment = commentsById.get(row.id)!;
+      const questionId = linkedQuestionId(row.id, row.metadata);
+      if (questionId) return <div><MessageHeader message={row} getActorName={getActorName} /><LinkedQuestion id={questionId} getActorName={getActorName} /></div>;
+      if (row.resolved_at && !resolved.expanded.has(row.id)) return <ResolvedThreadBar entry={comment} onExpand={() => resolved.toggle(row.id, true)} />;
+      const parentId = row.reply_to_id ?? row.parent_id;
+      const parentRow = parentId ? rowModel.byId.get(parentId) : null;
+      return <div><MessageHeader message={row} getActorName={getActorName} /><CommentCard issueId={issueId} entry={comment} bodyHtml={row.body_html} currentUserId={currentMemberId}
+        canModerate={canModerateComments} onStartReply={setReplyTo}
+        assignmentRef={responseTurns.has(row.id) ? { title: eventSummary(responseTurns.get(row.id)!.body_md), onOpen: () => setPromptRow(responseTurns.get(row.id)!) } : undefined}
+        parentRef={parentRow ? { id: parentRow.id, actorType: parentRow.author_type, actorId: parentRow.author_id ?? "", preview: quotePreview(parentRow.body_md) } : undefined}
+        hasReplies={rowModel.parentsWithReplies.has(row.id)}
+        onNavigateToParent={id => document.getElementById(`comment-${id}`)?.scrollIntoView({ block: "center" })}
+        onEdit={(id, content, attachmentIds) => run(() => update({ commentId: id, content, attachmentIds }))}
+        onDelete={id => run(() => remove(id))}
+        onResolveToggle={(id, value) => { resolved.clear(id); void run(() => resolve({ commentId: id, resolved: value })); }}
+        onCollapseResolved={row.resolved_at ? () => resolved.toggle(row.id, false) : undefined}
+        onToggleReaction={(id, emoji) => run(() => reaction({ commentId: id, emoji, existing: comment.reactions?.find(r => r.emoji === emoji && r.actor_id === currentMemberId) }))} /><QuestionReplyReference metadata={row.metadata} /></div>;
+    };
+    return new Map(rowModel.rows.map(row => [row.id, renderRow(row)]));
+  }, [rowModel, commentsById, issueId, issueTitle, currentUserId, currentMemberId, canModerateComments, replica, getActorName, taskAgents, resultsById, onShowKeyResults, responseTurns, resolved.expanded, resolved.toggle, resolved.clear, run, update, remove, resolve, reaction, t]);
+  const renderLogEntry = useCallback(({ entry }: { entry: SessionLogEntry }) => renderedRows.get(entry.id), [renderedRows]);
+  const renderTrails = (entry: SessionLogEntry, highlightedId: string | null) => presentation.trailers.get(entry.id)?.map(group => {
+    const choice = groupChoices.current.get(`${sessionId}:${group.id}`)!;
+    return <IssueActivityTrail key={group.id} group={group} expanded={choice.expanded} showOlder={choice.showOlder}
+      truncateOlder={choice.truncateOlder} getActorName={getActorName} onOpenTask={setPromptRow}
+      targetCommentId={activeCommentId} highlightedId={highlightedId}
+      taskAgents={taskAgents} results={resultsById} onShowKeyResults={onShowKeyResults}
+      onToggle={() => { choice.expanded = !choice.expanded; setGroupVersion(version => version + 1); }}
+      onShowOlder={() => { choice.showOlder = true; setGroupVersion(version => version + 1); }} />;
+  });
+  if (!sessionId) return sessionsPending ? <TimelineSkeleton /> : sessionsError
+    ? <TimelineUnavailable onRetry={onRetrySessions} retrying={sessionsFetching} />
+    : <NoLinkedSessions onCreate={onCreateSession} />;
+  if (error && !snapshot.ready) return <TimelineUnavailable onRetry={refresh} retrying={false} />;
+  return <><SessionLogList key={`${sessionId}:${activeCommentId ?? "tail"}`} sessionId={sessionId} replica={replica}
+    transformEntries={transformEntries}
+    onRevealed={onRevealed}
+    perfScroll="issue-detail" latestAnchor="latest-comment"
+    anchor={activeCommentId ? { kind: "element", id: `comment-${activeCommentId}` } : { kind: "bottom" }}
+    onReturnToLatest={activeCommentId ? () => void returnLatest() : undefined}
+    initialPositioned={initialLog?.sessionId === sessionId && (initialLog.targetCommentId ?? null) === activeCommentId}
+    initialDisplayReady={displayReady && tasksReady}
+    contentReady={tasksReady}
+    onScrollRoot={setScrollRoot}
+    afterEntry={(entry, { highlightedId }) => entry.seq === 0 ? null : renderTrails(entry, highlightedId)}
+    afterRow={(entry, { highlightedId }) => entry.seq === 0 ? <>
+      {replica.window?.has_more_before && <button type="button" data-log-earlier disabled={paging} className="mt-3 h-8 text-xs text-muted-foreground hover:text-foreground" onClick={() => void earlier()}>
+        {replica.window.before_visible_count === undefined
+          ? t($ => $.activity.expand_earlier, { count: 30 })
+          : t($ => $.activity.remaining_earlier, { count: replica.window.before_visible_count })}
+      </button>}
+      <hr className="my-6 border-border" data-issue-activity-divider />
+      <div className="mt-4 flex min-h-8 flex-wrap items-center justify-between gap-2">
+        <h2 className="min-w-0 basis-full truncate text-base font-semibold sm:basis-auto">{t($ => $.detail.activity_section)}</h2>
+        <div className="ml-auto flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+          <span>{t($ => $.log_event.show_system_details)}</span>
+          <Switch size="sm" checked={showSystemDetails} onCheckedChange={toggleSystemDetails} aria-label={t($ => $.log_event.show_system_details)} />
         </div>
-        <IssueSubscribersControl
-          issueId={issueId}
-          currentUserId={currentUserId}
-          members={members}
-          agents={agents}
-        />
+        <div className="h-6 min-w-16">{revealed && <IssueSubscribersControl issueId={issueId} currentUserId={currentUserId} members={members} agents={agents} />}</div>
       </div>
-
-      <LocalDirectoryHint projectId={projectId} />
-
-      {/* Agent live output — sticky banner in the activity section,
-          keyed by issue id so switching issues remounts the card and
-          clears any in-flight task state from the previous issue.
-          The execution log itself (per-task timeline + past runs)
-          lives in the right panel via ExecutionLogSection — this
-          card is just a header-style "agent is working" anchor. */}
-      {activeIssueSessionId && (
-        <AgentLiveCard
-          key={`${issueId}:${activeIssueSessionId}`}
-          issueId={issueId}
-          issueSessionId={activeIssueSessionId}
-        />
-      )}
-
-      {/* Published results are shown in full by the right panel's
-          key-results section; the timeline only notes that one
-          landed and points at it. */}
-      <IssueResultActivityLines
-        issueId={issueId}
-        onShowResults={onShowKeyResults}
-      />
-
-      {/* Timeline entries — virtualized via react-virtuoso to keep
-          first-paint cost O(viewport) instead of O(N). On a 500-comment
-          issue the unvirtualized .map froze the page for several
-          seconds (markdown parse + lowlight code highlight runs per
-          CommentCard on mount).
-
-          customScrollParent guard: callback ref populates after the
-          first commit. Without this null guard Virtuoso falls back to
-          its own scroller, grabs 0 height inside overflow-y-auto, and
-          miscomputes total-height on first paint. */}
-      {!activeIssueSessionId ? (
-        // The timeline query is gated on a resolved session id, and a
-        // disabled query reports `isLoading === false` — so this branch
-        // has to own both the waiting state and the dead end.
-        sessionsPending ? (
-          <TimelineSkeleton />
-        ) : (
-          <TimelineUnavailable
-            onRetry={onRetrySessions}
-            retrying={sessionsFetching}
-          />
-        )
-      ) : timelineLoading && timelineView.groups.length === 0 ? (
-        <TimelineSkeleton />
-      ) : items.length === 0 && publishedResults.length === 0 ? (
-        // A brand-new session has no comments, no activity and no
-        // published result. Say so, and say what the two ways forward
-        // are, instead of leaving a blank column under the header.
-        <SessionEmptyState />
-      ) : (
-        // Two render modes:
-        //   - `highlightCommentId` set (came from inbox deep-link) →
-        //     render flat. Every comment mounts, every height is real,
-        //     the target id is in the DOM the instant the useEffect
-        //     above runs `scrollIntoView`. No virtualization estimate
-        //     errors, no spacer reflow drift. Pays cold-mount cost
-        //     proportional to items.length (markdown + lowlight per
-        //     comment), which is acceptable in the deep-link case —
-        //     the user has explicit intent to land on a specific item.
-        //   - otherwise → Virtuoso. Browsing mode, virtualization
-        //     wins on first-paint perf for long timelines.
-        //
-        // The split is deliberate: virtualization and "land precisely
-        // on a target" have fundamentally opposed contracts (estimated
-        // heights vs real heights). Trying to satisfy both in one
-        // path is what produced the bug history this PR closes.
-        !highlightCommentId ? (
-          !scrollContainerEl ? (
-            // Skeleton while the callback ref populates so the gap
-            // between IssueDetail mount and Virtuoso mount doesn't
-            // flash empty.
-            <TimelineSkeleton />
-          ) : (
-            <div className="mt-4">
-              <Virtuoso
-                ref={virtuosoRef}
-                key={`${wsId}:${issueId}:${activeIssueSessionId}`}
-                customScrollParent={scrollContainerEl}
-                data={items}
-                firstItemIndex={firstItemIndex}
-                initialTopMostItemIndex={{ index: "LAST", align: "end" }}
-                increaseViewportBy={{ top: 800, bottom: 800 }}
-                computeItemKey={(_i, item) => `${item.kind}:${item.id}`}
-                skipAnimationFrameInResizeObserver
-                // Issue detail is a document-shaped scroller. Keep this close
-                // to the real bottom so a single wheel notch already hands
-                // scroll ownership to the reader instead of being swallowed
-                // by the next realtime timeline update.
-                atBottomThreshold={4}
-                atBottomStateChange={handleAtBottomStateChange}
-                // Use Virtuoso's synchronous position, not React's `atBottom`
-                // state from the previous render. New entries can arrive in
-                // the same frame as wheel / scrollbar / keyboard scrolling;
-                // the stale state used to return "smooth" and drag the page
-                // back down. An immediate follow also avoids a smooth-scroll
-                // animation continuing to fight later user input.
-                followOutput={(isAtBottom) => (
-                  !isFetchingOlderTimeline && isAtBottom && atBottomRef.current
-                    ? "auto"
-                    : false
-                )}
-                startReached={() => {
-                  if (hasOlderTimeline && !isFetchingOlderTimeline) {
-                    void fetchOlderTimeline();
-                  }
-                }}
-                components={{
-                  Header: () => isFetchingOlderTimeline ? (
-                    <div className="pb-3 text-center text-xs text-muted-foreground">
-                      {t(($) => $.activity.loading_older)}
-                    </div>
-                  ) : null,
-                }}
-                itemContent={renderItem}
-              />
-              {!atBottom && (
-                <div className="pointer-events-none sticky bottom-4 z-10 flex h-0 items-end justify-center">
-                  <button
-                    type="button"
-                    onClick={jumpToLatest}
-                    className="pointer-events-auto flex -translate-y-2 items-center gap-1 rounded-full border bg-background/95 px-3 py-1.5 text-xs text-muted-foreground shadow-md transition-colors hover:text-foreground"
-                  >
-                    <ArrowDown className="h-3.5 w-3.5" />
-                    {t(($) => $.activity.jump_to_latest)}
-                  </button>
-                </div>
-              )}
-            </div>
-          )
-        ) : (
-          <div className="mt-4">
-            {items.map((item, i) => (
-              <Fragment key={`${item.kind}:${item.id}`}>
-                {renderItem(i, item)}
-              </Fragment>
-            ))}
-          </div>
-        )
-      )}
-
-      {/* Foot of the stream: what the agent is doing right now. Sits
-          outside the timeline list so neither render mode (Virtuoso /
-          flat map) has to carry a synthetic item. */}
-      {activeIssueSessionId && (
-        <SessionAgentStreamRow issueId={issueId} issueSessionId={activeIssueSessionId} />
-      )}
-
-      {/* Bottom comment input — the session's only composer. A reply is
-          the same box carrying a parent_id, announced by the chip. */}
-      <div className="mt-4">
-        {/* key={id}: web's /issues/[id] route doesn't remount on
-            issueId change, so without an explicit key the editor
-            keeps the previous issue's in-memory content and the
-            next keystroke would flush it into the new issue's
-            draft key. */}
-        <CommentInput
-          key={`${issueId}:${activeIssueSessionId}`}
-          issueId={issueId}
-          onSubmit={handleComposerSubmit}
-          replyTo={replyTo}
-          onCancelReply={handleCancelReply}
-          // Naming the target session is the only thing that tells the
-          // user which of the issue's parallel tracks their comment
-          // joins — the composer sits far below the rail's selection.
-          placeholder={
-            activeIssueSession
-              ? t(($) => $.comment.comment_in_session_placeholder, {
-                  session: getSessionDisplayName(t, activeIssueSession),
-                })
-              : undefined
-          }
-        />
+      <LocalDirectoryHint projectId={projectId} enabled={revealed} reserveSlot />
+      <AgentLiveCard key={`${issueId}:${sessionId}`} issueId={issueId} issueSessionId={sessionId}
+        onInitialReconcile={onTasksReady} reconcileEnabled={revealed || !taskLayout.current.seeded} />
+      {replica.window?.activities_truncated && <div className="flex h-8 items-center text-xs text-muted-foreground">{t($ => $.activity.recent_limit)}</div>}
+      {renderTrails(entry, highlightedId)}
+    </> : null}
+    renderEntry={renderLogEntry}
+    footer={<>
+      {activeCommentId && <div className="flex h-8 items-center gap-4 text-xs">
+        {replica.window?.has_more_after && <button type="button" data-log-newer disabled={paging} className="text-muted-foreground hover:text-foreground" onClick={() => void newer()}>
+          {t($ => $.activity.expand_newer, { count: 30 })}
+        </button>}
+        <button type="button" data-log-return-latest disabled={paging} className="text-muted-foreground hover:text-foreground" onClick={() => void returnLatest()}>
+          {t($ => $.activity.jump_to_latest)}
+        </button>
+      </div>}
+      {/* Deferred task rows must fit the reservation used by the initial bottom
+          anchor. A minimum alone grows with queued runs after reveal and makes
+          the outer stick-to-bottom observer move the visible comment. */}
+      <div className="h-16 min-h-16 overflow-y-auto" data-agent-stream-slot>
+        {revealed && <SessionAgentStreamRow issueId={issueId} issueSessionId={sessionId} />}
       </div>
-    </div>
-  );
+      <div className="mt-4 min-h-32"><CommentInput key={`${issueId}:${sessionId}`} issueId={issueId} replyTo={replyTo} onCancelReply={() => setReplyTo(null)}
+        placeholder={activeIssueSession ? t($ => $.comment.comment_in_session_placeholder, { session: getSessionDisplayName(t, activeIssueSession) }) : undefined}
+        onSubmit={async (content, attachmentIds) => { await run(() => create.mutateAsync({ content, parentId: replyTo?.commentId, attachmentIds })); setReplyTo(null); }} /></div>
+    </>} />
+    {promptRow && <IssueTaskPromptDialog key={promptRow.id} issueId={issueId} row={promptRow} getActorName={getActorName} onClose={() => setPromptRow(null)} />}
+  </>;
 }

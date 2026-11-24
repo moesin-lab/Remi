@@ -1,5 +1,48 @@
 # Runtime Model Capabilities
 
+## Central Capability Groups
+
+Execution groups choose a shared gateway endpoint or explicit local sign-in. Endpoints
+store addresses, supported API protocols and credentials; default models and allowlists
+belong to groups. See [execution configuration](dev/execution-configuration.md).
+
+Each Runtime probes the selected connection after applying its binding. Codex uses
+OpenAI Responses-compatible model inventory; Claude uses `/v1/models` with its selected
+authentication header; Antigravity uses Google `/v1beta/models`. Per-protocol base paths
+are resolved before discovery. A local-sign-in probe has a separate group home and
+explicitly clears workspace gateway routing.
+
+The report travels in `runtime.binding_state.model_catalog`, fenced by group,
+Runtime, generation and endpoint revision. Configuration readiness, catalog readiness
+and online status are separate. A group's catalog is the intersection of its members'
+current reports, filtered by that group's model policy. New endpoint-backed groups do
+not fabricate a model from a manually entered default or inherit global gateway models.
+The selected model and connection are frozen on first claim. Unknown/failed catalogs
+block new tasks until a usable catalog is reported.
+
+Queue capability observation and queued fallback preflight use the claim-time
+snapshot check for frozen retries. A later group policy block does not create a
+capability wait or switch these retries to a fallback model; Runtime membership
+and authorization still apply.
+
+When a Codex endpoint includes complete native `models` metadata, discovery validates
+it with the actual Codex decoder. An ordinary `data` array does not imply reasoning
+support. The display-only legacy workspace overlay described below remains for older
+clients and unconverted connections; it does not override explicit endpoint groups.
+
+## Context Window Declarations
+
+Claude gateway models have a separate administrator-controlled 1M context switch
+in The legacy Relay API, defaulting off. The declaration is stored independently
+of discovery snapshots and reasoning levels, so a probe cannot erase it. The
+reasoning-level listing includes each model's `context_window` and retains
+context-only rows when an inventory entry disappears. The write command is
+`remi workspace relay context-window update claude --model <id> --one-million`
+(or `--clear`). It neither invents reasoning metadata nor changes model
+executability. Configuration follows the daemon relay wire; Runtime-specific
+Claude profiles are outside its scope. Selection and rollout are documented in
+[Claude Context Windows](claude-context-window.md).
+
 For workspace Codex relays, two gateway endpoints serve different purposes:
 `<base_url>/models` supplies available IDs and labels, while
 `<origin>/backend-api/codex/models` supplies the native model catalog, including
@@ -57,7 +100,7 @@ therefore only ever fills a gap. When a higher-priority source already declares
 levels the declaration is stored but not applied, and the read model
 (`remi workspace relay reasoning-levels get`) reports the stored declaration and
 the effective levels with their source — `gateway`, `runtime`, `manual`,
-`family`, or none — so the settings page can show a declaration that is being
+`family`, or none — so the legacy reasoning API can show a declaration that is being
 outranked instead of appearing to ignore it. A declaration names one model id and
 never applies to any other. An empty level set removes it rather than storing an
 empty list, because an empty list would read as an authoritative *unsupported*
@@ -65,7 +108,9 @@ and re-create the permanent queueing described above. Levels are validated
 server-side against the engine's enum — Claude `low`/`medium`/`high`/`xhigh`/`max`,
 Codex additionally `minimal` — and an unknown spelling is rejected with a 400
 rather than forwarded to execution, as are a default level outside the declared
-set and a missing model id.
+set and a missing model id. The Antigravity engine has no enum: both
+reasoning-level routes, like the Claude-only context-window route, answer 400 for
+it (see [Antigravity Gateway Engine](#antigravity-gateway-engine)).
 
 A declaration does not depend on discovery ever having succeeded — that is what
 makes it a source rather than a footnote to the snapshot. It applies to any model
@@ -75,7 +120,7 @@ entry carrying `thinking_source: manual` with the declared levels, so it appears
 in the Agent model dropdown with those levels selectable and is routable on any
 Claude runtime. An empty snapshot, a snapshot whose last attempt failed, a
 disabled discovery toggle or a model that has since left the inventory therefore
-never blocks declaring levels and never hides the declaration: the settings page
+never blocks declaring levels and never hides the declaration: the legacy reasoning API
 distinguishes "not discovered" from "not declared" and accepts a manually entered
 model id instead of only offering 立即探测. Executability is a separate question
 from reasoning levels, and the Codex boundary (#220) is unchanged: a declaration
@@ -172,3 +217,26 @@ this as a merge of catalog entries or as an already deployed change.
 Disabled plugin bindings remain readable after switching engine and are excluded
 before computing task snapshots. Creating/enabling bindings still validates engine
 compatibility, and cross-workspace bindings remain invalid.
+
+## Antigravity Gateway Engine
+
+Antigravity groups select an endpoint that declares `google-generative`. The endpoint
+address is the API root and omits `/v1beta` and `/v1`; the adapter appends `/v1beta/...`.
+The group chooses its default model; endpoints have no model field. Native-login groups
+instead probe the installed `agy acp` using an isolated copy of the local login,
+and discover both models and thinking levels through ACP config options.
+
+Binding discovery calls `/v1beta/models` on the Runtime, follows page tokens, removes
+non-chat and image-only models and reports no effort selector. A failed page makes the
+binding catalog fail, rather than promoting a partial list to executable capability.
+Before execution, the daemon opens the existing loopback shim with the task's frozen
+endpoint and credential. The ACP server still verifies actual model selection and can
+reject a model even if a gateway inventory listed it. See [Antigravity Runtime](antigravity.md).
+
+Old Relay API/CLI shapes remain compatible. Migration imports their address and key
+into an endpoint and moves `default_model` into group policy. The Relay row retains an
+endpoint reference for old consumers; new groups neither read nor inherit that row.
+
+执行端点可通过 `options.models_url` 指定目录地址，通过 `fetch_models: false` 禁止自动发现并使用 `manual_models`。Runtime 合并手动条目与发现结果；发现失败且配置手动条目时使用手动目录。服务器编辑器的检查缓存只供查看，不替代执行组成员的目录确认。Codex 禁用列表时也跳过原生扩展目录请求，不能由手工条目推断原生推理能力。详见[执行配置](dev/execution-configuration.md#第三方端点接入)。
+
+执行组的 `model_policy.blocked_models` 按精确 ID 在放行名单之后过滤成员目录；catalog、Agent 选型校验与任务调度共用 `executionModelPolicyReason`。响应的 `blocked_models` 保留屏蔽原因，即使模型已从可选列表移除或尚未发现，已保存的选项仍可解释。详见[执行配置](dev/execution-configuration.md)。

@@ -1,4 +1,6 @@
 import { HttpClient, type ApiClientOptions } from "./http";
+import { MessagesEndpoints } from "./endpoints/messages";
+import { SessionLogEndpoints } from "./endpoints/session-log";
 import { AuthEndpoints } from "./endpoints/auth";
 import { IssuesEndpoints } from "./endpoints/issues";
 import { CommentsEndpoints } from "./endpoints/comments";
@@ -7,6 +9,7 @@ import { AgentsEndpoints } from "./endpoints/agents";
 import { RuntimesEndpoints } from "./endpoints/runtimes";
 import { BillingEndpoints } from "./endpoints/billing";
 import { DashboardEndpoints } from "./endpoints/dashboard";
+import { UsageAccountingEndpoints } from "./endpoints/usage-accounting";
 import { TasksEndpoints } from "./endpoints/tasks";
 import { InboxEndpoints } from "./endpoints/inbox";
 import { NotificationPreferencesEndpoints } from "./endpoints/notification-preferences";
@@ -18,6 +21,8 @@ import { SkillsEndpoints } from "./endpoints/skills";
 import { TokensEndpoints } from "./endpoints/tokens";
 import { AttachmentsEndpoints } from "./endpoints/attachments";
 import { ChatEndpoints } from "./endpoints/chat";
+import { ExternalChatsEndpoints } from "./endpoints/external-chats";
+import { ChatQueueEndpoints } from "./endpoints/chat-queue";
 import { ProjectsEndpoints } from "./endpoints/projects";
 import { ProjectDocsEndpoints } from "./endpoints/project-docs";
 import { LabelsEndpoints } from "./endpoints/labels";
@@ -28,12 +33,13 @@ import { LarkEndpoints } from "./endpoints/lark";
 import { RepositoriesEndpoints } from "./endpoints/repositories";
 import { PluginsEndpoints } from "./endpoints/plugins";
 import { IssueSharesEndpoints } from "./endpoints/issue-shares";
-import { SessionArchivesEndpoints } from "./endpoints/session-archives";
+import { StorageEndpoints } from "./endpoints/storage";
 import { ScmEndpoints } from "./endpoints/scm";
 import { PlatformEndpoints } from "./endpoints/platform";
 import { FeishuEndpoints } from "./endpoints/feishu";
 import { FeishuBotEndpoints } from "./endpoints/feishu-bot";
 import { KnowledgeEndpoints } from "./endpoints/knowledge";
+import { IssueResponsibilityEndpoints } from "./endpoints/issue-responsibility";
 
 export { ApiError, PreviewTooLargeError, PreviewUnsupportedError } from "./http";
 export type { ApiClientIdentity, ApiClientOptions } from "./http";
@@ -56,6 +62,8 @@ function bindEndpoints(instance: object): Record<string, unknown> {
  *  facade. Adding a domain means adding one line here and one `extends` entry
  *  below — nothing else in this file changes. */
 export const ENDPOINT_FACTORIES: ReadonlyArray<(http: HttpClient) => object> = [
+  (http: HttpClient) => new SessionLogEndpoints(http),
+  (http: HttpClient) => new MessagesEndpoints(http),
   (http: HttpClient) => new AuthEndpoints(http),
   (http: HttpClient) => new IssuesEndpoints(http),
   (http: HttpClient) => new CommentsEndpoints(http),
@@ -64,6 +72,7 @@ export const ENDPOINT_FACTORIES: ReadonlyArray<(http: HttpClient) => object> = [
   (http: HttpClient) => new RuntimesEndpoints(http),
   (http: HttpClient) => new BillingEndpoints(http),
   (http: HttpClient) => new DashboardEndpoints(http),
+  (http: HttpClient) => new UsageAccountingEndpoints(http),
   (http: HttpClient) => new TasksEndpoints(http),
   (http: HttpClient) => new InboxEndpoints(http),
   (http: HttpClient) => new NotificationPreferencesEndpoints(http),
@@ -75,6 +84,8 @@ export const ENDPOINT_FACTORIES: ReadonlyArray<(http: HttpClient) => object> = [
   (http: HttpClient) => new TokensEndpoints(http),
   (http: HttpClient) => new AttachmentsEndpoints(http),
   (http: HttpClient) => new ChatEndpoints(http),
+  (http: HttpClient) => new ExternalChatsEndpoints(http),
+  (http: HttpClient) => new ChatQueueEndpoints(http),
   (http: HttpClient) => new ProjectsEndpoints(http),
   (http: HttpClient) => new ProjectDocsEndpoints(http),
   (http: HttpClient) => new LabelsEndpoints(http),
@@ -85,12 +96,13 @@ export const ENDPOINT_FACTORIES: ReadonlyArray<(http: HttpClient) => object> = [
   (http: HttpClient) => new RepositoriesEndpoints(http),
   (http: HttpClient) => new PluginsEndpoints(http),
   (http: HttpClient) => new IssueSharesEndpoints(http),
-  (http: HttpClient) => new SessionArchivesEndpoints(http),
+  (http: HttpClient) => new StorageEndpoints(http),
   (http: HttpClient) => new ScmEndpoints(http),
   (http: HttpClient) => new PlatformEndpoints(http),
   (http: HttpClient) => new FeishuEndpoints(http),
   (http: HttpClient) => new FeishuBotEndpoints(http),
   (http: HttpClient) => new KnowledgeEndpoints(http),
+  (http: HttpClient) => new IssueResponsibilityEndpoints(http),
 ];
 
 // Declaration merging: the facade's type is the union of every endpoint
@@ -104,6 +116,8 @@ export const ENDPOINT_FACTORIES: ReadonlyArray<(http: HttpClient) => object> = [
 // runtime check the compiler cannot do.
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- wiring asserted in client-composition.test.ts
 export interface ApiClient extends
+    SessionLogEndpoints,
+    MessagesEndpoints,
     AuthEndpoints,
     IssuesEndpoints,
     CommentsEndpoints,
@@ -112,6 +126,7 @@ export interface ApiClient extends
     RuntimesEndpoints,
     BillingEndpoints,
     DashboardEndpoints,
+    UsageAccountingEndpoints,
     TasksEndpoints,
     InboxEndpoints,
     NotificationPreferencesEndpoints,
@@ -123,6 +138,8 @@ export interface ApiClient extends
     TokensEndpoints,
     AttachmentsEndpoints,
     ChatEndpoints,
+    ExternalChatsEndpoints,
+    ChatQueueEndpoints,
     ProjectsEndpoints,
     ProjectDocsEndpoints,
     LabelsEndpoints,
@@ -133,12 +150,13 @@ export interface ApiClient extends
     RepositoriesEndpoints,
     PluginsEndpoints,
     IssueSharesEndpoints,
-    SessionArchivesEndpoints,
+    StorageEndpoints,
     ScmEndpoints,
     PlatformEndpoints,
     FeishuEndpoints,
     FeishuBotEndpoints,
-    KnowledgeEndpoints {}
+    KnowledgeEndpoints,
+    IssueResponsibilityEndpoints {}
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging -- see the interface above
 export class ApiClient {

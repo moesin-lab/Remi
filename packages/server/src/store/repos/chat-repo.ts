@@ -1,13 +1,23 @@
+import { memoizeRequestRead } from "@multiremi/store/request-read-cache.js";
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+import { sendMessageWithinTransaction } from '../inbox/send-message.js';
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Chat domain (chat sessions and chat messages), extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
 import { createId, nowIso } from "@multiremi/ids.js";
-import { cleanOptionalString, nullableString } from "@multiremi/store/helpers.js";
-import { type StoreContext } from "@multiremi/store/context.js";
+import { cleanOptionalString, nullableString, resolveCamelOrSnakeString } from "@multiremi/store/helpers.js";
+import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
+import {
+  chatMessageToConversationLog,
+  type MirrorChatMessageRow,
+} from "@multiremi/store/conversation-log-mirror.js";
 import { RuntimeWorkspaceError, RuntimeWorkspacesRepo } from "./runtime-workspaces-repo.js";
 import type { CancelTaskResult } from "./tasks-repo.js";
 import { buildSessionProjection } from "@multiremi/store/session-projection.js";
+import { conversationLogChatMessage } from "@multiremi/store/conversation-log-projection.js";
 import { resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLogger } from "@shared/logger.js";
+import { resolveStorageSettings } from "@multiremi/contracts/storage.js";
 import type {
   CreateChatSessionInput,
   MultiremiChatMessage,
@@ -22,6 +32,13 @@ import type {
 
 type Row = Record<string, unknown>;
 
+/** Chats archived per sweep; a backlog drains over successive sweeps. */
+const IDLE_CHAT_ARCHIVE_BATCH = 50;
+
+/** Which Chats a list shows: the user's own, those opened by automation runs, or both. */
+export type ChatOriginFilter = "user" | "automation" | "all";
+export const CHAT_ORIGIN_FILTERS: readonly ChatOriginFilter[] = ["user", "automation", "all"];
+
 export class ChatConflictError extends Error {}
 export class ChatValidationError extends Error {}
 
@@ -32,14 +49,51 @@ export interface QueuedChatTask {
   created_at: string;
 }
 
-const CHAT_SESSION_SELECT = `SELECT chat.*,
-  (SELECT COUNT(*) FROM multiremi_chat_messages m WHERE m.chat_session_id = chat.id
-    AND m.role != 'user' AND m.created_at >= chat.unread_since) AS unread_count,
-  (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_messages m WHERE m.chat_session_id = chat.id
+/** The in-flight statuses a Chat's queue counts as pending, in `pendingTasks()` terms. */
+const PENDING_CHAT_TASK_STATUSES: MultiremiTask["status"][] = [
+  "queued",
+  "dispatched",
+  "running",
+  "waiting_local_directory",
+  "awaiting_human",
+];
+
+/**
+ * One row of the batched pending-task read: the winning task plus the Session
+ * fields a caller needs to authorize it without re-reading the Chat.
+ */
+export interface PendingChatTaskCandidate {
+  taskId: string;
+  status: MultiremiTask["status"];
+  chatSessionId: string;
+  sessionAgentId: string;
+  sessionWorkspaceId: string;
+}
+
+// Chat is private to its creator. Resolve the user to the workspace member lane,
+// exactly as inbox/read does; the legacy unread_since is no longer a read cursor.
+// Historical recipients and receipts remain intact. The shared cursor never
+// marks another recipient's unread message read until an operator reads it.
+const CHAT_UNREAD_FROM = `FROM multiremi_conversation_log m
+  LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id
+    AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = ''
+  LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id
+    AND shared.workspace_id = chat.workspace_id
+  WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown'
+    AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL
+    AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)`;
+
+const CHAT_SESSION_SELECT = `SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id,
+  chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id,
+  chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint,
+  chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at,
+  (SELECT COUNT(*) ${CHAT_UNREAD_FROM}) AS unread_count,
+  (SELECT MIN(m.created_at) ${CHAT_UNREAD_FROM}) AS reader_unread_since,
+  (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id
     ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_content,
-  (SELECT m.role FROM multiremi_chat_messages m WHERE m.chat_session_id = chat.id
+  (SELECT m.role FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id
     ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_role,
-  (SELECT m.created_at FROM multiremi_chat_messages m WHERE m.chat_session_id = chat.id
+  (SELECT m.created_at FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id
     ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_created_at
   FROM multiremi_chat_sessions chat`;
 
@@ -64,6 +118,18 @@ export class ChatRepo {
     return this.ctx.db.transaction(() => this.createChatSessionWithinTransaction(input))();
   }
 
+  /**
+   * Whether a chat has ever had this id, in any workspace; a client-made id
+   * must name none, or a new chat would take over what an old one left. The
+   * reservation survives deletion without retaining the chat's private log.
+   * Legacy log rows also reserve their ids until they are cleaned up.
+   */
+  isChatSessionIdUsed(id: string): boolean {
+    if (this.getChatSession(id)) return true;
+    if (this.ctx.db.query("SELECT id FROM multiremi_chat_session_ids WHERE id = ?").get(id)) return true;
+    return !!this.ctx.db.query("SELECT session_id FROM multiremi_conversation_log WHERE session_id = ? LIMIT 1").get(id);
+  }
+
   /** Caller owns the transaction, including any accompanying Chat binding. */
   createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession {
     if (Object.hasOwn(input, "issueId") || Object.hasOwn(input, "issue_id")) {
@@ -83,7 +149,7 @@ export class ChatRepo {
       Object.hasOwn(input, "projectId") ? input.projectId : input.project_id);
     if (projectId && runtimeWorkspaceId) throw new RuntimeWorkspaceError("Choose either a project or a runtime workspace");
     const id = input.id ?? createId("chat");
-    if (this.getChatSession(id) || this.ctx.db.query("SELECT id FROM multiremi_tasks WHERE chat_session_id = ? LIMIT 1").get(id)) {
+    if (this.isChatSessionIdUsed(id) || this.ctx.db.query("SELECT id FROM multiremi_turn_execution_records WHERE chat_session_id = ? LIMIT 1").get(id)) {
       throw new ChatConflictError("Chat session id has already been used");
     }
     const now = nowIso();
@@ -95,7 +161,11 @@ export class ChatRepo {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
       [projectId, runtimeWorkspaceId, id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, title, now, now],
     );
+    this.ctx.db.run("INSERT INTO multiremi_chat_session_ids (id) VALUES (?)", [id]);
+    // The chat head is the session title at seq 0.
+    this.ctx.conversationLog().syncChatHeadWithinTransaction(id, title, now);
     const session = this.getChatSession(id)!;
+    this.ctx.issueSessions().getOrCreateDefaultChatSession(session.id, session.creatorId);
     return session;
   }
 
@@ -111,28 +181,93 @@ export class ChatRepo {
     return project.id;
   }
 
-  listChatSessions(workspaceId?: string | null, options: { creatorId?: string | null; includeArchived?: boolean } = {}): MultiremiChatSession[] {
+  listChatSessions(workspaceId?: string | null, options: {
+    creatorId?: string | null;
+    includeArchived?: boolean;
+    excludeTransportSessions?: boolean;
+    origin?: ChatOriginFilter;
+  } = {}): MultiremiChatSession[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (workspaceId) {
       clauses.push("workspace_id = ?");
       params.push(workspaceId);
     }
-    if (options.creatorId) {
+    if (options.origin === "user") clauses.push("origin_autopilot_id IS NULL");
+    else if (options.origin === "automation") clauses.push("origin_autopilot_id IS NOT NULL");
+    if (options.creatorId && options.creatorId !== "local") {
       clauses.push("creator_id = ?");
       params.push(options.creatorId);
     }
     if (!options.includeArchived) {
       clauses.push("status != 'archived'");
     }
+    if (options.excludeTransportSessions) {
+      clauses.push(`NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings binding
+        WHERE binding.chat_session_id = chat.id)`);
+    }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.ctx.db.query(`${CHAT_SESSION_SELECT} ${where} ORDER BY pinned DESC, updated_at DESC`).all(...params) as Row[];
     return rows.map(toChatSession);
   }
 
+  /**
+   * Archives each workspace's Chats that nobody has touched for `chat_idle_days`
+   * (workspace storage setting; 0 turns it off). Pinned Chats, Chats with work in
+   * flight and Feishu Issue topics, whose lifecycle follows their Issue, stay.
+   * A new message from the owner reopens an archived Chat.
+   */
+  archiveIdleChats(now: number = Date.now(), limit = IDLE_CHAT_ARCHIVE_BATCH): string[] {
+    const archived: string[] = [];
+    for (const workspace of this.ctx.workspaces().listWorkspaces()) {
+      const idleDays = resolveStorageSettings(workspace.settings.storage).chat_idle_days;
+      if (idleDays <= 0) continue;
+      const cutoff = new Date(now - idleDays * 24 * 60 * 60 * 1000).toISOString();
+      const pending = PENDING_CHAT_TASK_STATUSES.map(() => "?").join(", ");
+      const rows = this.ctx.db.query(
+        `SELECT chat.id FROM multiremi_chat_sessions chat
+         WHERE chat.workspace_id = ? AND chat.status = 'active' AND chat.pinned = 0
+           AND chat.updated_at < ?
+           AND COALESCE((SELECT MAX(m.created_at) FROM multiremi_chat_message_records m
+                         WHERE m.chat_session_id = chat.id), chat.created_at) < ?
+           AND NOT EXISTS (SELECT 1 FROM multiremi_turn_execution_records task
+                           WHERE task.chat_session_id = chat.id AND task.status IN (${pending}))
+           AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings binding
+                           WHERE binding.chat_session_id = chat.id AND binding.issue_id IS NOT NULL)
+         ORDER BY chat.updated_at ASC LIMIT ?`,
+      ).all(workspace.id, cutoff, cutoff, ...PENDING_CHAT_TASK_STATUSES, limit - archived.length) as Row[];
+      for (const row of rows) {
+        const id = String(row.id);
+        try {
+          this.updateChatSession(id, { status: "archived" });
+          archived.push(id);
+        } catch (error) {
+          log.warn(`idle chat archive failed for ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (archived.length >= limit) break;
+    }
+    return archived;
+  }
+
   getChatSession(id: string): MultiremiChatSession | null {
-    const row = this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id = ?`).get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_chat_sessions', 'multiremi_conversation_log',
+      'multiremi_chat_message_records', 'multiremi_session_lanes', 'multiremi_workspace_read_cursors'], `chat:${id}`,
+      () => this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id = ?`).get(id) as Row | null);
     return row ? toChatSession(row) : null;
+  }
+
+  /** Internal batch read; the same projection as getChatSession, no derived usage. */
+  listChatSessionsByIds(ids: readonly string[]): MultiremiChatSession[] {
+    const unique = [...new Set(ids)];
+    const sessions: MultiremiChatSession[] = [];
+    for (let offset = 0; offset < unique.length; offset += 500) {
+      const batch = unique.slice(offset, offset + 500);
+      const rows = this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id IN (${batch.map(() => "?").join(",")})`)
+        .all(...batch) as Row[];
+      sessions.push(...rows.map(toChatSession));
+    }
+    return sessions;
   }
 
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession {
@@ -143,6 +278,8 @@ export class ChatRepo {
       throw new ChatValidationError("Chat sessions cannot be bound to an Issue");
     }
     const cancelled: CancelTaskResult[] = [];
+    const childStatusChanges: import("./tasks-repo.js").ChildStatusChangeCollector = [];
+    const deferredEvents = createCommitEventQueue();
     const updated = this.ctx.db.transaction(() => {
       const initial = this.getChatSession(id);
       if (!initial) throw new Error(`Chat session not found: ${id}`);
@@ -165,15 +302,19 @@ export class ChatRepo {
         [input.title?.trim() || current.title, input.status ?? current.status, (input.pinned ?? current.pinned) ? 1 : 0, now, id],
       );
       if (input.status === "archived") {
-        for (const task of this.pendingTasks(id)) {
-          cancelled.push(this.ctx.tasks().cancelTaskWithinTransaction(task.id));
+        for (const task of this.pendingTasks(id, { includeSessionTasks: true })) {
+          cancelled.push(this.ctx.tasks().cancelTaskWithinTransaction(task.id, childStatusChanges, deferredEvents));
         }
         this.discardPendingAgentIssueUpdatesWithinTransaction(id);
       }
       const updated = this.getChatSession(id)!;
+      // A renamed Chat keeps one head row at seq 0 and bumps its `revision`.
+      this.ctx.conversationLog().syncChatHeadWithinTransaction(id, updated.title, now);
       return updated;
     })();
     for (const result of cancelled) this.ctx.tasks().notifyCancelledTask(result);
+    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChanges);
+    this.ctx.emitCommitEvents(deferredEvents);
     this.ctx.emitChatEvent(updated, "chat:session_updated", {
       title: updated.title,
       status: updated.status,
@@ -185,23 +326,40 @@ export class ChatRepo {
   }
 
   deleteChatSession(id: string): boolean {
+    const childStatusChangesDel: import("./tasks-repo.js").ChildStatusChangeCollector = [];
+    const deferredEventsDel = createCommitEventQueue();
     const result = this.ctx.db.transaction(() => {
       const initial = this.getChatSession(id);
       if (!initial) return null;
       this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = this.getChatSession(id);
       if (!current) return null;
-      const cancelled = this.pendingTasks(id).map((task) => this.ctx.tasks().cancelTaskWithinTransaction(task.id));
+      // Capture the proven owner before deleting its Sessions. A damaged audit
+      // pointer must still retain the private tombstone after its live owner is gone.
+      this.ctx.db.run(`UPDATE multiremi_turns SET chat_session_id = ? WHERE chat_session_id IS NULL
+        AND (session_id = ? OR session_id IN (SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?))`,
+        [id, id, id]);
+      const cancelled = this.pendingTasks(id, { includeSessionTasks: true }).map((task) =>
+        this.ctx.tasks().cancelTaskWithinTransaction(task.id, childStatusChangesDel, deferredEventsDel));
       // Keep the original private scope on retained task audits. Clearing it
       // would make their transcripts inherit the workspace Agent visibility.
       this.ctx.db.run("DELETE FROM multiremi_attachments WHERE chat_session_id = ?", [id]);
-      this.ctx.db.run("DELETE FROM multiremi_chat_messages WHERE chat_session_id = ?", [id]);
+      // Queued follow-ups are private drafts of this Chat (ADR 0020).
+      this.ctx.db.run("DELETE FROM multiremi_queued_messages WHERE session_id = ?", [id]);
+      this.ctx.db.run("UPDATE multiremi_autopilot_runs SET chat_session_id = NULL WHERE chat_session_id = ?", [id]);
+      this.ctx.db.run("UPDATE multiremi_conversation_log SET deleted_at=? WHERE session_id=?", [nowIso(),id]);
       this.ctx.notificationChannels().deleteAgentChatNotificationChannel(id);
+      this.ctx.issueSessions().deleteOwnedSessionsWithinTransaction("chat", id);
+      this.ctx.db.run("DELETE FROM multiremi_conversation_log WHERE session_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_session_lanes WHERE session_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_conversation_heads WHERE session_id = ?", [id]);
       const deleted = this.ctx.db.run("DELETE FROM multiremi_chat_sessions WHERE id = ?", [id]).changes > 0;
       return { current, cancelled, deleted };
     })();
     if (!result) return false;
     for (const terminal of result.cancelled) this.ctx.tasks().notifyCancelledTask(terminal);
+    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChangesDel);
+    this.ctx.emitCommitEvents(deferredEventsDel);
     if (result.deleted) this.ctx.emitChatEvent(result.current, "chat:session_deleted", {});
     return result.deleted;
   }
@@ -209,16 +367,31 @@ export class ChatRepo {
   markChatSessionRead(id: string): void {
     const session = this.getChatSession(id);
     if (!session) throw new Error(`Chat session not found: ${id}`);
-    this.ctx.db.run("UPDATE multiremi_chat_sessions SET unread_since = NULL WHERE id = ?", [id]);
+    const member = this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
+    if (member) this.ctx.inbox().readMessageInbox(member.id, id);
     this.ctx.emitChatEvent(session, "chat:session_read", {});
   }
 
-  private pendingTasks(chatSessionId: string): MultiremiTask[] {
+  private pendingTasks(
+    chatSessionId: string,
+    options: { includeSessionTasks?: boolean } = {},
+  ): MultiremiTask[] {
+    // Ordinary Chat queue controls must not observe, steer, edit, or prioritize
+    // explicit Session Tasks. Wiring those two interaction surfaces together is
+    // a separate product decision (MUL-3). Chat archive/delete still opt in to
+    // all descendant work for lifecycle safety.
+    const sessionClause = options.includeSessionTasks ? "" : "AND issue_session_id IS NULL";
+    const ownerClause = options.includeSessionTasks
+      ? `(chat_session_id = ? OR turn_id IN (SELECT turn.id FROM multiremi_turns turn
+          LEFT JOIN multiremi_issue_sessions session ON session.id = turn.session_id
+          WHERE turn.session_id = ? OR session.chat_id = ?))`
+      : "chat_session_id = ?";
     const rows = this.ctx.db.query(
-      `SELECT id FROM multiremi_tasks WHERE chat_session_id = ?
+      `SELECT id FROM multiremi_turn_execution_records WHERE ${ownerClause}
+       ${sessionClause}
        AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
        ORDER BY CASE WHEN status = 'queued' THEN 1 ELSE 0 END, priority DESC, chat_queue_order ASC, created_at ASC, id ASC`,
-    ).all(chatSessionId) as Row[];
+    ).all(...(options.includeSessionTasks ? [chatSessionId, chatSessionId, chatSessionId] : [chatSessionId])) as Row[];
     return rows.map((row) => this.ctx.tasks().getTask(String(row.id))!);
   }
 
@@ -229,93 +402,134 @@ export class ChatRepo {
 
   listQueuedChatTasks(chatSessionId: string): QueuedChatTask[] {
     if (!this.getChatSession(chatSessionId)) throw new Error(`Chat session not found: ${chatSessionId}`);
-    return this.pendingTasks(chatSessionId).slice(1).filter((task) => task.status === "queued")
+    return this.pendingTasks(chatSessionId).slice(1).filter((task) => task.status === "queued" && !task.wakeSource)
       .map((task) => this.queuedTaskResponse(task));
   }
 
   private queuedTaskResponse(task: MultiremiTask): QueuedChatTask {
     const attachments = this.ctx.db.query(
-      `SELECT a.id FROM multiremi_attachments a JOIN multiremi_chat_messages m ON m.id = a.chat_message_id
+      `SELECT a.id FROM multiremi_attachments a JOIN multiremi_chat_message_records m ON m.id = a.chat_message_id
        WHERE m.chat_session_id = ? AND m.task_id = ? AND m.role = 'user'`,
     ).all(task.chatSessionId, task.id) as Row[];
     return { task_id: task.id, content: task.prompt, attachment_ids: attachments.map((row) => String(row.id)), created_at: task.createdAt };
   }
 
-  private requireQueuedTask(chatSessionId: string, taskId: string): MultiremiTask {
-    const task = this.pendingTasks(chatSessionId).slice(1).find((entry) => entry.id === taskId && entry.status === "queued");
-    if (!task) throw new ChatConflictError("Task is no longer queued in this chat");
-    return task;
-  }
-
-  updateQueuedChatTask(chatSessionId: string, taskId: string, content: string): QueuedChatTask {
-    const result = this.ctx.db.transaction(() => {
-      this.lockActiveSession(chatSessionId);
-      this.requireQueuedTask(chatSessionId, taskId);
-      const body = content.trim();
-      if (!body) throw new Error("content is required");
-      const changed = this.ctx.db.run(
-        `UPDATE multiremi_tasks SET prompt = ?, updated_at = ? WHERE id = ? AND status = 'queued'`,
-        [body, nowIso(), taskId],
+  /**
+   * The first in-flight task of every Chat the caller can list, in one statement.
+   *
+   * The list surface used to walk the caller's Sessions and run
+   * {@link pendingTasks} per Session: on a workspace with ~200 unarchived Chats
+   * that is ~400 statements per poll, plus one Agent load each. The ranking
+   * below is the same expression {@link pendingTasks} orders by, applied per
+   * partition, so "first pending task of a Session" keeps its exact meaning;
+   * only the row that wins the partition comes back.
+   *
+   * The join reads `multiremi_chat_sessions` for ownership, workspace, archived
+   * state and the response's tie-break order. No Chat message column is touched
+   * (MUL-402 B1), and the projection carries only what a caller needs to
+   * authorize and answer — the prompts and results stay in the table.
+   */
+  listPendingChatTaskCandidates(
+    workspaceId?: string | null,
+    options: { creatorId?: string | null; excludeTransportSessions?: boolean } = {},
+  ): PendingChatTaskCandidate[] {
+    const clauses = ["chat.status != 'archived'"];
+    const params: unknown[] = [];
+    if (workspaceId) {
+      clauses.push("chat.workspace_id = ?");
+      params.push(workspaceId);
+    }
+    if (options.creatorId && options.creatorId !== "local") {
+      clauses.push("chat.creator_id = ?");
+      params.push(options.creatorId);
+    }
+    if (options.excludeTransportSessions) {
+      clauses.push(
+        "NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings binding"
+        + " WHERE binding.chat_session_id = chat.id)",
       );
-      if (!changed.changes) throw new ChatConflictError("Task is no longer queued");
-      const messages = this.ctx.db.run("UPDATE multiremi_chat_messages SET body = ? WHERE chat_session_id = ? AND task_id = ? AND role = 'user'", [body, chatSessionId, taskId]);
-      if (messages.changes !== 1) throw new ChatConflictError("Queued input can no longer be edited");
-      return this.queuedTaskResponse(this.ctx.tasks().getTask(taskId)!);
-    })();
-    this.ctx.emitChatEvent(this.getChatSession(chatSessionId)!, "chat:queue_updated", {});
-    return result;
+    }
+    const statuses = PENDING_CHAT_TASK_STATUSES.map(() => "?").join(", ");
+    const rows = this.ctx.db.query(
+      `WITH ranked_pending AS (
+         SELECT task.id AS task_id,
+                task.status AS status,
+                task.chat_session_id AS chat_session_id,
+                task.created_at AS task_created_at,
+                chat.agent_id AS session_agent_id,
+                chat.workspace_id AS session_workspace_id,
+                chat.pinned AS session_pinned,
+                chat.updated_at AS session_updated_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY task.chat_session_id
+                  ORDER BY CASE WHEN task.status = 'queued' THEN 1 ELSE 0 END,
+                           task.priority DESC,
+                           task.chat_queue_order ASC,
+                           task.created_at ASC,
+                           task.id ASC
+                ) AS pending_rank
+         FROM multiremi_turn_execution_records task
+         JOIN multiremi_chat_sessions chat ON chat.id = task.chat_session_id
+         WHERE ${clauses.join(" AND ")}
+           AND task.status IN (${statuses})
+       )
+       SELECT task_id, status, chat_session_id, session_agent_id, session_workspace_id
+       FROM ranked_pending
+       WHERE pending_rank = 1
+       ORDER BY task_created_at DESC, session_pinned DESC, session_updated_at DESC, chat_session_id ASC`,
+    ).all(...params, ...PENDING_CHAT_TASK_STATUSES) as Row[];
+    return rows.map((row) => ({
+      taskId: String(row.task_id),
+      status: String(row.status) as MultiremiTask["status"],
+      chatSessionId: String(row.chat_session_id),
+      sessionAgentId: String(row.session_agent_id),
+      sessionWorkspaceId: String(row.session_workspace_id ?? "local"),
+    }));
   }
 
-  removeQueuedChatTasks(chatSessionId: string, taskId?: string): void {
-    const cancelled = this.ctx.db.transaction(() => {
-      this.lockActiveSession(chatSessionId);
-      const tasks = taskId ? [this.requireQueuedTask(chatSessionId, taskId)]
-        : this.pendingTasks(chatSessionId).slice(1).filter((task) => task.status === "queued");
-      return tasks.map((task) => {
-        const result = this.ctx.tasks().cancelTaskWithinTransaction(task.id);
-        this.ctx.db.run(`UPDATE multiremi_attachments SET chat_message_id = NULL WHERE chat_message_id IN
-          (SELECT id FROM multiremi_chat_messages WHERE chat_session_id = ? AND task_id = ? AND role = 'user')`, [chatSessionId, task.id]);
-        this.ctx.db.run("DELETE FROM multiremi_chat_messages WHERE chat_session_id = ? AND task_id = ? AND role = 'user'", [chatSessionId, task.id]);
-        return result;
-      });
-    })();
-    for (const result of cancelled) this.ctx.tasks().notifyCancelledTask(result);
-    this.ctx.emitChatEvent(this.getChatSession(chatSessionId)!, "chat:queue_updated", {});
-  }
-
-  prioritizeQueuedChatTask(chatSessionId: string, taskId: string): { task_id: string; active_task_id: string | null } {
-    const result = this.ctx.db.transaction(() => {
-      this.lockActiveSession(chatSessionId);
-      this.requireQueuedTask(chatSessionId, taskId);
-      const pending = this.pendingTasks(chatSessionId);
-      // A retry is still the current logical turn even while waiting to claim.
-      // Interrupt it instead of moving its already-executed input into the queue.
-      const active = pending.find((task) => task.status !== "queued")
-        ?? (pending[0]?.attempt > 1 ? pending[0] : undefined);
-      const priority = Math.max(0, ...pending.map((task) => task.priority)) + 1;
-      this.ctx.db.run("UPDATE multiremi_tasks SET priority = ?, updated_at = ? WHERE id = ? AND status = 'queued'", [priority, nowIso(), taskId]);
-      const cancelled = active ? this.ctx.tasks().cancelTaskWithinTransaction(active.id) : null;
-      return { cancelled, activeTaskId: active?.id ?? null };
-    })();
-    if (result.cancelled) this.ctx.tasks().notifyCancelledTask(result.cancelled);
-    this.ctx.notifyTaskEnqueued(this.ctx.tasks().getTask(taskId)!);
-    this.ctx.emitChatEvent(this.getChatSession(chatSessionId)!, "chat:queue_updated", {});
-    return { task_id: taskId, active_task_id: result.activeTaskId };
-  }
-
+  /**
+   * Full task rows for the first in-flight task of each of the caller's Chats.
+   *
+   * Same set and order as the old per-Session walk; the rows come back in one
+   * `IN (…)` hydration instead of one statement per Session.
+   */
   listPendingChatTasks(workspaceId?: string | null, options: { creatorId?: string | null } = {}): MultiremiTask[] {
-    return this.listChatSessions(workspaceId, { creatorId: options.creatorId })
-      .map((session) => this.getPendingChatTask(session.id))
-      .filter((task): task is MultiremiTask => task != null)
-      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    const candidates = this.listPendingChatTaskCandidates(workspaceId, options);
+    if (!candidates.length) return [];
+    return this.ctx.tasks().hydrateTasksByIds(candidates.map((candidate) => candidate.taskId));
   }
 
   listChatMessages(chatSessionId: string): MultiremiChatMessage[] {
     if (!this.getChatSession(chatSessionId)) throw new Error(`Chat session not found: ${chatSessionId}`);
     const rows = this.ctx.db.query(
-      "SELECT * FROM multiremi_chat_messages WHERE chat_session_id = ? ORDER BY sequence ASC, id ASC",
+      "SELECT * FROM multiremi_chat_message_records WHERE chat_session_id = ? ORDER BY sequence ASC, id ASC",
     ).all(chatSessionId) as Row[];
     return rows.map(toChatMessage);
+  }
+
+  listChatMessagesPage(chatSessionId: string, options: {
+    limit: number;
+    before?: { id: string; createdAt: string };
+  }): { messages: MultiremiChatMessage[]; hasMore: boolean } {
+    const { limit, before } = options;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ChatValidationError("invalid limit");
+    const page = this.listChatMessagesPageFromLog(chatSessionId, limit, before?.id, before?.createdAt);
+    if (!page) throw new ChatValidationError("invalid cursor");
+    return page;
+  }
+
+  listChatMessagesFromLog(chatSessionId: string): MultiremiChatMessage[] {
+    if (!this.getChatSession(chatSessionId)) throw new Error(`Chat session not found: ${chatSessionId}`);
+    return this.listChatMessages(chatSessionId);
+  }
+
+  listChatMessagesPageFromLog(chatSessionId:string,limit:number,beforeId?:string|null,beforeCreatedAt?:string|null):{messages:MultiremiChatMessage[];hasMore:boolean}|null {
+    if(!this.getChatSession(chatSessionId))throw new Error(`Chat session not found: ${chatSessionId}`);
+    let anchor=this.ctx.conversationLog().getConversationLogHead(chatSessionId)?.headSeq??0;
+    if(beforeId&&beforeCreatedAt){const cursor=this.ctx.conversationLog().getConversationLogEntryById(beforeId);
+      if(!cursor||cursor.session_id!==chatSessionId||cursor.created_at!==beforeCreatedAt)return null;anchor=cursor.seq-1;}
+    const rows=this.ctx.db.query(`SELECT * FROM multiremi_chat_message_records WHERE chat_session_id=? AND sequence<=? ORDER BY sequence DESC LIMIT ?`).all(chatSessionId,anchor,limit+1) as Row[];
+    return {messages:rows.slice(0,limit).reverse().map(toChatMessage),hasMore:rows.length>limit};
   }
 
   appendChatMessageWithinTransaction(input: {
@@ -329,39 +543,32 @@ export class ChatRepo {
     pendingAgentDelivery?: boolean;
     agentDeliveryTaskId?: string | null;
     createdAt?: string;
+    /** Sender-supplied key for the optimistic message, kept in log metadata. */
+    clientId?: string | null;
+    metadata?: import("@multiremi/contracts/conversation-log").ConversationLogEntryMetadata;
   }): MultiremiChatMessage {
-    const sequenceRow = this.ctx.db.query(
-      `UPDATE multiremi_chat_sessions
-       SET message_sequence = message_sequence + 1
-       WHERE id = ?
-       RETURNING message_sequence`,
-    ).get(input.chatSessionId) as { message_sequence?: number } | null;
-    if (!sequenceRow) throw new Error(`Chat session not found: ${input.chatSessionId}`);
-    const id = input.id ?? createId("msg");
-    this.ctx.db.run(
-      `INSERT INTO multiremi_chat_messages (
-        id, chat_session_id, task_id, role, body, failure_reason, elapsed_ms,
-        pending_agent_delivery, agent_delivery_task_id, sequence, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        input.chatSessionId,
-        input.taskId ?? null,
-        input.role,
-        input.body,
-        input.failureReason ?? null,
-        input.elapsedMs ?? null,
-        input.pendingAgentDelivery ? 1 : 0,
-        input.agentDeliveryTaskId ?? null,
-        Number(sequenceRow.message_sequence),
-        input.createdAt ?? nowIso(),
-      ],
-    );
-    return this.getChatMessage(id)!;
+    const session=this.getChatSession(input.chatSessionId);
+    if(!session)throw new Error(`Chat session not found: ${input.chatSessionId}`);
+    const staged=input.role==='assistant'&&input.taskId?this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE current_attempt_id=?').get(input.taskId)?.reply_message_id:null;
+    const id=input.id??staged??createId('msg');
+    const task=input.taskId?this.ctx.tasks().getTask(input.taskId):null;
+    const source=input.taskId?readAttemptTurn(this.ctx.db, input.taskId):null;
+    const member=this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
+    const result=sendMessageWithinTransaction(this.ctx,{id,session_id:session.id,
+      sender:{type:input.role==='assistant'?'agent':input.role==='user'?'member':'platform',id:input.role==='assistant'?task?.agentId??null:input.role==='user'?member?.id??null:null},
+      source_turn_id:input.role==='assistant'?source?.turn_id:null,
+      to:input.role==='user'||input.pendingAgentDelivery?{type:'agent',ref:session.agentId}
+        :input.role==='assistant'?{type:'member',ref:member.id}:{type:'none'},
+      message_kind:input.role==='assistant'?'reply':'request',wake_requested:input.role==='user'||input.pendingAgentDelivery?'now':'inbox_only',
+      body_md:input.body,metadata:{...input.metadata,...(input.clientId?{client_id:input.clientId}:{}),failure_reason:input.failureReason??null,elapsed_ms:input.elapsedMs??null,
+        pending_agent_delivery:input.pendingAgentDelivery??false,agent_delivery_task_id:input.agentDeliveryTaskId??null}},createCommitEventQueue());
+    const entry=this.ctx.conversationLog().getConversationLogEntryById(result.message.id)!;
+    if(input.role==='assistant'&&input.taskId)this.ctx.db.run('UPDATE multiremi_turns SET reply_message_id=? WHERE current_attempt_id=?',[id,input.taskId]);
+    return conversationLogChatMessage(entry);
   }
 
-  buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
-    return this.ctx.db.transaction(() => {
+  buildTaskSessionProjection(taskId: string, options: { boundsOnly?: boolean } = {}): MultiremiSessionProjection | null {
+    const projectWithinTransaction = () => {
       const task = this.ctx.tasks().getTask(taskId);
       if (!task?.chatSessionId) return null;
       const topicIssueId = this.ctx.feishuBot().getFeishuIssueIdForChatSession(task.chatSessionId);
@@ -370,12 +577,25 @@ export class ChatRepo {
       if (!session) return null;
       const agent = this.ctx.agents().getAgent(task.agentId);
       const currentLineageTaskIds = chatTaskLineageIds(this.ctx, task);
-      const messages = this.listChatMessages(session.id).filter((message) => {
+      const entries = this.ctx.conversationLog().listConversationLogEntries(session.id);
+      // Only queue state is needed here. Read it for the whole conversation
+      // without hydrating each source's usage or autopilot history.
+      const sourceStatuses = new Map((this.ctx.db.query(`SELECT task.id,task.status
+        FROM multiremi_turn_execution_records task WHERE task.id IN (
+          SELECT task_id FROM multiremi_conversation_log WHERE session_id=? AND task_id IS NOT NULL
+        )`).all(session.id) as Row[]).map(row => [String(row.id), String(row.status)]));
+      const messages = entries
+        .filter((entry) => entry.kind !== "head" && entry.deleted_at === null)
+        .map((entry) => ({ ...conversationLogChatMessage(entry), seq: entry.seq, metadata: entry.metadata })).filter((message) => {
         if (message.role !== "user" || !message.taskId || currentLineageTaskIds.has(message.taskId)) return true;
-        const source = this.ctx.tasks().getTask(message.taskId);
-        return source?.status !== "queued";
+        return sourceStatuses.get(message.taskId) !== "queued";
       });
       const events = chatMessagesAsSessionEvents(messages, session, task.id, currentLineageTaskIds);
+      const entriesBySeq = new Map(entries.map((entry) => [entry.seq, entry]));
+      const expandableSeqs = new Set(events.filter((event) => {
+        const entry = entriesBySeq.get(event.seq);
+        return entry?.visibility === "shown" && entry.deleted_at === null && event.body === entry.body_md;
+      }).map((event) => event.seq));
       const detachedChatIssue = (task.issueId && topicIssueId !== task.issueId)
         || (task.issueSessionId && !topicIssueId);
       // Workspace validation may reject an active lease's old directory without
@@ -391,17 +611,18 @@ export class ChatRepo {
         sessionId: session.id,
         targetAgentId: task.agentId,
         events,
-        // createTask persists session_id only when resolveTaskAffinity concluded
-        // that this exact provider lineage is resumable. Stored Chat messages are
-        // already in that lineage; the current request is rendered separately.
-        cursorSeq: warmProviderSessionId ? events.length : 0,
+        expandableSeqs,
+        // Provider affinity permits resuming; only this reader's actual cursor
+        // establishes which queued requests that provider has already consumed.
+        cursorSeq: warmProviderSessionId
+          ? this.ctx.conversationLog().getSessionAgentReadProgress(session.id, task.agentId, task.id).seq : 0,
         providerSessionId: warmProviderSessionId,
         tokenBudget,
         currentTaskId: task.id,
         resolveAuthorName: (type, id) => type === "agent" && id === agent?.id ? agent.name : null,
+        boundsOnly: options.boundsOnly,
       });
-      this.ctx.db.run(
-        `UPDATE multiremi_tasks
+      runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
          SET projection_from_seq = ?, projection_to_seq = ?, projection_mode = ?,
              projection_truncated = ?, projection_omitted_events = ?, projection_estimated_tokens = ?,
              updated_at = ?
@@ -425,35 +646,29 @@ export class ChatRepo {
         );
       }
       return projection;
-    })();
+    };
+    return this.ctx.db.inTransaction ? projectWithinTransaction() : this.ctx.db.transaction(projectWithinTransaction)();
   }
 
   sendChatMessage(chatSessionId: string, input: SendChatMessageInput): SendChatMessageResult {
+    const childStatusChanges: import("./tasks-repo.js").ChildStatusChangeCollector = [];
+    const deferredEvents = createCommitEventQueue();
     const result = this.ctx.db.transaction(() => {
-      const session = this.lockActiveSession(chatSessionId);
+      // An archived Chat reopens when its owner writes again (sendMessageWithinTransaction).
+      const session = this.lockSession(chatSessionId);
       const body = (input.body ?? input.content)?.trim();
       if (!body) throw new Error("Chat message body is required");
       const queued = this.getPendingChatTask(session.id) != null;
       const now = nowIso();
       const messageId = createId("msg");
-      const task = this.ctx.tasks().createTaskWithinTransaction({
-        agentId: session.agentId,
-        chatSessionId: session.id,
-        // Issue ownership belongs to the Feishu transport binding, never Chat.
-        issueId: this.ctx.feishuBot().getFeishuIssueIdForChatSession(session.id),
-        workspaceId: session.workspaceId,
-        holdsWorkspace: false,
-        prompt: body,
-        parentTaskId: input.parentTaskId ?? input.parent_task_id ?? null,
-      });
-      this.appendChatMessageWithinTransaction({
-        id: messageId,
-        chatSessionId: session.id,
-        taskId: task.id,
-        role: "user",
-        body,
-        createdAt: now,
-      });
+      const member=this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
+      if(!member)throw new Error('Chat author is not a workspace member');
+      const written=sendMessageWithinTransaction(this.ctx,{id:messageId,session_id:session.id,sender:{type:'member',id:member.id},
+        to:{type:'agent',ref:session.agentId},message_kind:'request',wake_requested:'now',body_md:body,metadata:{client_id:input.client_id}},deferredEvents,
+        {holdsWorkspace:false,issueId:this.ctx.feishuBot().getFeishuIssueIdForChatSession(session.id)});
+      const turn=written.turn_id?this.ctx.db.query('SELECT current_attempt_id FROM multiremi_turns WHERE id=?').get(written.turn_id):null;
+      if(!turn)throw new Error('Chat recipient unavailable');
+      const task=this.ctx.tasks().getTask(turn.current_attempt_id)!;
       const attachmentIds = input.attachmentIds ?? input.attachment_ids ?? [];
       if (attachmentIds.length) {
         this.ctx.issues().linkAttachmentsToChatMessage(session.id, messageId, attachmentIds);
@@ -467,22 +682,17 @@ export class ChatRepo {
       return { session: this.getChatSession(session.id)!, message: this.getChatMessage(messageId)!, task, queued };
     })();
     this.ctx.notifyTaskEnqueued(result.task);
-    this.ctx.emitChatEvent(result.session, "chat:message", {
-      message_id: result.message.id,
-      role: "user",
-      content: result.message.body,
-      task_id: result.task.id,
-      created_at: result.message.createdAt,
-    });
+    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChanges);
+    this.ctx.emitCommitEvents(deferredEvents);
     return result;
   }
 
-  private lockActiveSession(chatSessionId: string): MultiremiChatSession {
+  private lockSession(chatSessionId: string): MultiremiChatSession {
     const initial = this.getChatSession(chatSessionId);
     if (!initial) throw new Error(`Chat session not found: ${chatSessionId}`);
     this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
     const session = this.getChatSession(chatSessionId);
-    if (!session || session.status === "archived") throw new ChatConflictError("Chat session is archived");
+    if (!session) throw new Error(`Chat session not found: ${chatSessionId}`);
     return session;
   }
 
@@ -490,19 +700,22 @@ export class ChatRepo {
   createPendingAgentIssueUpdateWithinTransaction(
     chatSessionId: string,
     bodyInput: string,
+    options: { id?: string; metadata?: import("@multiremi/contracts/conversation-log").ConversationLogEntryMetadata } = {},
   ): PendingAgentIssueUpdateWriteResult {
     const session = this.getChatSession(chatSessionId);
     if (!session) throw new Error(`Chat session not found: ${chatSessionId}`);
     if (session.status === "archived") throw new Error(`Chat session is archived: ${chatSessionId}`);
-    const body = bodyInput.trim();
-    if (!body) throw new Error("Chat message body is required");
+    const body = options.metadata?.envelope ? bodyInput : bodyInput.trim();
+    if (!body.trim()) throw new Error("Chat message body is required");
     const now = nowIso();
     const message = this.appendChatMessageWithinTransaction({
+      id: options.id,
       chatSessionId: session.id,
       role: "system",
       body,
       pendingAgentDelivery: true,
       createdAt: now,
+      metadata: options.metadata,
     });
     this.ctx.db.run(
       `UPDATE multiremi_chat_sessions
@@ -532,45 +745,52 @@ export class ChatRepo {
     limit = AGENT_ISSUE_UPDATE_PROMPT_LIMIT,
   ): PendingAgentIssueUpdateBatch {
     const safeLimit = Math.max(1, Math.floor(limit));
-    const rows = this.ctx.db.query(
-      `SELECT * FROM multiremi_chat_messages
-       WHERE chat_session_id = ? AND pending_agent_delivery = 1
-       ORDER BY sequence ASC, id ASC`,
-    ).all(chatSessionId) as Row[];
+    const rows = this.ctx.conversationLog().listConversationLogEntries(chatSessionId).filter((entry) =>
+      entry.kind === "message" && entry.author_type === "system" && entry.deleted_at === null
+      && entry.metadata.pending_agent_delivery === true);
     if (!rows.length) return { messages: [], omittedCount: 0 };
-    this.ctx.db.run(
-      `UPDATE multiremi_chat_messages
-       SET agent_delivery_task_id = ?
-       WHERE chat_session_id = ? AND pending_agent_delivery = 1`,
-      [taskId, chatSessionId],
-    );
+    this.patchPendingDeliveryLog(rows, true, taskId);
     const selected = rows.slice(-safeLimit);
     return {
-      messages: selected.map(toChatMessage),
+      messages: selected.map(conversationLogChatMessage),
       omittedCount: rows.length - selected.length,
     };
   }
 
   completePendingAgentIssueUpdatesForTaskWithinTransaction(chatSessionId: string, taskId: string): number {
-    return this.ctx.db.run(
-      `UPDATE multiremi_chat_messages
-       SET pending_agent_delivery = 0, agent_delivery_task_id = NULL
-       WHERE chat_session_id = ? AND pending_agent_delivery = 1 AND agent_delivery_task_id = ?`,
-      [chatSessionId, taskId],
-    ).changes;
+    const rows = this.ctx.conversationLog().listConversationLogEntries(chatSessionId).filter((entry) =>
+      entry.kind === "message" && entry.author_type === "system" && entry.deleted_at === null
+      && entry.metadata.pending_agent_delivery === true && entry.metadata.agent_delivery_task_id === taskId);
+    const changes = rows.length;
+    this.patchPendingDeliveryLog(rows, false, null);
+    return changes;
   }
 
   discardPendingAgentIssueUpdatesWithinTransaction(chatSessionId: string): number {
-    return this.ctx.db.run(
-      `UPDATE multiremi_chat_messages
-       SET pending_agent_delivery = 0, agent_delivery_task_id = NULL
-       WHERE chat_session_id = ? AND pending_agent_delivery = 1`,
-      [chatSessionId],
-    ).changes;
+    const rows = this.ctx.conversationLog().listConversationLogEntries(chatSessionId).filter((entry) =>
+      entry.kind === "message" && entry.author_type === "system" && entry.deleted_at === null
+      && entry.metadata.pending_agent_delivery === true);
+    const changes = rows.length;
+    this.patchPendingDeliveryLog(rows, false, null);
+    return changes;
+  }
+
+  private patchPendingDeliveryLog(rows: Array<{ id: string }>, pending: boolean, taskId: string | null): void {
+    for (const row of rows) {
+      const entry = this.ctx.conversationLog().getConversationLogEntryById(String(row.id));
+      if (!entry) continue; // Legacy messages are backfilled by MUL-427.
+      this.ctx.conversationLog().updateWithinTransaction(entry.session_id, entry.seq, {
+        fields: { metadata: {
+          ...entry.metadata,
+          pending_agent_delivery: pending,
+          agent_delivery_task_id: taskId,
+        } },
+      });
+    }
   }
 
   getChatMessage(id: string): MultiremiChatMessage | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_chat_messages WHERE id = ?").get(id) as Row | null;
+    const row = this.ctx.db.query("SELECT * FROM multiremi_chat_message_records WHERE id = ?").get(id) as Row | null;
     return row ? toChatMessage(row) : null;
   }
 
@@ -578,26 +798,24 @@ export class ChatRepo {
 }
 
 function chatTaskLineageIds(ctx: StoreContext, task: MultiremiTask): Set<string> {
-  const ids = new Set<string>();
-  let current: MultiremiTask | null = task;
-  while (
-    current?.chatSessionId === task.chatSessionId
-    && current.prompt.trim() === task.prompt.trim()
-    && !ids.has(current.id)
-  ) {
-    ids.add(current.id);
-    current = current.parentTaskId ? ctx.tasks().getTask(current.parentTaskId) : null;
-  }
-  return ids;
+  // Retry attempts share their turn's Chat and prompt. Follow consecutive
+  // attempt numbers in one read, including gaps exactly as parentTaskId does.
+  const rows = ctx.db.query(`WITH RECURSIVE lineage AS (
+    SELECT id,turn_id,attempt_no FROM multiremi_turn_attempts WHERE id=?
+    UNION ALL
+    SELECT parent.id,parent.turn_id,parent.attempt_no FROM multiremi_turn_attempts parent
+    JOIN lineage child ON parent.turn_id=child.turn_id AND parent.attempt_no=child.attempt_no-1
+  ) SELECT id FROM lineage`).all(task.id) as Row[];
+  return new Set(rows.map(row => String(row.id)));
 }
 
 function chatMessagesAsSessionEvents(
-  messages: MultiremiChatMessage[],
+  messages: Array<MultiremiChatMessage & { seq: number; metadata: Record<string, unknown> }>,
   session: MultiremiChatSession,
   currentTaskId: string,
   currentLineageTaskIds: Set<string>,
 ): MultiremiSessionEvent[] {
-  return messages.map((message, index) => {
+  return messages.map((message) => {
     const currentRequest = message.role === "user"
       && !!message.taskId
       && currentLineageTaskIds.has(message.taskId);
@@ -609,18 +827,18 @@ function chatMessagesAsSessionEvents(
     return {
       id: message.id,
       sessionId: session.id,
-      seq: index + 1,
+      seq: message.seq,
       authorType,
       authorId: message.role === "assistant"
         ? session.agentId
         : message.role === "user"
           ? session.creatorId
           : null,
-      kind: message.role === "user" ? "task_assigned" : `chat_${message.role}`,
+      kind: message.role === "user" ? "turn" : `chat_${message.role}`,
       body: message.body,
       taskId: currentRequest ? currentTaskId : message.taskId,
       sourceCommentId: null,
-      metadata: { role: message.role },
+      metadata: { role: message.role, ...(message.metadata.envelope ? { envelope: message.metadata.envelope } : {}) },
       createdAt: message.createdAt,
     };
   });
@@ -642,9 +860,11 @@ function toChatSession(row: Row): MultiremiChatSession {
     sessionProvider: nullableString(row.session_provider),
     sessionExecutionFingerprint: nullableString(row.session_execution_fingerprint),
     latestTaskId: nullableString(row.latest_task_id),
-    unreadSince: nullableString(row.unread_since),
-    hasUnread: Boolean(row.unread_since),
+    unreadSince: nullableString(row.reader_unread_since),
+    hasUnread: Number(row.unread_count ?? 0) > 0,
     pinned: Number(row.pinned ?? 0) === 1,
+    origin: row.origin_autopilot_id == null ? null
+      : { autopilot_id: String(row.origin_autopilot_id), run_id: String(row.origin_run_id ?? "") },
     unreadCount: Number(row.unread_count ?? 0),
     lastMessage: row.last_message_created_at == null ? null : {
       content: String(row.last_message_content ?? ""),

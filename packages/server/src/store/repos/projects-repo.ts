@@ -1,5 +1,7 @@
+import { memoizeRequestRead } from "@multiremi/store/request-read-cache.js";
 // Projects domain (projects, pinned items, project resources and project docs/wiki), extracted
 // verbatim from MultiremiStore (the facade delegates every public method here).
+import { joinProjectInstructions, MAX_PROJECT_INSTRUCTIONS_LENGTH, PROJECT_INSTRUCTIONS_TOO_LONG } from "@multiremi/contracts/remi-rules.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import {
   cleanOptionalString,
@@ -14,7 +16,10 @@ import {
   toJson,
 } from "@multiremi/store/helpers.js";
 import { type StoreContext } from "@multiremi/store/context.js";
+import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
+import { advisoryXactLock } from "@multiremi/store/db/postgres.js";
 import { DaemonRetiredError } from "@multiremi/store/repos/daemon-retirement-repo.js";
+export type ProjectSummary = Omit<MultiremiProject, "instructions" | "deltaInstructions" | "instructionsRevision" | "instructionsUpdatedAt" | "instructionsUpdatedBy">;
 import type {
   CreatePinnedItemInput,
   CreateProjectDocInput,
@@ -28,6 +33,7 @@ import type {
   MultiremiProjectDevice,
   MultiremiProjectDoc,
   MultiremiProjectDocIndexEntry,
+  MultiremiKnowledgeDocSummary,
   MultiremiProjectDocKind,
   MultiremiProjectDocRef,
   MultiremiProjectDocRevision,
@@ -48,6 +54,15 @@ type Row = Record<string, unknown>;
 
 export interface ProjectInstructionsWriteContext {
   instructionsUpdatedBy?: string | null;
+}
+
+export class ProjectExecutionOwnerError extends Error {
+  readonly code = "project_execution_owner_required";
+
+  constructor() {
+    super("Project default execution assignee must be an Agent or Squad");
+    this.name = "ProjectExecutionOwnerError";
+  }
 }
 
 export class ProjectInstructionsRevisionConflictError extends Error {
@@ -103,9 +118,12 @@ export class ProjectsRepo {
     const status = input.status ?? "in_progress";
     const archivedAt = isArchivedProjectStatus(status) ? now : null;
     const workspaceId = input.workspaceId ?? input.workspace_id ?? "local";
-    const instructions = normalizeProjectInstructions(input.instructions);
-    const deltaInstructions = normalizeProjectInstructions(input.deltaInstructions ?? input.delta_instructions);
-    const hasInstructions = instructions !== "" || deltaInstructions !== "";
+    // ADR 0023: one instructions field; a client from before may still send the delta half.
+    const deltaInput = normalizeProjectInstructions(input.deltaInstructions ?? input.delta_instructions);
+    const instructions = joinProjectInstructions(normalizeProjectInstructions(input.instructions), deltaInput);
+    const deltaInstructions = "";
+    if (deltaInput.trim()) assertMergedInstructionsLength(instructions);
+    const hasInstructions = instructions !== "";
     const defaultAssignee = this.resolveDefaultAssignee(
       input.defaultAssigneeType === undefined ? input.default_assignee_type : input.defaultAssigneeType,
       input.defaultAssigneeId === undefined ? input.default_assignee_id : input.defaultAssigneeId,
@@ -160,7 +178,8 @@ export class ProjectsRepo {
   }
 
   getProject(id: string): MultiremiProject | null {
-    const row = this.ctx.db.query(projectSelect("WHERE p.id = ?")).get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_projects', 'multiremi_issues', 'multiremi_project_resources'],
+      `project:${id}`, () => this.ctx.db.query(projectSelect("WHERE p.id = ?")).get(id) as Row | null);
     return row ? toProject(row) : null;
   }
 
@@ -169,6 +188,17 @@ export class ProjectsRepo {
       ? this.ctx.db.query(projectSelect("WHERE p.workspace_id = ? ORDER BY p.updated_at DESC")).all(workspaceId) as Row[]
       : this.ctx.db.query(projectSelect("ORDER BY p.updated_at DESC")).all() as Row[];
     return rows.map(toProject);
+  }
+
+  /** The compatibility list omits instruction bodies and revision metadata. */
+  listProjectSummaries(workspaceId: string): ProjectSummary[] {
+    const columns = ["id", "workspace_id", "title", "description", "icon", "status", "priority",
+      "lead_type", "lead_id", "default_assignee_type", "default_assignee_id", "archived_at", "created_at", "updated_at"];
+    const rows = this.ctx.db.query(projectSelect("WHERE p.workspace_id = ? ORDER BY p.updated_at DESC", columns.map(column => `p.${column}`).join(", "))).all(workspaceId) as Row[];
+    return rows.map(row => {
+      const { instructions, deltaInstructions, instructionsRevision, instructionsUpdatedAt, instructionsUpdatedBy, ...summary } = toProject(row);
+      return summary;
+    });
   }
 
   searchProjects(input: { q: string; workspaceId?: string | null; includeClosed?: boolean; limit?: number; offset?: number }): { projects: MultiremiProjectSearchResult[]; total: number } {
@@ -201,15 +231,15 @@ export class ProjectsRepo {
     const archivedAt = input.status === undefined
       ? current.archivedAt
       : isArchivedProjectStatus(status) ? current.archivedAt ?? now : null;
-    const instructions = input.instructions === undefined
-      ? current.instructions
-      : normalizeProjectInstructions(input.instructions);
     const deltaInstructionsInput = input.deltaInstructions === undefined
       ? input.delta_instructions
       : input.deltaInstructions;
-    const deltaInstructions = deltaInstructionsInput === undefined
-      ? current.deltaInstructions
-      : normalizeProjectInstructions(deltaInstructionsInput);
+    // ADR 0023: one instructions field. A client from before may still send the delta half; it is appended.
+    const instructions = joinProjectInstructions(input.instructions === undefined
+      ? current.instructions
+      : normalizeProjectInstructions(input.instructions), normalizeProjectInstructions(deltaInstructionsInput));
+    const deltaInstructions = "";
+    if (deltaInstructionsInput?.trim()) assertMergedInstructionsLength(instructions);
     const instructionsChanged = instructions !== current.instructions
       || deltaInstructions !== current.deltaInstructions;
     const writesInstructions = input.instructions !== undefined || deltaInstructionsInput !== undefined;
@@ -238,6 +268,13 @@ export class ProjectsRepo {
     };
     if (input.title !== undefined) assign("title", input.title);
     if (input.description !== undefined) assign("description", input.description);
+    // `current` already reads a leftover delta as part of the instructions; any save stores that as the one field.
+    const storedDelta = (this.ctx.db.query("SELECT delta_instructions FROM multiremi_projects WHERE id = ?").get(id) as
+      { delta_instructions?: string | null } | null)?.delta_instructions ?? "";
+    if (!writesInstructions && storedDelta) {
+      assign("instructions", current.instructions);
+      assign("delta_instructions", "");
+    }
     if (writesInstructions) {
       assign("instructions", instructions);
       assign("delta_instructions", deltaInstructions);
@@ -285,15 +322,20 @@ export class ProjectsRepo {
   }
 
   /**
-   * Validates and canonicalizes the project's default assignee (agent, member
-   * or squad — same polymorphic ref an issue assignee uses). Null when unset.
+   * Validates the default Agent/Squad execution assignment. Historical member
+   * values remain readable and survive unrelated edits; explicit writes must
+   * clear or replace them with a valid execution assignment.
    */
   private resolveDefaultAssignee(
     type: MultiremiAssigneeType | null | undefined,
     id: string | null | undefined,
     workspaceId: string,
   ): { assigneeType: MultiremiAssigneeType | null; assigneeId: string | null } {
+    if (type === "member") throw new ProjectExecutionOwnerError();
     const resolved = this.ctx.squads().resolveAssigneeRef(type ?? null, id ?? null, workspaceId);
+    if (resolved && resolved.assigneeType !== "agent" && resolved.assigneeType !== "squad") {
+      throw new ProjectExecutionOwnerError();
+    }
     return resolved ?? { assigneeType: null, assigneeId: null };
   }
 
@@ -321,39 +363,59 @@ export class ProjectsRepo {
     return this.getProject(id)!;
   }
 
-  listPinnedItems(workspaceId?: string | null, userId?: string | null): MultiremiPinnedItem[] {
+  listPinnedItems(workspaceId?: string | null, _userId?: string | null): MultiremiPinnedItem[] {
     const resolvedWorkspaceId = workspaceId ?? "local";
-    const resolvedUserId = userId ?? "local";
     const rows = this.ctx.db.query(
       `SELECT * FROM multiremi_pinned_items
-       WHERE workspace_id = ? AND user_id = ?
-       ORDER BY position ASC, created_at ASC`,
-    ).all(resolvedWorkspaceId, resolvedUserId) as Row[];
-    return rows.map(toPinnedItem);
+       WHERE workspace_id = ?
+       ORDER BY position ASC, created_at ASC, id ASC`,
+    ).all(resolvedWorkspaceId) as Row[];
+    // Preserve legacy rows and their IDs, but expose a single workspace list.
+    const seen = new Set<string>();
+    return rows.flatMap((row) => {
+      const pin = toPinnedItem(row);
+      const key = JSON.stringify([pin.itemType, pin.itemId]);
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ ...pin, userId: "local" }];
+    });
   }
 
+  /**
+   * `position` is another `MAX + 1` (MUL-405): two processes pinning at the same
+   * time read the same maximum and then write the same position, so the list
+   * order stops being reproducible. The read and the insert share one
+   * transaction that first takes the per-owner number lock.
+   */
   createPinnedItem(input: CreatePinnedItemInput): MultiremiPinnedItem {
     const itemType = normalizePinnedItemType(input.itemType ?? input.item_type);
     const itemId = String(input.itemId ?? input.item_id ?? "").trim();
     if (!itemId) throw new Error("item_id is required");
     const workspaceId = input.workspaceId ?? input.workspace_id ?? "local";
-    const userId = input.userId ?? input.user_id ?? "local";
-    this.validatePinnedItemTarget(workspaceId, itemType, itemId);
-    const existing = this.ctx.db.query(
-      "SELECT id FROM multiremi_pinned_items WHERE workspace_id = ? AND user_id = ? AND item_type = ? AND item_id = ?",
-    ).get(workspaceId, userId, itemType, itemId) as Row | null;
-    if (existing) throw new Error("Item already pinned");
-    const maxRow = this.ctx.db.query(
-      "SELECT COALESCE(MAX(position), 0) AS max_position FROM multiremi_pinned_items WHERE workspace_id = ? AND user_id = ?",
-    ).get(workspaceId, userId) as Row | null;
-    const id = input.id ?? createId("pin");
-    const position = Number(maxRow?.max_position ?? 0) + 1;
-    this.ctx.db.run(
-      `INSERT INTO multiremi_pinned_items (id, workspace_id, user_id, item_type, item_id, position, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, workspaceId, userId, itemType, itemId, position, nowIso()],
-    );
-    return this.getPinnedItem(id)!;
+    const userId = "local";
+    return this.ctx.db.transaction(() => {
+      // Global lock order (MUL-405, see store/advisory-locks.ts): the workspace
+      // lifecycle row lock precedes the number lock on every path that needs
+      // both, so no transaction can take them in opposite orders.
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      advisoryXactLock(this.ctx.db, numberAllocationLockKey(`pinned-item:${workspaceId}:${userId}`));
+      this.validatePinnedItemTarget(workspaceId, itemType, itemId);
+      const existing = this.ctx.db.query(
+        "SELECT id FROM multiremi_pinned_items WHERE workspace_id = ? AND item_type = ? AND item_id = ?",
+      ).get(workspaceId, itemType, itemId) as Row | null;
+      if (existing) throw new Error("Item already pinned");
+      const maxRow = this.ctx.db.query(
+        "SELECT COALESCE(MAX(position), 0) AS max_position FROM multiremi_pinned_items WHERE workspace_id = ?",
+      ).get(workspaceId) as Row | null;
+      const id = input.id ?? createId("pin");
+      const position = Number(maxRow?.max_position ?? 0) + 1;
+      this.ctx.db.run(
+        `INSERT INTO multiremi_pinned_items (id, workspace_id, user_id, item_type, item_id, position, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, workspaceId, userId, itemType, itemId, position, nowIso()],
+      );
+      return this.getPinnedItem(id)!;
+    })();
   }
 
   getPinnedItem(id: string): MultiremiPinnedItem | null {
@@ -361,37 +423,40 @@ export class ProjectsRepo {
     return row ? toPinnedItem(row) : null;
   }
 
-  deletePinnedItem(workspaceId: string | null | undefined, userId: string | null | undefined, itemType: string, itemId: string): void {
+  deletePinnedItem(workspaceId: string | null | undefined, _userId: string | null | undefined, itemType: string, itemId: string): void {
     const normalizedType = normalizePinnedItemType(itemType);
     this.ctx.db.run(
-      "DELETE FROM multiremi_pinned_items WHERE workspace_id = ? AND user_id = ? AND item_type = ? AND item_id = ?",
-      [workspaceId ?? "local", userId ?? "local", normalizedType, itemId],
+      "DELETE FROM multiremi_pinned_items WHERE workspace_id = ? AND item_type = ? AND item_id = ?",
+      [workspaceId ?? "local", normalizedType, itemId],
     );
   }
 
-  reorderPinnedItems(workspaceId: string | null | undefined, userId: string | null | undefined, items: ReorderPinnedItemInput[]): MultiremiPinnedItem[] {
+  reorderPinnedItems(workspaceId: string | null | undefined, _userId: string | null | undefined, items: ReorderPinnedItemInput[]): MultiremiPinnedItem[] {
     const resolvedWorkspaceId = workspaceId ?? "local";
-    const resolvedUserId = userId ?? "local";
     const tx = this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(resolvedWorkspaceId);
+      advisoryXactLock(this.ctx.db, numberAllocationLockKey(`pinned-item:${resolvedWorkspaceId}:local`));
       for (const item of items) {
         if (!item.id) throw new Error("items[].id is required");
         const position = Number(item.position);
         if (!Number.isFinite(position)) throw new Error("items[].position must be a finite number");
+        const pin = this.getPinnedItem(item.id);
+        if (!pin || pin.workspaceId !== resolvedWorkspaceId) continue;
         this.ctx.db.run(
-          "UPDATE multiremi_pinned_items SET position = ? WHERE id = ? AND workspace_id = ? AND user_id = ?",
-          [position, item.id, resolvedWorkspaceId, resolvedUserId],
+          "UPDATE multiremi_pinned_items SET position = ? WHERE workspace_id = ? AND item_type = ? AND item_id = ?",
+          [position, resolvedWorkspaceId, pin.itemType, pin.itemId],
         );
       }
-      return this.listPinnedItems(resolvedWorkspaceId, resolvedUserId);
+      return this.listPinnedItems(resolvedWorkspaceId);
     });
     return tx();
   }
 
   listProjectResources(projectId: string): MultiremiProjectResource[] {
     if (!this.getProject(projectId)) throw new Error(`Project not found: ${projectId}`);
-    const rows = this.ctx.db.query(
-      "SELECT * FROM multiremi_project_resources WHERE project_id = ? ORDER BY position ASC, created_at ASC, id ASC",
-    ).all(projectId) as Row[];
+    const rows = memoizeRequestRead(this.ctx.db, ['multiremi_project_resources'], `project-resources:${projectId}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_project_resources WHERE project_id = ? ORDER BY position ASC, created_at ASC, id ASC")
+        .all(projectId) as Row[]);
     return rows.map(toProjectResource);
   }
 
@@ -697,17 +762,81 @@ export class ProjectsRepo {
     this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [now, projectId]);
   }
 
-  listProjectDocs(projectId: string, input: { kind?: string | null } = {}): MultiremiProjectDoc[] {
+  listProjectDocs(projectId: string, input: { kind?: string | null; includeBody?: boolean } = {}): MultiremiProjectDoc[] {
     if (!this.getProject(projectId)) throw new Error(`Project not found: ${projectId}`);
     const kind = cleanOptionalString(input.kind);
+    const columns = input.includeBody === false ? `id, project_id, workspace_id, kind, slug, path, title, summary,
+      tags, pinned, refs, source_task_id, source_issue_id, author_type, author_id, updated_by_type, updated_by_id,
+      version, storage_backend, content_uri, content_sha256, sync_status, sync_error, snapshot_oid,
+      compilation_run_id, created_at, updated_at` : "*";
     const rows = kind
       ? this.ctx.db.query(
-        "SELECT * FROM multiremi_project_docs WHERE project_id = ? AND kind = ? ORDER BY pinned DESC, updated_at DESC",
+        `SELECT ${columns} FROM multiremi_project_docs WHERE project_id = ? AND kind = ? ORDER BY pinned DESC, updated_at DESC`,
       ).all(projectId, normalizeProjectDocKind(kind)) as Row[]
       : this.ctx.db.query(
-        "SELECT * FROM multiremi_project_docs WHERE project_id = ? ORDER BY pinned DESC, updated_at DESC",
+        `SELECT ${columns} FROM multiremi_project_docs WHERE project_id = ? ORDER BY pinned DESC, updated_at DESC`,
       ).all(projectId) as Row[];
     return rows.map(toProjectDoc);
+  }
+
+  /**
+   * Id/title/path for a bounded set of docs (MUL-386 C.2).
+   *
+   * Run-list responses only need `artifact{id,title,path}`; reading the whole
+   * doc — `body` included — per output row was 2 MB of bridge payload for 100
+   * runs. Bounded by the caller's id list.
+   */
+  listProjectDocSummariesByIds(ids: readonly string[]): MultiremiKnowledgeDocSummary[] {
+    const unique = [...new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean))];
+    if (!unique.length) return [];
+    const placeholders = unique.map(() => "?").join(", ");
+    return (this.ctx.db.query(
+      `SELECT id, title, path FROM multiremi_project_docs WHERE id IN (${placeholders})`,
+    ).all(...unique) as Row[]).map((row) => ({
+      id: String(row.id),
+      title: String(row.title ?? ""),
+      path: String(row.path ?? ""),
+    }));
+  }
+
+  /**
+   * Resolve one OpenViking URI to its owning doc (MUL-386 C.2).
+   *
+   * Recall used to call `listProjectDocs` — every doc in the project, bodies
+   * included — once per search hit and compare URIs in JavaScript, which is
+   * where production's 15.5 MB `db_bytes` and `db_queries=101` came from. This is
+   * the single-statement replacement with the same precedence:
+   *
+   *   1. `content_uri = uri` (the URI stored on the row), or
+   *   2. a URI derived from `kind` + `slug` (`content_uri` empty or stale).
+   *
+   * `candidates` carries the codec-derived `kind`/`slug` pairs, because only the
+   * caller knows the workspace the URI must belong to. Ties resolve by the same
+   * `pinned DESC, updated_at DESC` order the previous full-list scan used, so a
+   * project with several docs on one URI keeps returning the row a full scan
+   * would have picked. Only the list columns are selected: `body` stays in the
+   * database and never crosses the PG bridge.
+   */
+  findProjectDocByUri(
+    projectId: string,
+    uri: string,
+    candidates: ReadonlyArray<{ kind: MultiremiProjectDocKind; slug: string }> = [],
+  ): MultiremiProjectDoc | null {
+    if (!this.getProject(projectId)) throw new Error(`Project not found: ${projectId}`);
+    const conditions = ["content_uri = ?"];
+    const params: unknown[] = [uri];
+    for (const candidate of candidates) {
+      const slug = cleanOptionalString(candidate.slug);
+      if (!slug) continue;
+      conditions.push("(kind = ? AND slug = ?)");
+      params.push(normalizeProjectDocKind(candidate.kind), slug);
+    }
+    const row = this.ctx.db.query(
+      `SELECT ${PROJECT_DOC_LIST_COLUMNS} FROM multiremi_project_docs
+       WHERE project_id = ? AND (${conditions.join(" OR ")})
+       ORDER BY pinned DESC, updated_at DESC LIMIT 1`,
+    ).get(projectId, ...params) as Row | null;
+    return row ? toProjectDoc(row) : null;
   }
 
   getProjectDoc(id: string): MultiremiProjectDoc | null {
@@ -1121,7 +1250,8 @@ export class ProjectsRepo {
     ).all(projectId, PROJECT_DOC_MEMORY_INDEX_LIMIT) as Row[];
     // `_schema` rides its own field, so it never eats a slot in the wiki listing.
     const wiki = this.ctx.db.query(
-      `SELECT * FROM multiremi_project_docs WHERE project_id = ? AND kind = 'wiki' AND slug <> ?
+      `SELECT id, slug, path, title, summary, kind, pinned, source_issue_id, updated_at
+       FROM multiremi_project_docs WHERE project_id = ? AND kind = 'wiki' AND slug <> ?
        ORDER BY pinned DESC, updated_at DESC LIMIT ?`,
     ).all(projectId, PROJECT_DOC_SCHEMA_SLUG, PROJECT_DOC_WIKI_INDEX_LIMIT) as Row[];
     const schema = this.ctx.db.query(
@@ -1344,9 +1474,9 @@ function isValidGitRepoUrl(value: string): boolean {
   }
 }
 
-function projectSelect(suffix: string): string {
+function projectSelect(suffix: string, columns = "p.*"): string {
   return `
-    SELECT p.*,
+    SELECT ${columns},
       COUNT(i.id) AS issue_count,
       COALESCE(SUM(CASE WHEN i.status IN ('done', 'completed', 'closed') THEN 1 ELSE 0 END), 0) AS done_count,
       (
@@ -1366,8 +1496,10 @@ function toProject(row: Row): MultiremiProject {
     workspaceId: String(row.workspace_id ?? "local"),
     title: String(row.title),
     description: nullableString(row.description),
-    instructions: String(row.instructions ?? ""),
-    deltaInstructions: String(row.delta_instructions ?? ""),
+    // ADR 0023: one field. A delta an older image wrote after a rollback reads as part of it; the next save
+    // clears the half (`updateProject`).
+    instructions: joinProjectInstructions(String(row.instructions ?? ""), String(row.delta_instructions ?? "")),
+    deltaInstructions: "",
     instructionsRevision: Number(row.instructions_revision ?? 0),
     instructionsUpdatedAt: nullableString(row.instructions_updated_at),
     instructionsUpdatedBy: nullableString(row.instructions_updated_by),
@@ -1385,6 +1517,11 @@ function toProject(row: Row): MultiremiProject {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+/** Each half is checked at the API; a client from before can still send two that together are too long. */
+function assertMergedInstructionsLength(instructions: string): void {
+  if (Array.from(instructions).length > MAX_PROJECT_INSTRUCTIONS_LENGTH) throw new Error(PROJECT_INSTRUCTIONS_TOO_LONG);
 }
 
 function normalizeProjectInstructions(value: string | null | undefined): string {
@@ -1425,6 +1562,17 @@ function toProjectResource(row: Row): MultiremiProjectResource {
     createdBy: nullableString(row.created_by),
   };
 }
+
+/**
+ * Columns a doc-list reader needs when the body is not part of the answer.
+ * `toProjectDoc` treats a missing `body` as empty, which is why the projection
+ * is safe to reuse for the summary paths.
+ */
+const PROJECT_DOC_LIST_COLUMNS =
+  "id, project_id, workspace_id, kind, slug, path, title, summary, '' AS body, tags, pinned, refs, "
+  + "source_task_id, source_issue_id, author_type, author_id, updated_by_type, updated_by_id, version, "
+  + "storage_backend, content_uri, content_sha256, sync_status, sync_error, snapshot_oid, "
+  + "compilation_run_id, created_at, updated_at";
 
 function toProjectDoc(row: Row): MultiremiProjectDoc {
   return {

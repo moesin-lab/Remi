@@ -1,0 +1,47 @@
+# ADR 0011: Question cards use recipient-bound tokens and a responsibility revision
+
+- Status: accepted; amended by [ADR 0017](0017-issue-execution-and-escalation.md)
+  (card recipient at an Issue Q's human stage)
+
+## Decision
+
+The original conversation decision message owns the Q, its complete history and
+its provider waiting state. Cards and cross-session notifications reference this
+same message through `root_question_id`; they never create another question.
+
+Every card delivery mints a random token. Only its hash, designated recipient
+`open_id` and consumed timestamp are stored on `multiremi_conversation_log`.
+The plaintext travels once in the action value with `message_id` and
+`route_revision`. It must never appear in activities or logs.
+
+A card has one recipient. At an Issue Q's human stage nobody is designated, so
+the card goes to the root Issue's creator when that creator is an active member
+who maps uniquely to the bot app's `open_id`. A Chat Q without an Issue sends it
+to its explicitly configured external recipient. This affects delivery only, not
+the shared workspace operator used by web callers. Group owners and workspace owners never substitute for
+that recipient. Ambiguous or missing identity mapping produces a text reminder
+with its original Q and workbench link; any active member can still answer the
+same Q on the web.
+
+The server validates the configured bot transport and resolves the external
+`open_id` to one active historical identity in the Q's frozen workspace. It
+requires the actual delivery recipient, the current human stage, current
+responsibility facts, expected route revision and unused token. Web callers use
+the shared workspace operator; this does not replace external recipient proof
+or erase the verified external respondent from answer history. One transaction
+saves the answer, original-session reply and card consumption.
+Redelivery and responsibility transfer rotate credentials; old cards fail closed.
+
+The bot host forwards the action. Its optional in-memory registry only supports
+card patching; native callbacks work after a host restart by rereading the
+persisted original Q. Group owners and workspace operator access do not substitute
+for its external delivery recipient. Ambiguous identity mapping produces a text reminder with
+its original Q and workbench link.
+
+Remi reads and summarizes the same Issue Q before normal card delivery.
+Unavailable Remi, its own question, or the explicit summary deadline allows
+original-question fallback. A Chat Q has no Remi step: its member answers it in
+the original Chat, and a Feishu-bound Chat gets the original-question card at
+once (see [unified questions](../dev/questions.md)). Web and card answers use the same server authority. Saved answers and
+actual provider consumption remain separate, including controlled continuation
+after a process exit; see [unified questions](../dev/questions.md).

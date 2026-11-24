@@ -73,6 +73,7 @@ x-source-watch: &source-watch
 
 services:
   api:
+    stop_grace_period: 30s
     command: ["bun", "--watch", "run", "apps/server/main.ts", "serve"]
     environment:
       MULTIREMI_BACKGROUND_JOBS: ${REMI_BACKGROUND_JOBS:-0}

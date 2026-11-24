@@ -1,14 +1,303 @@
 # CLI command migration
 
+## Output and pipe completion
+
+Command namespaces, including implicit nested groups, print their generated help
+to stdout and exit 0 when invoked without a subcommand. An unknown subcommand
+prints `Unknown command: remi <full path>` and the nearest group's help to stderr
+and exits 1. Commands that also have children retain their positional arguments
+and executable behavior. `--help`, `-h`, and `remi help <path>` retain generated help.
+The [registry-wide group tests](../tests/unit/remi/cli-command-groups.test.ts)
+cover each namespace so new groups inherit this behavior.
+
+The CLI entry point routes console output through the standard streams and waits
+for stdout and stderr writes to complete before returning, including fatal command
+errors. JSON, JSONL and text output must remain complete when a pipe consumer is
+slow. A consumer closing the pipe early (for example `head`) exits quietly; command
+errors retain their nonzero status. Commands should return or throw rather than
+force process exit after rendering output. The source and compiled entry points
+are covered by [the stdio regression tests](../tests/unit/remi/cli-stdio.test.ts).
+
+## Shared workspace operator and login account
+
+| Old command | Canonical command |
+| --- | --- |
+| `remi member list` | `remi workspace operator` |
+| `remi member get me` | `remi account get` |
+| `remi member update me` | `remi account update` |
+| `remi member onboarding update` | `remi account onboarding update` |
+| `remi member onboarding complete` | `remi account onboarding complete` |
+| `remi member onboarding cloud-waitlist` | `remi account onboarding cloud-waitlist` |
+| `remi member onboarding runtime-bootstrap` | `remi account onboarding runtime-bootstrap` |
+| `remi member onboarding no-runtime-bootstrap` | `remi account onboarding no-runtime-bootstrap` |
+
+Every authenticated human operates the same workspace identity and can enter all
+workspaces. `remi workspace operator` reads its stable internal identity. Use
+`remi account get`, `remi account update --name <name>` and
+`remi account onboarding ...` for the actual platform login account.
+`member list`, `member get me`, `member update me` and `member onboarding ...`
+remain deprecated aliases for one release cycle. Historical attribution can still
+be inspected by ID with the hidden compatibility `member get <id>` command.
+`member create`, `member delete`, workspace invitations and `workspace leave`
+are retired; they return guidance without a mutation. Updating a historical member
+is rejected. Workspaces no longer need member invitations or roles.
+
+Login and token management remain account-bound. Task/daemon credentials retain
+their workspace, runtime and execution restrictions. Historical creator/owner IDs
+remain audit data; human Chat access, inbox reads, pins and notification preferences
+are shared within each workspace. See [authentication](dev/auth.md).
+
+
+Communication uses `remi message`, addressed unread messages use `remi inbox`,
+and execution uses `remi turn`. Sessions retain their Chat or Issue owner;
+ordinary Chat and Autopilot conversations keep their own conversation identities.
+An ordinary decision is a message with options and a same-session reply. A persisted
+business question uses the versioned `message question` actions below.
+
+Issue execution is resolved with `remi issue responsibility <issue>`: each Issue's
+execution owner is its assigned Agent or the assigned team's available Leader, and
+the response lists the owner chain to the root with any unavailable reasons. No
+Issue designates a human; above the root are the workspace members. New execution
+assignees use `agent` or `squad`; historical member assignments remain visible as
+needing configuration and are not valid execution owners. Create, update and
+quick-create keep `--responsible-member` (JSON `responsible_member_id`) only as a
+deprecated no-op: the CLI no longer sends it and the server ignores it.
+
+An execution owner's final reply of a round is its summary. When that round ends
+the Issue derives `in_review`; while a question waits for its Agent handler it stays
+`in_progress`, and a question at the human stage derives `in_review`. Closing is an ordinary status change such as
+`remi issue status <issue> done`. A member may close any Issue; an Agent task
+credential closes only a direct child of an Issue it executes, never its own Issue
+or a root. `--force` stays a member-only override of the unfinished-child and
+dependency guards. An SCM merge only records activity and closes nothing.
+
+`remi issue question list <issue>` and `remi message question get <Q>` expose the
+one original question, unchanged options, separate Remi summary, current handler,
+routing/answer history and actual consumption state. A Q, permission requests
+included, climbs from its Issue's execution owner through each parent's to the
+root's, skipping the asker and repeated owners, and then reaches the workspace
+members. A level without an available owner, or a broken parent chain, hands the
+Q to the members right there and records `route_reason`. Actions use
+`remi message question answer|escalate|present|continue|close <Q> --revision
+<route_revision>`. Answer takes `--data '{"response":{"answers":{"question":"answer"}}}'`
+or `--data '{"response":{"selected_options":["<options[].value>"]}}'`; a permission
+request's option value is its `option_id`, which `{"response":{"option_id":"<id>"}}`
+also accepts. Escalate/close require `--reason`, and present requires `--summary`.
+Close preserves the original question and history instead of deleting it. Explicit
+member revisions additionally require `--revise --answer-revision <answer_revision>
+--reason <reason>`. Continue is an exceptional member authorization for detached
+calls, not an extra button required after ordinary answers. All replies return to
+the original Q session; a parent/Remi notification references its Q ID. A
+responsibility change re-routes a pending Q automatically; there is no transfer
+action, and a client holding the old route revision gets one 409
+`question_route_changed` and reloads.
+Q escalation and Remi presentation require task credentials; Q continuation
+requires human credentials. The server still checks the exact role,
+notification lane and current responsibility revision for every action.
+`message send --reply-to <Q>` also requires the explicitly read `--revision`;
+answer changes additionally require `--revise --answer-revision --reason`.
+Ordinary message replies do not require a question revision.
+
+Feishu bot configuration keeps `responsible_member_id` for Chats without an Issue:
+`workspace feishu-bot set --responsible-member <member>` names the member who
+answers their questions, and `--clear-responsible` leaves such Chat questions
+without a handler. It never gates Issue creation. Topic configuration
+(`workspace issue-topics set --responsible-member` or `--inherit-bot-responsible`)
+and Autopilot JSON `responsible_member_id` are deprecated no-ops: topic and
+automatic Issues are created without a human. Removed commands are listed under
+[the execution owner release](#retired-in-the-execution-owner-release-adr-0017).
+
+Unified usage uses `remi dashboard usage report` with `--days n|all`,
+`--since`, `--until`, `--tz`, `--project` and `--runtime`.
+`--include day_model` adds one genuine consumption-date × model detail page;
+`--detail-limit 1..500` defaults to 200 and `--detail-cursor <next_cursor>`
+continues the same workspace, filters, resolved range, timezone and price
+revision. Detail rows omit lifecycle duration/status; distinct related task
+counts are not additive. A stale or invalid cursor returns an error and must
+restart at the first page. Default reports omit this lazy projection.
+JSON output preserves explicit accounting token counters as nonnegative safe
+integers or null, and `coverage.token_ratio` as a finite ratio or null.
+Credential fields remain filtered; strings or objects disguised as token
+statistics do not bypass that filter.
+`remi dashboard usage prices list|set|close` reads or appends exact
+provider/model/connection price versions (`set --file <json>`,
+`close <price-id> --effective-to <ISO>`). Price writes are human/admin only.
+`remi dashboard usage reconcile` checks additive metrics and each currency
+across one report snapshot; distinct model/day/Runtime task counts are not
+summed. All commands use the selected workspace. Legacy statistical paths
+remain available as normalized-fact compatibility projections, while Web
+uses the unified report. Schema-only startup gates historical installations
+with HTTP 503 until explicit resumable backfill completes. Database migration
+and evidence recovery are internal maintenance scripts, with explicit DB
+environment and reviewed apply plans, not ordinary API writes. Current
+semantics and executable maintenance commands are in
+[Unified usage and prices](usage-accounting.md).
+
+The browser-only `GET /api/sessions/:sessionId/log?with_activity=1` adds an activity
+sidecar for the Issue-owned default Session. A Chat-owned Session associated
+with that Issue is not its default Session. The same log-window response includes
+`activities`, `activities_truncated`, and `prev_entry_created_at`; activities
+do not consume log sequence numbers or change pagination counts. Each window
+returns the latest 200 matching activities in chronological order, bounded by
+the previous log entry's timestamp (inclusive) and the window's last entry
+(exclusive, except the open-ended tail). Side sessions and Chat ignore the
+flag. Without it, the response remains a log-only window. The JSON sidecar
+includes system activities; display preferences are applied by the frontend.
+The CLI log commands remain retired replacement notices; range reads use
+`remi message list <session> --from X --to Y`.
+
+## Session ownership and command paths
+
+Each product Session has exactly one owner: a Chat or an Issue. Chat-owned
+Sessions may have an optional Issue work projection; it does not change their
+owner or grant Issue readers access to private Chat content. Session responses
+include `owner_type` and `owner_id`. Issue-owned Sessions have a null `chat_id`
+and can receive directed requests without creating or adopting a Chat.
+
+Both owner paths are canonical Registry commands. They are not interchangeable
+aliases with different meanings for the same positional argument:
+
+| Operation | Chat-owned path | Issue-owned path |
+| --- | --- | --- |
+| List or create | `remi session list\|create <chat>` | `remi issue session list\|create <issue>` |
+| Read or update | `remi session get\|update <chat> <session>` | `remi issue session get\|update <issue> <session>` |
+| Participants | `remi session participant list\|add <chat> <session>` | `remi issue session participant list\|add <issue> <session>` |
+| Results | `remi session result list\|publish <chat> <session>` | `remi issue session result list <issue> [--session <session>]`, `remi issue session result publish <issue> <session>` |
+
+For either owner, use `remi message list|send <session>` for messages,
+`remi turn list --session <session>` for work, and `remi turn get <turn>`
+for execution metadata. A directed request replaces Session task creation.
+The old Chat and Issue Session event/message/task commands are retired.
+
+Issue Session and result lists include only accessible Issue-owned work and
+Chat-owned work projections. For Issue result publication, `--session <session>`
+also selects the source Session; `--session-id` remains accepted. Creation supports
+`--discussion`, `--from`, `--inherit-mode` and `--with-code`. A parent and its side
+Session must share their actual owner and workspace: use the Chat path to branch
+from a Chat-owned projection, even when viewing it inside an Issue.
+
+`remi session show <session>`, `remi message list <session>` and
+`remi session inherited-context <session>` resolve either owner by Session ID.
+Task credentials read their bound Session with the limited exceptions below.
+Private Chat-owned Task reads and controls require the credential's own Task;
+public Issue-owned or no-Chat Task routes retain their existing workspace,
+owner and route-specific permissions rather than a universal own-Task limit.
+A side Session Task may read a range from its direct parent with the same owner
+and workspace, only after an inherited projection is recorded and only through
+that attempt's persisted cutoff. Use `remi message list <parent> --from X --to Y`;
+this exception does not grant parent metadata, arbitrary windows or tail reads.
+A verified Feishu group Issue-topic Chat Task may read bound Session metadata,
+list safe handoff turn metadata and send directed requests to the bound Session.
+That coordination authority does not grant private messages, turn input or attempt trace
+or another private Task's cancellation or inspection; public Issue Task routes
+still apply their existing permissions. Chat-owned targets must share the Topic Chat;
+Issue-owned targets must share the bound Issue. It may actively post a message
+to that Issue-owned Session through the unified message path;
+this does not grant another Session's message history or Chat-owned writes.
+Directed request messages can create delegated work
+in another Issue-owned Session in the same workspace after owner, Agent, lineage,
+round-trip and side-Session dispatch checks. Creation grants no additional Session
+content or Task access/control rights: public Issue Task routes retain their
+existing baseline, and private Chat-owned Tasks require the credential's own Task.
+Chat-owned dispatch requires the current Session or verified Topic coordination.
+With task credentials, `remi turn retry` retains its
+explicit supervisor authorization and audit checks. The complete boundaries are
+in [the conversation model](conversation-model.md).
+
+`remi session adopt <chat> <session>` is an
+explicit transfer of an Issue-owned Session to a Chat, rejected for active Tasks
+or a parent/child relationship. Task creation never adopts implicitly.
+
+Execution records remain on the daemon; provider archive and Session config
+commands are retired. Inspect usage with `remi runtime storage <runtime>` and manage
+retention through `remi workspace storage get|set <workspace>`. These are separate
+from product Session ownership. Use generated `--help` for options and required
+arguments. The product lifecycle and migration rules are in
+[Topic, Chat and Session](conversation-model.md).
+
+Decisions use `remi message send <session> --kind decision --to <recipient>
+--option <choice>...`. Answers are replies to that message with `--reply-to`
+and `--option` or structured `--response`; the service validates and commits
+answer state atomically. Ordinary decisions are answered once. Native questions
+preserve the original Q and use the versioned question actions above for authorized
+answer revisions and history.
+See [the Message API](dev/message-api.md) for identity, options and card replay rules.
+
 This document is the user-facing migration contract for the Registry-based Remi CLI.
 The machine-readable source of truth remains `cli-capabilities.json`; CI checks this
 table against that manifest.
 
+`remi turn retry <turn> --yes` adds an attempt to the same work turn. Human
+credentials may recover a failed or cancelled turn after workspace, actual owner,
+Chat creator and Agent access checks; the Turn, Agent, Session and prompt stay the
+same. Task credentials retain explicit supervisor or related controller authority
+and organizer mode and audit checks. `--cold` requests a fresh provider context;
+`--reason` supplies the optional reason. Retrying does not undo prior tool actions.
+See [the Turn API](dev/message-api.md#turn) for active-run and dependency guards,
+state changes and the two response shapes. To ask for separate follow-up work,
+send a new directed request to the original Session instead. The old Issue rerun
+command and route are retired.
+
+`remi issue status-pages --statuses todo,in_progress --limit 50
+--include-archived-total --output json` calls `GET /api/issues/status-pages`.
+The response is `{ groups: { [status]: { issues, total, has_more } },
+archived_total? }`. Each bucket contains the same compatibility Issue records
+and total as `/api/issues?status=...&limit=...&offset=0`. Default statuses are
+all seven server statuses, including `cancelled`; `open` normalizes to `todo`.
+The default limit is 50 per status, capped at 500. Only offset 0 is accepted;
+continue each bucket through the existing `/api/issues` route.
+
+`remi issue grouped --include-archived-total --output json` also opts into
+the workspace-wide `archived_total` for assignee boards. Omitting the flag
+preserves the existing response and avoids the additional archive count.
+
+The API reuses the compatibility list query: `workspace_id`, `statuses`/`status`,
+`priorities`/`priority`, `assignee_types`, `assignee_id`, `assignee_ids`,
+`project_id`, `project_ids`, `parent_id`, `top_level_only`, `metadata` (JSON
+equality filters), `include_no_assignee`, `include_no_project`, `include_archived`,
+`archived_only`, `limit`, and `offset`. Lists are comma-separated. CLI options
+use `--workspace`, `--statuses`/`--status`, `--priority`, `--assignee-type`,
+`--assignee`, `--assignee-ids`, `--project`, `--project-ids`, `--parent`,
+`--metadata`, and hyphenated forms of the Boolean flags. Assignee references
+use the shared resolver, including user IDs, member IDs, Agent IDs and names.
+The compatibility list query also accepts the legacy `assignee_type` spelling
+when `assignee_types` is absent; the plural takes precedence, including when
+empty. Native queries retain `assigneeTypes`/`assignee_types` only. The CLI sends
+`assignee_types` for `--assignee-type`.
+Like the existing list, ordering is `updated_at DESC`; `sort_by`, `sort_order`,
+`creator_id` and `involves_user_id` currently have no effect.
+
+`remi issue children <key-or-id>` accepts either reference. Both children batch
+routes resolve `parent_ids` to parent IDs and deduplicate those IDs before
+listing children. A full issue ID resolves globally, whatever workspace is
+selected, so the CLI's default `X-Workspace-ID` never hides a parent the caller
+can access; the workspace only distinguishes keys, numbers and ID prefixes.
+For those, explicit workspace selectors take precedence in this order: query
+`workspace_id` (native requests first check `workspaceId`, then `workspace_id`),
+`X-Workspace-ID`, then `X-Workspace-Slug` resolved to a workspace ID. An unknown
+explicit slug skips keys, numbers and prefixes but still resolves full IDs. With
+no explicit selector, resolution remains unscoped and does not infer token or
+member defaults. Non-ID references follow `getIssueByRef`, like
+`/api/issues/:id/children`: a unique match wins, or, without a workspace
+selector, the unique local row takes precedence among multiple matches. An
+explicit workspace restricts resolution to that workspace's row. Unknown or
+still unresolved references and inaccessible parents are skipped; children must
+also pass the existing workspace access check. Compatibility responses retain
+snake_case Issue fields, while native responses retain camelCase.
+
+`include_archived_total=true` (CLI `--include-archived-total`) adds the
+workspace-wide archived count, independent of other list filters. Omission
+performs no archive count query and omits the field. Buckets, totals, labels
+and the optional count share a SQLite read transaction or a PostgreSQL
+read-only Repeatable Read transaction. The Web pages do not call this API yet.
+
 Agent creation, editing and default-agent commands accept `--provider antigravity`.
-`remi daemon start --provider antigravity` selects the native `agy` runtime;
-automatic daemon discovery also detects it. Install/sign in to agy on the daemon
-machine first. See [Antigravity Runtime](antigravity.md) for model discovery,
-configuration and execution limits. Agent Plugin provider filters remain scoped
+`remi daemon start --provider antigravity` (and `remi setup` with that provider)
+installs Google's pinned Antigravity ACP server when it is missing; the first
+download needs `--accept-antigravity-terms` or `REMI_ACCEPT_ANTIGRAVITY_TERMS=1`.
+Automatic daemon discovery considers only that pinned install, never `agy` on
+`PATH`. See [Antigravity Runtime](antigravity.md) for install, gateway and
+execution limits. Agent Plugin provider filters remain scoped
 to Claude/Codex.
 
 `remi agent create|update|template create` accept `--fallback-model <model>` and
@@ -22,11 +311,16 @@ execution group or workspace clears the saved backup unless supplied again.
 <agent>` and `remi agent default` accept `--execution-group <group-id>`.
 Use `remi runtime group list` to find groups and their online Runtime counts,
 then `remi runtime model catalog --execution-group <group-id>` to inspect models.
-Groups default to one machine and Runtime type. Assign the same custom group ID
-with `remi runtime update <runtime> --execution-group <group-id>` to pool Runtimes
-in the same workspace and provider. Workspace boundaries remain isolated;
-a group cannot mix Runtime types. Restore a Runtime's default group with
-`remi runtime update <runtime> --data '{"execution_group_id":null}'`.
+Create and maintain groups explicitly with `remi runtime group create|update`
+and a JSON body containing `name`, `provider`, `profile_id` (or null), and
+`runtime_ids`. Optional `description` organizes groups; optional `connection`
+contains `name`, `profile`, and a write-only `api_key` to save the provider and
+models atomically with membership. The provider is inherited from the group.
+With `connection`, null `profile_id` creates a reusable connection; an existing
+ID updates that shared connection for all referencing groups. Omitting
+`connection` leaves it unchanged. Discovery no longer creates groups. A Runtime can belong to several
+groups in its workspace; provider compatibility is checked. Existing legacy groups
+and bindings are retained on upgrade. See [execution configuration](dev/execution-configuration.md).
 
 The legacy `--runtime <runtime-id>` agent and model-catalog option remains
 supported, and is mutually exclusive with `--execution-group`. Omitting both
@@ -52,17 +346,23 @@ thinking level are preserved. Custom Runtime connections keep their own catalogs
 
 ## Canonical command tree
 
-Codex Runtime connections use `remi runtime codex-profile get <runtime>` and
-`remi runtime codex-profile set <runtime> --file profile.json`. The JSON body
-contains `profile` and an optional write-only `api_key`; `profile: null` restores
-the workspace gateway. These are human configuration commands; task credentials
-cannot read or change them. See [Codex Runtime connections](design/acp-codex-via-codex-acp.md#runtime-自定义连接)
-for authentication, environment variables and session behavior.
+Shared gateway endpoints use `remi runtime endpoint list|get|create|update|delete`.
+Create/update accepts `name`, a `connection` containing `base_url`, `protocols`,
+optional `protocol_paths`, authentication settings, and a separate write-only
+`api_key`. Endpoints own neither an execution engine nor a model selection.
+`remi runtime group create|update` accepts `endpoint_id` (null means native local
+sign-in) and an optional `model_policy`; it keeps the engine and Runtime membership.
+One multi-protocol endpoint can serve several engines. System AI selects existing
+endpoints with `remi workspace system-model-endpoints get|set`.
+The old `runtime profile` and `workspace relay` commands remain executable
+compatibility interfaces for at least one release cycle. They retain their old
+input shape; migrated writes update the shared endpoint rather than a second key.
+New integrations use the endpoint commands. Human workspace administration is
+required for writes. See [execution configuration](dev/execution-configuration.md).
 
-Claude Code uses `remi runtime claude-profile get <runtime>` and
-`remi runtime claude-profile set <runtime> --file profile.json`, with the same
-credential and clear semantics plus `auth_header: bearer | x-api-key`. See
-[Claude Code Runtime connections](design/acp-claude-via-claude-agent-acp.md).
+The older `runtime codex-profile get|set` and `runtime claude-profile get|set`
+commands remain available for retained per-Runtime connections. New configuration
+uses shared endpoints; the legacy commands do not edit a group's endpoint.
 
 For either custom connection, `remi runtime model refresh <runtime>` asks its
 daemon to discover the provider catalog. Poll `runtime model status <runtime>
@@ -74,18 +374,18 @@ the connection's configured model remains the default when no model is selected.
 The canonical tree includes a focused top-level Attachment download command;
 Issue and Comment keep their scoped attachment listing and management commands.
 
-`remi task list` accepts `--limit` and `--offset`. The limit applies to the
-tasks the caller is allowed to see, not to the scanned rows: `GET
-/api/multiremi/tasks` walks candidates in chunks, applies the same per-task
-visibility filter as before, and stops once the page is full. Omitting
-`--limit` returns at most 100 tasks (the server cap is 500) and reports
-`has_more` / `next_offset` for the next page. List entries omit `result`,
-`prompt`, `pluginSnapshot` / `plugin_snapshot`, `executionFingerprint` /
-`execution_fingerprint` and `usage`; `remi task get` and
-`GET /api/multiremi/tasks/:id` still return the full task.
+`remi turn list --limit <n> --cursor <cursor>` lists authorized turns.
+`remi turn get <turn> --input --attempts` reads the input range and attempt history;
+`remi turn trace read <turn> --attempt <attempt>` reads a selected attempt's trace
+as the folded turn and items (`view=turn`, [ADR 0019](adr/0019-turn-and-item-traces.md));
+page it with `--cursor <next_item_cursor>` and `--limit <n>`. `--raw` reads the stored
+event lines instead (`view=events`, paged with `--after <next_after_seq>`), which is the
+only view of a pre-PR 2 (v1) trace. `--after` without `--raw`, or `--cursor` with it, is a
+usage error. `remi share trace read` takes the same options. JSON output prints the whole
+page; JSONL prints one item, or one raw line, per line.
 
 Chat Tasks can deliver files to their current conversation with
-`remi chat attachment send --attachment report.html --attachment chart.png`.
+`remi message send --attachment report.html --attachment chart.png`.
 `--content`, `--content-file`, and `--content-stdin` optionally add a caption.
 The server resolves the destination from the Task credential; no Feishu chat ID
 is needed. Each file must be non-empty, at most 20MB, and pass the server's file type allowlist.
@@ -94,13 +394,13 @@ order. A retry keeps later files waiting; a permanent failure marks the remainin
 files failed with the reason. Raster images larger than 10MB use file cards;
 smaller images use inline image messages. SVG files always use file cards.
 The response includes attachment IDs and queued delivery IDs; queueing does not
-mean Feishu has acknowledged delivery. This command requires a Chat Task credential.
+mean Feishu has acknowledged delivery. The current conversation comes from CLI context when no conversation is supplied.
 
 ```text
 remi context
 remi workspace
-remi member
-remi invite
+remi account
+remi workspace operator
 remi token
 
 remi project
@@ -110,14 +410,14 @@ remi memory
 remi wiki
 
 remi issue
-remi comment
+remi message
 remi session
 remi share
 remi label
 remi attachment download
 
 remi chat
-remi task
+remi turn
 
 remi agent
 remi squad
@@ -164,9 +464,45 @@ managed by `remi workspace`. Use `--runtime-workspace <id>` on `chat create` or
 `issue create|update` to select it. See the [runtime workspace contract](dev/runtime-workspaces.md)
 for local context, directory lifetime, and the immutable execution binding.
 
-`remi runtime prepare [--provider claude|codex]` installs this release's fixed ACP
-and Agent dependencies, verifying executables and ACP initialization without
-switching a running daemon. This local command does not require server authentication.
+`remi runtime delete <runtime> --yes` and `runtime archive-agents-and-delete`
+block on uncleaned Issue workspaces. Add `--abandon-issue-workspaces` only after
+reviewing the affected Issue list. For historical records with no Runtime,
+`remi issue workspace abandon <issue> --yes` releases their task affinity and
+retains local files. Records still attached to a Runtime must use deletion or
+retirement instead. `remi issue workspace <issue>` remains the read command.
+
+Daemon storage retention ([ADR 0018](adr/0018-local-records-and-recyclable-workspaces.md),
+[storage and retention](dev/storage-retention.md)) is managed with:
+
+```text
+remi workspace storage get <workspace>
+remi workspace storage set <workspace> [--ttl-ms <ms>] [--automation-ttl-ms <ms>] [--max-retained <n>]
+    [--orphan-ttl-ms <ms>] [--snapshot-max-bytes <bytes>] [--chat-idle-days <days>] [--reset <option>]
+remi runtime storage <runtime>
+remi runtime gc <runtime> [--dry-run] [--wait] [--yes]
+remi runtime gc-status <runtime> <request>
+remi automation quiet [--turn <turn>]
+```
+
+`workspace storage get` shows the effective policy and which values the workspace
+overrides; `set` sends only the options given and `--reset <option>` (repeatable)
+restores the default. `runtime storage` prints the latest storage report of the
+daemon that hosts the Runtime. `runtime gc` queues a reclaim round on that daemon:
+`--dry-run` only reports the plan, a real round requires `--yes`, and `--wait`
+polls until the round finishes and prints its report. `runtime gc-status` reads a
+request created without `--wait`. `remi automation quiet` is
+task-scoped: it marks the automation run of `MULTIREMI_TURN_ID` (or `--turn`) quiet,
+so its Chat is archived when the run completes. `remi chat list --origin
+user|automation|all` selects which Chats are listed (default: user conversations).
+
+`remi runtime prepare [--provider claude|codex|antigravity] [--accept-antigravity-terms]`
+installs this release's fixed ACP and Agent dependencies, verifying executables and
+ACP initialization without switching a running daemon. Antigravity is Google's
+server, downloaded per machine after terms consent and checked with a
+credential-free gateway contract check. Without `--provider` it prepares the
+configured or detected bundled providers, and Antigravity only when some install
+already exists (a pin bump is pre-fetched, never a first download), succeeding with
+empty `runtimes` when none remain; any other explicit `--provider` is rejected. This local command does not require server authentication.
 Maintainers refresh dependencies before every release with
 `bun run release:prepare --version <next>`; daemons do not poll the registry.
 See [daemon runtime upgrades](daemon-runtime-upgrades.md) for the release and
@@ -188,6 +524,31 @@ compatible task can be claimed, leaving those tasks available after the update. 
 [Runtime skill import contract](runtime-skills.md) for file limits and daemon
 compatibility. JSON request input remains available through `--data` or `--file`;
 `--json` selects JSON output.
+
+### Skill URL import
+
+`remi skill import --url <url>` imports GitHub, skills.sh or ClawHub sources.
+GitHub and skills.sh imports recursively include text supporting files with their
+relative paths, skip binary extensions and LICENSE files, and retain the limits
+of 128 supporting files, 1 MiB per file and 8 MiB combined supporting content.
+A failed directory listing, invalid listing or failed file download fails the
+whole GitHub/skills.sh import before saving anything. Upstream rate limits return
+HTTP 429 with a reset time when available and a hint to configure `GITHUB_TOKEN`
+on the API server. Each upstream request has a 10-second deadline covering both
+connection and body reading; the whole import has a 25-second deadline, below
+the CLI default of 30 seconds. Timeouts return HTTP 504 with the upstream host,
+operation (ref resolution, listing or download path), read/connect phase and
+deadline. Client cancellation aborts the active upstream request and stops
+subsequent requests. Failed or timed-out imports leave existing Skills intact.
+Other upstream failures return HTTP 502. CLI failures display
+the server error and exit unsuccessfully.
+
+Reimporting the same source type and URL in the selected workspace updates the
+existing Skill (HTTP 200, versus HTTP 201 on creation), including SKILL.md and a
+complete replacement of supporting files: deleted upstream files are removed.
+The Skill ID, creator and other local configuration remain. Existing Skill
+management permissions apply to updates. A same-name Skill from a different
+source remains a conflict (HTTP 409); it is never replaced by name alone.
 
 ### Repository checkout defaults
 
@@ -211,10 +572,9 @@ worktree HEAD, or null when no common ancestor can be resolved.
 
 Chat management uses `remi chat pin|unpin|archive|restore <chat>`. Archiving stops
 unfinished runs and makes the conversation read-only until restored. While a
-Chat is running, `remi chat queue list|update|remove|clear|prioritize` manages its
-queued follow-ups. `prioritize <chat> <task>` moves the selected message next and
-stops the current run; `update <chat> <task> --content-file <path>` edits only a
-message that has not started. See the [Chat contract](chat.md).
+Chat is running, directed now messages join the running turn. Unread follow-ups
+are listed with `remi message list <chat> --unread-by <agent>` and edited or deleted
+by message ID; order follows seq. See the [Chat contract](chat.md).
 
 The Feishu ingestion domain exposes source administration through
 `remi feishu source list|get|status|add|update` and task-safe processing through
@@ -226,18 +586,20 @@ Inbox/Issue object and audited outcome, and generic `resolve` cannot forge those
 outcomes. An empty source allowlist means zero ingestion; `source update
 --clear-allowlist` restores that state.
 
-Feishu bots default to Agent capabilities: anyone who can message the bot may
-use its enabled capabilities without sender approval. `remi workspace feishu-bot
-set <workspace> ... --sender-access-policy agent|allowlist` selects this policy;
-omitting the option preserves the saved choice. Existing bot configurations
-upgrade to `agent`. Agent and inherited task proposal policies still apply.
+Feishu bots default to the sender allowlist: only approved accounts can use the
+bot, and other accounts receive a no-access reply without starting a Chat.
+`remi workspace feishu-bot set <workspace> ... --sender-access-policy
+agent|allowlist` selects this policy; `agent` lets anyone who can message the bot
+use its enabled capabilities. Omitting the option preserves the saved choice.
+Existing bot configurations upgrade to `allowlist` once, with nobody
+pre-approved. Agent and inherited task proposal policies still apply.
 
-The optional Feishu bot sender allowlist uses `remi workspace feishu-bot sender
+The Feishu bot sender allowlist uses `remi workspace feishu-bot sender
 list <workspace>`, `allow <workspace> <sender>`, and `revoke <workspace> <sender>`.
 The sender ID comes from `list`; accounts are discovered from incoming bot
-requests and deduplicated within the current bot app. These human-only commands
-manage permission to create Issues through bot Chats without linking senders to
-Remi users or workspace members. This account allowlist is separate from the
+requests, including rejected ones, and deduplicated within the current bot app.
+These human-only commands manage who can use the bot and create Issues through
+bot Chats without linking senders to Remi users or workspace members. This account allowlist is separate from the
 Messaging Source conversation allowlist. See the [sender policy](feishu-message-ingestion.md#机器人发送者白名单)
 for active Chat checks and legacy restricted sessions.
 
@@ -258,6 +620,22 @@ remi wiki publish
 remi memory publish
 remi platform operation cancel <operation> --yes
 ```
+
+`remi wiki repository list <repo>` prints document metadata only, matching the
+API list contract from [ADR 0002](adr/0002-repository-wiki-list-without-bodies.md).
+Pass `--include-body --ids <a,b>` (at most 20 ids per request) to fetch bodies
+for specific documents.
+
+平台更新设置使用 `remi platform settings update --file <settings.json> --yes`，
+文件可包含 `{"releaseFeedUrl":"https://example.com/platform-release.json"}`，
+或 `{"releaseFeedUrl":null}` 恢复主机默认来源。执行
+`remi platform operation create --file <operation.json> --yes`，文件包含
+`{"kind":"check_updates"}`，会刷新版本和可更新性检查；结果通过
+`remi platform status` 读取。`--json` 输出中的 `updateMode` 是更新器实际报告的模式，
+`preflight.source` 列出当前源对各模式提供的发布内容及缺失项；未知模式不能从 `driver` 推断。
+模式改变需要部署迁移，settings 接口只更改更新源和计划，不执行模式切换。
+更新、回滚和重启均要求更新器在线、预检通过，
+并等待 Runtime 确认空闲。备份与恢复约束见[平台部署](../deploy/README.md)。
 
 ## Current user identity
 
@@ -379,6 +757,38 @@ API changes:
 - Internal daemon task wire removes `chat_bootstrap_transcript`; cold conversation
   history continues through the existing session projection.
 
+## Autopilot run must not read as a query (MUL-468)
+
+`remi autopilot run <autopilot>` shares its prefix with the read-only
+`remi autopilot run list <autopilot>` and `remi autopilot run get <autopilot>
+<run>`. In the parent help the `run` line borrowed the description of its first
+child ("List autopilot runs including queued schedule targets"), so the trigger
+command read as a query. On 2026-09-27 that misfire launched six unrequested
+autopilot runs and published an unintended release; a second operator read it the
+same way later that day.
+
+Starting one run now has its own verb, matching the UI label:
+
+- `remi autopilot run-now <autopilot>` — POST a run now, the same action as
+  "立即运行 / Run now". `--data '{"trigger_id":"..."}'` selects the schedule
+  trigger to start.
+- `remi autopilot run <autopilot>` — rejects the invocation with a usage error and
+  names the three correct commands. It sends no request at all, not even the
+  autopilot name lookup.
+- `remi autopilot run list|get` — unchanged read-only queries.
+
+**This rename intentionally ships without a compatibility alias.** The repository
+rule that deprecated command paths stay executable for one release assumes the old
+path was a working spelling of the intent. Here the old spelling is exactly the
+hazard: an alias would keep turning a read into a manual run on every Runtime that
+has not upgraded yet, which is how this incident happened twice. The path is
+therefore removed outright and replaced by the guard above, so an un-upgraded CLI
+is the only way to still reach the old behavior.
+
+Running turns receive directed messages through `remi message send`; explicit
+finish requests use `remi turn wrap-up`. Missing send input fails locally before
+capability negotiation or any mutation.
+
 ## Deprecated aliases
 
 `remi wiki lint` is deprecated since `0.2.58` with no CLI replacement. Wiki
@@ -389,8 +799,7 @@ do not fail. It must be removed after that compatibility window.
 All aliases below are deprecated since `0.3.0`. They remain executable for at
 least one complete release cycle. Removal requires all supported platform and
 daemon versions to advertise the canonical capability, prompt and skill audits
-to remain clean, and a separately approved release change. This branch does not
-remove any alias.
+to remain clean, and a separately approved release change. Commands explicitly retired below have no executable alias.
 
 | Deprecated command | Canonical replacement | Lifecycle |
 | --- | --- | --- |
@@ -408,21 +817,7 @@ remove any alias.
 | `remi project knowledge backfill` | `remi memory migration backfill` | One-release compatibility alias |
 | `remi project knowledge verify` | `remi memory migration verify` | One-release compatibility alias |
 | `remi project knowledge retry-failed` | `remi memory migration retry` | One-release compatibility alias |
-| `remi issue comment list` | `remi comment list` | One-release compatibility alias |
-| `remi issue comment add` | `remi comment add` | One-release compatibility alias |
-| `remi issue comment update` | `remi comment update` | One-release compatibility alias |
-| `remi issue comment delete` | `remi comment delete` | One-release compatibility alias |
-| `remi issue comment resolve` | `remi comment resolve` | One-release compatibility alias |
-| `remi issue comment unresolve` | `remi comment unresolve` | One-release compatibility alias |
-| `remi issue session list` | `remi session list` | One-release compatibility alias |
-| `remi issue session result list` | `remi session result list` | One-release compatibility alias |
-| `remi issue session result publish` | `remi session result publish` | One-release compatibility alias |
-| `remi issue archive list` | `remi session archive list` | One-release compatibility alias |
-| `remi issue archive status` | `remi session archive status` | One-release compatibility alias |
-| `remi issue archive verify` | `remi session archive verify` | One-release compatibility alias |
-| `remi issue archive retry` | `remi session archive retry` | One-release compatibility alias |
 | `remi issue attachment download` | `remi attachment download` | One-release compatibility alias |
-| `remi task messages` | `remi task message list` | One-release compatibility alias |
 | `remi multiremi agent list` | `remi agent list` | One-release compatibility alias |
 | `remi multiremi agent get` | `remi agent get` | One-release compatibility alias |
 | `remi agent edit` | `remi agent update` | One-release compatibility alias |
@@ -442,24 +837,239 @@ remove any alias.
 | `remi update` | `remi platform operation create` | Byte-compatible local updater alias |
 | `remi multiremi` | `remi <command>` | Hidden compatibility entry |
 
-Nested Issue aliases and the local lifecycle aliases intentionally keep their
+The remaining nested Issue aliases and the local lifecycle aliases intentionally keep their
 legacy dispatchers for byte-compatible arguments, stdout/stderr, and exit codes.
 They are still present in Registry inventory and the capability manifest, so
 they cannot become undocumented bypasses.
 
+## IM platform management
+
+The Web sidebar groups IM capabilities under **IM platforms → Feishu**. This
+navigation change reuses the existing APIs and registered commands; it does not
+introduce another CLI command family or change credential ownership.
+
+| Web capability | Canonical CLI commands |
+| --- | --- |
+| Bot list and creation | `remi workspace feishu-bot list\|create <workspace>` |
+| Concierge configuration and status | `remi workspace feishu-bot get\|set\|status\|candidates\|test\|deploy\|stop` |
+| Bot registration and per-Agent installations | `remi workspace feishu-bot register\|register-status\|register-cancel`, `remi lark install begin\|status`, `remi lark installation list\|delete` |
+| Menu editing and publication | `remi workspace bot-menu get\|update\|publish\|publish-status` |
+| Sender access | `remi workspace feishu-bot set`, `remi workspace feishu-bot sender list\|allow\|revoke` |
+| Agent routes and Issue topics | `remi feishu route list\|set\|unset`, `remi workspace issue-topics get\|set` |
+| Message connections and authorization | `remi messaging connection list\|get\|add\|update\|check\|delete`, `remi messaging connection authorization start\|get` |
+| Sources and conversation selection | `remi messaging source list\|get\|add\|update\|status\|delete\|available-conversations` |
+| History and processing | `remi messaging conversation list`, `remi messaging message list\|get\|resolve\|notify\|draft-reply\|propose-issue\|create-issue` |
+
+Multiple Feishu bots share the workspace domain. Use `workspace feishu-bot list` to obtain a bot ID, then pass `--bot <id>` to configuration, status, test, deploy, stop, delete, audit and sender commands. `feishu route list|set|unset` and `feishu chat list` accept the same option. Omitting it retains the original `default` bot. `workspace feishu-bot create <workspace> --name <name> --agent <id> --runtime <id> --app-id <id> --app-secret <secret> --disabled` creates an additional bot with a separate application and Runtime; secrets may also be supplied via input JSON. The optional legacy contact fields do not gate Issue creation or acceptance. All four `workspace bot-menu` commands also accept `--bot <id>`; each bot has one shared menu, with no member/role overrides. For example, `remi workspace bot-menu update <workspace> --bot <id> --data '{"bot_menu":{"default":[]}}'` saves an empty menu, and `publish <workspace> --bot <id>` validates it without changing Feishu (`--live` publishes). Menu publication requires a Runtime advertising bot menu protocol 2. Automatic Issue topics remain with the default bot.
+
+Use each command's generated `--help` for positional workspace/record references
+and required options. The Web uses Feishu compatibility endpoints where their
+legacy ID contract is required; new automation should use `messaging` for the
+generic connection/source/message model. The bot's app credentials and a
+message-ingestion connection's authorization remain separate.
+
 ## Prompt and documentation migration
 
-The server-injected agent prompt now uses only canonical commands in
-`packages/daemon/src/agent-runtime/prompts/ephemeral.ts`:
+Prompts and durable examples use message / inbox / turn commands. Folded messages
+expand with `remi message get <message>`. Delegation is a directed request, progress
+is a report. Questions originate only from native AskUserQuestion, retain one
+original Q, climb the execution owner chain and use the versioned
+`remi message question` actions above. Read the chain with
+`remi issue responsibility <issue>`; the CLI does not create a replacement Q.
+Ordinary decision messages use `--kind decision --option ...` and same-session
+`--reply-to <message>` replies; they do not enter the question chain. Consulting a
+Senior remains ordinary collaboration through directed messages.
+Use `remi turn get --input --attempts` for
+execution evidence. Session result publishing and project knowledge commands retain
+their separate responsibilities.
 
-- `remi comment list|add`
-- `remi session result publish`
-- `remi memory search|get|create|update`
+`remi message list <conversation> --from X --to Y` reads the complete range
+`X < seq ≤ Y`, automatically follows every page and rejoins long bodies without
+truncating table output. Task credentials omit the requesting agent's own history.
+Only contiguous range reads advance the agent's persistent high water; skipped
+pages cannot mark an unread gap as read. Range flags cannot be combined with list
+filters, limits or an explicit cursor.
 
-The matching durable command examples use canonical commands in
-`docs/project-wiki-memory-spec.md`, `docs/issue-key-results.md`, and the frontend
-Session-result convention comment. The repository-maintained
-[Remi skill](../.agents/skills/remi/SKILL.md) provides CLI workflows with
-task-specific references; keep its examples aligned with this command contract.
-Legacy handler usage strings remain unchanged because they document commands
-that are deliberately supported during the compatibility period.
+`message send` treats a pair round-trip limit as a successful send (HTTP 200),
+with `wake_applied=next_turn` and `wake_reason=pair_round_trip_limit`.
+It reports the applied wake result, including six downgrade explanations:
+`agent_pair_not_privileged`, `pair_round_trip_limit`, `dependencies_unmet`,
+`self`, `recipient_unavailable` and `source_side_session`.
+The message, inbox and turn APIs now call the S2 Store transaction methods.
+See [the HTTP interface contract](dev/message-api.md) for the page integration
+shapes, authenticated identities, pagination and decision replies.
+
+`scripts/migrations/rewrite-retired-cli-commands.ts --dry-run` reports platform
+instruction changes. Execute only after reviewing its entity / field / original /
+replacement output; optimistic locking protects concurrent edits and successful
+writes record an activity. This operator script never runs at startup.
+
+## Retired in the local records release (ADR 0018)
+
+Session archives no longer exist: execution records stay on the daemon and the
+server keeps only a pointer to them. The commands below keep their Registry entries
+and raise one removal error before any network request; the matching routes
+(`/api/issues/:id/session-archives*`, `/api/workspaces/:id/session-archive`) are gone.
+
+| Retired command | Replacement |
+| --- | --- |
+| `remi session archive` (`list`, `status`, `verify`, `retry`) | `remi runtime storage <runtime>（Session 归档已取消，执行记录留在 daemon 本机）` |
+| `remi issue archive` (`list`, `status`, `verify`, `retry`) | `remi runtime storage <runtime>（Session 归档已取消，执行记录留在 daemon 本机）` |
+| `remi session config` (`get`, `update`) | `remi workspace storage get\|set <workspace>（Session 归档设置已取消，存储策略见 workspace storage）` |
+
+## Retired in the unified model release (MUL-493)
+
+Each entry remains in Registry and `cli-capabilities.json.retired`. Execution
+raises one removal error before any network request. Old API routes return 410
+with `code: route_retired` and a replacement. The reused inbox list/read paths
+serve the new message and cursor contract. Old item IDs are rejected locally.
+
+| Retired command | Replacement |
+| --- | --- |
+| `remi task create` | `remi message send --to <agent> --kind request` |
+| `remi task continue` | `remi message send --to <agent> --kind request` |
+| `remi session task create` | `remi message send <conversation> --to <agent> --kind request` |
+| `remi issue session task create` | `remi message send <conversation> --to <agent> --kind request` |
+| `remi issue rerun` | `remi message send <conversation> --to issue-owner --kind request --content <prompt>` |
+| `remi task steer` | `remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)` |
+| `remi task steer list` | `remi message list <conversation> --unread-by <agent>` |
+| `remi issue task steer` | `remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)` |
+| `remi issue task steers` | `remi message list <conversation> --unread-by <agent>` |
+| `remi comment add` | `remi message send <conversation>` |
+| `remi issue comment add` | `remi message send <conversation>` |
+| `remi session message create` | `remi message send <conversation>` |
+| `remi issue session message create` | `remi message send <conversation>` |
+| `remi chat message create` | `remi message send <conversation>` |
+| `remi chat attachment send` | `remi message send --attachment <path>` |
+| `remi issue decision request` | Native AskUserQuestion; `remi issue responsibility <issue>` reads responsibility |
+| `remi issue decision answer` | `remi message question answer <question> --revision <route_revision> --data <json>` |
+| `remi issue decision list` | `remi issue question list <issue>` |
+| `remi issue decision escalate` | `remi message question escalate <question> --revision <route_revision> --reason <reason>` |
+| `remi issue decision withdraw` | `remi message question close <question> --revision <route_revision> --reason <reason>` |
+| `remi task request list` | `remi inbox` |
+| `remi task request respond` | `remi message question answer <question> --revision <route_revision> --data <json>` |
+| `remi comment list` | `remi message list <conversation>` |
+| `remi comment update` | `remi message edit <message>` |
+| `remi comment delete` | `remi message delete <message>` |
+| `remi comment resolve` | `remi message resolve <message>` |
+| `remi comment unresolve` | `remi message resolve <message> --no-resolved` |
+| `remi comment reaction list` | `remi message get <message>` |
+| `remi comment reaction add` | `remi message react <message> --emoji <emoji>` |
+| `remi comment reaction remove` | `remi message react <message> --emoji <emoji> --remove` |
+| `remi comment attachment list` | `remi message get <message>` |
+| `remi session log get` | `remi message get <message>` |
+| `remi session log window` | `remi message list <conversation>` |
+| `remi session log locate` | `remi message get <message>` |
+| `remi session event list` | `remi message list <conversation>` |
+| `remi issue session event list` | `remi message list <conversation>` |
+| `remi chat message list` | `remi message list <conversation>` |
+| `remi chat queue list` | `remi message list <conversation> --unread-by <agent>` |
+| `remi chat queue update` | `remi message edit <message>` |
+| `remi chat queue remove` | `remi message delete <message>` |
+| `remi chat queue clear` | `remi message list <conversation> --unread-by <agent> 后逐条 remi message delete <message>` |
+| `remi chat queue prioritize` | `remi message delete <message> 后重新 remi message send <conversation>（按消息顺序）` |
+| `remi chat pending` | `remi message list <conversation> --unread-by <agent>` |
+| `remi chat read` | `remi inbox read <conversation>` |
+| `remi inbox list` | `remi inbox` |
+| `remi inbox page` | `remi inbox --limit <n> --cursor <cursor>` |
+| `remi inbox summary` | `remi inbox` |
+| `remi inbox unread-count` | `remi inbox` |
+| `remi inbox archive` | `remi inbox read <conversation>` |
+| `remi inbox mark-all-read` | `remi inbox read-all` |
+| `remi inbox archive-all` | `remi inbox read-all` |
+| `remi inbox archive-all-read` | `remi inbox read-all` |
+| `remi inbox archive-completed` | `remi inbox read-all` |
+| `remi task list` | `remi turn list` |
+| `remi task get` | `remi turn get <turn>` |
+| `remi task inspect` | `remi turn get <turn> --attempts` |
+| `remi task cancel` | `remi turn cancel <turn>` |
+| `remi task prompt` | `remi turn get <turn> --input` |
+| `remi task redispatch` | `remi turn retry <turn> --cold` |
+| `remi task trace read` | `remi turn trace read <turn>` |
+| `remi task message list` | `remi turn trace read <turn>` |
+| `remi task messages` | `remi turn trace read <turn>` |
+| `remi issue run-messages` | `remi turn trace read <turn>` |
+| `remi issue runs` | `remi turn list --issue <issue>` |
+| `remi issue active-task` | `remi turn list --issue <issue>` |
+| `remi issue cancel-task` | `remi turn cancel <turn>` |
+| `remi session task list` | `remi turn list --session <conversation>` |
+| `remi issue session task list` | `remi turn list --session <conversation>` |
+| `remi issue comment list` | `remi message list <conversation>` |
+| `remi issue comment update` | `remi message edit <message>` |
+| `remi issue comment delete` | `remi message delete <message>` |
+| `remi issue comment resolve` | `remi message resolve <message>` |
+| `remi issue comment unresolve` | `remi message resolve <message> --no-resolved` |
+| `remi inbox read <inb_item>` | `remi inbox read <conversation> [--to <seq>]` |
+
+## External native Codex Chats
+
+These commands read or continue the original Codex thread on the selected Runtime.
+They require human credentials and use the selected workspace's Runtime access.
+Source and Project IDs come from the native catalog; they are opaque IDs, not
+filesystem paths or product Chat IDs.
+
+| Operation | Canonical command |
+| --- | --- |
+| Sources and Projects | `remi chat external sources --runtime <id>` |
+| One native model page | `remi chat external models --runtime <id> --source <id> [--cursor <cursor>] [--limit 1..50]` |
+| One Chat page | `remi chat external list --runtime <id> --source <id> [--project <id>] [--cursor <cursor>] [--limit 1..50]` |
+| One history page and pending requests | `remi chat external get <thread> --runtime <id> --source <id> [--cursor <cursor>] [--limit 1..50]` |
+| Send to the original thread | `remi chat external send <thread> --runtime <id> --source <id> --text <text> [--request-id <uuid>] [--model <id>]` |
+| Reconcile a send | `remi chat external receipt <thread> --runtime <id> --source <id> --request-id <uuid>` |
+| Interrupt an exact native turn | `remi chat external interrupt <thread> --runtime <id> --source <id> --turn <turn>` |
+| Answer a pending native request | `remi chat external respond <thread> --runtime <id> --source <id> --request-id <id> --decision accept\|decline\|cancel` or `--answers-json '{"question-id":["answer"]}'` |
+
+`send` generates a new UUID when `--request-id` is omitted. Its receipt retains
+that UUID, the original thread, native turn and `accepted` or `unknown` outcome.
+Lost or invalid acknowledgements preserve an unknown receipt in the CLI error
+details and a reconciliation hint. Query `receipt` with the same UUID before
+making a new send. Native sends, interrupts and request responses are never
+automatically retried; a receipt UUID is not an HTTP retry authorization.
+`respond` accepts only one of `--decision` and `--answers-json`; its request ID is
+the opaque pending request ID delivered to this Remi connection, not a send UUID.
+
+`models` reads one page from the selected source's native model catalog. Listing a
+model does not prove that the source account has inference access to it. `send
+--model` passes that exact model ID, including names with `/`, to the original
+thread's next native turn. Omit it to preserve the native model. Both model
+listing and explicit selection require Runtime capability `external_chat_models: 1`;
+older daemons return an upgrade error instead of silently ignoring the model.
+An explicit model does not enable retries or replace the source's connection
+configuration, provider, workspace or credentials.
+
+## Retired in the execution owner release (ADR 0017)
+
+Issues no longer designate a human, formal delivery and the parent-done grant are
+gone, and a responsibility change re-routes a Q by itself; see
+[ADR 0017](adr/0017-issue-execution-and-escalation.md). Each entry below remains in
+Registry and `cli-capabilities.json.retired` and raises one removal error before
+any network request. Its old API routes return 410 with `code: route_retired` and
+a replacement.
+
+| Retired command | Replacement |
+| --- | --- |
+| `remi issue delivery list` | `remi issue get <issue>`; the execution owner's final reply of a round is its summary |
+| `remi issue delivery submit` | Nothing to submit: the final reply of a round is its summary, and the round's end derives `in_review` |
+| `remi issue delivery accept` | `remi issue status <issue> done`; request changes with `remi message send <conversation> --to issue-owner --kind request` |
+| `remi issue delivery return` | `remi issue status <issue> done`; request changes with `remi message send <conversation> --to issue-owner --kind request` |
+| `remi issue delivery authorize` | The parent's execution owner runs `remi issue status <child> done` itself |
+| `remi issue responsibility-unassigned list` | `remi issue responsibility <issue>`; Issues no longer configure a human |
+| `remi issue responsibility-unassigned map` | `remi issue assign <issue> --to <agent\|squad>` configures the execution owner |
+| `remi issue responsible clear` | `remi issue responsibility <issue>`; Issues no longer configure a human |
+| `remi issue responsible set` | `remi issue assign <issue> --to <agent\|squad>`; Issues no longer designate a human |
+| `remi autopilot responsible clear` | `remi autopilot update <autopilot>`; automatic Issues no longer need a human |
+| `remi autopilot responsible set` | `remi autopilot update <autopilot>`; automatic Issues no longer need a human |
+| `remi issue done-grant add` | `remi issue status <child> done` by the parent's execution owner; members close any Issue |
+| `remi issue done-grant remove` | `remi issue status <child> done` by the parent's execution owner; members close any Issue |
+| `remi message question transfer` | Automatic re-routing; `remi message question get <question>` shows the current handler |
+
+端点检查使用 `remi runtime endpoint inspect --file inspection.json --json`（operation 为 `models`、`detect` 或显式单模型 `test`）；缓存读取使用 `remi runtime endpoint catalog <endpoint-id> --json`。模型列表不代表实际调用验证，`test` 可能计费。
+
+## 本机数据库维护
+
+`remi db prepare` 在所有数据库客户端停止后显式准备历史 schema，已完成步骤可续跑；
+`remi db schema` 读取 PostgreSQL schema level 与代码兼容区间；
+`remi db contract --level <n>` 显式执行已声明、晚于 expand release 的收缩步骤。
+这两个 Registry 命令直接使用 `MULTIREMI_DATABASE_URL`，不使用平台 token；
+contract 当前要求所有其他数据库客户端停止，不支持 SQLite。
+步骤声明与限制见 [Schema 迁移纪律](dev/schema-migrations.md)。

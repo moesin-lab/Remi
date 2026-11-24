@@ -23,15 +23,18 @@ const WORKSPACE_ROUTE_SEGMENTS = new Set([
   "issues",
   "projects",
   "knowledge",
+  "magpie",
   "autopilots",
   "agents",
   "inbox",
   "my-issues",
   "workbench",
   "runtimes",
+  "execution-groups",
   "plugins",
   "skills",
   "settings",
+  "im",
 ]);
 
 /**

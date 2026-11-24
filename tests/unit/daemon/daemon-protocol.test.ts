@@ -1,0 +1,455 @@
+import { describe, expect, it } from "bun:test";
+import {
+  DAEMON_ACK_TIMEOUT_MS,
+  DAEMON_TERMINAL_CLOSE_CODES,
+  DAEMON_DOWNLINK_EVENT_FRAMES,
+  DAEMON_DOWNLINK_RPC_FRAMES,
+  DAEMON_DOWNLINK_TRACE_FRAMES,
+  DAEMON_FRAME_MAX_BYTES,
+  DAEMON_HEARTBEAT_INTERVAL_MS,
+  DAEMON_LANE_BACKGROUND_CLOSED_REPEAT_MS,
+  DAEMON_LANE_BACKGROUND_CLOSED_REPEATS,
+  DAEMON_LANE_BACKGROUND_DEBOUNCE_MS,
+  DAEMON_LANE_BACKGROUND_MAX_BYTES,
+  DAEMON_LANE_BACKGROUND_MAX_TASKS,
+  DAEMON_LANE_BACKGROUND_REFRESH_MS,
+  DAEMON_LANE_BACKGROUND_STOP_ALL,
+  DAEMON_MIN_CLI_VERSION,
+  DAEMON_OFFER_COOLDOWN_MS,
+  DAEMON_OFFER_TIMEOUT_MS,
+  DAEMON_PROTOCOL_CAPS,
+  DAEMON_PROTOCOL_CLOSE_CODES,
+  DAEMON_PROTOCOL_ERROR_CODES,
+  DAEMON_PROTOCOL_MIN,
+  DAEMON_PROTOCOL_VERSION,
+  DAEMON_RETRYABLE_ERROR_CODES,
+  DAEMON_TERMINAL_ERROR_CODES,
+  DAEMON_TRACE_READ_MAX_LIMIT,
+  DAEMON_UPLINK_EVENT_FRAMES,
+  DAEMON_UPLINK_BEST_EFFORT_FRAMES,
+  DAEMON_UPLINK_RPC_FRAMES,
+  DAEMON_UPLINK_TRACE_FRAMES,
+  DAEMON_UPLINK_WINDOW_FRAMES,
+  DAEMON_WS_MAX_PAYLOAD_BYTES,
+  compareDaemonCliVersion,
+  daemonCloseCodeIsRetryable,
+  daemonCloseCodeRequiresUpgrade,
+  daemonFrameCategory,
+  daemonFrameIsReliable,
+  daemonFrameUsesOutboxWindow,
+  daemonFrameUsesSeq,
+  meetsDaemonMinCliVersion,
+} from "@multiremi/contracts/daemon-protocol.js";
+import type {
+  DaemonGcCheckChatSessionReply,
+  DaemonGcRunPayload,
+  DaemonGcRunResultPayload,
+  DaemonGcSubjectReclaimedPayload,
+  DaemonTaskCompletionTrace,
+  DaemonTraceAppendPayload,
+  DaemonTracePushPayload,
+  DaemonTraceReadReplyPayload,
+  DaemonTraceSubscribeReplyPayload,
+} from "@multiremi/contracts/daemon-protocol.js";
+
+/** Every frame name the protocol defines, in one list, so the inventory cannot silently shrink. */
+const ALL_FRAME_NAMES = [
+  ...DAEMON_UPLINK_EVENT_FRAMES,
+  ...DAEMON_UPLINK_TRACE_FRAMES,
+  ...DAEMON_UPLINK_BEST_EFFORT_FRAMES,
+  ...DAEMON_UPLINK_RPC_FRAMES,
+  ...DAEMON_DOWNLINK_EVENT_FRAMES,
+  ...DAEMON_DOWNLINK_RPC_FRAMES,
+  ...DAEMON_DOWNLINK_TRACE_FRAMES,
+  "hello",
+  "welcome",
+  "reject",
+  "hb",
+  "res",
+  "ack",
+];
+
+describe("daemon protocol v2 constants", () => {
+  it("pins the version to 2 and refuses v1", () => {
+    expect(DAEMON_PROTOCOL_VERSION).toBe(2);
+    expect(DAEMON_PROTOCOL_MIN).toBe(2);
+    expect(DAEMON_PROTOCOL_MIN).toBeLessThanOrEqual(DAEMON_PROTOCOL_VERSION);
+  });
+
+  it("keeps the protocol frame cap below the socket payload cap", () => {
+    // A frame that violates the protocol cap must still arrive intact so the
+    // receiver can answer protocol_violation instead of the socket dying first.
+    expect(DAEMON_FRAME_MAX_BYTES).toBe(1024 * 1024);
+    expect(DAEMON_WS_MAX_PAYLOAD_BYTES).toBeGreaterThan(DAEMON_FRAME_MAX_BYTES);
+  });
+
+  it("keeps the heartbeat well inside both idle timeouts", () => {
+    // nginx proxy_read_timeout is 1h and Bun idleTimeout is 120s in production.
+    expect(DAEMON_HEARTBEAT_INTERVAL_MS).toBe(15_000);
+    expect(DAEMON_HEARTBEAT_INTERVAL_MS).toBeLessThan(120_000);
+  });
+
+  it("orders offer timeout, cooldown and ack timeout so a stalled offer cannot outlive its task", () => {
+    expect(DAEMON_ACK_TIMEOUT_MS).toBeLessThan(DAEMON_OFFER_TIMEOUT_MS);
+    expect(DAEMON_OFFER_COOLDOWN_MS).toBeGreaterThan(0);
+    expect(DAEMON_UPLINK_WINDOW_FRAMES).toBeGreaterThan(0);
+    expect(DAEMON_TRACE_READ_MAX_LIMIT).toBeGreaterThan(0);
+  });
+});
+
+describe("daemon protocol frame inventory", () => {
+  it("names every frame exactly once", () => {
+    expect(new Set(ALL_FRAME_NAMES).size).toBe(ALL_FRAME_NAMES.length);
+  });
+
+  it("categorizes every frame and rejects anything else", () => {
+    for (const name of ALL_FRAME_NAMES) {
+      expect(daemonFrameCategory(name), `${name} has no category`).not.toBeNull();
+    }
+    expect(daemonFrameCategory("not_a_frame")).toBeNull();
+    expect(daemonFrameCategory("")).toBeNull();
+    expect(daemonFrameCategory("task.offerr")).toBeNull();
+    expect(daemonFrameCategory("steer.consume")).toBeNull();
+    expect(daemonFrameCategory("task.steer")).toBeNull();
+  });
+
+  it("maps the six categories to the frames that behave that way", () => {
+    expect(daemonFrameCategory("hello")).toBe("handshake");
+    expect(daemonFrameCategory("welcome")).toBe("handshake");
+    expect(daemonFrameCategory("reject")).toBe("handshake");
+    expect(daemonFrameCategory("hb")).toBe("best_effort");
+    expect(daemonFrameCategory("res")).toBe("reply");
+    expect(daemonFrameCategory("ack")).toBe("ack");
+    expect(daemonFrameCategory("task.offer")).toBe("event");
+    expect(daemonFrameCategory("trace.append")).toBe("rpc");
+    expect(daemonFrameCategory("trace.push")).toBe("event");
+    expect(daemonFrameCategory("runtime.ready")).toBe("best_effort");
+    expect(daemonFrameCategory("concierge.status")).toBe("best_effort");
+    expect(daemonFrameCategory("concierge.status_report")).toBe("rpc");
+    expect(daemonFrameCategory("trace.read")).toBe("rpc");
+    expect(daemonFrameCategory("trace.subscribe")).toBe("rpc");
+  });
+
+  it("keeps event sequences separate from head-based trace reliability", () => {
+    for (const name of ALL_FRAME_NAMES) {
+      const category = daemonFrameCategory(name);
+      const mustReplay = category === "event" || name === "trace.append";
+      expect(daemonFrameIsReliable(name), `${name} (${category}) replay flag`).toBe(mustReplay);
+      expect(daemonFrameUsesSeq(name), `${name} (${category}) seq flag`).toBe(category === "event");
+    }
+  });
+
+  it("keeps ordinary RPC and best-effort frames off both replay and seq", () => {
+    expect(daemonFrameCategory("hb")).toBe("best_effort");
+    expect(daemonFrameIsReliable("hb")).toBe(false);
+    expect(daemonFrameUsesSeq("hb")).toBe(false);
+
+    // runtime.ready is best effort for the same reason hb is: it is recomputed
+    // from local state on every reconnect, so there is nothing to replay.
+    expect(daemonFrameCategory("runtime.ready")).toBe("best_effort");
+    expect(daemonFrameIsReliable("runtime.ready")).toBe(false);
+
+    // RPC frames pair by id and are retried by their caller, not replayed by seq.
+    expect(daemonFrameCategory("turn.input")).toBe("rpc");
+    expect(daemonFrameIsReliable("turn.input")).toBe(false);
+    expect(daemonFrameUsesSeq("turn.input")).toBe(false);
+    expect(daemonFrameCategory("trace.read")).toBe("rpc");
+    expect(daemonFrameIsReliable("trace.read")).toBe(false);
+
+    expect(daemonFrameCategory("res")).toBe("reply");
+    expect(daemonFrameIsReliable("res")).toBe(false);
+    expect(daemonFrameCategory("ack")).toBe("ack");
+    expect(daemonFrameIsReliable("ack")).toBe(false);
+
+    // And the frames that do carry a seq say so.
+    expect(daemonFrameUsesSeq("task.offer")).toBe(true);
+    expect(daemonFrameUsesSeq("task.complete")).toBe(true);
+    expect(daemonFrameUsesSeq("trace.push")).toBe(true);
+  });
+
+  it("resumes trace.append by head without an outer seq or outbox window", () => {
+    expect(daemonFrameCategory("trace.append")).toBe("rpc");
+    expect(daemonFrameIsReliable("trace.append")).toBe(true);
+    expect(daemonFrameUsesSeq("trace.append")).toBe(false);
+    expect(daemonFrameUsesOutboxWindow("trace.append")).toBe(false);
+    expect(daemonFrameCategory("trace.push")).toBe("event");
+    expect(daemonFrameUsesSeq("trace.push")).toBe(true);
+  });
+
+  it("windows only outbox-backed uplink frames, never trace", () => {
+    expect(daemonFrameUsesOutboxWindow("task.complete")).toBe(true);
+    expect(daemonFrameUsesOutboxWindow("plugin.state")).toBe(true);
+    // The trace file is the buffer for trace.append, so it is not window-managed.
+    expect(daemonFrameUsesOutboxWindow("trace.append")).toBe(false);
+    expect(daemonFrameUsesOutboxWindow("hb")).toBe(false);
+    expect(daemonFrameIsReliable("trace.append")).toBe(true);
+  });
+
+  it("carries the four trace frames the Feishu connector switch needs", () => {
+    expect(DAEMON_UPLINK_RPC_FRAMES).toContain("trace.subscribe");
+    expect(DAEMON_UPLINK_RPC_FRAMES).toContain("trace.unsubscribe");
+    expect(DAEMON_UPLINK_RPC_FRAMES).toContain("trace.fetch");
+    expect(DAEMON_DOWNLINK_TRACE_FRAMES).toContain("trace.push");
+    // The read direction stays a server-initiated RPC; there is no new HTTP route.
+    expect(DAEMON_DOWNLINK_RPC_FRAMES).toContain("trace.read");
+  });
+
+  it("moves the periodic maintenance polls onto RPC frames", () => {
+    for (const name of ["gc.check_issue", "gc.check_chat_session", "gc.check_task", "gc.subject_reclaimed"]) {
+      expect(DAEMON_UPLINK_RPC_FRAMES).toContain(name as never);
+    }
+    // Autopilot runs are Chats now, and cleanup is reported per subject.
+    for (const name of ["gc.check_autopilot_run", "gc.workspace_cleaned"]) {
+      expect(DAEMON_UPLINK_RPC_FRAMES).not.toContain(name as never);
+    }
+  });
+
+  it("moves on-demand storage reclaim onto a typed frame pair, not the shell channel", () => {
+    expect(DAEMON_DOWNLINK_EVENT_FRAMES).toContain("runtime.gc_run");
+    expect(DAEMON_UPLINK_EVENT_FRAMES).toContain("runtime.gc_run_result");
+    // The generic shell channel keeps its own frames, and a reclaim run must not be
+    // carried by them: `runtime.command` takes `{command, args, timeout_ms}` and
+    // the daemon executes it directly, so routing a structured request through it
+    // would mean remote shell execution.
+    expect(DAEMON_DOWNLINK_EVENT_FRAMES).toContain("runtime.command");
+    expect(DAEMON_UPLINK_EVENT_FRAMES).toContain("runtime.command_result");
+    expect(DAEMON_DOWNLINK_EVENT_FRAMES).not.toContain("pending_command" as never);
+    // It is a reliable event on both sides, so it is replayed by entity id.
+    expect(daemonFrameIsReliable("runtime.gc_run")).toBe(true);
+    expect(daemonFrameIsReliable("runtime.gc_run_result")).toBe(true);
+    expect(daemonFrameUsesSeq("runtime.gc_run")).toBe(true);
+  });
+
+  it("sends the storage report best effort and drops the archive frames", () => {
+    expect(DAEMON_UPLINK_BEST_EFFORT_FRAMES).toContain("gc.storage_report");
+    expect(daemonFrameCategory("gc.storage_report")).toBe("best_effort");
+    expect(daemonFrameIsReliable("gc.storage_report")).toBe(false);
+    expect(daemonFrameCategory("gc.subject_reclaimed")).toBe("rpc");
+    expect(ALL_FRAME_NAMES).not.toContain("runtime.archive_sessions" as never);
+    expect(ALL_FRAME_NAMES).not.toContain("runtime.archive_sessions_result" as never);
+  });
+
+  it("sends the running-subagent count best effort, without a seq (PR 5)", () => {
+    expect(DAEMON_UPLINK_BEST_EFFORT_FRAMES).toContain("task.activity");
+    expect(daemonFrameCategory("task.activity")).toBe("best_effort");
+    expect(daemonFrameIsReliable("task.activity")).toBe(false);
+    expect(daemonFrameUsesSeq("task.activity")).toBe(false);
+  });
+
+  it("carries background tasks on additive frames behind one cap (PR 6)", () => {
+    // The lane snapshot is recomputed from local state: best effort, never replayed.
+    expect(daemonFrameCategory("lane.background_tasks")).toBe("best_effort");
+    expect(daemonFrameIsReliable("lane.background_tasks")).toBe(false);
+    expect(daemonFrameUsesSeq("lane.background_tasks")).toBe(false);
+    // The doorbell needs an answer.
+    expect(DAEMON_UPLINK_RPC_FRAMES).toContain("lane.background_wake");
+    expect(daemonFrameCategory("lane.background_wake")).toBe("rpc");
+    // Stop and release are DB-derived downlinks, resent at hello.
+    for (const name of ["lane.background_stop", "lane.background_release"] as const) {
+      expect(DAEMON_DOWNLINK_EVENT_FRAMES).toContain(name);
+      expect(daemonFrameCategory(name)).toBe("event");
+      expect(daemonFrameUsesSeq(name)).toBe(true);
+    }
+    expect(DAEMON_PROTOCOL_CAPS).toContain("lane.background");
+    expect(DAEMON_PROTOCOL_ERROR_CODES).toContain("lane_moved");
+    expect(DAEMON_PROTOCOL_ERROR_CODES).toContain("session_closed");
+    // A rejected doorbell is a business answer: not retried as is, and no outbox partition depends on it.
+    expect(DAEMON_RETRYABLE_ERROR_CODES).not.toContain("lane_moved" as never);
+    expect(DAEMON_TERMINAL_ERROR_CODES).not.toContain("session_closed" as never);
+    expect(DAEMON_LANE_BACKGROUND_MAX_TASKS).toBe(32);
+    expect(DAEMON_LANE_BACKGROUND_MAX_BYTES).toBeLessThan(DAEMON_FRAME_MAX_BYTES);
+    expect(DAEMON_LANE_BACKGROUND_DEBOUNCE_MS).toBeLessThan(DAEMON_LANE_BACKGROUND_REFRESH_MS);
+    expect(DAEMON_LANE_BACKGROUND_CLOSED_REPEATS * DAEMON_LANE_BACKGROUND_CLOSED_REPEAT_MS).toBeLessThanOrEqual(DAEMON_LANE_BACKGROUND_REFRESH_MS);
+    expect(DAEMON_LANE_BACKGROUND_STOP_ALL).toBe("*");
+  });
+
+  it("keeps the upgrade channel free of task traffic", () => {
+    // The HTTP heartbeat stays alive only to carry an update instruction, so no
+    // offer or report frame may be reachable through it.
+    expect(DAEMON_DOWNLINK_EVENT_FRAMES).not.toContain("task.accept" as never);
+    expect(ALL_FRAME_NAMES).not.toContain("task.claim");
+  });
+});
+
+describe("daemon protocol codes", () => {
+  it("keeps close codes unique and in the application range", () => {
+    const codes = Object.values(DAEMON_PROTOCOL_CLOSE_CODES);
+    expect(new Set(codes).size).toBe(codes.length);
+    for (const code of codes) {
+      expect(code).toBeGreaterThanOrEqual(4000);
+      expect(code).toBeLessThanOrEqual(4999);
+    }
+  });
+
+  it("defaults to reconnecting, and stops only on the four terminal codes", () => {
+    // The deny-list direction is the load-bearing part: a daemon that treats an
+    // unexpected code as terminal is unreachable until someone SSHes in.
+    for (const code of DAEMON_TERMINAL_CLOSE_CODES) {
+      expect(daemonCloseCodeIsRetryable(code), `${code} must be terminal`).toBe(false);
+    }
+    expect([...DAEMON_TERMINAL_CLOSE_CODES].sort((a, b) => a - b)).toEqual([4401, 4403, 4410, 4426]);
+
+    // The two protocol-defined non-terminal codes.
+    expect(daemonCloseCodeIsRetryable(DAEMON_PROTOCOL_CLOSE_CODES.ack_timeout)).toBe(true);
+    expect(daemonCloseCodeIsRetryable(DAEMON_PROTOCOL_CLOSE_CODES.server_closing)).toBe(true);
+  });
+
+  it("retries the codes the WebSocket layer produces on its own", () => {
+    // These are the codes a daemon actually observes for a dropped network, a
+    // killed server, or a restart. An allow-list would have made every one of them
+    // terminal, which is the defect this replaced.
+    for (const code of [1000, 1001, 1005, 1006, 1011, 1012, 1013]) {
+      expect(daemonCloseCodeIsRetryable(code), `${code} must be retryable`).toBe(true);
+    }
+    // An unassigned / future code is retryable too, by the same rule.
+    expect(daemonCloseCodeIsRetryable(4999)).toBe(true);
+    expect(daemonCloseCodeIsRetryable(0)).toBe(true);
+  });
+
+  it("distinguishes the one terminal code that has a scheduled way forward", () => {
+    // 4426 stops the reconnect loop but is not a dead end: the daemon enters
+    // `upgrade_wait` and polls the upgrade channel.
+    expect(daemonCloseCodeRequiresUpgrade(DAEMON_PROTOCOL_CLOSE_CODES.protocol_upgrade_required)).toBe(true);
+    for (const code of [4401, 4403, 4410]) {
+      expect(daemonCloseCodeRequiresUpgrade(code)).toBe(false);
+    }
+    expect(daemonCloseCodeRequiresUpgrade(1006)).toBe(false);
+    expect(daemonCloseCodeRequiresUpgrade(4001)).toBe(false);
+  });
+
+  it("keeps error codes unique and the retryable/terminal sets disjoint", () => {
+    expect(new Set(DAEMON_PROTOCOL_ERROR_CODES).size).toBe(DAEMON_PROTOCOL_ERROR_CODES.length);
+    for (const code of DAEMON_RETRYABLE_ERROR_CODES) {
+      expect(DAEMON_PROTOCOL_ERROR_CODES).toContain(code);
+      expect(DAEMON_TERMINAL_ERROR_CODES).not.toContain(code as never);
+    }
+    for (const code of DAEMON_TERMINAL_ERROR_CODES) {
+      expect(DAEMON_PROTOCOL_ERROR_CODES).toContain(code);
+    }
+  });
+
+  it("covers the four trace.read failures MUL-402 and MUL-403 branch on", () => {
+    for (const code of ["daemon_unreachable", "daemon_timeout", "daemon_busy", "trace_not_hot"]) {
+      expect(DAEMON_PROTOCOL_ERROR_CODES).toContain(code as never);
+    }
+  });
+
+  it("keeps capability bits unique", () => {
+    expect(new Set(DAEMON_PROTOCOL_CAPS).size).toBe(DAEMON_PROTOCOL_CAPS.length);
+  });
+});
+
+describe("compareDaemonCliVersion", () => {
+  it("orders dotted releases", () => {
+    expect(compareDaemonCliVersion("0.2.83", "0.2.82")).toBe(1);
+    expect(compareDaemonCliVersion("0.2.82", "0.2.83")).toBe(-1);
+    expect(compareDaemonCliVersion("0.2.83", "0.2.83")).toBe(0);
+    expect(compareDaemonCliVersion("0.3.0", "0.2.99")).toBe(1);
+    expect(compareDaemonCliVersion("1.0.0", "0.99.99")).toBe(1);
+  });
+
+  it("tolerates a leading v and a prerelease or build suffix", () => {
+    expect(compareDaemonCliVersion("v0.2.83", "0.2.83")).toBe(0);
+    expect(compareDaemonCliVersion("0.2.83-rc.1", "0.2.83")).toBe(0);
+    expect(compareDaemonCliVersion("0.2.83+build.7", "0.2.83")).toBe(0);
+  });
+
+  it("treats an unreadable version as older, so it has to upgrade", () => {
+    expect(compareDaemonCliVersion("", "0.2.83")).toBe(-1);
+    expect(compareDaemonCliVersion("dev", "0.2.83")).toBe(-1);
+    expect(compareDaemonCliVersion("0.2", "0.2.83")).toBe(-1);
+    expect(compareDaemonCliVersion("garbage", "garbage")).toBe(0);
+  });
+});
+
+describe("meetsDaemonMinCliVersion", () => {
+  it("admits the pinned minimum and anything newer", () => {
+    expect(meetsDaemonMinCliVersion(DAEMON_MIN_CLI_VERSION)).toBe(true);
+    expect(meetsDaemonMinCliVersion(`${Number(DAEMON_MIN_CLI_VERSION.split(".")[0]) + 1}.0.0`)).toBe(true);
+  });
+
+  it("rejects released daemon versions before the unified model", () => {
+    // Every online daemon reported v0.2.82 when MUL-401 was designed.
+    expect(meetsDaemonMinCliVersion("0.2.82")).toBe(false);
+    expect(meetsDaemonMinCliVersion("0.2.85")).toBe(false);
+    expect(meetsDaemonMinCliVersion("0.2.86")).toBe(false);
+    expect(meetsDaemonMinCliVersion("0.2.87")).toBe(false);
+    expect(meetsDaemonMinCliVersion("0.2.88")).toBe(false);
+    // v0.2.89 still writes fragment traces (PR 2, ADR 0019).
+    expect(meetsDaemonMinCliVersion("0.2.89")).toBe(false);
+    expect(meetsDaemonMinCliVersion("0.1.0")).toBe(false);
+  });
+});
+
+
+/**
+ * The payload types are compile-time contracts, but a few of their shape rules are
+ * behavioural claims that belong in a test: `closed` is always true on a completion
+ * block, the histogram carries a null tool for non-tool frames, and the GC run
+ * result can express failure.
+ *
+ * These are typed literals assembled here rather than parsed, so a field rename in
+ * `daemon-protocol.ts` fails this file at `tsc`, not silently at runtime.
+ */
+describe("payload contracts", () => {
+  it("spells completion trace completeness as closed: true", () => {
+    const trace: DaemonTaskCompletionTrace = {
+      head: 42,
+      event_count: 42,
+      closed: true,
+      tool_call_count: 7,
+      type_histogram: [
+        { type: "text", tool: null, count: 20 },
+        { type: "tool_use", tool: "Bash", count: 7 },
+      ],
+    };
+    expect(trace.closed).toBe(true);
+    // A dense trace has equal head and event_count; a sparse one does not, and the
+    // type keeps both so the two can be told apart.
+    expect(trace.head).toBe(trace.event_count);
+  });
+
+  it("expresses a failed GC run with a null report and a reason", () => {
+    const failed: DaemonGcRunResultPayload = {
+      request_id: "req_1",
+      runtime_id: "rt_1",
+      status: "failed",
+      report: null,
+      error: "root ownership lost",
+    };
+    const request: DaemonGcRunPayload = { id: "req_1", mode: "dry_run" };
+    expect(failed.report).toBeNull();
+    expect(failed.error).toBe("root ownership lost");
+    expect(request.mode).toBe("dry_run");
+  });
+
+  it("carries closed on the trace frames so completeness is never inferred", () => {
+    const push: DaemonTracePushPayload = { task_id: "t", events: [], closed: false };
+    const append: DaemonTraceAppendPayload = { task_id: "t", events: [], closed: true };
+    const reply: DaemonTraceReadReplyPayload = {
+      ok: true, view: "events", format: "v2", events: [], next_after_seq: 0, head: 0, eof: true, closed: true,
+    };
+    const subscribe: DaemonTraceSubscribeReplyPayload = {
+      ok: true, first_seq: 1, head: 0, closed: false, gap: false,
+    };
+    expect([push.closed, append.closed, reply.closed, subscribe.closed]).toEqual([false, true, true, false]);
+  });
+
+  it("types the reclaimed subject kinds and the chat check fields the daemon retains by", () => {
+    const reclaimed: DaemonGcSubjectReclaimedPayload[] = [
+      { runtime_id: "rt_1", subject: { kind: "issue", id: "iss_1" }, snapshot: null, unsaved_work: false, freed_bytes: 1 },
+      { runtime_id: "rt_1", subject: { kind: "chat", id: "chat_1" }, snapshot: null, unsaved_work: false, freed_bytes: 2 },
+      { runtime_id: "rt_1", subject: { kind: "task", id: "tsk_1" }, snapshot: null, unsaved_work: false, freed_bytes: 3 },
+    ];
+    expect(reclaimed.map((payload) => payload.subject.kind)).toEqual(["issue", "chat", "task"]);
+    const check: DaemonGcCheckChatSessionReply = {
+      ok: true,
+      status: "active",
+      updated_at: "2026-10-13T00:00:00.000Z",
+      pinned: true,
+      origin: { autopilot_id: "ap_1", run_id: "apr_1" },
+      last_activity_at: null,
+    };
+    expect(check.origin?.autopilot_id).toBe("ap_1");
+  });
+});

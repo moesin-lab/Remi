@@ -1,7 +1,10 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
+import { issueMessagesPath, requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -32,19 +35,18 @@ describe("agent Issue proposal policy", () => {
       headers: fixture.ordinaryHeaders,
       body: JSON.stringify({ title: "Delegated child remains supported", parent_issue_id: fixture.current.id }),
     });
-    expect(ordinary.status).toBe(201);
+    expect(ordinary.status, await ordinary.clone().text()).toBe(201);
     expect((await ordinary.json()).title).toBe("Delegated child remains supported");
 
-    const delegated = await fixture.app.request("/api/multiremi/tasks", {
+    const delegated = await fixture.app.request(issueMessagesPath(fixture.store, fixture.current.id), {
       method: "POST",
       headers: fixture.ordinaryHeaders,
-      body: JSON.stringify({ agentId: fixture.worker.id, prompt: "ordinary delegation" }),
+      body: JSON.stringify(requestMessageBody(fixture.store, { agentId: fixture.worker.id, prompt: "ordinary delegation" })),
     });
-    expect(delegated.status).toBe(201);
-    const delegatedTask = (await delegated.json() as { task: { id: string } }).task;
+    expect(delegated.status).toBe(200);
+    const delegatedTask = sentTask(fixture.store, await delegated.json());
     expect(fixture.store.getTask(delegatedTask.id)).toMatchObject({
-      parentTaskId: fixture.ordinaryTask.id,
-      issueCreationRestricted: false,
+            issueCreationRestricted: false,
     });
     const delegatedCredential = await fixture.store.createTaskAccessToken(
       fixture.store.getTask(delegatedTask.id)!,
@@ -99,13 +101,13 @@ describe("agent Issue proposal policy", () => {
 
   it("prevents restricted tasks from configuring or firing create_issue Autopilots", async () => {
     const fixture = await policyFixture();
-    const createIssueAutopilot = fixture.store.createAutopilot({
+    const createIssueAutopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Human-created Issue autopilot",
       assigneeId: fixture.worker.id,
       executionMode: "create_issue",
       triggerKind: "api",
     });
-    const runOnlyAutopilot = fixture.store.createAutopilot({
+    const runOnlyAutopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Run-only autopilot",
       assigneeId: fixture.worker.id,
       executionMode: "run_only",
@@ -149,26 +151,26 @@ describe("agent Issue proposal policy", () => {
   it("carries the restriction through task, Session, squad, and run-only Autopilot delegation", async () => {
     const fixture = await policyFixture();
 
-    const generic = await fixture.app.request("/api/multiremi/tasks", {
+    const generic = await fixture.app.request(issueMessagesPath(fixture.store, fixture.current.id), {
       method: "POST",
       headers: fixture.restrictedHeaders,
-      body: JSON.stringify({ agentId: fixture.worker.id, prompt: "generic delegated work" }),
+      body: JSON.stringify(requestMessageBody(fixture.store, { agentId: fixture.worker.id, prompt: "generic delegated work" })),
     });
-    expect(generic.status).toBe(201);
-    const genericTaskId = (await generic.json() as { task: { id: string } }).task.id;
+    expect(generic.status).toBe(200);
+    const genericTaskId = sentTask(fixture.store, await generic.json()).id;
     await expectRestrictedTaskCannotCreateIssue(fixture, genericTaskId, "generic delegation");
 
     const sessionId = fixture.restrictedTask.issueSessionId!;
     const session = await fixture.app.request(
-      `/api/issues/${fixture.current.id}/sessions/${sessionId}/tasks`,
+      `/api/sessions/${sessionId}/messages`,
       {
         method: "POST",
         headers: fixture.restrictedHeaders,
-        body: JSON.stringify({ agent_id: fixture.worker.id, prompt: "Session delegated work" }),
+        body: JSON.stringify(requestMessageBody(fixture.store, { agent_id: fixture.worker.id, prompt: "Session delegated work" }, { type: "role", ref: "issue_owner" })),
       },
     );
-    expect(session.status).toBe(201);
-    const sessionTaskId = (await session.json() as { id: string }).id;
+    expect(session.status).toBe(200);
+    const sessionTaskId = sentTask(fixture.store, await session.json()).id;
     await expectRestrictedTaskCannotCreateIssue(fixture, sessionTaskId, "Session delegation");
 
     const squad = fixture.store.createSquad({
@@ -176,7 +178,7 @@ describe("agent Issue proposal policy", () => {
       leaderId: fixture.restricted.id,
       memberIds: [fixture.worker.id],
     });
-    const squadIssue = fixture.store.createIssue({
+    const squadIssue = createResponsibleTestIssue(fixture.store, {
       title: "Squad policy work",
       workspaceId: "local",
       assigneeType: "squad",
@@ -188,23 +190,23 @@ describe("agent Issue proposal policy", () => {
       prompt: "lead squad work",
     });
     const squadCredential = await fixture.store.createTaskAccessToken(squadSource, "local");
-    const squadComment = await fixture.app.request(`/api/issues/${squadIssue.id}/comments`, {
+    const squadComment = await fixture.app.request(issueMessagesPath(fixture.store, squadIssue.id), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${squadCredential.token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify(requestMessageBody(fixture.store, {
         body: `Please help [@${fixture.worker.name}](mention://agent/${fixture.worker.id})`,
-      }),
+      }, { type: "role", ref: "issue_owner" })),
     });
-    expect(squadComment.status).toBe(201);
+    expect(squadComment.status).toBe(200);
     const squadTask = fixture.store.listTasksForIssue(squadIssue.id)
-      .find((task) => task.parentTaskId === squadSource.id && task.agentId === fixture.worker.id);
+      .find((task) => task.agentId === fixture.worker.id);
     expect(squadTask).toBeDefined();
     await expectRestrictedTaskCannotCreateIssue(fixture, squadTask!.id, "squad mention delegation");
 
-    const runOnlyAutopilot = fixture.store.createAutopilot({
+    const runOnlyAutopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Delegated run-only autopilot",
       assigneeId: fixture.worker.id,
       executionMode: "run_only",
@@ -254,20 +256,20 @@ describe("agent Issue proposal policy", () => {
       const agentId = String(rawAgent.id);
       expect(fixture.store.getAgent(agentId)?.issueCreationRequiresProposal, label).toBe(true);
 
-      const delegated = await fixture.app.request("/api/multiremi/tasks", {
+      const delegated = await fixture.app.request(issueMessagesPath(fixture.store, fixture.current.id), {
         method: "POST",
         headers: fixture.restrictedHeaders,
-        body: JSON.stringify({ agentId, prompt: `${label} delegated work` }),
+        body: JSON.stringify(requestMessageBody(fixture.store, { agentId, prompt: `${label} delegated work` })),
       });
-      expect(delegated.status, label).toBe(201);
-      const taskId = (await delegated.json() as { task: { id: string } }).task.id;
+      expect(delegated.status, label).toBe(200);
+      const taskId = sentTask(fixture.store, await delegated.json()).id;
       await expectRestrictedTaskCannotCreateIssue(fixture, taskId, `${label} Agent delegation`);
     }
   });
 
   it("persists a restricted task's taint on schedule triggers and blocks future background Issue creation", async () => {
     const fixture = await policyFixture();
-    const autopilot = fixture.store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Future scheduled delegation",
       assigneeId: fixture.worker.id,
       executionMode: "run_only",
@@ -310,13 +312,14 @@ describe("agent Issue proposal policy", () => {
   it("persists system-event taint independently of the later event caller", async () => {
     const fixture = await policyFixture();
     const project = fixture.store.createProject({ title: "Approval policy project" });
-    const triggerIssue = fixture.store.createIssue({
+    const triggerIssue = createResponsibleTestIssue(fixture.store, {
       title: "Later human event",
+      assigneeType: 'agent', assigneeId: fixture.ordinary.id,
       workspaceId: "local",
       projectId: project.id,
       status: "todo",
     });
-    const autopilot = fixture.store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Future system event",
       assigneeId: fixture.worker.id,
       executionMode: "trigger_issue",
@@ -357,13 +360,19 @@ describe("agent Issue proposal policy", () => {
   it("uses trusted event and webhook-delivery source tasks as a second inheritance path", async () => {
     const fixture = await policyFixture();
     const project = fixture.store.createProject({ title: "Source lineage project" });
-    const eventIssue = fixture.store.createIssue({
+    // The restricted Agent executes the parent and closes its direct child (the done rule).
+    const eventParent = createResponsibleTestIssue(fixture.store, {
+      title: "Restricted source parent", assigneeType: 'agent', assigneeId: fixture.restricted.id, workspaceId: "local", status: "in_progress",
+    });
+    const eventIssue = createResponsibleTestIssue(fixture.store, {
       title: "Restricted source event",
+      parentIssueId: eventParent.id,
+      assigneeType: 'agent', assigneeId: fixture.ordinary.id,
       workspaceId: "local",
       projectId: project.id,
       status: "todo",
     });
-    const eventAutopilot = fixture.store.createAutopilot({
+    const eventAutopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Clean system-event automation",
       assigneeId: fixture.worker.id,
       executionMode: "trigger_issue",
@@ -378,9 +387,11 @@ describe("agent Issue proposal policy", () => {
         projectId: project.id,
       },
     });
+    const reviewTask=fixture.store.createTask({ agentId: fixture.restricted.id, issueId: eventParent.id, prompt: "Review the child" });
+    const sourceCredential=await fixture.store.createTaskAccessToken(reviewTask,'local');
     const changed = await fixture.app.request(`/api/issues/${eventIssue.id}`, {
       method: "PATCH",
-      headers: fixture.restrictedHeaders,
+      headers: {...fixture.restrictedHeaders,Authorization:`Bearer ${sourceCredential.token}`},
       body: JSON.stringify({ status: "done" }),
     });
     expect(changed.status).toBe(200);
@@ -392,7 +403,7 @@ describe("agent Issue proposal policy", () => {
       "system-event source task",
     );
 
-    const webhookAutopilot = fixture.store.createAutopilot({
+    const webhookAutopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Clean webhook automation",
       assigneeId: fixture.worker.id,
       executionMode: "run_only",
@@ -425,7 +436,7 @@ describe("agent Issue proposal policy", () => {
 
   it("makes taint human-visible and clearable while keeping it hidden and immutable for tasks", async () => {
     const fixture = await policyFixture();
-    const autopilot = fixture.store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Shared Wiki-like automation",
       assigneeId: fixture.worker.id,
       executionMode: "run_only",
@@ -543,6 +554,7 @@ describe("agent Issue proposal policy", () => {
 async function policyFixture() {
   const store = createStore();
   store.ensureLocalWorkspace();
+  const human=store.findWorkspaceMemberForUser('local','local')!;
   const restricted = store.createAgent({
     name: "Feishu watcher",
     provider: "codex",
@@ -550,15 +562,34 @@ async function policyFixture() {
   });
   const ordinary = store.createAgent({ name: "Ordinary collaborator", provider: "codex" });
   const worker = store.createAgent({ name: "Quick-create worker", provider: "codex" });
-  const current = store.createIssue({ title: "Current work", workspaceId: "local" });
-  const restrictedTask = store.createTask({ agentId: restricted.id, issueId: current.id, prompt: "watch Feishu" });
-  const ordinaryTask = store.createTask({ agentId: ordinary.id, issueId: current.id, prompt: "collaborate" });
+  const current = createResponsibleTestIssue(store, { title: "Current work", workspaceId: "local", assigneeType: "agent", assigneeId: ordinary.id });
+  const restrictedSession = store.createIssueSession(current.id, { title: "Restricted work" });
+  const ordinarySession = store.createIssueSession(current.id, { title: "Collaboration" });
+  const restrictedTask = store.createTask({
+    agentId: restricted.id,
+    issueId: current.id,
+    issueSessionId: restrictedSession.id,
+    prompt: "watch Feishu",
+  });
+  const ordinaryTask = store.createTask({
+    agentId: ordinary.id,
+    issueId: current.id,
+    issueSessionId: ordinarySession.id,
+    prompt: "collaborate",
+  });
+
+  for (const [task, session] of [[restrictedTask, restrictedSession], [ordinaryTask, ordinarySession]] as const) {
+    expect(store.getTask(task.id)).toMatchObject({ issueId: current.id, issueSessionId: session.id, chatSessionId: null });
+    expect(store.getIssueSession(session.id)).toMatchObject({ issueId: current.id, chatId: null });
+  }
+
   const restrictedCredential = await store.createTaskAccessToken(restrictedTask, "local");
   const ordinaryCredential = await store.createTaskAccessToken(ordinaryTask, "local");
   const app = createMultiremiApp({ store, authToken: "root-secret" });
   return {
     app,
     store,
+    human,
     restricted,
     ordinary,
     worker,
@@ -586,7 +617,11 @@ async function expectRestrictedTaskCannotCreateIssue(
 ): Promise<void> {
   const task = fixture.store.getTask(taskId)!;
   expect(task.issueCreationRestricted, label).toBe(expectSnapshot);
-  if (expectParent) expect(task.parentTaskId, label).toBeString();
+  if (expectParent) {
+    // #3/#9: lineage is the triggering message's source Turn.
+    const turn = fixture.store.getTurnForAttempt(task.id)!;
+    expect(fixture.store.getMessage(turn.trigger_message_id!)?.task_id, label).toBeString();
+  }
   const credential = await fixture.store.createTaskAccessToken(task, "local");
   const before = fixture.store.listIssues({ workspaceId: "local" }).length;
   const response = await fixture.app.request("/api/issues", {

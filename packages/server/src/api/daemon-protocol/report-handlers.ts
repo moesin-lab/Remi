@@ -1,0 +1,599 @@
+import { PlannedRestartError } from "@multiremi/store/planned-restarts.js";
+import type { MultiremiStore } from "@multiremi/store/store.js";
+import { UsageValidationError, validateUsageSnapshot } from "@multiremi/store/usage-accounting.js";
+import { isDeepStrictEqual } from "node:util";
+import { TaskDaemonReportError } from "@multiremi/store/repos/tasks-repo.js";
+import type { MultiremiIssueWorkspaceRepo, MultiremiIssueWorkspaceStatus, ReportAgentPluginRuntimeStateInput,
+  ReportRuntimeUpdateInput, ReportRuntimeCommandInput, ReportRuntimeModelListInput,
+  ReportRuntimeLocalSkillListInput, ReportRuntimeLocalSkillImportInput, ReportRuntimeDirectoryScanInput,
+  ReportBotMenuPublishInput, FeishuDecisionDegradeReason } from "@multiremi/contracts/types.js";
+import { FEISHU_DECISION_DEGRADE_REASONS } from "@multiremi/contracts/types.js";
+import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
+import { isFeishuOpenId } from "@shared/feishu-mention.js";
+import { normalizeFeishuBotErrorCode, redactFeishuBotError } from "@multiremi/feishu-bot/diagnostics.js";
+import type { StorageReport, SubjectSnapshot } from "@multiremi/contracts/storage.js";
+import { STORAGE_SUBJECT_KINDS, type StorageSubjectKind } from "@multiremi/contracts/storage.js";
+import type {
+  DaemonGcCheckChatSessionReply, DaemonGcErrorReply, DaemonFeishuOutboundOkReply, DaemonTaskCompletionFields,
+} from "@multiremi/contracts/daemon-protocol.js";
+import { createLogger } from "@shared/logger.js";
+import { log as apiLog } from "../helpers/common.js";
+import { daemonTaskUsageEntries, daemonLocalSkillListReportBody, daemonLocalSkillImportReportBody } from "../helpers.js";
+import { daemonAgentPluginStateResponse } from "../wire/index.js";
+import type { DaemonProtocolLayer } from "./index.js";
+import type { DaemonProtocolSession } from "./session.js";
+import type { DaemonParsedFrame } from "./frames.js";
+import type { DaemonTurnBridge } from "./turn-bridge.js";
+import type { DaemonTurnCompletePayload } from "@multiremi/contracts/daemon-protocol.js";
+import { isTraceContextUsage, isTraceLateSubagent, type TraceContextUsage, type TraceLateSubagent } from "@multiremi/contracts/trace.js";
+import { boundSlashCommands } from "@multiremi/contracts/slash-commands.js";
+
+class ReportRejection extends Error {
+  constructor(readonly code: string) { super(code); }
+}
+
+const log = createLogger("daemon-reports");
+
+class GcRejection extends Error {
+  constructor(readonly status: number, readonly code: string | null, message: string) { super(message); }
+}
+
+function gcError(status: number, code: string | null, message: string): DaemonGcErrorReply {
+  return { ok: false, code: status === 404 ? "task_not_found" : [401, 403, 410].includes(status)
+    ? "authority_revoked" : status < 500 ? "invalid_report" : "server_error", message, retryable: status >= 500,
+    operation_error: { status, code, message } };
+}
+
+function reject(code = "invalid_report"): never { throw new ReportRejection(code); }
+const string = (value: unknown): string => typeof value === "string" ? value : "";
+const nullable = (value: unknown): string | null => string(value).trim() || null;
+const terminal = (status: string): boolean => ["completed", "failed", "cancelled"].includes(status);
+
+function completionFields(p: Record<string, unknown>, taskId: string): DaemonTaskCompletionFields | null {
+  const count = (value: unknown): boolean => Number.isSafeInteger(value) && (value as number) >= 0;
+  const malformed = (field: keyof DaemonTaskCompletionFields): null => {
+    log.error("Terminal report has a malformed round-card field", { taskId, field });
+    return null;
+  };
+  if (p.trace !== undefined) {
+    if (!p.trace || typeof p.trace !== "object" || Array.isArray(p.trace)) return malformed("trace");
+    const trace = p.trace as Record<string, unknown>;
+    if (!count(trace.head) || !count(trace.event_count) || trace.closed !== true || !count(trace.tool_call_count)
+      || !Array.isArray(trace.type_histogram) || !trace.type_histogram.every((bucket: unknown) => {
+        if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) return false;
+        const b = bucket as Record<string, unknown>;
+        return typeof b.type === "string" && (b.tool === null || typeof b.tool === "string") && count(b.count);
+      })) return malformed("trace");
+  }
+  if (p.final_reply_md !== undefined && p.final_reply_md !== null && typeof p.final_reply_md !== "string") return malformed("final_reply_md");
+  if (p.model !== undefined && p.model !== null) {
+    if (typeof p.model !== "object" || Array.isArray(p.model)
+      || typeof (p.model as Record<string, unknown>).provider !== "string"
+      || typeof (p.model as Record<string, unknown>).model !== "string") return malformed("model");
+  }
+  // Card metadata must never block a terminal report. Never read trace to fill a blank card.
+  if (p.trace === undefined || p.final_reply_md === undefined || p.model === undefined) {
+    log.warn("Terminal report is missing round-card fields", { taskId });
+    return null;
+  }
+  return {
+    trace: p.trace, final_reply_md: p.final_reply_md, model: p.model,
+    ...traceSummaryFields(p, taskId),
+    ...availableCommandsField(p, taskId),
+  } as DaemonTaskCompletionFields;
+}
+
+/**
+ * ADR 0025: the optional command catalogue. Older daemons omit it, and absent
+ * or null stores nothing. A malformed value is dropped with a log line (never
+ * its content) and never costs the terminal report; the entries are bounded
+ * again and lose any key the contract does not name. An empty list is kept.
+ */
+function availableCommandsField(p: Record<string, unknown>, taskId: string): Pick<DaemonTaskCompletionFields, "available_commands"> {
+  const value = p.available_commands;
+  if (value === undefined || value === null) return {};
+  const catalogue = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const provider = typeof catalogue?.provider === "string" ? catalogue.provider.trim() : "";
+  if (!catalogue || !provider || provider.length > 64 || typeof catalogue.reported_at !== "string"
+    || Number.isNaN(Date.parse(catalogue.reported_at)) || !Array.isArray(catalogue.commands)) {
+    log.error("Terminal report has a malformed round-card field", { taskId, field: "available_commands" });
+    return {};
+  }
+  return { available_commands: { provider, reported_at: catalogue.reported_at, commands: boundSlashCommands(catalogue.commands) } };
+}
+
+/** `late_subagents` holds at most this many entries (PR 5, `lateSubagents` in shared). */
+const MAX_LATE_SUBAGENTS = 5;
+/** The PostgreSQL INTEGER ceiling of `multiremi_turn_attempts.running_subagents` and `running_background_tasks`. */
+const MAX_RUNNING_SUBAGENTS = 2_147_483_647;
+
+/**
+ * PR 5: the optional `late_subagents` completion fact. Older daemons omit it,
+ * which reads as null without a log line; an empty list is stored as null
+ * ("none did"). More than five entries, or any entry that fails the guard,
+ * makes the whole value null with a log line. Only the contract's keys are kept.
+ */
+function lateSubagentsField(p: Record<string, unknown>, taskId: string): TraceLateSubagent[] | null {
+  const value = p.late_subagents;
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length > MAX_LATE_SUBAGENTS || !value.every(isTraceLateSubagent)) {
+    log.error("Terminal report has a malformed round-card field", { taskId, field: "late_subagents" });
+    return null;
+  }
+  return value.length
+    ? value.map(({ item_id, name, status, duration_ms }) => ({ item_id, name, status, duration_ms }))
+    : null;
+}
+
+/**
+ * The turn + items summary fields (PR 2): context usage, "worked for" and the
+ * process item count. Each is validated on its own; a missing or malformed
+ * value becomes null with a log line and never costs the rest of the card.
+ * PR 5's optional `late_subagents` follows `lateSubagentsField`: missing is
+ * silent.
+ */
+function traceSummaryFields(p: Record<string, unknown>, taskId: string): Pick<DaemonTaskCompletionFields,
+  "context_usage" | "worked_ms" | "process_item_count" | "late_subagents"> {
+  const count = (value: unknown): boolean => Number.isSafeInteger(value) && (value as number) >= 0;
+  const field = <T>(name: "context_usage" | "worked_ms" | "process_item_count", valid: (value: unknown) => boolean): T | null => {
+    const value = p[name];
+    if (value === null) return null;
+    if (value === undefined) {
+      log.warn("Terminal report is missing a turn summary field", { taskId, field: name });
+      return null;
+    }
+    if (!valid(value)) {
+      log.error("Terminal report has a malformed round-card field", { taskId, field: name });
+      return null;
+    }
+    return value as T;
+  };
+  const usage = field<TraceContextUsage>("context_usage", isTraceContextUsage);
+  return {
+    context_usage: usage ? { used: usage.used, size: usage.size } : null,
+    worked_ms: field<number>("worked_ms", count),
+    process_item_count: field<number>("process_item_count", count),
+    late_subagents: lateSubagentsField(p, taskId),
+  };
+}
+
+/**
+ * MUL-429 (B5): only an explicit `trace.event_count === 0` marks the hot trace
+ * `none`. Read on its own, not from `completionFields`, so a frame that lacks
+ * the other card fields still reports its count; an invalid count is ignored.
+ * Logged on the API logger, as the retired HTTP completion routes did.
+ */
+function completionTraceEventCount(trace: unknown, taskId: string): number | undefined {
+  if (trace === undefined) return undefined;
+  if (trace !== null && typeof trace === "object" && !Array.isArray(trace)) {
+    const eventCount = (trace as Record<string, unknown>).event_count;
+    if (eventCount === undefined) return undefined;
+    if (typeof eventCount === "number" && Number.isSafeInteger(eventCount) && eventCount >= 0) {
+      return eventCount;
+    }
+  }
+  apiLog.warn("Ignoring invalid daemon completion trace.event_count", { taskId });
+  return undefined;
+}
+
+export function authorizeReportRuntime(store: MultiremiStore, session: DaemonProtocolSession, runtimeId: string): void {
+  const runtime = store.getRuntimeLite(runtimeId);
+  const token = session.ownerAccessToken;
+  if (!runtime || !session.runtimeIds.includes(runtimeId)) reject("authority_revoked");
+  if (runtime.daemonId && runtime.daemonId !== session.daemonId) reject("authority_revoked");
+  const workspaceId = runtime.workspaceId ?? "local";
+  if (token && (token.workspaceId !== workspaceId || token.daemonId !== session.daemonId)) reject("authority_revoked");
+  if (token && !store.getWorkspace(workspaceId)) reject("authority_revoked");
+  if (store.isDaemonRetired(workspaceId, session.daemonId)) reject("authority_revoked");
+}
+
+export function authorizeReportTask(store: MultiremiStore, session: DaemonProtocolSession, taskId: string, runtimeId: string | null) {
+  const task = store.getTask(taskId);
+  if (!task) reject("task_not_found");
+  if (!task.runtimeId || (runtimeId && runtimeId !== task.runtimeId)) reject("authority_revoked");
+  authorizeReportRuntime(store, session, task.runtimeId);
+  if ((store.getRuntimeLite(task.runtimeId)?.workspaceId ?? "local") !== task.workspaceId) reject("authority_revoked");
+  return task;
+}
+
+/** Domain handlers are independent of the socket and of removed HTTP routes. */
+export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: MultiremiStore,
+  onTraceClosed?: (taskId: string, head: number, runtimeId: string) => void,
+  turns: DaemonTurnBridge = store.getDaemonTurnBridge()): void {
+  const handle = async (frame: DaemonParsedFrame, session: DaemonProtocolSession) => {
+    try {
+      const p = frame.payload;
+      // Persisted pre-turn reports must be quarantined, never upgraded on replay.
+      if (frame.type === "task.complete") return { ok: false, code: "report_shape_retired", retryable: false };
+      if (frame.type === "turn.complete") {
+        const reply = p.reply as Record<string, unknown> | undefined;
+        if (!string(p.turn_id) || !string(p.attempt_id) || !Number.isSafeInteger(p.input_to_seq)
+          || (p.input_to_seq as number) < 0 || !reply || typeof reply.body_md !== "string"
+          || (reply.message_kind !== "reply" && reply.message_kind !== "final") || "output" in p || "task_id" in p) reject();
+        const runtimeId = frame.rt ?? string(p.runtime_id);
+        authorizeReportRuntime(store, session, runtimeId);
+        const fields = completionFields(p, string(p.attempt_id));
+        if (fields) fields.final_reply_md = reply.body_md;
+        const result = await turns.complete({ payload: p as unknown as DaemonTurnCompletePayload, completionFields: fields,
+          traceEventCount: completionTraceEventCount(p.trace, string(p.attempt_id)) },
+        { runtimeId, daemonId: session.daemonId, workspaceId: store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", userId: session.ownerAccessToken?.userId, inputUnread: session.supportsInputUnread, generation: p.generation as number | undefined });
+        if (result.ok === true && fields?.trace) onTraceClosed?.(string(p.attempt_id), fields.trace.head, runtimeId);
+        return result;
+      }
+      if (frame.type.startsWith("task.")) {
+        const taskId = string(p.task_id);
+        if (!taskId) reject();
+        let task;
+        let reportingRuntimeId: string | null = null;
+        if ((frame.type === "task.usage" && p.usageSnapshot !== undefined) || (frame.type === "task.start" && p.usage_run_id !== undefined)) {
+          let runId: string;
+          if (frame.type === "task.usage") {
+            try { runId = validateUsageSnapshot(p.usageSnapshot).runId; }
+            catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
+          } else {
+            if (typeof p.usage_run_id !== "string" || !p.usage_run_id.trim() || p.usage_run_id.length > 256) reject();
+            runId = p.usage_run_id;
+          }
+          const owner = store.getTaskUsageRunRuntime(taskId, runId);
+          if (owner) {
+            reportingRuntimeId = owner;
+            if (frame.rt && frame.rt !== owner) reject("authority_revoked");
+            authorizeReportRuntime(store, session, owner);
+            task = store.getTask(taskId);
+            if (!task) reject("task_not_found");
+          } else task = authorizeReportTask(store, session, taskId, frame.rt);
+        } else task = authorizeReportTask(store, session, taskId, frame.rt);
+        const authority = { runtimeId: reportingRuntimeId ?? task.runtimeId!, workspaceId: task.workspaceId,
+          daemonId: session.daemonId, userId: session.ownerAccessToken?.userId, generation: p.generation as number | undefined };
+        const isCompletion = frame.type === "task.fail";
+        const fields = isCompletion ? completionFields(p, taskId) : null;
+        const traceEventCount = isCompletion ? completionTraceEventCount(p.trace, taskId) : undefined;
+        const apply = () => {
+          switch (frame.type) {
+            case "task.start": {
+              const runId = typeof p.usage_run_id === "string" ? p.usage_run_id : undefined;
+              let outcome: "started" | "replayed";
+              try { outcome = store.startTaskFromDaemon(taskId, authority, runId); }
+              catch (error) { if (error instanceof UsageValidationError) reject("authority_revoked"); throw error; }
+              const permission = runId ? { execution_authorized: store.isTaskUsageExecutionAuthorized(taskId, runId, authority.runtimeId) } : {};
+              if (outcome === "replayed") return { ok: true, code: "start_replayed", ...permission };
+              if (runId) return { ok: true, ...permission };
+              break;
+            }
+            case "task.prompt":
+              if (!["bootstrap", "delta"].includes(string(p.mode)) || typeof p.prompt !== "string" || typeof p.sha256 !== "string"
+                || (p.instructions !== undefined && typeof p.instructions !== "string")) reject();
+              try {
+                store.recordTaskPrompt(taskId, { mode: p.mode as "bootstrap" | "delta", prompt: p.prompt as string, sha256: p.sha256 as string,
+                  ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}) });
+              }
+              catch { reject(); }
+              break;
+            case "task.session_pin":
+              if (!nullable(p.session_id) && !nullable(p.work_dir)) reject();
+              store.pinTaskSession(taskId, nullable(p.session_id), nullable(p.work_dir));
+              break;
+            case "task.progress": {
+              const summary = string(p.summary);
+              const step = typeof p.step === "number" ? p.step : undefined;
+              const total = typeof p.total === "number" ? p.total : undefined;
+              // An identical replay must not repeat a DB write or task notification.
+              if (task.progressSummary === summary
+                && task.progressStep === (step ?? null) && task.progressTotal === (total ?? null)) break;
+              if (!terminal(task.status) || p.final === true) store.reportProgress(taskId, summary, step, total,
+                { allowTerminal: p.final === true });
+              break;
+            }
+            case "task.usage": {
+              if (p.usageSnapshot !== undefined) {
+                try { store.reportTaskUsageSnapshot(taskId, validateUsageSnapshot(p.usageSnapshot), authority); }
+                catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
+                break;
+              }
+              const usage = daemonTaskUsageEntries(p.usage);
+              // The ingestion boundary performs replay checks and rejects JSON
+              // drift against its protected historical source checkpoint.
+              try { store.reportTaskUsage(taskId, usage); }
+              catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
+              break;
+            }
+            case "task.workspace": {
+              const runtimeId = string(p.runtime_id);
+              if (!task.issueId) reject("task_not_found");
+              if (runtimeId !== task.runtimeId) reject("authority_revoked");
+              if (!nullable(p.root_path) || typeof p.branch_name !== "string" || !p.status) reject();
+              const repos = Array.isArray(p.repos) ? p.repos as Array<Record<string, unknown>> : [];
+              const mapped: MultiremiIssueWorkspaceRepo[] = repos.map(repo => ({
+                repoUrl: string(repo.repo_url).trim(), repoName: string(repo.repo_name).trim(),
+                worktreePath: string(repo.worktree_path).trim(), branchName: string(repo.branch_name ?? p.branch_name).trim(),
+                baseRef: string(repo.base_ref).trim(), baseCommit: nullable(repo.base_commit),
+                status: (repo.status ?? (repo.dirty ? "dirty" : "ready")) as "ready" | "dirty" | "error",
+                dirty: repo.dirty === true, error: nullable(repo.error),
+              }));
+              const input = { issueId: task.issueId, runtimeId, rootPath: string(p.root_path).trim(),
+                branchName: p.branch_name.trim(), status: p.status as MultiremiIssueWorkspaceStatus, repos: mapped, lastTaskId: taskId };
+              const current = terminal(task.status) ? store.getIssueWorkspace(task.issueId) : null;
+              if (current?.lastTaskId === taskId && current.runtimeId === runtimeId
+                && current.rootPath === input.rootPath && current.branchName === input.branchName
+                && current.status === input.status && isDeepStrictEqual(current.repos, mapped)) break;
+              try { store.reportIssueWorkspace(input); }
+              catch { reject(); }
+              break;
+            }
+
+            case "task.activity": {
+              // Best effort (PR 5): no seq, no reply; a lost or rejected frame is
+              // replaced by the daemon's next change or periodic refresh.
+              const count = p.running_subagents;
+              const counted = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX_RUNNING_SUBAGENTS;
+              if (!counted(count)) reject();
+              // PR 6: optional; an older daemon omits it, and a missing value is not a 0.
+              const background = p.running_background_tasks;
+              if (background !== undefined && !counted(background)) reject();
+              if (p.runtime_id != null && p.runtime_id !== task.runtimeId) reject("authority_revoked");
+              store.recordTaskActivity(taskId, { runningSubagents: count as number,
+                ...(background === undefined ? {} : { runningBackgroundTasks: background as number }) });
+              break;
+            }
+            case "task.fail":
+              store.failTaskFromDaemon(taskId, {
+                error: string(p.error) || "Task failed", traceEventCount,
+                sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), failureReason: nullable(p.failure_reason), completionFields: fields }, authority);
+              break;
+            default: reject();
+          }
+          if (isCompletion && fields?.trace) {
+            onTraceClosed?.(taskId, fields.trace.head, task.runtimeId!);
+          }
+          return { ok: true };
+        };
+        // Accepted usage runs retain accounting authority after execution handoff.
+        return frame.type === "task.usage" || frame.type === "task.fail" ? apply()
+          : store.plannedRestarts().withExecution(taskId, p.generation, authority, apply,
+            frame.type === "task.start" && typeof p.usage_run_id === "string" ? p.usage_run_id : undefined);
+      }
+      const runtimeId = frame.rt ?? string(p.runtime_id);
+      authorizeReportRuntime(store, session, runtimeId);
+      const requestId = string(p.request_id);
+      const result = p;
+      const exists = (request: { status: string } | null, allowTimeout = false): boolean => {
+        if (!request) reject("task_not_found");
+        return ["completed", "rolled_back", "failed", ...(allowTimeout ? [] : ["timeout"])].includes(request.status);
+      };
+      switch (frame.type) {
+        case "runtime.binding_state":
+          if (!Array.isArray(result.acknowledgements)) reject();
+          store.recordRuntimeExecutionBindingAcks(runtimeId, result.acknowledgements);
+          break;
+        case "runtime.update_result": {
+          const request = store.getRuntimeUpdateRequest(runtimeId, requestId);
+          if (exists(request) && !(request?.scope === "cli" && result.status === "running")) break;
+          if (!["running", "restarting", "completed", "rolled_back", "failed"].includes(string(result.status))) reject();
+          store.reportRuntimeUpdateResult(runtimeId, requestId, result as unknown as ReportRuntimeUpdateInput);
+          break;
+        }
+        case "runtime.command_result":
+          if (exists(store.getRuntimeCommandRequest(runtimeId, requestId))) break;
+          if (!["completed", "failed", "timeout"].includes(string(result.status))) reject();
+          store.reportRuntimeCommandResult(runtimeId, requestId, result as unknown as ReportRuntimeCommandInput);
+          break;
+        case "runtime.model_list_result":
+          if (!requestId) {
+            if (!Array.isArray(result.models)) reject();
+            store.updateRuntimeModels(runtimeId, result.models, result.model_profile as ReportRuntimeModelListInput["model_profile"]);
+          } else if (!exists(store.getRuntimeModelListRequest(runtimeId, requestId))) {
+            if (!["completed", "failed"].includes(string(result.status))) reject();
+            store.reportRuntimeModelListResult(runtimeId, requestId, result as unknown as ReportRuntimeModelListInput);
+          }
+          break;
+        case "runtime.local_skills_result":
+          if (exists(store.getRuntimeLocalSkillListRequest(runtimeId, requestId))) break;
+          if (!["completed", "failed"].includes(string(result.status))) reject();
+          store.reportRuntimeLocalSkillListResult(runtimeId, requestId, daemonLocalSkillListReportBody(result as unknown as ReportRuntimeLocalSkillListInput));
+          break;
+        case "runtime.directory_scan_result":
+          if (exists(store.getRuntimeDirectoryScanRequest(runtimeId, requestId))) break;
+          if (!["completed", "failed"].includes(string(result.status))) reject();
+          store.reportRuntimeDirectoryScanResult(runtimeId, requestId, result as unknown as ReportRuntimeDirectoryScanInput);
+          break;
+        case "runtime.gc_run_result":
+          // A round that outlives the request timeout still reports its plan; the late result replaces the timeout.
+          if (exists(store.getRuntimeGcRunRequest(runtimeId, requestId), true)) break;
+          if (!["completed", "failed"].includes(string(result.status))) reject();
+          if (result.status === "completed" && !storageReport(result.report)) reject();
+          store.reportRuntimeGcRunResult(runtimeId, requestId, {
+            status: result.status as "completed" | "failed",
+            report: storageReport(result.report),
+            error: nullable(result.error),
+          });
+          break;
+        case "runtime.local_skill_import_result":
+          if (exists(store.getRuntimeLocalSkillImportRequest(runtimeId, requestId))) break;
+          if (!["completed", "failed"].includes(string(result.status))) reject();
+          store.reportRuntimeLocalSkillImportResult(runtimeId, requestId, daemonLocalSkillImportReportBody(result as unknown as ReportRuntimeLocalSkillImportInput));
+          break;
+        case "runtime.bot_menu_result":
+          if (exists(store.getBotMenuPublishRequest(runtimeId, requestId), true)) break;
+          if (!["completed", "failed"].includes(string(result.status))) reject();
+          store.reportBotMenuPublishResult(runtimeId, requestId, result as unknown as ReportBotMenuPublishInput);
+          break;
+        case "plugin.state": {
+          try {
+            const { state, changed } = store.reportAgentPluginRuntimeStateResult(runtimeId, string(p.version_id), p as unknown as ReportAgentPluginRuntimeStateInput);
+            if (changed) store.emitWorkspaceEvent({ type: "agent_plugin:runtime_state", workspaceId: state.workspaceId,
+              actorType: "daemon", actorId: session.daemonId, payload: { state: daemonAgentPluginStateResponse(state) } });
+          } catch (error) {
+            if (typeof (error as { status?: unknown }).status === "number") reject();
+            throw error;
+          }
+          break;
+        }
+        case "feishu.outbound_result": {
+          const runtime = store.getRuntimeLite(runtimeId)!;
+          const claimToken = nullable(p.claim_token);
+          if (!claimToken) reject();
+          if (p.status === "prepared") {
+            if (p.mention_open_id !== null && !isFeishuOpenId(p.mention_open_id)) reject();
+            const prepared = store.prepareFeishuBotOutboundMention(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken, p.mention_open_id as string | null);
+            if (!prepared) {
+              const current = store.getFeishuBotOutboundReportState(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken);
+              log.warn("Absorbed Feishu mention checkpoint whose lease or policy is no longer current", { deliveryId: requestId, status: current.status });
+              return { ok: true, lease_lost: true } satisfies DaemonFeishuOutboundOkReply;
+            }
+            return { ok: true, mention_open_id: prepared.openId } satisfies DaemonFeishuOutboundOkReply;
+          }
+          if (!["sent", "failed", "streaming"].includes(string(p.status))) reject();
+          const presentation = p.presentation === undefined ? undefined : parseFeishuPresentation(p.presentation);
+          if (presentation === null) reject();
+          const accepted = store.reportFeishuBotOutbound(runtime.workspaceId ?? "local", runtimeId, requestId, {
+            claimToken, status: p.status as "sent" | "failed" | "streaming", externalMessageId: nullable(p.external_message_id),
+            error: p.error ? redactFeishuBotError(String(p.error)) : null, presentation,
+            retryable: typeof p.retryable === "boolean" ? p.retryable : undefined,
+            interactionOpenId: p.interaction_open_id === null ? null : nullable(p.interaction_open_id),
+            degraded: FEISHU_DECISION_DEGRADE_REASONS.includes(p.degraded as FeishuDecisionDegradeReason) ? p.degraded as FeishuDecisionDegradeReason : undefined,
+          });
+          if (!accepted) {
+            const current = store.getFeishuBotOutboundReportState(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken);
+            const duplicate = current.currentRuntime && current.status === p.status && ["sent", "failed"].includes(current.status);
+            if (duplicate || (p.status === "streaming" && current.currentLease)) {
+              log.debug("Absorbed replayed Feishu result or old checkpoint", { deliveryId: requestId, status: current.status });
+            } else {
+              log.warn("Absorbed Feishu result whose lease is no longer current", { deliveryId: requestId, status: current.status });
+              return { ok: true, lease_lost: true } satisfies DaemonFeishuOutboundOkReply;
+            }
+          }
+          break;
+        }
+        case "gc.storage_report": {
+          const report = storageReport(p.report);
+          if (!report) reject();
+          const runtime = store.getRuntimeLite(runtimeId)!;
+          store.saveDaemonStorageReport(runtime.daemonId ?? session.daemonId, runtimeId, report);
+          break;
+        }
+        case "concierge.status":
+        case "concierge.status_report": {
+          if (!["stopped", "starting", "online", "failed"].includes(string(p.state))) reject();
+          const revision = Number(p.applied_revision);
+          store.reportFeishuBotRuntimeStatus(store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", runtimeId, {
+            appliedRevision: Number.isSafeInteger(revision) && revision >= 0 ? revision : 0,
+            state: p.state as "stopped" | "starting" | "online" | "failed", botName: nullable(p.bot_name), botOpenId: nullable(p.bot_open_id),
+            errorCode: normalizeFeishuBotErrorCode(p.error_code), errorMessage: p.error_message ? redactFeishuBotError(String(p.error_message)) : null,
+          });
+          break;
+        }
+        default: reject();
+      }
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
+        return { ok: false, code: error.code, retryable: false };
+      }
+      if (error instanceof PlannedRestartError) return { ok: false, code: error.code, retryable: false };
+      if (error instanceof TaskDaemonReportError) return { ok: false, code: error.code, retryable: error.retryable };
+      if (error instanceof ReportRejection) return { ok: false, code: error.code, retryable: false };
+      throw error;
+    }
+  };
+  for (const type of ["task.start", "task.prompt", "task.session_pin", "task.progress", "task.usage", "task.workspace", "task.complete", "turn.complete", "task.fail",
+    "runtime.binding_state", "runtime.update_result", "runtime.command_result", "runtime.model_list_result", "runtime.local_skills_result", "runtime.directory_scan_result",
+    "runtime.gc_run_result", "runtime.local_skill_import_result", "runtime.bot_menu_result", "feishu.outbound_result", "plugin.state"]) layer.registerEventHandler(type, handle);
+  layer.registerBestEffortHandler("concierge.status", handle);
+  // A lost report is replaced by the next round's; it never needs a retry.
+  layer.registerBestEffortHandler("gc.storage_report", handle);
+  // PR 5: the running-subagent count; the next change or refresh replaces a lost one.
+  layer.registerBestEffortHandler("task.activity", handle);
+  // Keep the legacy best-effort frame for older daemons during a rolling upgrade.
+  layer.registerRpcHandler("concierge.status_report", handle);
+}
+
+/** A daemon storage report is stored as sent; only its envelope is checked. */
+function storageReport(value: unknown): StorageReport | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const report = value as Partial<StorageReport>;
+  return report.version === 1 && Array.isArray(report.plan) && Array.isArray(report.errors)
+    && typeof report.generated_at === "string" ? report as StorageReport : null;
+}
+
+function subjectSnapshot(value: unknown): SubjectSnapshot | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const snapshot = value as Partial<SubjectSnapshot>;
+  if (typeof snapshot.created_at !== "string" || !Array.isArray(snapshot.git)
+    || !Number.isSafeInteger(snapshot.wiki_files) || (snapshot.wiki_files as number) < 0) return undefined;
+  const git = snapshot.git.map((entry) => entry as Partial<SubjectSnapshot["git"][number]>);
+  if (!git.every((entry) => typeof entry.repo_url === "string" && typeof entry.ref === "string"
+    && typeof entry.commit === "string" && typeof entry.head === "string"
+    && (entry.branch === null || typeof entry.branch === "string")
+    && typeof entry.dir === "string")) return undefined;
+  return { created_at: snapshot.created_at, git: git as SubjectSnapshot["git"], wiki_files: snapshot.wiki_files as number };
+}
+
+export function registerDaemonMaintenanceHandlers(layer: DaemonProtocolLayer, store: MultiremiStore): void {
+  const handle = async (frame: DaemonParsedFrame, session: DaemonProtocolSession) => {
+    try {
+      const p = frame.payload;
+      const runtimeId = frame.rt ?? string(p.runtime_id);
+      authorizeReportRuntime(store, session, runtimeId);
+      const workspaceId = store.getRuntimeLite(runtimeId)!.workspaceId ?? "local";
+      const scoped = <T extends { workspaceId?: string | null }>(value: T | null, message: string, code: string | null = null): T => {
+        if (!value || (value.workspaceId ?? "local") !== workspaceId) throw new GcRejection(404, code, message);
+        return value;
+      };
+      const scopedTask = (taskId: string) => {
+        const task = scoped(store.getTask(taskId), "task not found");
+        if (!task.runtimeId || !session.runtimeIds.includes(task.runtimeId)) throw new GcRejection(404, null, "task not found");
+        authorizeReportRuntime(store, session, task.runtimeId);
+        return task;
+      };
+      switch (frame.type) {
+        case "gc.check_issue": {
+          const issueId = string(p.issue_id);
+          const found = store.getIssueByRef(issueId);
+          // A cleaned Issue can move to another workspace. The daemon keeps its records (traces, session
+          // history) for it, so this must not look like the 404 that tells a daemon the Issue was deleted.
+          // Only a daemon that ran a task of the Issue is told; everyone else still gets the 404.
+          const daemonId = store.getRuntimeLite(runtimeId)?.daemonId;
+          if (found && found.id === issueId && (found.workspaceId ?? "local") !== workspaceId
+            && daemonId && store.issueRanOnDaemon(found.id, daemonId)) {
+            return { ok: true, status: "moved" };
+          }
+          const issue = scoped(found, "issue not found");
+          const active = store.listTasksForIssue(issue.id).some(task => !terminal(task.status));
+          return { ok: true, status: active ? "active" : issue.status, updated_at: issue.updatedAt };
+        }
+        case "gc.check_chat_session": {
+          const chat = scoped(store.getChatSession(string(p.session_id)), "chat session not found");
+          return {
+            ok: true, status: chat.status, updated_at: chat.updatedAt, pinned: chat.pinned, origin: chat.origin,
+            last_activity_at: chat.lastMessage?.createdAt ?? null,
+          } satisfies DaemonGcCheckChatSessionReply;
+        }
+        case "gc.check_task": {
+          const task = scopedTask(string(p.task_id));
+          return { ok: true, status: task.status, completed_at: task.completedAt };
+        }
+        case "gc.subject_reclaimed": {
+          const subject = p.subject as { kind?: unknown; id?: unknown } | null | undefined;
+          const kind = subject?.kind as StorageSubjectKind;
+          const id = typeof subject?.id === "string" ? subject.id.trim() : "";
+          const snapshot = subjectSnapshot(p.snapshot);
+          if (!STORAGE_SUBJECT_KINDS.includes(kind) || !id || snapshot === undefined || typeof p.unsaved_work !== "boolean") {
+            throw new GcRejection(400, null, "subject, snapshot and unsaved_work are required");
+          }
+          if (kind === "issue") scoped(store.getIssue(id), "issue not found", "issue_not_found");
+          else if (kind === "chat") scoped(store.getChatSession(id), "chat session not found");
+          else scopedTask(id);
+          store.reportSubjectReclaimed(runtimeId, { subject: { kind, id }, snapshot, unsavedWork: p.unsaved_work });
+          return { ok: true };
+        }
+        default: return null;
+      }
+    } catch (error) {
+      if (error instanceof GcRejection) return gcError(error.status, error.code, error.message);
+      if (error instanceof ReportRejection) return gcError(error.code === "task_not_found" ? 404 : error.code === "authority_revoked" ? 403 : 400, null, error.message);
+      throw error;
+    }
+  };
+  for (const type of ["gc.check_issue", "gc.check_chat_session", "gc.check_task", "gc.subject_reclaimed"]) layer.registerRpcHandler(type, handle);
+}

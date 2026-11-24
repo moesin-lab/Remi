@@ -1,3 +1,5 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
@@ -20,6 +22,7 @@ function scaffold() {
   store.registerRuntime({ id: "rt_audit", name: "Audit", provider: "codex", workspaceId: "local" });
   store.heartbeatRuntime("rt_audit", { supportsFeishuBotConfig: true });
   const config = store.upsertFeishuBotConfig("local", {
+    responsibleMemberId:store.findWorkspaceMemberForUser('local','local')!.id,
     agentId: agent.id, runtimeId: "rt_audit", appId: "cli_audit", appSecretOp: "set",
     appSecret: "fixture-only", senderAccessPolicy: "agent", domain: "feishu", enabled: true,
   });
@@ -30,7 +33,7 @@ function scaffold() {
   };
   const first = store.submitFeishuBotMessage("local", "rt_audit", input);
   store.cancelTask(first.taskId);
-  const issue = store.createIssue({ title: "Legacy Issue", workspaceId: "local", assigneeType: "agent", assigneeId: agent.id });
+  const issue = createResponsibleTestIssue(store, { title: "Legacy Issue", workspaceId: "local", assigneeType: "agent", assigneeId: agent.id });
   const binding = db!.query("SELECT * FROM multiremi_feishu_bot_chat_bindings WHERE chat_session_id = ?")
     .get(first.chatSessionId)! as Record<string, string>;
   const channel = store.upsertAgentChatNotificationChannel({
@@ -45,8 +48,7 @@ function scaffold() {
   // These records would have been included by the removed catch-up projection.
   store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "LEGACY_PRIVATE_COMMENT" });
   const sourceTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Legacy work", holdsWorkspace: false });
-  db!.run("UPDATE multiremi_tasks SET status = 'completed', completed_at = ?, result = ? WHERE id = ?",
-    [new Date().toISOString(), "SYNTHETIC_SECRET_RESULT /internal/legacy/work", sourceTask.id]);
+  mutateExecutionFixture(store, "UPDATE multiremi_turn_execution_records SET status = 'completed', completed_at = ?, result = ? WHERE id = ?", [new Date().toISOString(), "SYNTHETIC_SECRET_RESULT /internal/legacy/work", sourceTask.id]);
   const audit = db!.query("SELECT * FROM multiremi_feishu_bot_issue_link_audit WHERE binding_id = ?").get(binding.id);
   return { store, agent, issue, binding, input, first, audit };
 }

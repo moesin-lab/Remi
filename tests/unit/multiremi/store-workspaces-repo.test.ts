@@ -1,8 +1,11 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
 // Sibling test for packages/server/src/store/repos/workspaces-repo.ts.
 // Drives the carved-out repo directly over its StoreContext (not through the
 // MultiremiStore facade) so a broken delegation cannot mask a broken move.
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { StoreContext } from "@multiremi/store/context.js";
 import { WorkspacesRepo } from "@multiremi/store/repos/workspaces-repo.js";
@@ -11,7 +14,7 @@ let db: Database | null = null;
 const previousScmEncryptionKey = process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
 
 function createFixture(): { repo: WorkspacesRepo; store: MultiremiStore } {
-  db = new Database(":memory:");
+  db = openSqliteDatabase(":memory:");
   // The store owns migrations and is the lazy cross-domain host the context resolves.
   const store = new MultiremiStore(db);
   return { repo: new WorkspacesRepo(new StoreContext(db, () => store)), store };
@@ -137,7 +140,7 @@ describe("WorkspacesRepo", () => {
       stream: "change_requests",
       baselineCompletedAt: "2026-08-22T00:00:00.000Z",
     });
-    const issue = store.createIssue({ title: "Clean SCM state", workspaceId: workspace.id });
+    const issue = createResponsibleTestIssue(store, { title: "Clean SCM state", workspaceId: workspace.id });
     store.advanceScmEntitySnapshot({
       connectionId: connection.id,
       repositoryId: "repo_cleanup",
@@ -172,7 +175,7 @@ describe("WorkspacesRepo", () => {
       provider: "codex",
       workspaceId: workspace.id,
     });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Cleanup automation",
       workspaceId: workspace.id,
       assigneeId: agent.id,

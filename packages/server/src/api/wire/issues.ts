@@ -2,12 +2,15 @@
 // Go-compat (`*Compatibility*`) and native shapers sit side by side on purpose:
 // the two route prefixes are intentionally divergent and must stay diffable.
 import type {
+  AssignIssueInput,
   BatchDeleteIssuesInput,
   BatchUpdateIssuesInput,
+  MultiremiAttachment,
   MultiremiCommentReaction,
   MultiremiIssue,
   MultiremiIssueComment,
   MultiremiIssueDependency,
+  MultiremiIssueDependencyView,
   MultiremiIssueReaction,
   MultiremiIssueSearchResult,
   MultiremiIssueSession,
@@ -17,14 +20,24 @@ import type {
   MultiremiSessionResult,
   MultiremiTimelineEntry,
   MultiremiTimelinePage,
+  MultiremiTask,
+  CreateSessionTaskInput,
   QuickCreateIssueInput,
   UpdateIssueInput,
 } from "@multiremi/contracts/types.js";
+import {
+  BatchParentStatusGuardError,
+  IssueDependencyError,
+  IssueLockSetStaleError,
+  IssueWorkspaceMoveError,
+  ParentStatusGuardError,
+} from "@multiremi/store/repos/issues-repo.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { Context } from "hono";
 import { issueDetailAttachmentCompatibilityResponse } from "./attachments.js";
-import { cleanString, hasRequestField } from "./context.js";
+import { cleanString, currentTaskAccessToken, hasRequestField } from "./context.js";
 import { labelCompatibilityResponse } from "./projects.js";
+import { IssueResponsibilityError } from '../../store/issue-responsibility.js';
 
 export function issueCompatibilityResponse(
   issue: MultiremiIssue,
@@ -102,6 +115,9 @@ export function issueSessionCompatibilityResponse(
 ): Record<string, unknown> {
   return {
     id: session.id,
+    owner_type: session.ownerType,
+    owner_id: session.ownerId,
+    chat_id: session.chatId,
     issue_id: session.issueId,
     workspace_id: session.workspaceId,
     title: session.title,
@@ -123,6 +139,28 @@ export function issueSessionCompatibilityResponse(
   };
 }
 
+export function sessionTaskMetadataResponse(task: MultiremiTask): Record<string, unknown> {
+  return {
+    id: task.id,
+    status: task.status,
+    agentId: task.agentId,
+    agent_id: task.agentId,
+    workspaceId: task.workspaceId,
+    workspace_id: task.workspaceId,
+    issueId: task.issueId,
+    issue_id: task.issueId,
+    chatSessionId: task.chatSessionId,
+    chat_session_id: task.chatSessionId,
+    issueSessionId: task.issueSessionId,
+    issue_session_id: task.issueSessionId,
+    parentTaskId: task.parentTaskId,
+    parent_task_id: task.parentTaskId,
+    session_id: task.sessionId,
+    created_at: task.createdAt,
+    updated_at: task.updatedAt,
+  };
+}
+
 export function sessionEventCompatibilityResponse(event: MultiremiSessionEvent): Record<string, unknown> {
   return {
     id: event.id,
@@ -132,7 +170,7 @@ export function sessionEventCompatibilityResponse(event: MultiremiSessionEvent):
     author_id: event.authorId,
     kind: event.kind,
     body: event.body,
-    task_id: event.taskId,
+    task_id: event.sourceCommentId ? null : event.taskId,
     source_comment_id: event.sourceCommentId,
     metadata: event.metadata,
     created_at: event.createdAt,
@@ -142,6 +180,7 @@ export function sessionEventCompatibilityResponse(event: MultiremiSessionEvent):
 export function sessionResultCompatibilityResponse(result: MultiremiSessionResult): Record<string, unknown> {
   return {
     id: result.id,
+    chat_id: result.chatId,
     issue_id: result.issueId,
     source_session_id: result.sourceSessionId,
     title: result.title,
@@ -217,13 +256,14 @@ export function issueSubscriberTargetErrorResponse(c: Context, error: unknown): 
   return c.json({ error: message }, 400);
 }
 
-export function issueDependencyCompatibilityResponse(dependency: MultiremiIssueDependency): Record<string, unknown> {
+export function issueDependencyCompatibilityResponse(dependency: MultiremiIssueDependencyView): Record<string, unknown> {
   return {
     id: dependency.id,
     workspace_id: dependency.workspaceId,
     issue_id: dependency.issueId,
     depends_on_issue_id: dependency.dependsOnIssueId,
     type: dependency.type,
+    direction: dependency.direction,
     issue: dependency.issue ? issueCompatibilityResponse(dependency.issue) : null,
     depends_on_issue: dependency.dependsOnIssue ? issueCompatibilityResponse(dependency.dependsOnIssue) : null,
     created_at: dependency.createdAt,
@@ -236,8 +276,52 @@ export function issueSearchErrorResponse(c: Context, err: unknown): Response | n
   return null;
 }
 
+/**
+ * MUL-400 S1: a refused batch names every row the pre-flight rejected, so a
+ * caller can tell "this batch was refused" from "these particular rows were".
+ */
+function rejectedIssueIds(err: ParentStatusGuardError): { rejected_issue_ids?: string[] } {
+  return err instanceof BatchParentStatusGuardError ? { rejected_issue_ids: err.rejectedIssueIds } : {};
+}
+
 export function issueErrorResponse(c: Context, err: unknown): Response | null {
+  // The execution-owner assignment and done rules carry their own code and status.
+  if (err instanceof IssueResponsibilityError) return c.json({error:err.message,code:err.code},err.status);
   if (!(err instanceof Error)) return null;
+  // Moving a connected issue requires an explicit detach first. Foreign
+  // relationships are represented by a count, never another workspace's keys.
+  if (err instanceof IssueWorkspaceMoveError) {
+    return c.json({
+      error: err.message, code: err.code, relations: err.relations,
+      ...(err.issueIds ? { issue_ids: err.issueIds } : {}),
+    }, 409);
+  }
+  // ADR 0003 #8: the Issue changed twice while this request waited for its
+  // locks; nothing was written and the client may retry.
+  if (err instanceof IssueLockSetStaleError) {
+    return c.json({ error: err.message, code: err.code }, 409);
+  }
+  // MUL-400 E1: the parent-status guard is a conflict, and the client needs the
+  // machine-readable code plus `open_children` to show the reason and to offer
+  // the member-only override.
+  if (err instanceof ParentStatusGuardError) {
+    return c.json({
+      error: err.message,
+      code: err.code,
+      reason: err.details.reason ?? "children_open",
+      open_children: err.details.openChildren ?? 0,
+      ...rejectedIssueIds(err),
+    }, 409);
+  }
+  // MUL-400 E3 gate 2: leaving backlog with unmet prerequisites is a conflict,
+  // and the body names the prerequisites so the client can explain the hold.
+  if (err instanceof IssueDependencyError) {
+    return c.json({
+      error: err.message,
+      code: err.code,
+      unmet: err.details.unmet ?? [],
+    }, 409);
+  }
   if (err.message === "auto_title is reserved for system metadata") {
     return c.json({ error: err.message }, 400);
   }
@@ -271,6 +355,14 @@ export function issueErrorResponse(c: Context, err: unknown): Response | null {
 
 export function issueDependencyErrorResponse(c: Context, err: unknown): Response | null {
   if (!(err instanceof Error)) return null;
+  // MUL-400 E3: cycles and ancestor dependencies are 409 with the offending key
+  // path; the console turns `path` into the readable chain.
+  if (err instanceof IssueDependencyError) {
+    if (err.code === "dependency_cycle" || err.code === "dependency_on_ancestor") {
+      return c.json({ error: err.message, code: err.code, path: err.details.path ?? [] }, 409);
+    }
+    return c.json({ error: err.message, code: err.code, unmet: err.details.unmet ?? [] }, 409);
+  }
   if (err.message.startsWith("Issue not found:")) return c.json({ error: "issue not found" }, 404);
   if (err.message.startsWith("Dependent issue not found:")) return c.json({ error: "dependent issue not found" }, 400);
   if (err.message === "An issue cannot depend on itself") return c.json({ error: "an issue cannot depend on itself" }, 400);
@@ -278,6 +370,129 @@ export function issueDependencyErrorResponse(c: Context, err: unknown): Response
   if (err.message.includes("dependency type must be one of")) return c.json({ error: err.message }, 400);
   if (err.message.startsWith("Dependency not found for issue:")) return c.json({ error: "dependency not found" }, 404);
   return null;
+}
+
+/**
+ * MUL-400 E1: `force` is a member-only escape hatch for the parent-status guard.
+ * A task identity (a run) must never be able to bypass the guard on its own, so
+ * both PATCH routes funnel through here and get a 403 instead of the field.
+ */
+export function denyTaskIdentityIssueForce(c: Context, input: UpdateIssueInput): Response | null {
+  if (input.force !== true) return null;
+  if (!currentTaskAccessToken(c)) return null;
+  return c.json({
+    error: "force is a member-only override; a task cannot bypass the parent-status guard",
+    code: "issue_force_requires_member",
+  }, 403);
+}
+
+/**
+ * MUL-400 S1: fields the server owns and stamps from the authenticated request.
+ *
+ * The routes overwrite the camelCase spelling, but the store reads several of
+ * these as `input.foo ?? input.foo_snake` (the `issue_status_forced` audit's
+ * source task and the parent wakeup's `parentTaskId`). A body that sends BOTH
+ * spellings would therefore leave the snake_case alias behind to win the `??`.
+ * Strip both spellings before stamping, and strip the actor fields too so a
+ * body can never pick the identity the done rule branches on.
+ */
+const SERVER_OWNED_ISSUE_UPDATE_FIELDS = [
+  "actorType",
+  "actor_type",
+  "actorId",
+  "actor_id",
+  "parentTaskId",
+  "parent_task_id",
+] as const;
+
+export function stripServerOwnedIssueUpdateFields(input: UpdateIssueInput = {}): UpdateIssueInput {
+  return stripRequestFields(input, SERVER_OWNED_ISSUE_UPDATE_FIELDS);
+}
+
+/**
+ * MUL-448: lineage the assignment route stamps from the authenticated request.
+ *
+ * Same `??` hazard as above: the route overwrites `parentTaskId`, but a body
+ * that also sends `parent_task_id` leaves the alias to win when the credential
+ * carries no lineage (a member PAT has no source task, so the camelCase stamp
+ * is null and `null ?? body.parent_task_id` picks the forged value up).
+ */
+const SERVER_OWNED_ASSIGN_FIELDS = ["parentTaskId", "parent_task_id"] as const;
+
+export function stripServerOwnedAssignFields(input: AssignIssueInput = {}): AssignIssueInput {
+  return stripRequestFields(input, SERVER_OWNED_ASSIGN_FIELDS);
+}
+
+/**
+ * MUL-448: what the Session task route derives for itself.
+ *
+ * `parentTaskId` comes from the caller's task credential and `sourceEventId`
+ * names the SCM event that authorizes repository scope; neither is a
+ * caller-selectable input on this surface.
+ */
+const SERVER_OWNED_SESSION_TASK_FIELDS = [
+  "parentTaskId",
+  "parent_task_id",
+  "sourceEventId",
+  "source_event_id",
+] as const;
+
+export function stripServerOwnedSessionTaskFields(input: CreateSessionTaskInput): CreateSessionTaskInput {
+  return stripRequestFields(input, SERVER_OWNED_SESSION_TASK_FIELDS);
+}
+
+/**
+ * MUL-448 B4: caller-supplied creator/requester identities are not accepted.
+ *
+ * The native create route strips `createdBy` / `created_by`, and both
+ * quick-create routes strip `requesterId` / `requester_id`. These routes do not
+ * stamp a credentialed identity, so their result stays aligned with main. The
+ * compatibility `POST /api/issues` route still stamps the credentialed caller
+ * through `withIssueCreateRequestContext`.
+ */
+const SERVER_OWNED_ISSUE_CREATE_FIELDS = ["createdBy", "created_by"] as const;
+
+export function stripServerOwnedIssueCreateFields<T extends object>(input: T): T {
+  return stripRequestFields(input, SERVER_OWNED_ISSUE_CREATE_FIELDS);
+}
+
+/**
+ * MUL-448 B3: provenance a credentialed create must not take from the body.
+ *
+ * `sourceIssueId` + `issueKind` are what the compatibility create route matches
+ * on (`findGeneratedIssueByTitle`) to hand back an existing issue instead of
+ * creating one, and `issueKind` alone flips the intake/execution semantics the
+ * generated-issue cache keys on. A member could therefore file an "execution"
+ * naming someone else's intake with the title a real run would use, and the
+ * run's own create would then return that forged issue with no task dispatched.
+ *
+ * The credentialed paths derive both fields from the credential: the compat
+ * route through `withIssueCreateRequestContext` (intake task token only), and
+ * the native route by simply not accepting them. The anonymous compatibility
+ * mode (master token / auth disabled) keeps passing the body through.
+ */
+const SERVER_OWNED_ISSUE_SOURCE_FIELDS = [
+  "sourceIssueId",
+  "source_issue_id",
+  "issueKind",
+  "issue_kind",
+] as const;
+
+export function stripServerOwnedIssueSourceFields<T extends object>(input: T): T {
+  return stripRequestFields(input, SERVER_OWNED_ISSUE_SOURCE_FIELDS);
+}
+
+/** The quick-create equivalent: `requester_id` is who asked, not who is asked. */
+const SERVER_OWNED_QUICK_CREATE_FIELDS = ["requesterId", "requester_id"] as const;
+
+export function stripServerOwnedQuickCreateFields(input: QuickCreateIssueInput): QuickCreateIssueInput {
+  return stripRequestFields(input, SERVER_OWNED_QUICK_CREATE_FIELDS);
+}
+
+function stripRequestFields<T extends object>(input: T, fields: readonly string[]): T {
+  const out: Record<string, unknown> = { ...(input as Record<string, unknown>) };
+  for (const field of fields) delete out[field];
+  return out as T;
 }
 
 export function issueUpdateCompatibilityInput(input: UpdateIssueInput = {}): UpdateIssueInput {
@@ -297,11 +512,17 @@ export function issueUpdateCompatibilityInput(input: UpdateIssueInput = {}): Upd
   if (hasRequestField(input, "due_date")) out.due_date = input.due_date ?? null;
   if (hasRequestField(input, "acceptance_criteria")) out.acceptance_criteria = input.acceptance_criteria ?? [];
   if (hasRequestField(input, "context_refs")) out.context_refs = input.context_refs ?? [];
+  // MUL-400 E1/E3: `force` survives the compatibility projection because the
+  // batch route needs it to select the parent-status override (the store moves
+  // it into a server-internal option that the dependency gate ignores). The
+  // routes strip it for task identities, so reaching the store means a member.
+  if (hasRequestField(input, "force")) out.force = input.force === true;
   return out;
 }
 
 export function issueQuickCreateCompatibilityInput(input: QuickCreateIssueInput): QuickCreateIssueInput {
   const out: QuickCreateIssueInput = { prompt: input.prompt };
+  if (hasRequestField(input, 'parent_issue_id')) out.parent_issue_id = input.parent_issue_id ?? null;
   if (hasRequestField(input, "runtime_workspace_id")) out.runtime_workspace_id = input.runtime_workspace_id ?? null;
   if (hasRequestField(input, "agent_id")) out.agent_id = input.agent_id ?? null;
   if (hasRequestField(input, "squad_id")) out.squad_id = input.squad_id ?? null;
@@ -342,29 +563,111 @@ export function issueCommentListErrorResponse(c: Context, err: unknown): Respons
 }
 
 
+/**
+ * MUL-385: response body of `GET /api/issues/:id`.
+ *
+ * S5's `/open` aggregate calls this directly, so it owns the whole payload:
+ * the issue compatibility shape plus optional labels, reactions and attachments.
+ * It reads only what it returns, so it never triggers the tasks / children /
+ * child-progress / dependency loads that the native route
+ * (`/api/multiremi/issues/:id`) needs.
+ */
+export function issueDetailCompatibilityResponse(
+  store: MultiremiStore,
+  issue: MultiremiIssue,
+  options: { labelsAlreadyHydrated?: boolean } = {},
+): Record<string, unknown> {
+  // `getIssue` / `getIssueByRef` already filled `labels`; reading them again
+  // would add the label join for nothing. A caller holding a bare row leaves
+  // the flag off and gets the same body either way.
+  const labels = options.labelsAlreadyHydrated
+    ? issue.labels
+    : store.listLabelsForExistingIssue(issue.id);
+  const response = issueCompatibilityResponse({ ...issue, labels }, { includeLabels: true });
+  // `getIssueWithTasks` hangs reactions/attachments off the object; a plain
+  // hydrated issue does not, so read them from the store when absent.
+  const withExtras = issue as MultiremiIssue & {
+    reactions?: MultiremiIssueReaction[];
+    attachments?: MultiremiAttachment[];
+  };
+  const reactions = withExtras.reactions ?? store.listIssueReactionsForExistingIssue(issue.id);
+  const attachments = withExtras.attachments ?? store.listAttachmentsForExistingIssue(issue.id);
+  if (reactions.length) response.reactions = reactions.map(issueReactionCompatibilityResponse);
+  if (attachments.length) response.attachments = attachments.map(issueDetailAttachmentCompatibilityResponse);
+  // MUL-400 E1's `child_count` is deliberately NOT added here: MUL-385 pins this
+  // route at exactly four statements and forbids a parent_issue_id read. The
+  // native `/api/multiremi/issues/:id` route carries it instead, where the child
+  // progress it counts is already loaded.
+  return response;
+}
+
+/**
+ * MUL-385: response body of `GET /api/issues/:id/sessions`.
+ *
+ * One batched participant lookup for the whole list: the previous per-session
+ * `listSessionParticipants` ran 1 + N statements (an existence read plus the
+ * participant scan for every session) and made the route's `dbq` grow linearly
+ * with session count. The sessions are already loaded, so their existence does
+ * not need re-verification.
+ */
+export function issueSessionsCompatibilityResponse(
+  store: MultiremiStore,
+  issueId: string,
+  includeArchived = false,
+  options: { skipIssueExistenceCheck?: boolean } = {},
+): Record<string, unknown>[] {
+  // Unknown issues throw from here, so a direct S5 call fails the same way the
+  // route does. The route already resolved the issue, hence the opt-out.
+  if (!options.skipIssueExistenceCheck && !store.hasIssue(issueId)) {
+    throw new Error(`Issue not found: ${issueId}`);
+  }
+  const sessions = store.listIssueSessions(issueId, includeArchived, { skipExistenceCheck: true });
+  const participantsBySession = store.listSessionParticipantsForSessions(sessions.map((session) => session.id));
+  return sessions.map((session) => issueSessionCompatibilityResponse(
+    session,
+    participantsBySession.get(session.id) ?? [],
+  ));
+}
+
 export function issueTimelineResponse(
   store: MultiremiStore,
   issueId: string,
   c: { req: { query: (name: string) => string | undefined } },
+  options: { skipIssueExistenceCheck?: boolean } = {},
 ): MultiremiTimelineEntry[] | MultiremiTimelinePage | null {
-  if (!store.getIssue(issueId)) return null;
+  // Existence only: the response carries timeline entries, never the Issue's
+  // labels, so the hydrating read would be two wasted statements. Callers that
+  // already resolved the issue (both timeline routes do) skip it.
+  if (!options.skipIssueExistenceCheck && !store.hasIssue(issueId)) return null;
   const rawIssueSessionId = cleanString(c.req.query("issue_session_id")) || null;
   const paged = c.req.query("limit") != null || c.req.query("before") != null;
   let issueSessionId = rawIssueSessionId;
-  if (paged && rawIssueSessionId === "@default") {
-    const sessions = store.listIssueSessions(issueId);
-    issueSessionId = sessions.find((session) => session.isDefault)?.id ?? sessions[0]?.id ?? null;
+  // `@default` needs the session list anyway, so keep it: the resolved id is
+  // then validated against that list instead of re-reading the same row.
+  const sessionsForDefault = paged && rawIssueSessionId === "@default"
+    ? store.listIssueSessions(issueId, false, { skipExistenceCheck: true })
+    : null;
+  if (sessionsForDefault) {
+    issueSessionId = sessionsForDefault.find((session) => session.isDefault && !session.chatId && session.issueId === issueId)?.id
+      ?? null;
   }
   if (issueSessionId) {
-    const session = store.getIssueSession(issueSessionId);
-    if (!session || session.issueId !== issueId) return null;
+    const known = sessionsForDefault?.find((session) => session.id === issueSessionId);
+    const session = known ?? store.getIssueSession(issueSessionId);
+    if (!session || session.issueId !== issueId || session.workspaceId !== store.getIssue(issueId)?.workspaceId) return null;
   }
   const wrapped = ["limit", "before", "after", "around"].some((name) => c.req.query(name) != null);
   if (!wrapped) return store.listIssueTimeline(issueId, { ascending: true, issueSessionId });
   if (paged) {
     const limit = parseTimelineLimit(c.req.query("limit"));
     const before = parseTimelineCursor(c.req.query("before"));
-    const page = store.listIssueTimelinePage(issueId, { issueSessionId, before, limit });
+    // The issue and the session-to-issue binding were both checked above.
+    const page = store.listIssueTimelinePage(issueId, {
+      issueSessionId,
+      before,
+      limit,
+      skipExistenceChecks: true,
+    });
     const oldest = page.entries[0];
     const response: MultiremiTimelinePage = {
       entries: page.entries,
@@ -471,6 +774,7 @@ export function issueTimelineCompatibilityResponse(
   store: MultiremiStore,
   issueId: string,
   c: { req: { query: (name: string) => string | undefined } },
+  options: { skipIssueExistenceCheck?: boolean } = {},
 ): Record<string, unknown>[] | {
   entries: Record<string, unknown>[];
   limit: number;
@@ -482,7 +786,7 @@ export function issueTimelineCompatibilityResponse(
   issue_session_id: string | null;
   target_index?: number;
 } | null {
-  const response = issueTimelineResponse(store, issueId, c);
+  const response = issueTimelineResponse(store, issueId, c, options);
   if (!response) return null;
   if (Array.isArray(response)) return response.map(timelineEntryCompatibilityResponse);
   return {
@@ -499,7 +803,8 @@ export function issueUsageResponse(store: MultiremiStore, issue: MultiremiIssue)
   total_tokens: number;
   task_count: number;
 } {
-  const taskIds = new Set(store.listTasksForIssue(issue.id).map((task) => task.id));
+  const tasks = store.listTasksForIssue(issue.id);
+  const taskIds = new Set(tasks.map((task) => task.id));
   const totals = {
     total_input_tokens: 0,
     total_output_tokens: 0,
@@ -508,7 +813,8 @@ export function issueUsageResponse(store: MultiremiStore, issue: MultiremiIssue)
     total_tokens: 0,
     task_count: taskIds.size,
   };
-  for (const task of store.listTasksForIssue(issue.id)) {
+  // task.usage is a compatibility projection of canonical actual units.
+  for (const task of tasks) {
     for (const entry of task.usage) {
       totals.total_input_tokens += entry.inputTokens ?? 0;
       totals.total_output_tokens += entry.outputTokens ?? 0;

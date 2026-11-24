@@ -10,16 +10,17 @@ import {
   ArrowDown,
   ArrowUp,
   CalendarClock,
-  Check,
   ChevronRight,
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  Link2,
+  Plus,
   X as XIcon,
 } from "lucide-react";
 import { cn } from "@multiremi/ui/lib/utils";
 import { toast } from "sonner";
-import type { Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "@multiremi/core/types";
+import type { CreatedIssue, Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "@multiremi/core/types";
 import {
   DialogContent,
   DialogTitle,
@@ -35,7 +36,7 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@multi
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Switch } from "@multiremi/ui/components/ui/switch";
 import { ContentEditor, type ContentEditorRef, TitleEditor, useFileDropZone, FileDropOverlay } from "../editor";
-import { StatusIcon, StatusPicker, PriorityPicker, AssigneePicker, StartDatePicker, DueDatePicker } from "../issues/components";
+import { StatusPicker, PriorityPicker, AssigneePicker, StartDatePicker, DueDatePicker } from "../issues/components";
 import { BacklogAgentHintContent } from "../issues/components/backlog-agent-hint-dialog";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
 import { useWorkspaceId } from "@multiremi/core/hooks";
@@ -57,6 +58,7 @@ import { FileUploadButton } from "@multiremi/ui/components/common/file-upload-bu
 import { PillButton } from "../common/pill-button";
 import { IssuePickerModal } from "./issue-picker-modal";
 import { useT } from "../i18n";
+import { IssueCreationReceipt } from "./issue-creation-receipt";
 
 // ---------------------------------------------------------------------------
 // ManualCreatePanel — manual-mode body of the create-issue dialog. Renders
@@ -88,6 +90,8 @@ export function ManualCreatePanel({
   setBacklogHintIssueId: (id: string | null) => void;
 }) {
   const { t } = useT("modals");
+  const { t: tIssues } = useT("issues");
+  const executionUnconfiguredLabel = tIssues($ => $.responsibility.execution_unconfigured);
   const router = useNavigation();
   const p = useWorkspacePaths();
   const workspaceName = useCurrentWorkspace()?.name;
@@ -109,13 +113,17 @@ export function ManualCreatePanel({
   const [status, setStatus] = useState<IssueStatus>((data?.status as IssueStatus) || draft.status);
   const [priority, setPriority] = useState<IssuePriority>(draft.priority);
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const [receipt, setReceipt] = useState<CreatedIssue | null>(null);
   const [assigneeType, setAssigneeType] = useState<IssueAssigneeType | undefined>(() => {
     if (data && "assignee_type" in data) {
-      return (data.assignee_type as IssueAssigneeType | null) ?? undefined;
+      return data.assignee_type === "agent" || data.assignee_type === "squad" ? data.assignee_type : undefined;
     }
-    return draft.assigneeType;
+    return draft.assigneeType === "agent" || draft.assigneeType === "squad" ? draft.assigneeType : undefined;
   });
   const [assigneeId, setAssigneeId] = useState<string | undefined>(() => {
+    const type = data && "assignee_type" in data ? data.assignee_type : draft.assigneeType;
+    if (type !== "agent" && type !== "squad") return undefined;
     if (data && "assignee_id" in data) {
       return (data.assignee_id as string | null) ?? undefined;
     }
@@ -140,6 +148,8 @@ export function ManualCreatePanel({
   // object, and we never need to hydrate from an ID the way we do for parent.
   const [childIssues, setChildIssues] = useState<Issue[]>([]);
   const [childPickerOpen, setChildPickerOpen] = useState(false);
+  const [prerequisites, setPrerequisites] = useState<Issue[]>([]);
+  const [prerequisitePickerOpen, setPrerequisitePickerOpen] = useState(false);
   // Fetch parent issue details for the chip (status/identifier/title).
   // List cache usually has it already, so this resolves synchronously.
   const wsId = useWorkspaceId();
@@ -164,6 +174,7 @@ export function ManualCreatePanel({
   const updateStatus = (v: IssueStatus) => { setStatus(v); setDraft({ status: v }); };
   const updatePriority = (v: IssuePriority) => { setPriority(v); setDraft({ priority: v }); };
   const updateAssignee = (type?: IssueAssigneeType, id?: string) => {
+    if (type === "member") return;
     setAssigneeType(type); setAssigneeId(id);
     setDraft({ assigneeType: type, assigneeId: id });
   };
@@ -171,7 +182,7 @@ export function ManualCreatePanel({
   const updateDueDate = (v: string | null) => { setDueDate(v); setDraft({ dueDate: v }); };
 
   // Project default assignee: when a project that binds a default (squad /
-  // agent / member) is picked — or seeded via data.project_id — prefill the
+  // agent) is picked — or seeded via data.project_id — prefill the
   // assignee pill so the user stops re-picking the same group every time.
   // Only fills when the assignee is empty or was itself auto-filled; a manual
   // pick always wins. The fill is visible in the form before submit, so the
@@ -198,7 +209,7 @@ export function ManualCreatePanel({
     defaultAppliedForProjectRef.current = projectId ?? undefined;
     const shouldOverride = projectSelectionOverridesAssigneeRef.current;
     projectSelectionOverridesAssigneeRef.current = false;
-    const defType = project?.default_assignee_type ?? null;
+    const defType = project?.default_assignee_type === "agent" || project?.default_assignee_type === "squad" ? project.default_assignee_type : null;
     const defId = project?.default_assignee_id ?? null;
     if (defType && defId && (shouldOverride || !assigneeId || autoAssignedRef.current)) {
       autoAssignedRef.current = true;
@@ -231,6 +242,7 @@ export function ManualCreatePanel({
     setRuntimeWorkspaceId(null);
     setParentIssueId(undefined);
     setChildIssues([]);
+    setPrerequisites([]);
     setAttachmentIds([]);
     setDraft({
       title: "",
@@ -247,7 +259,8 @@ export function ManualCreatePanel({
   };
 
   const handleSubmit = async () => {
-    if (!title.trim() || submitting) return;
+    if (!title.trim() || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const issue = await createIssueMutation.mutateAsync({
@@ -264,6 +277,7 @@ export function ManualCreatePanel({
         due_date: dueDate || undefined,
         attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
         parent_issue_id: parentIssueId,
+        ...(prerequisites.length > 0 ? { blocked_by: prerequisites.map((prerequisite) => prerequisite.id) } : {}),
         project_id: projectId ?? null,
         runtime_workspace_id: runtimeWorkspaceId,
       });
@@ -311,37 +325,9 @@ export function ManualCreatePanel({
 
       if (shouldShowBacklogHint) {
         setBacklogHintIssueId(issue.id);
-      } else if (keepOpen) {
-        resetForNextIssue();
       } else {
-        onClose();
-      }
-
-      if (!shouldShowBacklogHint) {
-        toast.custom((toastId) => (
-          <div className="bg-popover text-popover-foreground border rounded-lg shadow-lg p-4 w-[360px]">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="flex items-center justify-center size-5 rounded-full bg-emerald-500/15 text-emerald-500">
-                <Check className="size-3" />
-              </div>
-              <span className="text-sm font-medium">{t(($) => $.create_issue.toast_created)}</span>
-            </div>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground ml-7">
-              <StatusIcon status={issue.status} className="size-3.5 shrink-0" />
-              <span className="truncate">{issue.identifier} – {issue.title}</span>
-            </div>
-            <button
-              type="button"
-              className="ml-7 mt-2 text-sm text-primary hover:underline cursor-pointer"
-              onClick={() => {
-                router.push(p.issueDetail(issue.id));
-                toast.dismiss(toastId);
-              }}
-            >
-              {t(($) => $.create_issue.view_issue)}
-            </button>
-          </div>
-        ), { duration: 5000 });
+        setReceipt(issue);
+        resetForNextIssue();
       }
     } catch (err) {
       // Duplicate-issue is the only structured 409 the create endpoint
@@ -393,6 +379,7 @@ export function ManualCreatePanel({
           : t(($) => $.create_issue.toast_failed),
       );
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -435,6 +422,8 @@ export function ManualCreatePanel({
       ...(carryParentIdentifier ? { parent_issue_identifier: carryParentIdentifier } : {}),
     });
   };
+
+  if (receipt && !keepOpen && !backlogHintIssueId) return <IssueCreationReceipt issue={receipt} onClose={onClose} onCreateAnother={() => setReceipt(null)} />;
 
   return (
     <>
@@ -510,6 +499,8 @@ export function ManualCreatePanel({
               </div>
             </div>
 
+            {receipt && <IssueCreationReceipt issue={receipt} compact onClose={onClose} onCreateAnother={() => setReceipt(null)} />}
+
             {/* Title */}
             <div className="px-5 pb-2 shrink-0">
               <TitleEditor
@@ -556,6 +547,7 @@ export function ManualCreatePanel({
 
               {/* Assignee */}
               <AssigneePicker
+                unassignedLabel={executionUnconfiguredLabel}
                 assigneeType={assigneeType ?? null}
                 assigneeId={assigneeId ?? null}
                 onUpdate={(u) => handleAssigneePicked(
@@ -646,6 +638,21 @@ export function ManualCreatePanel({
                 </div>
               ))}
 
+              {parentIssueId && prerequisites.map((prerequisite) => (
+                <span key={prerequisite.id} className="inline-flex h-7 items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                  <Link2 className="size-3" />
+                  {t(($) => $.create_issue.prerequisite_chip, { identifier: prerequisite.identifier })}
+                  <button type="button" onClick={() => setPrerequisites((items) => items.filter((item) => item.id !== prerequisite.id))} aria-label={t(($) => $.create_issue.remove_prerequisite, { identifier: prerequisite.identifier })}>
+                    <XIcon className="size-3" />
+                  </button>
+                </span>
+              ))}
+              {parentIssueId && (
+                <button type="button" className="inline-flex h-7 items-center gap-1 rounded-full border px-2 text-xs text-muted-foreground hover:text-foreground" onClick={() => setPrerequisitePickerOpen(true)}>
+                  <Plus className="size-3" />{t(($) => $.create_issue.add_prerequisite)}
+                </button>
+              )}
+
               {/* Overflow — always the last child so DOM order keeps it at the
                   end of the wrap flow, no matter how many chips are present. */}
               <DropdownMenu>
@@ -723,6 +730,14 @@ export function ManualCreatePanel({
                   prev.some((x) => x.id === selected.id) ? prev : [...prev, selected],
                 );
               }}
+            />
+            <IssuePickerModal
+              open={prerequisitePickerOpen}
+              onOpenChange={setPrerequisitePickerOpen}
+              title={t(($) => $.create_issue.add_prerequisite)}
+              description={t(($) => $.create_issue.prerequisite_picker_description)}
+              excludeIds={[...(parentIssueId ? [parentIssueId] : []), ...prerequisites.map((prerequisite) => prerequisite.id)]}
+              onSelect={(selected) => setPrerequisites((items) => [...items, selected])}
             />
 
             {/* Footer */}

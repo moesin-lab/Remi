@@ -1,3 +1,6 @@
+import { memoizeRequestRead } from "../request-read-cache.js";
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
+import { refreshResponsibilityEntityChange } from '../issue-responsibility-changes.js';
 import { getExecutionGroup, runtimeExecutionGroupId } from "@multiremi/store/execution-groups.js";
 // Agents + skills domain, extracted verbatim from MultiremiStore (facade delegates here).
 // `listActiveAgentsByRuntime` lives here (rather than in RuntimesRepo) because it hydrates agent
@@ -15,6 +18,8 @@ import {
   uniqueRefMatch,
 } from "@multiremi/store/helpers.js";
 import { type StoreContext } from "@multiremi/store/context.js";
+import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
+import { advisoryXactLock } from "@multiremi/store/db/postgres.js";
 import { isAgentRole, normalizeStoredAgentRole } from "@multiremi/store/agent-role.js";
 import type {
   CreateAgentInput,
@@ -28,6 +33,9 @@ import type {
 } from "@multiremi/contracts/types.js";
 
 type Row = Record<string, unknown>;
+
+/** Keeps one `IN (…)` below SQLite's default bind-variable limit. */
+const AGENT_LOOKUP_BATCH_SIZE = 400;
 
 export class AgentsSkillsRepo {
   constructor(private ctx: StoreContext) {}
@@ -88,27 +96,29 @@ export class AgentsSkillsRepo {
   }
 
   updateAgent(id: string, input: UpdateAgentInput): MultiremiAgent {
+    return this.ctx.db.transaction(() => this.updateAgentWithinTransaction(id, input))();
+  }
+
+  /** Caller owns the transaction, including any role-dependent token revocations. */
+  updateAgentWithinTransaction(id: string, input: UpdateAgentInput): MultiremiAgent {
     const initial = this.getAgent(id);
     if (!initial) throw new Error(`Agent not found: ${id}`);
     const requestedWorkspaceId = hasAnyField(input, "workspaceId", "workspace_id")
       ? cleanOptionalString(input.workspaceId ?? input.workspace_id) ?? "local"
       : initial.workspaceId;
     const workspaceIds = [...new Set([initial.workspaceId, requestedWorkspaceId])].sort();
-    const transaction = this.ctx.db.transaction(() => {
-      for (const workspaceId of workspaceIds) this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
-      for (const workspaceId of workspaceIds) this.ctx.agentPlugins().lockAgentPluginWorkspace(workspaceId);
-      this.lockAgentRow(id);
-      const current = this.getAgent(id);
-      if (!current) throw new Error(`Agent not found: ${id}`);
-      const lockedRequestedWorkspaceId = hasAnyField(input, "workspaceId", "workspace_id")
-        ? cleanOptionalString(input.workspaceId ?? input.workspace_id) ?? "local"
-        : current.workspaceId;
-      if (!workspaceIds.includes(current.workspaceId) || !workspaceIds.includes(lockedRequestedWorkspaceId)) {
-        throw new Error("Agent workspace changed concurrently; retry the update");
-      }
-      return this.updateAgentWithinPluginLock(id, input);
-    });
-    return transaction();
+    for (const workspaceId of workspaceIds) this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+    for (const workspaceId of workspaceIds) this.ctx.agentPlugins().lockAgentPluginWorkspace(workspaceId);
+    this.lockAgentRow(id);
+    const current = this.getAgent(id);
+    if (!current) throw new Error(`Agent not found: ${id}`);
+    const lockedRequestedWorkspaceId = hasAnyField(input, "workspaceId", "workspace_id")
+      ? cleanOptionalString(input.workspaceId ?? input.workspace_id) ?? "local"
+      : current.workspaceId;
+    if (!workspaceIds.includes(current.workspaceId) || !workspaceIds.includes(lockedRequestedWorkspaceId)) {
+      throw new Error("Agent workspace changed concurrently; retry the update");
+    }
+    return this.updateAgentWithinPluginLock(id, input);
   }
 
   setAgentRole(id: string, role: MultiremiAgent["role"]): MultiremiAgent {
@@ -130,7 +140,10 @@ export class AgentsSkillsRepo {
   }
 
   private updateAgentWithinPluginLock(id: string, input: UpdateAgentInput): MultiremiAgent {
-    const current = this.getAgent(id);
+    // The row, not the hydrated Agent: `skills` below writes back the inline column, and the
+    // hydrated list also holds the attached workspace skills. Writing those back made a copy
+    // that a later `PUT /api/agents/:id/skills` could not remove.
+    const current = this.getAgentLite(id);
     if (!current) throw new Error(`Agent not found: ${id}`);
     const now = nowIso();
     const workspaceId = hasAnyField(input, "workspaceId", "workspace_id")
@@ -243,17 +256,24 @@ export class AgentsSkillsRepo {
     );
     this.ctx.db.run("UPDATE multiremi_agents SET execution_group_id = ? WHERE id = ?", [executionGroupId, id]);
     const updated = this.getAgent(id)!;
-    // Changing a scheduling-relevant field (target, engine, owner, or workspace)
+    if (updated.workspaceId !== current.workspaceId) refreshResponsibilityEntityChange(this.ctx,'agent',id,'execution_owner_workspace_changed',[current.workspaceId]);
+    // Changing a scheduling-relevant field (target, engine, or workspace)
     // strands the agent's already-queued tasks: a task pinned to a runtime
-    // that no longer matches the agent (provider/owner) can't be claimed, and
+    // that no longer matches the agent's provider can't be claimed, and
     // a workspace change leaves the task's workspace stale versus the claim
     // predicate. Re-home them.
     const providerChanged = input.provider !== undefined && input.provider !== current.provider;
-    const ownerChanged = (updated.ownerId ?? "local") !== (current.ownerId ?? "local");
     const workspaceChanged = updated.workspaceId !== current.workspaceId;
     const runtimeChanged = updated.runtimeId !== current.runtimeId || updated.executionGroupId !== current.executionGroupId;
-    if (providerChanged || ownerChanged || workspaceChanged || runtimeChanged) {
-      this.rescheduleAgentQueuedTasks(updated, { workspaceChanged, executionTargetChanged: providerChanged || runtimeChanged });
+    const managedGroup = updated.executionGroupId
+      ? getExecutionGroup(this.ctx.db, updated.executionGroupId, updated.workspaceId)?.managed : false;
+    const modelChanged = Boolean(managedGroup)
+      && (updated.model !== current.model || updated.thinkingLevel !== current.thinkingLevel);
+    if (providerChanged || workspaceChanged || runtimeChanged || modelChanged) {
+      // Dispatched tasks contain a frozen connection but hydrate Agent model
+      // settings on recovery. Retire those unstarted snapshots when the user
+      // changes execution parameters, just as for an explicit target change.
+      this.rescheduleAgentQueuedTasks(updated, { workspaceChanged, executionTargetChanged: providerChanged || runtimeChanged || modelChanged });
     }
     return updated;
   }
@@ -274,7 +294,7 @@ export class AgentsSkillsRepo {
     // its new workspace.
     if (opts.workspaceChanged) {
       const active = this.ctx.db
-        .query("SELECT id FROM multiremi_tasks WHERE agent_id = ? AND status IN ('queued', 'dispatched', 'waiting_local_directory')")
+        .query("SELECT id FROM multiremi_turn_execution_records WHERE agent_id = ? AND status IN ('queued', 'dispatched', 'waiting_local_directory')")
         .all(agent.id) as Row[];
       for (const row of active) this.ctx.tasks().cancelTask(String(row.id));
       return;
@@ -285,7 +305,7 @@ export class AgentsSkillsRepo {
       // target using the Agent's now-mutated executable/config. Cancel work
       // that has not started; an explicit rerun will resolve current settings.
       const frozen = this.ctx.db.query(
-        `SELECT id FROM multiremi_tasks
+        `SELECT id FROM multiremi_turn_execution_records
          WHERE agent_id = ?
            AND execution_fingerprint IS NOT NULL
            AND status IN ('queued', 'dispatched', 'waiting_local_directory')`,
@@ -294,10 +314,10 @@ export class AgentsSkillsRepo {
     }
     // Include tasks with only a session/work_dir (no runtime pin) — a chat
     // send can queue a task carrying the promoted provider session without a
-    // runtime stamp, and that session is also void after an engine/owner change.
+    // runtime stamp, and that session is also void after an engine change.
     const rows = this.ctx.db
       .query(
-        "SELECT * FROM multiremi_tasks WHERE agent_id = ? AND status = 'queued' AND (runtime_id IS NOT NULL OR session_id IS NOT NULL)",
+        "SELECT * FROM multiremi_turn_execution_records WHERE agent_id = ? AND status = 'queued' AND (runtime_id IS NOT NULL OR session_id IS NOT NULL)",
       )
       .all(agent.id) as Row[];
     for (const row of rows) {
@@ -305,18 +325,16 @@ export class AgentsSkillsRepo {
       if (daemonId) {
         // local_directory task: keep it on the machine that holds the
         // directory, under the runtime id for the agent's current provider.
-        // Drop the provider session — an engine/owner change invalidates it —
+        // Drop the provider session — an engine change invalidates it —
         // while keeping work_dir (the directory itself is unchanged).
         const rt = this.ctx.runtimes().getRuntimeByDaemonAndProvider(daemonId, agent.provider);
         const newRuntimeId = rt ? rt.id : daemonRuntimeId(daemonId, agent.provider);
-        this.ctx.db.run(
-          "UPDATE multiremi_tasks SET runtime_id = ?, session_id = NULL, updated_at = ? WHERE id = ?",
+        runTurnExecutionMutation(this.ctx.db, "UPDATE multiremi_turn_execution_records SET runtime_id = ?, session_id = NULL, offered_at = NULL, accepted_at = NULL, updated_at = ? WHERE id = ?",
           [newRuntimeId, now, String(row.id)],
         );
       } else {
         // Session/other pin: the old session is void — re-pool it.
-        this.ctx.db.run(
-          "UPDATE multiremi_tasks SET runtime_id = NULL, session_id = NULL, work_dir = NULL, updated_at = ? WHERE id = ?",
+        runTurnExecutionMutation(this.ctx.db, "UPDATE multiremi_turn_execution_records SET runtime_id = NULL, session_id = NULL, work_dir = NULL, offered_at = NULL, accepted_at = NULL, updated_at = ? WHERE id = ?",
           [now, String(row.id)],
         );
       }
@@ -329,7 +347,21 @@ export class AgentsSkillsRepo {
     const initial = this.getAgent(id);
     if (!initial) throw new Error(`Agent not found: ${id}`);
     const tx = this.ctx.db.transaction(() => {
+      // Global lock order (MUL-405): W then N, before any domain lock. The
+      // Feishu cascade at the end of this transaction writes the audit trail
+      // (its seq is allocated under the audit number lock) and updates rows, so
+      // N must already be held when the first D write happens — otherwise this
+      // path runs W -> D -> N while every other audit writer runs W -> N -> D.
+      //
+      // Taken unconditionally: this is a low-frequency admin action, and the
+      // alternative (a read to see whether any Feishu config references this
+      // Agent, then a conditional lock) would need the read to be lock-free
+      // against config creation. It is not: `upsertConfig` and `replaceRoutes`
+      // also take W, so a plain read here cannot be proven race-free without
+      // adding a read-creates-a-write dependency. A per-workspace lock held for
+      // one archive is the cheaper, provable choice.
       this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
+      advisoryXactLock(this.ctx.db, numberAllocationLockKey(`feishu-bot-audit:${initial.workspaceId}`));
       this.ctx.agentPlugins().lockAgentPluginWorkspace(initial.workspaceId);
       this.lockAgentRow(id);
       const agent = this.getAgent(id);
@@ -342,6 +374,7 @@ export class AgentsSkillsRepo {
          WHERE default_assignee_type = 'agent' AND default_assignee_id = ?`,
       ).all(id) as Array<{ id: string; workspace_id: string }>);
       this.ctx.db.run("UPDATE multiremi_agents SET archived_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
+      if (!agent.archivedAt) refreshResponsibilityEntityChange(this.ctx,'agent',id,'execution_owner_archived');
       this.ctx.db.run(
         `UPDATE multiremi_projects
          SET default_assignee_type = NULL, default_assignee_id = NULL, updated_at = ?
@@ -364,8 +397,9 @@ export class AgentsSkillsRepo {
     if (group.provider !== provider) throw new Error("Execution group provider does not match Agent provider");
     if (!group.runtimeIds.some(runtimeId => {
       const runtime = this.ctx.runtimes().getRuntime(runtimeId);
-      return runtime && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId);
-    })) throw new Error("Execution group has no Runtime available to the Agent owner");
+      return runtime && (runtime.workspaceId ?? "local") === workspaceId
+        && (runtime.provider === "any" || runtime.provider === provider);
+    })) throw new Error("Execution group has no compatible Runtime in this workspace");
   }
 
   private assertRuntimeBinding(runtimeId: string, workspaceId: string, provider: string, ownerId: string): void {
@@ -375,9 +409,6 @@ export class AgentsSkillsRepo {
     }
     if (runtime.provider !== "any" && runtime.provider !== provider) {
       throw new Error("Runtime provider does not match Agent provider");
-    }
-    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== ownerId) {
-      throw new Error("Private Runtime must belong to the Agent owner");
     }
   }
 
@@ -418,6 +449,7 @@ export class AgentsSkillsRepo {
         throw new Error("Agent workspace changed concurrently; retry the restore");
       }
       this.ctx.db.run("UPDATE multiremi_agents SET archived_at = NULL, updated_at = ? WHERE id = ?", [now, id]);
+      if (initial.archivedAt) refreshResponsibilityEntityChange(this.ctx,'agent',id,'execution_owner_restored');
       this.ctx.agentPlugins().reconcileAgentPluginDesiredStateWithinLock(workspaceId);
     })();
     return this.getAgent(id)!;
@@ -470,7 +502,7 @@ export class AgentsSkillsRepo {
       ],
     );
     this.replaceSkillFiles(id, files, now);
-    return this.getSkill(id)!;
+    return this.getSkill(id, { includeFiles: true })!;
   }
 
   updateSkill(id: string, input: UpdateSkillInput): MultiremiSkill {
@@ -503,7 +535,7 @@ export class AgentsSkillsRepo {
       );
       if (input.files !== undefined) this.replaceSkillFiles(id, normalizeSkillFiles(input.files), now);
     })();
-    return this.getSkill(id)!;
+    return this.getSkill(id, { includeFiles: true })!;
   }
 
   upsertSkill(input: CreateSkillInput & { id: string }): MultiremiSkill {
@@ -538,7 +570,7 @@ export class AgentsSkillsRepo {
       );
       if (input.files !== undefined) this.replaceSkillFiles(input.id, normalizeSkillFiles(input.files), now);
     })();
-    return this.getSkill(input.id)!;
+    return this.getSkill(input.id, { includeFiles: true })!;
   }
 
   archiveSkill(id: string): MultiremiSkill {
@@ -557,11 +589,11 @@ export class AgentsSkillsRepo {
     return rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
   }
 
-  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill | null {
+  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = {}): MultiremiSkill | null {
     const row = this.ctx.db.query(
       `SELECT * FROM multiremi_skills WHERE id = ?${options.includeArchived ? "" : " AND archived_at IS NULL"}`,
     ).get(id) as Row | null;
-    return row ? toSkill(row, options.includeFiles === false ? [] : this.listSkillFiles(id, { includeArchived: options.includeArchived })) : null;
+    return row ? toSkill(row, options.includeFiles ? this.listSkillFiles(id, { includeArchived: options.includeArchived }) : []) : null;
   }
 
   listSkillFiles(skillId: string, options: { includeArchived?: boolean } = {}): MultiremiSkillFile[] {
@@ -603,7 +635,7 @@ export class AgentsSkillsRepo {
     return result.changes > 0;
   }
 
-  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill[] {
+  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = {}): MultiremiSkill[] {
     const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(agentId) as Row | null;
     if (!row) throw new Error(`Agent not found: ${agentId}`);
     const agent = toAgent(row);
@@ -614,8 +646,26 @@ export class AgentsSkillsRepo {
        WHERE aks.agent_id = ? AND s.archived_at IS NULL
        ORDER BY aks.created_at ASC, s.name ASC`,
     ).all(agentId) as Row[];
-    const structured = rows.map((row) => toSkill(row, options.includeFiles === false ? [] : this.listSkillFiles(String(row.id))));
+    const structured = rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
     return mergeAgentSkills(agent.skills, structured);
+  }
+
+  /** Compatibility lists ship summaries, never Skill files; preserve join order and inline fallback. */
+  listAgentSkillSummaries(agents: readonly MultiremiAgent[]): Map<string, MultiremiSkill[]> {
+    const structured = new Map<string, MultiremiSkill[]>();
+    for (let offset = 0; offset < agents.length; offset += AGENT_LOOKUP_BATCH_SIZE) {
+      const batch = agents.slice(offset, offset + AGENT_LOOKUP_BATCH_SIZE);
+      const rows = this.ctx.db.query(`SELECT aks.agent_id AS linked_agent_id, s.*
+        FROM multiremi_skills s JOIN multiremi_agent_skills aks ON aks.skill_id = s.id
+        WHERE aks.agent_id IN (${batch.map(() => "?").join(", ")}) AND s.archived_at IS NULL
+        ORDER BY aks.created_at ASC, s.name ASC`).all(...batch.map(agent => agent.id)) as Row[];
+      for (const row of rows) {
+        const id = String(row.linked_agent_id);
+        const skills = structured.get(id) ?? [];
+        skills.push(toSkill(row, [])); structured.set(id, skills);
+      }
+    }
+    return new Map(agents.map(agent => [agent.id, mergeAgentSkills(agent.skills, structured.get(agent.id) ?? [])]));
   }
 
   setAgentSkills(agentId: string, input: SetAgentSkillsInput | string[]): MultiremiSkill[] {
@@ -624,16 +674,31 @@ export class AgentsSkillsRepo {
     const now = nowIso();
     this.ctx.db.transaction(() => {
       this.ctx.db.run("DELETE FROM multiremi_agent_skills WHERE agent_id = ?", [agentId]);
-      for (const skillId of skillIds) {
-        const skill = this.getSkill(skillId);
-        if (!skill) throw new Error(`Skill not found: ${skillId}`);
-        this.ctx.db.run(
-          "INSERT OR IGNORE INTO multiremi_agent_skills (agent_id, skill_id, created_at) VALUES (?, ?, ?)",
-          [agentId, skillId, now],
-        );
-      }
+      // Replace means the result is exactly `skillIds`. Reads merge the inline `skills` column
+      // back in, so it has to be cleared here too.
+      this.ctx.db.run("UPDATE multiremi_agents SET skills = ? WHERE id = ?", [toJson([]), agentId]);
+      this.insertAgentSkillLinks(agentId, skillIds, now);
     })();
     return this.listAgentSkills(agentId);
+  }
+
+  /** Attach skills without touching the ones already present, inline or linked. */
+  addAgentSkills(agentId: string, skillIds: readonly string[]): MultiremiSkill[] {
+    if (!this.ctx.db.query("SELECT id FROM multiremi_agents WHERE id = ?").get(agentId)) throw new Error(`Agent not found: ${agentId}`);
+    const now = nowIso();
+    this.ctx.db.transaction(() => this.insertAgentSkillLinks(agentId, skillIds, now))();
+    return this.listAgentSkills(agentId);
+  }
+
+  private insertAgentSkillLinks(agentId: string, skillIds: readonly string[], now: string): void {
+    for (const skillId of skillIds) {
+      const skill = this.getSkill(skillId);
+      if (!skill) throw new Error(`Skill not found: ${skillId}`);
+      this.ctx.db.run(
+        "INSERT OR IGNORE INTO multiremi_agent_skills (agent_id, skill_id, created_at) VALUES (?, ?, ?)",
+        [agentId, skillId, now],
+      );
+    }
   }
 
   ensureDefaultAgent(
@@ -649,19 +714,13 @@ export class AgentsSkillsRepo {
     const existing = this.getDefaultAgent(workspaceId, provider, ownerId);
     if (existing) {
       if (existing.archivedAt) {
-        this.ctx.db.run("UPDATE multiremi_agents SET archived_at = NULL, updated_at = ? WHERE id = ?", [nowIso(), existing.id]);
-        return this.getAgent(existing.id)!;
+        return this.restoreAgent(existing.id);
       }
       return existing;
     }
-    // Per-owner default agent: each member gets their own, owned by them. This
-    // is what lets a member's PRIVATE runtime run their default/onboarding task
-    // (the claim ownership predicate requires runtime owner == agent owner) —
-    // a single workspace-shared default owned by whoever created it first would
-    // be rejected by every other member's private machine. It also means the
-    // /agents/default endpoint can never hand one member another member's
-    // default agent (with its custom_env / mcp_config). Walk past any taken id
-    // (legacy/imported rows) so createAgent can't hit a UNIQUE violation.
+    // Human requests use the shared operator owner. Explicit store callers may
+    // still address a historical owner's default without rewriting attribution.
+    // Walk past imported or legacy ids to avoid a UNIQUE collision.
     const base = `agt_default_${safeIdSegment(workspaceId)}_${provider}_${safeIdSegment(ownerId)}`;
     let id = base;
     for (let n = 2; this.getAgent(id); n += 1) id = `${base}_${n}`;
@@ -678,11 +737,11 @@ export class AgentsSkillsRepo {
   }
 
   /**
-   * Find a member's default agent for a provider. Matches legacy ids too
+   * Find a default agent for a provider and the requested attribution owner.
+   * Human API calls pass the shared operator. Matches legacy ids too
    * (`agt_default_<provider>`, `agt_default_<ws>_<provider>`) so pre-pool
    * deployments reuse their default agent instead of growing a twin. Scoped to
-   * `ownerId` (exact match) — default agents are per-owner, so this never
-   * returns another member's default agent (with its custom_env / mcp_config).
+   * `ownerId` retains exact matching for historical store callers.
    */
   getDefaultAgent(workspaceId: string, provider: string, ownerId: string): MultiremiAgent | null {
     const row = this.ctx.db.query(
@@ -693,9 +752,28 @@ export class AgentsSkillsRepo {
     return row ? this.hydrateAgent(toAgent(row)) : null;
   }
 
-  getAgent(id: string): MultiremiAgent | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null;
-    return row ? this.hydrateAgent(toAgent(row)) : null;
+  getAgent(id: string, options: { includeFiles?: boolean } = {}): MultiremiAgent | null {
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_agents'], `agent:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null);
+    return row ? this.hydrateAgent(toAgent(row), options) : null;
+  }
+
+  /**
+   * The Agent row without its skills or skill files.
+   *
+   * Eligibility checks (may this Runtime run this Agent?) read identity, ownership, provider,
+   * model and archival state — nothing that lives in `multiremi_skill_files`. Hydrating those
+   * rows costs one query per Agent plus the entire body of every Skill file: on a workspace
+   * whose Agents carry a few hundred KB of Skills each, a claim that only ever *selects* one
+   * Agent pays megabytes to answer questions the Skills cannot affect.
+   *
+   * Callers that ship an Agent to a daemon must use `getAgent(id, { includeFiles: true })`; this is only for
+   * decisions.
+   */
+  getAgentLite(id: string): MultiremiAgent | null {
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_agents'], `agent:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null);
+    return row ? toAgent(row) : null;
   }
 
   getAgentByWorkspaceAndName(workspaceId: string, name: string): MultiremiAgent | null {
@@ -703,6 +781,29 @@ export class AgentsSkillsRepo {
       .query("SELECT * FROM multiremi_agents WHERE workspace_id = ? AND name = ? ORDER BY created_at ASC LIMIT 1")
       .get(workspaceId, name) as Row | null;
     return row ? this.hydrateAgent(toAgent(row)) : null;
+  }
+
+  /**
+   * Resolve an assignee reference to an Agent row, without Skills or Skill files.
+   *
+   * Same matching rule as {@link getAgentByRef} (exact id, then the tiered
+   * alias match over the workspace's Agents), but the alias scan reads the
+   * Agent rows only. The caller is selecting a row — the reference-shaped
+   * branch of the assignee filter resolver (MUL-473) — and never ships the
+   * result to a daemon, so pulling every Skill body across the bridge would
+   * dominate the request for an answer the Skills cannot change.
+   */
+  getAgentLiteByRef(ref: string, workspaceId?: string | null): MultiremiAgent | null {
+    const value = ref.trim();
+    if (!value) return null;
+    const exact = this.getAgentLite(value);
+    if (exact && !exact.archivedAt && (!workspaceId || exact.workspaceId === workspaceId)) return exact;
+    return uniqueRefMatch(
+      this.listAgentsLite().filter((agent) => !workspaceId || agent.workspaceId === workspaceId),
+      value,
+      (agent) => agent.id,
+      (agent) => [agent.name],
+    );
   }
 
   getAgentByRef(ref: string, workspaceId?: string | null): MultiremiAgent | null {
@@ -722,7 +823,55 @@ export class AgentsSkillsRepo {
     const rows = this.ctx.db.query(options.includeArchived
       ? "SELECT * FROM multiremi_agents ORDER BY created_at ASC"
       : "SELECT * FROM multiremi_agents WHERE archived_at IS NULL ORDER BY created_at ASC").all() as Row[];
-    return rows.map((row) => this.hydrateAgent(toAgent(row)));
+    const agents = rows.map(toAgent);
+    const skills = this.listAgentSkillSummaries(agents);
+    return agents.map(agent => ({ ...agent, skills: skills.get(agent.id) ?? [] }));
+  }
+
+  /**
+   * Every Agent row, without Skills or Skill files.
+   *
+   * Capability questions ("which Agent may publish a Wiki?") are answered from a
+   * role/provider plus the plugin tables, so they must not pull every Skill body in the
+   * workspace across the bridge. Callers that ship an Agent to a client use
+   * {@link listAgents}.
+   */
+  listAgentsLite(options: { includeArchived?: boolean } = {}): MultiremiAgent[] {
+    const rows = this.ctx.db.query(options.includeArchived
+      ? "SELECT * FROM multiremi_agents ORDER BY created_at ASC"
+      : "SELECT * FROM multiremi_agents WHERE archived_at IS NULL ORDER BY created_at ASC").all() as Row[];
+    return rows.map(toAgent);
+  }
+
+  listAgentCompatibilityCandidates(workspaceId: string, options: { includeArchived?: boolean } = {}): MultiremiAgent[] {
+    const rows = this.ctx.db.query(`SELECT * FROM multiremi_agents
+      WHERE workspace_id = ? ${options.includeArchived ? "" : "AND archived_at IS NULL"}
+      ORDER BY created_at ASC`).all(workspaceId) as Row[];
+    return rows.map(toAgent);
+  }
+
+  /**
+   * Live Agent rows for a set of ids, without Skills or Skill files.
+   *
+   * Read-path counterpart of {@link hydrateTasksByIds}: a list route that has
+   * already decided it only needs to *check* Agents (visibility, workspace)
+   * reads them in one bounded `IN (…)` instead of one hydrated load per id.
+   * Archived Agents are included — the decision the caller makes is the same one
+   * `getAgent` supports, and filtering here would silently change it (MUL-473).
+   */
+  listAgentsLiteByIds(ids: readonly string[]): MultiremiAgent[] {
+    const uniqueIds = [...new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean))];
+    if (!uniqueIds.length) return [];
+    const out: MultiremiAgent[] = [];
+    for (let offset = 0; offset < uniqueIds.length; offset += AGENT_LOOKUP_BATCH_SIZE) {
+      const batch = uniqueIds.slice(offset, offset + AGENT_LOOKUP_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(", ");
+      const rows = this.ctx.db.query(
+        `SELECT * FROM multiremi_agents WHERE id IN (${placeholders})`,
+      ).all(...batch) as Row[];
+      out.push(...rows.map(toAgent));
+    }
+    return out;
   }
 
   listActiveAgentsByRuntime(runtimeId: string): MultiremiAgent[] {
@@ -732,25 +881,44 @@ export class AgentsSkillsRepo {
        WHERE runtime_id = ? AND archived_at IS NULL
        ORDER BY lower(name) ASC, name ASC`,
     ).all(runtimeId) as Row[];
-    return rows.map((row) => this.hydrateAgent(toAgent(row)));
+    const agents = rows.map(toAgent);
+    const skills = this.listAgentSkillSummaries(agents);
+    return agents.map(agent => ({ ...agent, skills: skills.get(agent.id) ?? [] }));
   }
 
-  hydrateAgent(agent: MultiremiAgent): MultiremiAgent {
+  hydrateAgent(agent: MultiremiAgent, options: { includeFiles?: boolean } = {}): MultiremiAgent {
+    agent.model_policy_reason = this.ctx.runtimes().agentModelPolicyReason(agent);
     return {
       ...agent,
-      skills: this.listAgentSkillsForExistingAgent(agent),
+      skills: this.listAgentSkillsForExistingAgent(agent, options),
     };
   }
 
-  private listAgentSkillsForExistingAgent(agent: MultiremiAgent): MultiremiSkill[] {
-    const rows = this.ctx.db.query(
+  private listAgentSkillsForExistingAgent(agent: MultiremiAgent, options: { includeFiles?: boolean }): MultiremiSkill[] {
+    const rows = memoizeRequestRead(this.ctx.db, ['multiremi_skills','multiremi_agent_skills'], `skills:${agent.id}`, () => this.ctx.db.query(
       `SELECT s.*
        FROM multiremi_skills s
        JOIN multiremi_agent_skills aks ON aks.skill_id = s.id
        WHERE aks.agent_id = ? AND s.archived_at IS NULL
        ORDER BY aks.created_at ASC, s.name ASC`,
-    ).all(agent.id) as Row[];
-    const structured = rows.map((row) => toSkill(row, this.listSkillFiles(String(row.id))));
+    ).all(agent.id) as Row[]);
+    // The join already checked active skills; load their files as one batch,
+    // keeping each skill's path order without a per-skill existence/read pair.
+    const files = options.includeFiles && rows.length ? memoizeRequestRead(this.ctx.db,
+      ['multiremi_skill_files'], `skill-files:${JSON.stringify(rows.map(row => row.id))}`, () => {
+        const values = this.ctx.db.dialect === 'postgres'
+          ? 'SELECT jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB))'
+          : 'SELECT value FROM json_each(?)';
+        return this.ctx.db.query(`SELECT * FROM multiremi_skill_files WHERE skill_id IN (${values})
+          ORDER BY skill_id ASC, path ASC`).all(JSON.stringify(rows.map(row => row.id))) as Row[];
+      }) : [];
+    const bySkill = new Map<string, MultiremiSkillFile[]>();
+    for (const file of files) {
+      const id = String(file.skill_id);
+      const list = bySkill.get(id) ?? [];
+      list.push(toSkillFile(file)); bySkill.set(id, list);
+    }
+    const structured = rows.map(row => toSkill(row, bySkill.get(String(row.id)) ?? []));
     return mergeAgentSkills(agent.skills, structured);
   }
 

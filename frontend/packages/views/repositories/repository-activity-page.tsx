@@ -46,7 +46,7 @@ const ActivityRow = memo(function ActivityRow({ item, asOf }: { item: Item; asOf
       {item.attempt > 1 && <span>{t(($) => $.activity.attempt, { count: item.attempt })}</span>}
       <TranscriptButton
         task={{
-          id: item.task_id, status: item.status, agent_id: item.agent?.id,
+          id: item.task_id, turn_id: item.turn_id, status: item.status, agent_id: item.agent?.id,
           started_at: item.started_at, completed_at: item.ended_at, created_at: item.created_at ?? undefined,
         }}
         agentName={agent}

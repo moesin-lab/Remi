@@ -1,4 +1,5 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { MultiremiStore } from "../../packages/server/src/store/store.js";
@@ -37,7 +38,7 @@ function normalizeSql(sql: string): string {
 }
 
 function countingDatabase(): CountingDatabase {
-  const database = new Database(":memory:");
+  const database = openSqliteDatabase(":memory:");
   const counts = new Map<string, number>();
   const proxy = new Proxy(database, {
     get(target, key) {
@@ -560,22 +561,6 @@ const cases: BenchmarkCase[] = [
       });
     },
     run: (store) => store.listRepositoryWikiDocs("local", "repository_bench"),
-  },
-  {
-    name: "CONTROL SessionArchivesRepo.list",
-    unit: "session archives",
-    seed(database, n) {
-      seedWorkspace(database);
-      transaction(database, () => {
-        for (let index = 0; index < n; index += 1) {
-          database.run(
-            "INSERT INTO multiremi_session_archives (id, workspace_id, issue_id, runtime_id, daemon_id, source_revision, sha256, size_bytes, relative_path, created_at, updated_at) VALUES (?, 'local', 'issue_bench', 'runtime_bench', 'daemon_bench', ?, ?, 0, ?, ?, ?)",
-            [`archive_${index}`, `revision_${index}`, `sha_${index}`, `archive-${index}.tar.gz`, NOW, NOW],
-          );
-        }
-      });
-    },
-    run: (store) => store.listSessionArchives("issue_bench"),
   },
   {
     name: "CONTROL AutopilotsRepo.listAutopilots",

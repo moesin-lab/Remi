@@ -15,7 +15,9 @@ import type {
   UpdateProjectInput,
 } from "@multiremi/contracts/types.js";
 import type { Context } from "hono";
-import { ProjectInstructionsRevisionConflictError } from "@multiremi/store/repos/projects-repo.js";
+import { PROJECT_INSTRUCTIONS_TOO_LONG } from "@multiremi/contracts/remi-rules.js";
+import { ProjectExecutionOwnerError, ProjectInstructionsRevisionConflictError } from "@multiremi/store/repos/projects-repo.js";
+import type { ProjectSummary } from "@multiremi/store/repos/projects-repo.js";
 import { currentRequestUserId } from "./context.js";
 
 export function projectCompatibilityResponse(project: MultiremiProject): Record<string, unknown> {
@@ -29,7 +31,7 @@ export function projectCompatibilityResponse(project: MultiremiProject): Record<
   };
 }
 
-export function projectCompatibilitySummaryResponse(project: MultiremiProject): Record<string, unknown> {
+export function projectCompatibilitySummaryResponse(project: ProjectSummary): Record<string, unknown> {
   return {
     id: project.id,
     workspace_id: project.workspaceId,
@@ -202,6 +204,9 @@ export function labelCompatibilityErrorResponse(c: Context, error: unknown): Res
 }
 
 export function projectErrorResponse(c: Context, err: unknown): Response | null {
+  if (err instanceof ProjectExecutionOwnerError) {
+    return c.json({ error: err.message, code: err.code }, 409);
+  }
   if (err instanceof ProjectInstructionsRevisionConflictError) {
     return c.json({
       error: "project instructions changed after they were loaded",
@@ -212,6 +217,7 @@ export function projectErrorResponse(c: Context, err: unknown): Response | null 
   }
   if (!(err instanceof Error)) return null;
   if (err.message === "Project title is required") return c.json({ error: "title is required" }, 400);
+  if (err.message === PROJECT_INSTRUCTIONS_TOO_LONG) return c.json({ error: err.message }, 400);
   if (err.message.startsWith("Project not found:")) return c.json({ error: "project not found" }, 404);
   // Default-assignee resolution failures (resolveAssigneeRef) are client errors.
   if (

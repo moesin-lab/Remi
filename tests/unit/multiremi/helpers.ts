@@ -20,19 +20,25 @@
  * `db!.run(...)` exactly as it did when the variable was file-local.
  */
 import { expect } from "bun:test";
-import { Database } from "bun:sqlite";
+import { createSqliteStoreSnapshotFactory } from "../../helpers/sqlite-store-snapshot.js";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { createHash, createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MultiremiStore } from "@multiremi/store.js";
-import { createId } from "@multiremi/ids.js";
+import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { historicalWriters } from "./unified-model-test-backends.js";
+import { createCommitEventQueue, type StoreContext } from '@multiremi/store/context.js';
 import type {
   MultiremiAgent,
   MultiremiAgentPlugin,
   MultiremiAutopilot,
   MultiremiAutopilotTrigger,
-  MultiremiIssueWorkspaceArchiveBinding,
+  CreateIssueInput,
+  CreateAutopilotInput,
+  MultiremiIssue,
 } from "@multiremi/contracts/types.js";
 
 /** The sqlite handle behind the store most recently built by `createStore()`. */
@@ -41,9 +47,68 @@ let previousUploadDir: string | undefined;
 let uploadDir: string | null = null;
 let previousFetch: typeof globalThis.fetch | null = null;
 
+/**
+ * Ordinary business store: a new handle and a new Store cloned from the
+ * migrated SQLite image (same as `createSnapshotStore`). The migration
+ * entrance still runs; a non-native clock/RNG, a changed environment or a
+ * missing migration report falls back to a cold migration automatically.
+ */
 export function createStore(): MultiremiStore {
-  db = new Database(":memory:");
+  return createSnapshotStore();
+}
+
+/** Cold migration from an empty database, for migration, empty-schema, seed-clock
+ * or startup-side-effect cases that must observe the first migration run. */
+export function createFreshStore(): MultiremiStore {
+  db = openSqliteDatabase(":memory:");
   return new MultiremiStore(db);
+}
+
+// Lazy: importing helpers never opens a snapshot database; the image is built
+// by the first createStore()/createSnapshotStore() call of the process.
+const sqliteSnapshots = createSqliteStoreSnapshotFactory();
+
+/** Ordinary business tests only; retains an independent handle and new Store. */
+export function createSnapshotStore(): MultiremiStore {
+  const fixture = sqliteSnapshots.create();
+  db = fixture.db;
+  return fixture.store;
+}
+
+/** Call in a consuming file's beforeAll, then invoke its reporter in afterAll.
+ * Bun's normal test completion does not emit process exit. File windows are
+ * explicit deltas rather than cumulative totals that could be double-counted.
+ */
+export function snapshotStatsForFile(file: string): () => void {
+  const start = sqliteSnapshots.stats();
+  return () => {
+    const end = sqliteSnapshots.stats();
+    const report = {
+      fixture: end.fixture, dialect: end.dialect, scope: "file-window", file,
+      coldBootstraps: end.coldBootstraps - start.coldBootstraps,
+      clones: end.clones - start.clones,
+      freshFallbacks: end.freshFallbacks - start.freshFallbacks,
+      storeInitializations: end.storeInitializations - start.storeInitializations,
+      initializationMs: end.initializationMs - start.initializationMs,
+    };
+    console.info(`REMI_TEST_DB_FIXTURE_STATS ${JSON.stringify(report)}`);
+  };
+}
+
+/** Snapshot clone plus the same explicit local-workspace seed as createLocalStore. */
+export function createLocalSnapshotStore(): MultiremiStore {
+  const store = createSnapshotStore();
+  store.ensureLocalWorkspace();
+  return store;
+}
+
+/** An offline snapshot; construct the current Store only after seeding/draining it. */
+export function createHistoricalDatabase(): Database {
+  db = openSqliteDatabase(":memory:");
+  bootstrapPreUnifiedSchema(db);
+  historicalWriters(db);
+  db.run("UPDATE multiremi_workspace_members SET role='owner' WHERE id='mem_local_local'");
+  return db;
 }
 
 /** `createStore()` plus the seeded `local` workspace, for surfaces that assume it exists. */
@@ -51,6 +116,75 @@ export function createLocalStore(): MultiremiStore {
   const store = createStore();
   store.ensureLocalWorkspace();
   return store;
+}
+
+/** Fixture Issue creation. Issues no longer designate a human: a deprecated
+ * `responsibleMemberId` is accepted, ignored and never stored. */
+export function createResponsibleTestIssue(store: MultiremiStore, input: CreateIssueInput): MultiremiIssue {
+  return store.createIssue(input);
+}
+
+/** Fixture Autopilot creation; a deprecated `responsibleMemberId` is accepted and ignored. */
+export function createResponsibleTestAutopilot(store:MultiremiStore,input:CreateAutopilotInput):MultiremiAutopilot {
+  return store.createAutopilot(input);
+}
+
+/** An active real member of the fixture workspace, created on first use. */
+export function testWorkspaceMember(store: MultiremiStore, workspaceId: string) {
+  const memberId=`test_member_${workspaceId}`;
+  const member=store.getWorkspaceMember(memberId)??store.createWorkspaceMember({id:memberId,name:'Fixture member',workspaceId,role:'member'});
+  if(member.archivedAt || member.workspaceId!==workspaceId)throw new Error('Fixture member is unavailable; close the Issue with an explicit member');
+  return member;
+}
+
+/** Close the Issue the way a real workspace member does: any member may set any
+ * Issue to done (the unfinished-child guard still applies). The name predates
+ * the removal of formal delivery and acceptance. */
+export function acceptTestIssueDelivery(store: MultiremiStore, issueId: string): MultiremiIssue {
+  const issue=store.getIssue(issueId);
+  if(!issue)throw new Error('Fixture Issue not found');
+  const member=testWorkspaceMember(store,issue.workspaceId);
+  return store.updateIssue(issueId,{status:'done',actorType:'member',actorId:member.id})!;
+}
+
+/** Seed a documented pre-responsibility snapshot, never a current business write.
+ * Consumers must still expose legacy gaps. */
+export function seedHistoricalIssueFacts(store: MultiremiStore, issueId: string, facts: {
+  status?: MultiremiIssue['status']; assigneeType?: MultiremiIssue['assigneeType']; assigneeId?: string|null;
+}): MultiremiIssue {
+  const issue=store.getIssue(issueId);
+  if(!issue)throw new Error('Historical fixture Issue not found');
+  const database=(store as unknown as {db:import('@multiremi/store/db/postgres.js').SqlDatabase}).db;
+  const columns:Record<string,unknown>={};
+  if(Object.hasOwn(facts,'status'))columns.status=facts.status;
+  if(Object.hasOwn(facts,'assigneeType'))columns.assignee_type=facts.assigneeType;
+  if(Object.hasOwn(facts,'assigneeId'))columns.assignee_id=facts.assigneeId;
+  const entries=Object.entries(columns);
+  if(entries.length)database.run(`UPDATE multiremi_issues SET ${entries.map(([column])=>`${column}=?`).join(',')} WHERE id=?`,[...entries.map(([,value])=>value),issueId]);
+  return store.getIssue(issueId)!;
+}
+
+/** A read/upgrade fixture with old member execution or already-closed facts.
+ * Never use for current creation, assignment, closing, or acceptance tests. */
+export function createHistoricalTestIssue(store: MultiremiStore,input:CreateIssueInput):MultiremiIssue {
+  const member=(input.assigneeType??input.assignee_type)==='member';
+  const done=input.status==='done';
+  const issue=createResponsibleTestIssue(store,{...input,...(member?{assigneeType:null,assignee_type:null,assigneeId:null,assignee_id:null}:{}),...(done?{status:'in_progress'}:{})});
+  return seedHistoricalIssueFacts(store,issue.id,{...(member?{assigneeType:'member',assigneeId:input.assigneeId??input.assignee_id??null}:{}),...(done?{status:'done'}:{})});
+}
+
+/** Replay a pre-responsibility terminal fact into the notification consumer.
+ * This is not a current closure; it bypasses the done rule on purpose. */
+export function replayHistoricalTestChildDone(store: MultiremiStore, issueId:string, statusChangeEventId?:string):void {
+  const {db:database,ctx}=store as unknown as {db:import('@multiremi/store/db/postgres.js').SqlDatabase;ctx:StoreContext};
+  const previous=store.getIssue(issueId)!;
+  const events=createCommitEventQueue();
+  database.transaction(()=>{
+    ctx.lockWorkspaceRuntimeLifecycle(previous.workspaceId);
+    const historical=seedHistoricalIssueFacts(store,issueId,{status:'done'});
+    ctx.issues().notifyChildStatusChangeWithinTransaction(previous,historical,null,[],events,{statusChangeEventId});
+  })();
+  ctx.emitCommitEvents(events);
 }
 
 export function configureRepositoryWikiAutomation(
@@ -95,7 +229,7 @@ export function configureRepositoryWikiAutomation(
   } else if (!binding.enabled) {
     store.updateAgentPluginBinding(agent.id, binding.id, { enabled: true });
   }
-  const autopilot = input.autopilot ?? store.createAutopilot({
+  const autopilot = input.autopilot ?? createResponsibleTestAutopilot(store, {
     title: "Repository Wiki updater",
     workspaceId,
     assigneeId: agent.id,
@@ -157,51 +291,6 @@ export function configureRepositoryWikiAutomation(
   return { agent, plugin, autopilot, trigger };
 }
 
-export function readyArchiveBinding(
-  store: MultiremiStore,
-  issueId: string,
-  runtimeId: string,
-): MultiremiIssueWorkspaceArchiveBinding {
-  const existing = store.getSessionArchiveStatus(issueId).latestReady;
-  if (existing) {
-    return {
-      archiveId: existing.id,
-      sourceRevision: existing.sourceRevision,
-      sha256: existing.sha256,
-    };
-  }
-  const runtime = store.getRuntime(runtimeId);
-  if (!runtime) throw new Error(`Runtime not found: ${runtimeId}`);
-  const archiveId = createId("sar");
-  const sourceRevision = `test-${archiveId}`;
-  const sha256 = createHash("sha256").update(archiveId).digest("hex");
-  const initialized = store.initSessionArchive({
-    workspaceId: runtime.workspaceId ?? "local",
-    issueId,
-    runtimeId,
-    daemonId: runtime.daemonId ?? "test-daemon",
-    sourceRevision,
-    sha256,
-    sizeBytes: 0,
-  }, archiveId, `tests/${archiveId}/sessions.tar.gz`).archive;
-  const claimed = store.claimSessionArchiveUploadAttempt(initialized.id, runtimeId);
-  if (!claimed) throw new Error("Failed to claim test Session archive");
-  const uploading = store.beginSessionArchiveUploadAttempt(
-    claimed.id,
-    runtimeId,
-    claimed.attemptCount,
-  );
-  if (!uploading) throw new Error("Failed to begin test Session archive upload");
-  const ready = store.markSessionArchiveReadyAttempt(
-    uploading.id,
-    runtimeId,
-    uploading.attemptCount,
-    0,
-  );
-  if (!ready) throw new Error("Failed to complete test Session archive");
-  return { archiveId: ready.id, sourceRevision: ready.sourceRevision, sha256: ready.sha256 };
-}
-
 /**
  * Undo everything the helpers below touch: close the store's database, drop the
  * upload dir and its env var, restore the real `fetch`.
@@ -212,10 +301,10 @@ export function resetMultiremiTestEnv(): void {
   if (uploadDir) {
     rmSync(uploadDir, { recursive: true, force: true });
     uploadDir = null;
+    if (previousUploadDir === undefined) delete process.env.MULTIREMI_UPLOAD_DIR;
+    else process.env.MULTIREMI_UPLOAD_DIR = previousUploadDir;
+    previousUploadDir = undefined;
   }
-  if (previousUploadDir === undefined) delete process.env.MULTIREMI_UPLOAD_DIR;
-  else process.env.MULTIREMI_UPLOAD_DIR = previousUploadDir;
-  previousUploadDir = undefined;
   if (previousFetch) {
     globalThis.fetch = previousFetch;
     previousFetch = null;
@@ -242,7 +331,9 @@ export function useUploadDir(): string {
 }
 
 export function mockFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>): void {
-  previousFetch = globalThis.fetch;
+  // A test may replace its fixture several times (e.g. skill re-import).
+  // Teardown must restore the fetch from before the first replacement.
+  previousFetch ??= globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => handler(String(input), init)) as typeof globalThis.fetch;
 }
 
@@ -265,9 +356,9 @@ export function tableHeaders(output: string): string[] {
   return output.split("\n")[0]?.trim().split(/\s{2,}/) ?? [];
 }
 
-export function nextWebSocketMessage(socket: WebSocket): Promise<any> {
+export function nextWebSocketMessage(socket: WebSocket, timeoutMs = 2000): Promise<any> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Timed out waiting for websocket message")), 2000);
+    const timeout = setTimeout(() => reject(new Error("Timed out waiting for websocket message")), timeoutMs);
     socket.addEventListener("message", (event) => {
       clearTimeout(timeout);
       resolve(JSON.parse(String(event.data)));
@@ -320,13 +411,13 @@ export function expectWebSocketRejected(socket: WebSocket): Promise<void> {
   });
 }
 
-export function waitWebSocketOpen(socket: WebSocket): Promise<void> {
+export function waitWebSocketOpen(socket: WebSocket, timeoutMs = 2000): Promise<void> {
   return new Promise((resolve, reject) => {
     if (socket.readyState === WebSocket.OPEN) {
       resolve();
       return;
     }
-    const timeout = setTimeout(() => reject(new Error("Timed out waiting for websocket open")), 2000);
+    const timeout = setTimeout(() => reject(new Error("Timed out waiting for websocket open")), timeoutMs);
     const done = (fn: () => void) => {
       clearTimeout(timeout);
       socket.removeEventListener("open", onOpen);

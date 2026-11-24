@@ -8,15 +8,21 @@ export const CHAT_ISSUE_DECOUPLED_FINGERPRINT = "chat-issue-decoupled";
 
 /** Retry lineage is structural. Editable prompt text must never erase the
  * provenance of a generated notification; an explicit user turn is a new input. */
-export function chatTaskRetryParentSql(child: string, parent: string): string {
+export function chatTaskRetryParentSql(child: string, parent: string, source: "log" | "legacy" = "log"): string {
+  const userInput = source === "legacy"
+    ? `SELECT 1 FROM multiremi_chat_messages retry_input
+      WHERE retry_input.task_id = ${child}.id AND retry_input.role = 'user'`
+    : `SELECT 1 FROM multiremi_conversation_log retry_input
+      JOIN multiremi_chat_sessions retry_session ON retry_session.id = retry_input.session_id
+      WHERE retry_input.task_id = ${child}.id AND retry_input.kind = 'message'
+        AND retry_input.sender_type = 'member' AND retry_input.deleted_at IS NULL`;
   return `${child}.parent_task_id = ${parent}.id
     AND ${child}.workspace_id = ${parent}.workspace_id
     AND ${child}.agent_id = ${parent}.agent_id
     AND ${child}.chat_session_id = ${parent}.chat_session_id
     AND ${child}.task_kind = ${parent}.task_kind
     AND ${child}.attempt > 1 AND ${child}.attempt = ${parent}.attempt + 1
-    AND NOT EXISTS (SELECT 1 FROM multiremi_chat_messages retry_input
-      WHERE retry_input.task_id = ${child}.id AND retry_input.role = 'user')`;
+    AND NOT EXISTS (${userInput})`;
 }
 
 const TERMINAL_STATUSES: MultiremiTaskStatus[] = ["completed", "failed", "cancelled"];
@@ -65,6 +71,23 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function cleanOptionalString(value: unknown): string | null {
   const trimmed = String(value ?? "").trim();
   return trimmed || null;
+}
+
+/**
+ * MUL-456 fix round 1: read a server-owned nullable field that has historical
+ * camelCase and snake_case spellings.
+ *
+ * A *present* camelCase key is authoritative — including when its value is
+ * `null`; the snake_case alias is only consulted when the camelCase key is
+ * absent. The old `camel ?? snake` chain let a body-supplied `parent_task_id`
+ * win exactly when the server deliberately stamped `null`, which is how a
+ * member credential could plant the `parent_task_id` that D4 reads as "this
+ * task was created by the delegating run".
+ */
+export function resolveCamelOrSnakeString(input: object, camel: string, snake: string): string | null {
+  const fields = input as Record<string, unknown>;
+  const value = Object.hasOwn(fields, camel) ? fields[camel] : fields[snake];
+  return cleanOptionalString(value);
 }
 
 export function normalizeOptionalTimezone(value: unknown): string | null {

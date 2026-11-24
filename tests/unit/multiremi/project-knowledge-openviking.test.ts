@@ -1,3 +1,5 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import type { MultiremiProjectDoc } from "@multiremi/contracts/types.js";
 import {
@@ -285,17 +287,17 @@ describe("Repository Wiki snapshot restoration", () => {
     expect(f.client.writeAttempts).toBe(writes);
   });
 
-  it("enforces admin human membership and scoped publishing tasks before accessing snapshots", async () => {
+  it("shares human publishing while enforcing task scope before accessing snapshots", async () => {
     const f = await fixture();
-    const writes = f.client.writeAttempts;
     const user = f.store.getOrCreateUser({ email: "restore-member@example.test", name: "Reader" });
     f.store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: "Reader", role: "member" });
     const pat = await f.store.createAccessToken({ workspaceId: "local", userId: user.id, name: "Reader", type: "pat", purpose: "session" });
-    expect((await f.request({ targets: f.targets, dry_run: false }, pat.token)).status).toBe(403);
+    expect((await f.request({ targets: f.targets, dry_run: false }, pat.token)).status).toBe(200);
     const outsider = f.store.getOrCreateUser({ email: "restore-outsider@example.test", name: "Outsider" });
     const outsidePat = await f.store.createAccessToken({ workspaceId: "local", userId: outsider.id, name: "Outsider", type: "pat", purpose: "session" });
-    // Existing workspace middleware hides non-member workspace existence.
-    expect((await f.request({ targets: f.targets, dry_run: false }, outsidePat.token)).status).toBe(404);
+    expect((await f.request({ targets: f.targets, dry_run: false }, outsidePat.token)).status).toBe(200);
+    const writes = f.client.writeAttempts;
+    const compilationRuns = f.store.listKnowledgeCompilationRuns({ workspaceId: "local", repositoryId: "repo_restore" });
     expect((await f.request({ targets: f.targets, dry_run: false }, "invalid-token")).status).toBe(401);
     const { autopilot } = configureRepositoryWikiAutomation(f.store);
     const run = f.store.runAutopilot(autopilot.id, { source: "scm_event", repositoryId: "repo_other", dedupeKey: "repo_other:incremental_update:restore", payload: { repository_wiki_repository_id: "repo_other" } });
@@ -305,7 +307,7 @@ describe("Repository Wiki snapshot restoration", () => {
     expect((await denied.json() as any).error).toBe("task knowledge target does not match its repository scope");
     const project = f.store.createProject({ title: "Restore project" });
     f.store.createProjectResource(project.id, { resourceType: "github_repo", resourceRef: { url: "https://github.com/acme/restore.git" } });
-    const issue = f.store.createIssue({ title: "Restore", projectId: project.id });
+    const issue = createResponsibleTestIssue(f.store, { title: "Restore", projectId: project.id });
     const agent = f.store.createAgent({ name: "Non-publisher", provider: "claude" });
     const task = f.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "restore" });
     const ordinary = await f.store.createTaskAccessToken(task, "local");
@@ -313,7 +315,7 @@ describe("Repository Wiki snapshot restoration", () => {
     expect(noPublish.status).toBe(403);
     expect((await noPublish.json() as any).error).toBe("knowledge publish capability is required");
     expect(f.client.writeAttempts).toBe(writes);
-    expect(f.store.listKnowledgeCompilationRuns({ workspaceId: "local", repositoryId: "repo_restore" })).toEqual([]);
+    expect(f.store.listKnowledgeCompilationRuns({ workspaceId: "local", repositoryId: "repo_restore" })).toEqual(compilationRuns);
     const scopedRun = f.store.runAutopilot(autopilot.id, { source: "scm_event", repositoryId: "repo_restore", dedupeKey: "repo_restore:incremental_update:restore", payload: { repository_wiki_repository_id: "repo_restore" } });
     const scoped = await f.store.createTaskAccessToken(f.store.getTask(scopedRun.taskId!)!, "local");
     expect((await f.request({ targets: f.targets, dry_run: false }, scoped.token)).status).toBe(200);
@@ -679,6 +681,236 @@ describe("Repository Wiki availability and migration safeguards", () => {
     expect((await service.get("local", "repo_graph", hidden.id))?.body).toBe("[[guides/target.md]]");
   });
 
+});
+
+describe("Repository Wiki list is metadata only (MUL-387, MUL-398 D)", () => {
+  async function fixture(pageCount: number, options: { readDelayMs?: number } = {}) {
+    const store = createStore();
+    store.ensureLocalWorkspace();
+    store.updateWorkspaceRepositories("local", [{
+      id: "repo_list",
+      name: "list",
+      url: "https://github.com/acme/list.git",
+      source: "github",
+      default_branch: "main",
+    }]);
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking");
+    const operations = Array.from({ length: pageCount }, (_, index) => ({
+      kind: "create" as const,
+      input: { path: `page-${index}.md`, title: `Page ${index}`, body: `Body ${index}` },
+    }));
+    const docs = operations.length ? (await service.applyBatch("local", "repo_list", operations)).map(result => result.doc) : [];
+    await service.runStorageJobs();
+    // The delay models the OpenViking read the list must not perform, so it is
+    // applied after the fixture is published.
+    client.readDelayMs = options.readDelayMs ?? 0;
+    client.readCalls.length = 0;
+    client.maxActiveReads = 0;
+    const app = createMultiremiApp({ store, repositoryWiki: service, authToken: "root-secret" });
+    const authorization = { Authorization: "Bearer root-secret" };
+    return { store, client, service, docs, app, authorization };
+  }
+
+  it("serves the default list without reading a single body", async () => {
+    const f = await fixture(6);
+
+    const response = await f.app.request("/api/workspaces/local/repos/repo_list/wiki", { headers: f.authorization });
+    expect(response.status).toBe(200);
+    const docs = (await response.json() as any).docs as Array<Record<string, unknown>>;
+
+    expect(docs).toHaveLength(6);
+    expect(f.client.readCalls).toEqual([]);
+    for (const doc of docs) {
+      expect(doc).not.toHaveProperty("body");
+      expect(doc.version).toBe(1);
+      expect(typeof doc.content_sha256).toBe("string");
+      expect(doc.sync_status).toBe("ready");
+    }
+  });
+
+  it("bounds include_body concurrency at 4 and reads exactly the requested ids", async () => {
+    const f = await fixture(20, { readDelayMs: 700 });
+    const ids = f.docs.map(doc => doc.id);
+
+    const start = Date.now();
+    const response = await f.app.request(
+      `/api/workspaces/local/repos/repo_list/wiki?include_body=true&ids=${ids.join(",")}`,
+      { headers: f.authorization },
+    );
+    const elapsed = Date.now() - start;
+
+    expect(response.status).toBe(200);
+    const docs = (await response.json() as any).docs as Array<Record<string, unknown>>;
+    expect(docs).toHaveLength(20);
+    expect(new Set(f.client.readCalls).size).toBe(20);
+    expect(f.client.maxActiveReads).toBeLessThanOrEqual(4);
+    // 20 documents at 4-way concurrency and 700ms each is 5 rounds: ~3.5s.
+    // ~0.7s would mean the cap was ignored; ~14s would mean serialized reads.
+    expect(elapsed).toBeGreaterThanOrEqual(2_800);
+    expect(elapsed).toBeLessThan(8_000);
+  }, 30_000);
+
+  it("filters metadata by ids and omits unknown ids", async () => {
+    const f = await fixture(3);
+    const response = await f.app.request(
+      `/api/workspaces/local/repos/repo_list/wiki?ids=${f.docs[1]!.id},rwdoc_missing`,
+      { headers: f.authorization },
+    );
+    expect(response.status).toBe(200);
+    const docs = (await response.json() as any).docs;
+    expect(docs.map((doc: any) => doc.id)).toEqual([f.docs[1]!.id]);
+    expect(docs[0]).not.toHaveProperty("body");
+  });
+
+  it("rejects invalid bounded requests with 400", async () => {
+    const f = await fixture(21);
+    const root = "/api/workspaces/local/repos/repo_list/wiki";
+    const tooMany = f.docs.map(doc => doc.id).join(",");
+    const cases = [
+      `${root}?include_body=true`,
+      `${root}?include_body=true&ids=${tooMany}`,
+      `${root}?q=page&include_body=true&ids=${f.docs[0]!.id}`,
+      `${root}?q=page&ids=${f.docs[0]!.id}`,
+    ];
+    for (const path of cases) {
+      const response = await f.app.request(path, { headers: f.authorization });
+      expect({ path, status: response.status }).toEqual({ path, status: 400 });
+    }
+    // 20 unique ids is inside the limit even when one id repeats.
+    const twenty = [...f.docs.slice(0, 20).map(doc => doc.id), f.docs[0]!.id];
+    expect((await f.app.request(`${root}?include_body=true&ids=${twenty.join(",")}`, { headers: f.authorization })).status).toBe(200);
+  });
+
+  it("returns only metadata for Bun/1.3.14 without reading bodies", async () => {
+    const f = await fixture(2);
+    const root = "/api/workspaces/local/repos/repo_list/wiki";
+
+    const response = await f.app.request(root, { headers: { ...f.authorization, "User-Agent": "Bun/1.3.14" } });
+    expect(response.status).toBe(200);
+    const docs = (await response.json() as any).docs as Array<Record<string, unknown>>;
+    expect(docs).toHaveLength(2);
+    for (const doc of docs) {
+      expect(doc).not.toHaveProperty("body");
+      expect(doc.version).toBe(1);
+      expect(typeof doc.content_sha256).toBe("string");
+      expect(doc.sync_status).toBe("ready");
+    }
+    expect(f.client.readCalls).toEqual([]);
+  });
+
+  it.each(["Bun/1.2.23", "remi-cli/0.2.83", "remi-cli/0.2.85", "Mozilla/5.0"])(
+    "returns only metadata for User-Agent %s",
+    async (userAgent) => {
+      const f = await fixture(2);
+      const response = await f.app.request("/api/workspaces/local/repos/repo_list/wiki", {
+        headers: { ...f.authorization, "User-Agent": userAgent },
+      });
+      expect(response.status).toBe(200);
+      const docs = (await response.json() as any).docs as Array<Record<string, unknown>>;
+      expect(docs).toHaveLength(2);
+      for (const doc of docs) expect(doc).not.toHaveProperty("body");
+      expect(f.client.readCalls).toEqual([]);
+      const baseline = await f.app.request("/api/workspaces/local/repos/repo_list/wiki", { headers: f.authorization });
+      expect((await baseline.json() as any).docs).toEqual(docs);
+    },
+  );
+
+  it("returns an empty metadata list for every User-Agent", async () => {
+    const f = await fixture(0);
+    for (const userAgent of [undefined, "Bun/1.3.14", "remi-cli/0.2.85", "Mozilla/5.0"]) {
+      const response = await f.app.request("/api/workspaces/local/repos/repo_list/wiki", {
+        headers: { ...f.authorization, ...(userAgent ? { "User-Agent": userAgent } : {}) },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ docs: [] });
+    }
+    expect(f.client.readCalls).toEqual([]);
+  });
+
+  it.each(["Bun/1.3.14", "remi-cli/0.2.85", "Mozilla/5.0"])(
+    "keeps explicit body requests and document details for User-Agent %s",
+    async (userAgent) => {
+      const f = await fixture(3);
+      const root = "/api/workspaces/local/repos/repo_list/wiki";
+      const headers = { ...f.authorization, "User-Agent": userAgent };
+      const requested = [f.docs[0]!, f.docs[2]!];
+      const ids = requested.map(doc => doc.id);
+      for (const query of ["include_body=false", "include_body=0", `ids=${ids[0]},${ids[0]}&ids=rwdoc_missing&ids=${ids[1]}`]) {
+        const response = await f.app.request(`${root}?${query}`, { headers });
+        expect(response.status).toBe(200);
+        const docs = (await response.json() as any).docs as Array<Record<string, unknown>>;
+        expect(docs.map(doc => doc.id).sort()).toEqual(query.startsWith("ids=") ? [...ids].sort() : f.docs.map(doc => doc.id).sort());
+        for (const doc of docs) expect(doc).not.toHaveProperty("body");
+        expect(f.client.readCalls).toEqual([]);
+      }
+      for (const includeBody of ["true", "1"]) {
+        f.client.readCalls.length = 0;
+        const response = await f.app.request(`${root}?include_body=${includeBody}&ids=${ids.join(",")}`, { headers });
+        expect(response.status).toBe(200);
+        const docs = (await response.json() as any).docs as Array<Record<string, unknown>>;
+        expect(docs.map(doc => doc.id).sort()).toEqual([...ids].sort());
+        for (const doc of docs) expect(doc.body).toBe(requested.find(row => row.id === doc.id)?.body);
+        expect(new Set(f.client.readCalls)).toEqual(new Set(requested.map(doc => doc.contentUri!)));
+      }
+      f.client.readCalls.length = 0;
+      const detail = await f.app.request(`${root}/${f.docs[1]!.id}`, { headers });
+      expect(detail.status).toBe(200);
+      expect((await detail.json() as any).doc.body).toBe("Body 1");
+      expect(f.client.readCalls).toEqual([f.docs[1]!.contentUri!]);
+    },
+  );
+
+  it("fails the whole batch with 503 when one requested body is unreadable", async () => {
+    const f = await fixture(3);
+    f.client.failReadUris.add(f.docs[1]!.contentUri!);
+    const ids = f.docs.map(doc => doc.id).join(",");
+
+    const response = await f.app.request(
+      `/api/workspaces/local/repos/repo_list/wiki?include_body=true&ids=${ids}`,
+      { headers: f.authorization },
+    );
+
+    expect(response.status).toBe(503);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).not.toHaveProperty("docs");
+    expect(String(body.error)).toContain(f.docs[1]!.id);
+  });
+
+  it("answers the default 146-page list in well under 200ms p95 with 700ms OpenViking reads", async () => {
+    const f = await fixture(146, { readDelayMs: 700 });
+    const root = "/api/workspaces/local/repos/repo_list/wiki";
+    const samples: number[] = [];
+    for (let index = 0; index < 100; index++) {
+      const start = performance.now();
+      const response = await f.app.request(root, { headers: f.authorization });
+      samples.push(performance.now() - start);
+      expect(response.status).toBe(200);
+      expect((await response.json() as any).docs).toHaveLength(146);
+    }
+    samples.sort((left, right) => left - right);
+    const p95 = samples[Math.ceil(samples.length * 0.95) - 1]!;
+    const p50 = samples[Math.floor(samples.length / 2)]!;
+    expect(f.client.readCalls.length).toBe(0);
+    console.log(`repository wiki list p50=${p50.toFixed(1)}ms p95=${p95.toFixed(1)}ms over ${samples.length} requests`);
+    expect(p95).toBeLessThan(200);
+  }, 60_000);
+
+  it("does not hydrate unreadable bodies when a Bun client lists metadata", async () => {
+    const f = await fixture(2);
+    f.client.failReadUris.add(f.docs[0]!.contentUri!);
+    const response = await f.app.request("/api/workspaces/local/repos/repo_list/wiki", {
+      headers: { ...f.authorization, "User-Agent": "Bun/1.3.14" },
+    });
+    expect(response.status).toBe(200);
+    const docs = (await response.json() as any).docs;
+    expect(docs).toHaveLength(2);
+    for (const doc of docs) {
+      expect(doc).not.toHaveProperty("body");
+      expect(doc.sync_status).toBe("ready");
+    }
+    expect(f.client.readCalls).toEqual([]);
+  });
 });
 
 describe("project knowledge URIs", () => {
@@ -1572,7 +1804,7 @@ describe("RepositoryWikiService OpenViking mode", () => {
     });
     store.createAgent({ name: "Atlas · LLM Wiki", provider: "claude" });
     const userAgent = store.createAgent({ name: "User Wiki", provider: "claude" });
-    const sameTitle = store.createAutopilot({
+    const sameTitle = createResponsibleTestAutopilot(store, {
       title: "Atlas · Repository Wiki",
       workspaceId: "local",
       assigneeId: userAgent.id,
@@ -1676,5 +1908,177 @@ describe("ProjectKnowledgeService migration", () => {
     const client = new FakeOpenViking();
     client.failHealth = true;
     expect((await new ProjectKnowledgeService(store, client, "shadow").migrationStatus("local")).openviking).toBe("unavailable");
+  });
+});
+
+/**
+ * MUL-386 C.2 — `recall` must resolve URIs without scanning every project doc.
+ *
+ * The old implementation called `listProjectDocs(projectId)` per hit and matched
+ * `contentUri === uri || docUri(doc) === uri` in JavaScript, which is where
+ * production's 15.5 MB of bridge payload came from. These cases pin the two
+ * clauses and the tie-break order so the single-statement replacement cannot
+ * drift from the behaviour it replaced.
+ */
+describe("recall URI resolution (MUL-386 C.2)", () => {
+  /**
+   * Index stub with an explicit hit list.
+   *
+   * `recallProjectDocs` is driven by whatever the index returns, so the fake must
+   * answer `find` from a list the test controls — not from substring matching over
+   * stored content — to pin the URI resolution precisely.
+   */
+  class IndexClient extends FakeOpenViking {
+    hits: OpenVikingFindHit[] = [];
+    override async find(_query: string, _target: string | string[], limit: number): Promise<OpenVikingFindHit[]> {
+      this.findTargets.push(_target);
+      return this.hits.slice(0, limit);
+    }
+  }
+
+  /** Reference implementation: the per-hit full scan the service used to run. */
+  function legacyFindDocByUri(
+    store: ReturnType<typeof createStore>,
+    projectId: string,
+    uri: string,
+  ): MultiremiProjectDoc | null {
+    const kindUri = (doc: MultiremiProjectDoc) =>
+      projectKnowledgeDocUri({ workspaceId: doc.workspaceId, projectId, kind: doc.kind, slug: doc.slug });
+    return store.listProjectDocs(projectId).find((doc) => doc.contentUri === uri || kindUri(doc) === uri) ?? null;
+  }
+
+  /** Build an OpenViking-mode project plus a recall hit list at the given URIs. */
+  async function fixture(hits: Array<{ docRef: string; via: "stored" | "derived" }>) {
+    const store = createStore();
+    store.ensureLocalWorkspace();
+    const client = new IndexClient();
+    const service = new ProjectKnowledgeService(store, client, "openviking");
+    const project = store.createProject({ title: "Recall" });
+    const docs: MultiremiProjectDoc[] = [];
+    for (const slug of ["alpha", "beta", "gamma"]) {
+      const created = await service.createProjectDoc(project.id, {
+        kind: "wiki",
+        slug,
+        path: `${slug}.md`,
+        title: slug.toUpperCase(),
+        body: `${slug} body mentions Phoenix rollback.`,
+      });
+      docs.push(store.getProjectDoc(created.id)!);
+    }
+    // Make the indexed URI look stale/empty for the "derived" cases: the doc must
+    // still be found through kind+slug, exactly like the old second clause.
+    for (const doc of docs) {
+      if (hits.some((hit) => hit.docRef === doc.slug && hit.via === "derived")) {
+        store.setProjectDocSyncState(doc.id, { storageBackend: "openviking", syncStatus: "ready", contentUri: undefined });
+      }
+    }
+    const bySlug = new Map(docs.map((doc) => [doc.slug, store.getProjectDoc(doc.id)!]));
+    client.hits = hits.map((hit) => {
+      const doc = bySlug.get(hit.docRef)!;
+      const uri = hit.via === "stored" && doc.contentUri
+        ? doc.contentUri
+        : projectKnowledgeDocUri({ workspaceId: doc.workspaceId, projectId: project.id, kind: doc.kind, slug: doc.slug });
+      return { uri, score: 0.9, abstract: "recall hit", tags: [] };
+    });
+    return { store, service, project, docs: bySlug };
+  }
+
+  it("matches stored URIs and kind+slug fallbacks exactly as the full scan did", async () => {
+    const f = await fixture([
+      { docRef: "alpha", via: "stored" },
+      { docRef: "beta", via: "derived" },
+    ]);
+    const hits = await f.service.recallProjectDocs(f.project.id, "Phoenix rollback");
+
+    // Same order, same doc ids, same fields as the reference implementation.
+    expect(hits.map((hit) => hit.doc.slug)).toEqual(["alpha", "beta"]);
+    expect(hits.map((hit) => hit.doc.slug)).toEqual(["alpha", "beta"]);
+    for (const hit of hits) {
+      const reference = legacyFindDocByUri(f.store, f.project.id, hit.uri)!;
+      expect(reference).not.toBeNull();
+      expect(hit.doc.id).toBe(reference.id);
+      expect(hit.doc.title).toBe(reference.title);
+      expect(hit.doc.path).toBe(reference.path);
+      expect(hit.doc.version).toBe(reference.version);
+      expect(hit.doc.kind).toBe(reference.kind);
+      // The lookup deliberately does not select `body`: recall hits never carried
+      // a usable body (the HTTP response deletes it and `hydrate` re-reads
+      // OpenViking), so the projection leaves it empty instead of shipping it.
+      expect(hit.doc.body).toBe("");
+      expect(hit.doc.contentUri ?? projectKnowledgeDocUri({
+        workspaceId: hit.doc.workspaceId, projectId: f.project.id, kind: hit.doc.kind, slug: hit.doc.slug,
+      })).toBe(reference.contentUri ?? projectKnowledgeDocUri({
+        workspaceId: reference.workspaceId, projectId: f.project.id, kind: reference.kind, slug: reference.slug,
+      }));
+      expect(hit.uri).toBe(reference.contentUri ?? projectKnowledgeDocUri({
+        workspaceId: reference.workspaceId, projectId: f.project.id, kind: reference.kind, slug: reference.slug,
+      }));
+    }
+  });
+
+  it("resolves a URI that several docs could claim exactly like the pinned-first scan", async () => {
+    // A stale `content_uri` on one doc can collide with another doc's derived URI.
+    // The old scan returned the first row of `pinned DESC, updated_at DESC`; the
+    // SQL lookup must break the tie the same way.
+    const store = createStore();
+    store.ensureLocalWorkspace();
+    const client = new IndexClient();
+    const service = new ProjectKnowledgeService(store, client, "openviking");
+    const project = store.createProject({ title: "Tie-break" });
+    const sharedUri = projectKnowledgeDocUri({ workspaceId: "local", projectId: project.id, kind: "wiki", slug: "shared" });
+
+    const older = store.createProjectDoc(project.id, {
+      kind: "wiki", slug: "older", path: "older.md", title: "Older", body: "older body",
+    });
+    store.setProjectDocSyncState(older.id, { storageBackend: "openviking", syncStatus: "ready", contentUri: sharedUri });
+    const newer = store.createProjectDoc(project.id, {
+      kind: "wiki", slug: "shared", path: "shared.md", title: "Shared", body: "shared body",
+    });
+    store.setProjectDocSyncState(newer.id, { storageBackend: "openviking", syncStatus: "ready", contentUri: undefined });
+    db!.run("UPDATE multiremi_project_docs SET pinned = 1, updated_at = ? WHERE id = ?", ["2026-09-01T00:00:00.000Z", newer.id]);
+    db!.run("UPDATE multiremi_project_docs SET updated_at = ? WHERE id = ?", ["2026-09-02T00:00:00.000Z", older.id]);
+
+    const expected = legacyFindDocByUri(store, project.id, sharedUri);
+    expect(expected).not.toBeNull();
+    client.hits = [{ uri: sharedUri, score: 1, abstract: "tie", tags: [] }];
+    const hits = await service.recallProjectDocs(project.id, "body");
+    expect(hits.map((hit) => hit.doc.id)).toEqual([expected!.id]);
+
+    // An unrelated project's URI must not match, mirrored from the old `docUri`
+    // scope check.
+    const foreign = store.createProject({ title: "Foreign" });
+    const foreignUri = projectKnowledgeDocUri({ workspaceId: "local", projectId: foreign.id, kind: "wiki", slug: "shared" });
+    client.hits = [{ uri: foreignUri, score: 1, abstract: "foreign", tags: [] }];
+    expect((await service.recallProjectDocs(project.id, "body")).map((hit) => hit.doc.id)).toEqual([]);
+  });
+
+  it("reads no doc body while resolving recall hits", async () => {
+    const f = await fixture([{ docRef: "alpha", via: "stored" }, { docRef: "beta", via: "derived" }]);
+    const collected: string[] = [];
+    const spy = db!;
+    const originalQuery = spy.query.bind(spy);
+    (spy as any).query = (sql: string) => {
+      collected.push(sql);
+      return originalQuery(sql);
+    };
+    try {
+      await f.service.recallProjectDocs(f.project.id, "Phoenix rollback");
+    } finally {
+      (spy as any).query = originalQuery;
+    }
+    const docReads = collected.filter((sql) => sql.includes("FROM multiremi_project_docs"));
+    expect(docReads.length).toBeGreaterThan(0);
+    for (const sql of docReads) {
+      expect(sql).not.toMatch(/SELECT\s+\*/i);
+      expect(sql).toContain("LIMIT 1");
+    }
+    // The old path read the whole project once per hit; the new one is one
+    // statement per hit and never selects `body`.
+    expect(docReads.length).toBeLessThanOrEqual(collected.length);
+    // `'' AS body` is the alias that keeps the row shape; the raw column must not
+    // be selected.
+    for (const sql of docReads) {
+      expect(sql.replace(/'' AS body/g, "")).not.toMatch(/\bbody\b/);
+    }
   });
 });

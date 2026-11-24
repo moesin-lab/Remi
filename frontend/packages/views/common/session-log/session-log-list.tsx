@@ -1,0 +1,538 @@
+"use client";
+
+import { DeferredContentContext } from "../deferred-content-context";
+
+/**
+ * SessionLogList — the flat session log both the Issue detail timeline and Chat
+ * will mount (MUL-403 plan 3/6 §3, ADR 0007 §3).
+ *
+ * The list is deliberately not virtualized. It renders a bounded window of rows
+ * in document order, capped at {@link SESSION_LOG_DOM_LIMIT}, and relies on three
+ * facts that make a flat list cheaper than a virtualizer here:
+ *
+ * - the server rendered each row's body (`body_html`), so mounting a row is an
+ *   `innerHTML` assignment rather than a markdown parse plus a Shiki round trip;
+ * - its height is cached, so a row that has been seen before paints at its final
+ *   size on the first frame;
+ * - the reveal hook hides the whole list until the anchor has a position, so the
+ *   first visible frame is already the final one.
+ *
+ * The two hooks are MUL-450's, consumed exactly as the plan prescribes:
+ * `dataReady` is the replica's own "I have answered" gate, `fresh` is the
+ * replica's `log_version` + `head_seq` verdict, `layoutSettled` is trivially
+ * true for a flat list, and the budget stays at its default. Nothing here
+ * implements stickiness or reveal: those are the hooks' jobs and the list only
+ * renders what their state says.
+ */
+
+import { Fragment, useCallback, useEffect, useLayoutEffect, useId, useMemo, useRef, useState } from "react";
+import { useSyncExternalStore } from "react";
+import { ArrowDown } from "lucide-react";
+import type { SessionLogEntry, SessionReplicaPort } from "@multiremi/core/replica";
+import { useAnchoredReveal, type RevealAnchor } from "../use-anchored-reveal";
+import { useStickToBottom } from "../use-stick-to-bottom";
+import { useT } from "../../i18n";
+import { EntryHtml } from "./entry-html";
+import { entryAttachments } from "./entry-attachments";
+import { reservedRowHeight, useRowHeights, type MeasurableRow } from "./use-row-heights";
+
+/** DOM ceiling from plan 5/6 §1: the newest end is kept, the oldest is dropped. */
+export const SESSION_LOG_DOM_LIMIT = 300;
+
+/** The chip's visual cap, per the design spec (`99+`). */
+export const NEW_MESSAGE_DISPLAY_CAP = 99;
+
+/** Chat's arrow shows only once the reader is further than this from the end. */
+export const SCROLL_BUTTON_DISTANCE_PX = 24;
+
+/** The newest whole-number seq in the replica's own window: a real log row. */
+function newestLogSeq(entries: readonly SessionLogEntry[]): number | null {
+  let newest: number | null = null;
+  for (const entry of entries) {
+    if (Number.isInteger(entry.seq) && (newest === null || entry.seq > newest)) newest = entry.seq;
+  }
+  return newest;
+}
+
+/** Stable identity for the empty window, so `useSyncExternalStore` sees no change. */
+const EMPTY_SNAPSHOT = { sessionId: "", entries: [], head: null, fresh: false, ready: false } as const;
+
+export interface SessionLogListRenderArgs {
+  entry: SessionLogEntry;
+  /** `min-height` from the height cache, or null when the row is unmeasured. */
+  reservedHeight: number | null;
+}
+
+export interface SessionLogListProps {
+  sessionId: string;
+  /** The read-only replica port (C7 in production, the memory one in tests). */
+  replica: SessionReplicaPort;
+  /**
+   * Where the reveal lands. `bottom` for a live session; an element anchor when
+   * the caller opened a deep link and knows the row id.
+   */
+  anchor?: RevealAnchor;
+  /** Changes force the reveal state machine to restart (session/deep-link switch). */
+  resetKey?: string;
+  /**
+   * Rendered instead of `body_html` when the replica has not rendered the row
+   * yet. The consumer supplies the client renderer; this component never
+   * re-parses markdown itself.
+   */
+  renderFallback?: (entry: SessionLogEntry) => React.ReactNode;
+  /**
+   * Called once per row that had to render on the client because `body_html` was
+   * missing — the `degraded_render` count from plan 3/6 §3. The list also
+   * publishes its own running total on the scroll root as
+   * `data-session-log-degraded`, so a probe can read it without a consumer.
+   */
+  onDegradedRender?: (entry: SessionLogEntry) => void;
+  /** Rendered per row instead of the default `EntryHtml`. */
+  renderEntry?: (args: SessionLogListRenderArgs) => React.ReactNode;
+  /** What to render before the replica answers at all. */
+  renderPending?: () => React.ReactNode;
+  className?: string;
+  /**
+   * Width and padding of the centred content column. Issues keep the default;
+   * Chat narrows it to its reading column.
+   */
+  contentClassName?: string;
+  /**
+   * The released-reader affordance. `chip` (default) appears once new rows
+   * arrive; `arrow` is Chat's round scroll-to-bottom button, shown whenever the
+   * reader has left the bottom and badged with the new-message count.
+   */
+  scrollButton?: "chip" | "arrow";
+  /** Element carrying the scroll root's data attributes, for tests and probes. */
+  testIdPrefix?: string;
+  perfScroll?: "session-log" | "issue-detail";
+  latestAnchor?: "latest-message" | "latest-comment";
+  initialPositioned?: boolean;
+  /** Local display preferences must be applied before the SSR list is shown. */
+  initialDisplayReady?: boolean;
+  /** Additional content above the anchor must settle before the list reveals. */
+  contentReady?: boolean;
+  onRevealed?: () => void;
+  afterEntry?: (entry: SessionLogEntry, context: { highlightedId: string | null }) => React.ReactNode;
+  /** Sibling chrome, outside the measured row so sticky controls span the whole log. */
+  afterRow?: (entry: SessionLogEntry, context: { highlightedId: string | null }) => React.ReactNode;
+  header?: React.ReactNode;
+  footer?: React.ReactNode;
+  transformEntries?: (entries: readonly SessionLogEntry[]) => readonly SessionLogEntry[];
+  entryKey?: (entry: SessionLogEntry) => string;
+  showPendingSkeleton?: boolean;
+  /** A local send can be displayed before an empty session's first server window arrives. */
+  localDataReady?: boolean;
+  onReturnToLatest?: () => void;
+  onScrollRoot?: (el: HTMLDivElement | null) => void;
+}
+
+/**
+ * New-message chip. Purely a scroll affordance: it renders only while the reader
+ * is released, and the count on screen is deliberately cosmetic (capped at 99+
+ * per the design spec) while the accessible name carries the real number, which
+ * is the only place the true count is exposed.
+ */
+function NewMessagesChip({
+  count,
+  onReturn,
+  label,
+}: {
+  count: number;
+  onReturn: () => void;
+  label: string;
+}): React.ReactElement {
+  const display = count > NEW_MESSAGE_DISPLAY_CAP ? `${NEW_MESSAGE_DISPLAY_CAP}+` : String(count);
+  return (
+    <button
+      type="button"
+      data-session-log-new-messages=""
+      onClick={onReturn}
+      aria-label={label}
+      title={label}
+      // Absolutely positioned overlay: the design spec's rule that a dynamic
+      // affordance must not be inserted between rows, because inserting it would
+      // move every row below it by its own height.
+      className="absolute right-4 bottom-4 z-20 inline-flex items-center gap-1.5 rounded-full bg-brand px-3 py-1.5 text-xs font-medium text-brand-foreground shadow-md"
+    >
+      <ArrowDown className="size-3.5" aria-hidden="true" />
+      {/* Tabular numerals keep the chip from resizing as the count ticks up. */}
+      <span className="tabular-nums">{display}</span>
+    </button>
+  );
+}
+
+/**
+ * Chat's scroll-to-bottom button: a 32px circle centred 24px above the bottom
+ * edge of the list (the composer sits right below it). Like the chip it is an
+ * overlay, so it never moves a row.
+ */
+function ScrollToBottomButton({
+  count,
+  onReturn,
+  label,
+}: {
+  count: number;
+  onReturn: () => void;
+  label: string;
+}): React.ReactElement {
+  const display = count > NEW_MESSAGE_DISPLAY_CAP ? `${NEW_MESSAGE_DISPLAY_CAP}+` : String(count);
+  return (
+    <button
+      type="button"
+      data-session-log-scroll-bottom=""
+      onClick={onReturn}
+      aria-label={label}
+      title={label}
+      className="absolute bottom-6 left-1/2 z-20 inline-flex size-8 -translate-x-1/2 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition-colors duration-150 animate-in fade-in-0 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring motion-reduce:animate-none"
+    >
+      <ArrowDown className="size-4" aria-hidden="true" />
+      {count > 0 && (
+        <span
+          data-session-log-scroll-bottom-count=""
+          className="absolute -top-1.5 -right-2 min-w-4 rounded-full bg-brand px-1 text-center text-[10px] font-medium leading-4 text-brand-foreground tabular-nums"
+        >
+          {display}
+        </span>
+      )}
+    </button>
+  );
+}
+
+export function SessionLogList({
+  sessionId,
+  replica,
+  anchor = { kind: "bottom" },
+  resetKey,
+  renderFallback,
+  onDegradedRender,
+  renderEntry,
+  renderPending,
+  className,
+  contentClassName = "max-w-4xl px-4 py-6",
+  scrollButton = "chip",
+  testIdPrefix = "session-log",
+  perfScroll = "session-log",
+  latestAnchor = "latest-message",
+  initialPositioned = false,
+  initialDisplayReady = true,
+  contentReady = true,
+  onRevealed,
+  afterEntry,
+  afterRow,
+  header,
+  footer,
+  transformEntries,
+  entryKey,
+  showPendingSkeleton = true,
+  localDataReady = false,
+  onReturnToLatest,
+  onScrollRoot,
+}: SessionLogListProps): React.ReactElement {
+  const { t } = useT("chat");
+  const scrollId = useId();
+
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  /**
+   * Degraded rows (`body_html` missing, so the row rendered on the client).
+   *
+   * Counted in state rather than written to the DOM imperatively: React
+   * re-applies a declarative attribute on every render, so a ref-counted
+   * attribute would be reset to its initial value by the next render — the same
+   * trap `EntryHtml` documents for `dangerouslySetInnerHTML`. The cost is one
+   * re-render per batch of degraded rows, and updates from effects in the same
+   * commit are batched, so a window of them costs one.
+   */
+  const [degradedCount, setDegradedCount] = useState(0);
+  const reportDegraded = useCallback((entry: SessionLogEntry) => {
+    setDegradedCount((count) => count + 1);
+    onDegradedRender?.(entry);
+  }, [onDegradedRender]);
+  const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null);
+  const [widthPx, setWidthPx] = useState(0);
+  const elementRefs = useRef(new Map<number, HTMLElement>());
+
+  const subscribe = useCallback(
+    (listener: () => void) => replica.subscribe(sessionId, listener),
+    [replica, sessionId],
+  );
+  const getSnapshot = useCallback(
+    () => (sessionId ? replica.getSnapshot(sessionId) : EMPTY_SNAPSHOT),
+    [replica, sessionId],
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  /**
+   * The window the list renders: the newest {@link SESSION_LOG_DOM_LIMIT} rows.
+   * Dropping the oldest end is what bounds the DOM; the caller keeps the full
+   * window in the replica, so `head`-relative counts stay correct.
+   */
+  const entries = useMemo(() => {
+    const all = transformEntries ? transformEntries(snapshot.entries) : snapshot.entries;
+    return all.length > SESSION_LOG_DOM_LIMIT ? all.slice(all.length - SESSION_LOG_DOM_LIMIT) : all;
+  }, [snapshot.entries, transformEntries]);
+
+  const anchorId = anchor.kind === "element" ? anchor.id : null;
+  const [highlighted, setHighlighted] = useState(Boolean(anchorId));
+  useEffect(() => {
+    setHighlighted(Boolean(anchorId));
+    if (!anchorId) return;
+    const timeout = setTimeout(() => setHighlighted(false), 2500);
+    return () => clearTimeout(timeout);
+  }, [anchorId]);
+  const latestEntry = latestAnchor === "latest-comment"
+    ? entries.findLast(entry => entry.kind === "message")
+    : entries.at(-1);
+
+  const reveal = useAnchoredReveal({
+    scrollEl,
+    contentEl,
+    resetKey: resetKey ?? `${sessionId}:${anchorId ?? "bottom"}`,
+    dataReady: (snapshot.ready || localDataReady) && contentReady && initialDisplayReady,
+    anchor,
+    // Trivially true: the flat list has no virtualizer whose measurement window
+    // has to close before the anchor position is final (plan 3/6 §3).
+    layoutSettled: true,
+    // Only the replica's own verdict: a list that happened to hold every row it
+    // was given is not the same claim as "this equals the server's head".
+    fresh: snapshot.fresh,
+    initialPositioned,
+  });
+  const [confirmedSsrRoot, setConfirmedSsrRoot] = useState<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (!initialPositioned || !scrollEl) return;
+    const confirm = () => {
+      if (scrollEl.dataset.ssrPositioned === "1" && scrollEl.dataset.perfState === "ready") setConfirmedSsrRoot(scrollEl);
+    };
+    confirm();
+    const observer = new MutationObserver(confirm);
+    observer.observe(scrollEl, { attributes: true, attributeFilter: ["data-ssr-positioned", "data-perf-state"] });
+    return () => observer.disconnect();
+  }, [initialPositioned, scrollEl]);
+  // The hook's initial SSR state describes pre-rendered markup. Deferred work
+  // starts only after the pre-paint script has actually positioned/revealed it.
+  const contentRevealed = reveal.revealed && (!initialPositioned || Boolean(scrollEl && confirmedSsrRoot === scrollEl));
+  useEffect(() => { if (contentRevealed) onRevealed?.(); }, [contentRevealed, onRevealed]);
+
+  const stick = useStickToBottom({
+    scrollEl,
+    contentEl,
+    mode: anchor.kind === "bottom" ? { kind: "bottom" } : { kind: "element", id: anchor.id },
+    enabled: contentRevealed,
+    // A deep link lands on a row, not on the end of the stream: pinning there
+    // would fight the reader from the first frame (ADR 0008 §4).
+    initialState: anchor.kind === "element" ? "released" : "pinned",
+  });
+
+  // A wheel-up on a log that does not overflow releases the stick, and no
+  // scroll event can follow to re-pin it. The arrow therefore also needs the
+  // real distance from the end, re-measured on scroll, resize and release.
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
+  useEffect(() => {
+    if (scrollButton !== "arrow" || !scrollEl) return;
+    const measure = () => setAwayFromBottom(
+      scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight > SCROLL_BUTTON_DISTANCE_PX);
+    measure();
+    scrollEl.addEventListener("scroll", measure, { passive: true });
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    observer?.observe(scrollEl);
+    if (contentEl) observer?.observe(contentEl);
+    return () => {
+      scrollEl.removeEventListener("scroll", measure);
+      observer?.disconnect();
+    };
+  }, [scrollButton, scrollEl, contentEl, stick.state]);
+
+  // The count is derived rather than stored: `head` minus the newest log row the
+  // replica held when the reader released. Keeping it derived means a re-render,
+  // a resize or a remount cannot drift from the replica.
+  //
+  // Both ends are real log seqs. The rendered window is not: a consumer's
+  // `transformEntries` may add local rows (Chat's optimistic sends carry a
+  // fractional seq between two log rows, and keep it after the server's row
+  // arrives), so its newest seq is neither a whole number nor the log's. The
+  // keys rendered at release also discount a log row that only confirms a local
+  // row the reader was already looking at: that is not a new message.
+  const [released, setReleased] = useState<{ seq: number; keys: ReadonlySet<string> } | null>(null);
+  const keyOf = useCallback((entry: SessionLogEntry) => entryKey?.(entry) ?? String(entry.seq), [entryKey]);
+  const previousStateRef = useRef(stick.state);
+  useEffect(() => {
+    const previous = previousStateRef.current;
+    previousStateRef.current = stick.state;
+    if (previous === "pinned" && stick.state === "released") {
+      const newest = newestLogSeq(snapshot.entries);
+      setReleased(newest === null ? null : { seq: newest, keys: new Set(entries.map(keyOf)) });
+      return;
+    }
+    if (stick.state === "pinned") setReleased(null);
+  }, [stick.state, entries, snapshot.entries, keyOf]);
+
+  const head = snapshot.head;
+  const newMessageCount = useMemo(() => {
+    if (stick.state !== "released" || head === null || released === null) return 0;
+    let seen = 0;
+    for (const entry of snapshot.entries) {
+      if (entry.seq > released.seq && entry.seq <= head && released.keys.has(keyOf(entry))) seen += 1;
+    }
+    return Math.max(0, head - released.seq - seen);
+  }, [stick.state, head, released, snapshot.entries, keyOf]);
+
+  // The height hook reads rows through a getter, and the getter reads the two
+  // things that are only correct after commit: the element refs (populated by
+  // React) and the current window. Resolving the pairs during render instead
+  // would hand the hook an empty list on the first pass, and nothing would
+  // re-render the list to fix it.
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+  const getRows = useCallback((): MeasurableRow[] => {
+    const rows: MeasurableRow[] = [];
+    for (const entry of entriesRef.current) {
+      const element = elementRefs.current.get(entry.seq);
+      if (!element) continue;
+      rows.push({
+        element,
+        revision: entry.revision,
+        renderVersion: entry.render_version,
+        seq: entry.seq,
+      });
+    }
+    return rows;
+  }, []);
+
+  // The window's own identity: a seq list plus the revision of each row, so a
+  // patch that changes a row's height re-scans without an array prop.
+  const windowVersion = useMemo(
+    () => entries.map((entry) => `${entry.seq}.${entry.revision}.${entry.render_version ?? ""}`).join(","),
+    [entries],
+  );
+
+  useRowHeights({
+    replica,
+    sessionId,
+    scrollEl,
+    widthPx,
+    getRows,
+    version: windowVersion,
+    enabled: contentRevealed,
+  });
+
+  // Content width, in the same units the cache keys on. A ResizeObserver rather
+  // than a window listener: the list's width changes when a sidebar opens, which
+  // fires no window resize at all.
+  useEffect(() => {
+    if (!contentEl) return;
+    setWidthPx(contentEl.clientWidth);
+    if (typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(() => setWidthPx(contentEl.clientWidth));
+    observer.observe(contentEl);
+    return () => observer.disconnect();
+  }, [contentEl]);
+
+  const setRowRef = useCallback((seq: number) => (element: HTMLElement | null) => {
+    if (element) elementRefs.current.set(seq, element);
+    else elementRefs.current.delete(seq);
+  }, []);
+
+  const reserve = useCallback(
+    (entry: SessionLogEntry): number | null => reservedRowHeight(replica, sessionId, entry, widthPx),
+    [replica, sessionId, widthPx],
+  );
+
+  // The accessible name is built from the real count and never from the capped
+  // one: "99+" is a display convention, not something to read out.
+  const newMessagesLabel = t(($) => $.session_log.new_messages_jump, {
+    count: newMessageCount,
+  });
+  const scrollBottomLabel = newMessageCount > 0
+    ? newMessagesLabel
+    : t(($) => $.session_log.scroll_to_bottom);
+
+  const handleReturn = useCallback(() => {
+    if (onReturnToLatest) { onReturnToLatest(); return; }
+    stick.returnToBottom();
+  }, [stick, onReturnToLatest]);
+
+  return (
+    <div className={`relative min-h-0 flex-1 ${className ?? ""}`}>
+      <div
+        id={scrollId}
+        ref={useCallback((el: HTMLDivElement | null) => { setScrollEl(el); onScrollRoot?.(el); }, [onScrollRoot])}
+        data-tab-scroll-root=""
+        data-session-log-scroll=""
+        data-session-log-id={sessionId}
+        data-ssr-initial={initialPositioned ? "" : undefined}
+        data-ssr-display-ready={initialPositioned ? (initialDisplayReady ? "1" : "0") : undefined}
+        data-ssr-expected={initialPositioned ? entries.length : undefined}
+        data-ssr-anchor-id={initialPositioned ? anchorId ?? undefined : undefined}
+        data-session-log-degraded={degradedCount}
+        data-perf-scroll={perfScroll}
+        data-perf-state={initialPositioned ? "pending" : undefined}
+        data-perf-fresh={snapshot.fresh ? "1" : "0"}
+        data-stick-state={stick.state}
+        className="relative h-full overflow-y-auto"
+      >
+        {/* The reveal hook hides this subtree until its gates hold, so the first
+            frame that shows content is already at its final position. It keeps
+            `visibility: hidden` rather than unmounting because the hook measures
+            real heights to know where "final" is. */}
+        <DeferredContentContext.Provider value={contentRevealed}>
+        <div ref={setContentEl} style={initialPositioned ? { visibility: "hidden" } : undefined} className={`relative mx-auto w-full ${contentClassName}`}>
+          {showPendingSkeleton && reveal.state === "pending" && (
+            <div
+              data-slot="skeleton"
+              data-testid={`${testIdPrefix}-skeleton`}
+              className="visible absolute inset-0 z-10 flex flex-col justify-end gap-3 bg-background"
+            >
+              {[0, 1, 2].map((index) => (
+                <div key={index} className="h-16 rounded-md bg-muted/40" />
+              ))}
+            </div>
+          )}
+          {!snapshot.ready && renderPending ? renderPending() : null}
+          {header}
+          {entries.map((entry) => {
+            const reservedHeight = reserve(entry);
+            const isLatest = entry === latestEntry;
+            return (
+              <Fragment key={entryKey?.(entry) ?? entry.seq}>
+                <div
+                  ref={setRowRef(entry.seq)}
+                  id={`comment-${entry.id}`}
+                  data-perf-item="message"
+                  data-perf-key={entry.id}
+                  {...(anchorId === `comment-${entry.id}` ? { "data-perf-anchor": "target-comment" } : null)}
+                  {...(isLatest && anchorId !== `comment-${entry.id}` ? { "data-perf-anchor": latestAnchor } : null)}
+                  style={reservedHeight === null ? undefined : { minHeight: `${reservedHeight}px` }}
+                  className={`pb-3 transition-colors duration-500 ${highlighted && anchorId === `comment-${entry.id}` ? "bg-warning/10" : ""}`}
+                >
+                  {renderEntry
+                    ? renderEntry({ entry, reservedHeight })
+                    : (
+                      <EntryHtml
+                        html={entry.body_html}
+                        markdown={entry.body_md}
+                        attachments={entryAttachments(entry)}
+                        onDegradedRender={() => reportDegraded(entry)}
+                        fallback={renderFallback ? renderFallback(entry) : null}
+                      />
+                    )}
+                  {afterEntry?.(entry, { highlightedId: highlighted ? anchorId : null })}
+                </div>
+                {afterRow?.(entry, { highlightedId: highlighted ? anchorId : null })}
+              </Fragment>
+            );
+          })}
+          {footer}
+          {anchorId && <div aria-hidden="true" className="h-[50vh]" />}
+        </div>
+        </DeferredContentContext.Provider>
+      </div>
+      {scrollButton === "chip" && newMessageCount > 0 && stick.state === "released" && (
+        <NewMessagesChip count={newMessageCount} onReturn={handleReturn} label={newMessagesLabel} />
+      )}
+      {scrollButton === "arrow" && stick.state === "released" && awayFromBottom && (
+        <ScrollToBottomButton count={newMessageCount} onReturn={handleReturn} label={scrollBottomLabel} />
+      )}
+    </div>
+  );
+}

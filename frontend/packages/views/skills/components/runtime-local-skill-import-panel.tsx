@@ -15,7 +15,6 @@ import type {
   RuntimeLocalSkillSummary,
   Skill,
 } from "@multiremi/core/types";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import {
   runtimeListOptions,
@@ -278,17 +277,15 @@ export function RuntimeLocalSkillImportPanel({
   const { t } = useT("skills");
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
-  const userId = useAuthStore((s) => s.user?.id ?? null);
 
   const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
   const localRuntimes = useMemo(
     () =>
       runtimes.filter(
         (r) =>
-          r.runtime_mode === "local" &&
-          (userId == null || r.owner_id === userId),
+          r.runtime_mode === "local",
       ),
-    [runtimes, userId],
+    [runtimes],
   );
 
   const [selectedRuntimeId, setSelectedRuntimeId] = useState<string>("");

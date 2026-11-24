@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { executionGroupModelCatalog } from "@multiremi/api/helpers/agents.js";
@@ -26,7 +28,7 @@ function setup() {
     { id: "bundled-model", label: "Bundled", thinking: thinking("high") },
   ] });
   const fallback = store.registerRuntime({
-    id: "fallback", name: "Fallback", provider: "codex", workspaceId: "local", executionGroupId: "mixed-group",
+    id: "fallback", name: "Fallback", provider: "codex", workspaceId: "local",
     models: [report("bundled-model", "low", "error")],
   });
   const fleet = () => workspaceRuntimeModelCatalog(store, "local", store.listRuntimes(), "local")[0]!;
@@ -122,8 +124,9 @@ describe("MUL-330 independent mixed-runtime catalog regression", () => {
   });
 
   it("keeps execution groups as an intersection of actual available members", async () => {
-    const { store, fleet, app } = setup();
-    store.registerRuntime({ id: "healthy", name: "Healthy", provider: "codex", workspaceId: "local", executionGroupId: "mixed-group", models: [report("gateway-only", "high", "ready")] });
+    const { store, fallback, fleet, app } = setup();
+    const healthy = store.registerRuntime({ id: "healthy", name: "Healthy", provider: "codex", workspaceId: "local", models: [report("gateway-only", "high", "ready")] });
+    store.saveExecutionGroup("local", { name: "Mixed", provider: "codex", profile_id: null, runtime_ids: [fallback.id, healthy.id] }, "mixed-group");
     expect(catalogAllowsModel(fleet(), "gateway-only")).toBe(true);
     const group = executionGroupModelCatalog(store, "local", "mixed-group", "local")[0]!;
     expect(catalogAllowsModel(group, "gateway-only")).toBe(false);

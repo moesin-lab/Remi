@@ -7,7 +7,7 @@ import type { Agent } from "@multiremi/core/types";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import enCommon from "../../../locales/en/common.json";
 import enAgents from "../../../locales/en/agents.json";
-import enSettings from "../../../locales/en/settings.json";
+import enSettings from "../../../locales/en/im-platforms.json";
 
 // IntegrationsTab's job is to pick which copy sits beside the bind entry
 // based on (configured / install_supported / role). The bind entry itself
@@ -17,7 +17,7 @@ import enSettings from "../../../locales/en/settings.json";
 type MemberRole = "owner" | "admin" | "member" | "guest";
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as MemberRole }],
+  current: [{ user_id: "local", role: "owner" as MemberRole }],
 }));
 const installationsRef = vi.hoisted(() => ({
   current: {
@@ -62,7 +62,7 @@ vi.mock("@multiremi/core/auth", () => {
   return { useAuthStore };
 });
 
-vi.mock("../../../settings/components/lark-tab", () => ({
+vi.mock("../../../im-platforms/feishu/lark-tab", () => ({
   LarkAgentBindButton: ({ agentId }: { agentId: string }) => (
     <div data-testid="lark-bind-button" data-agent-id={agentId} />
   ),
@@ -71,7 +71,7 @@ vi.mock("../../../settings/components/lark-tab", () => ({
 import { IntegrationsTab } from "./integrations-tab";
 
 const TEST_RESOURCES = {
-  en: { common: enCommon, agents: enAgents, settings: enSettings },
+  en: { common: enCommon, agents: enAgents, "im-platforms": enSettings },
 };
 
 const agent: Agent = {
@@ -107,7 +107,7 @@ function renderTab(children: ReactNode) {
 
 function resetFixtures() {
   vi.clearAllMocks();
-  membersRef.current = [{ user_id: "user-1", role: "owner" }];
+  membersRef.current = [{ user_id: "local", role: "owner" }];
   installationsRef.current = {
     installations: [],
     configured: true,
@@ -148,7 +148,7 @@ describe("IntegrationsTab", () => {
   });
 
   it("points members at Settings instead of a dead button when they can't manage", () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     renderTab(<IntegrationsTab agent={agent} />);
     expect(
       screen.getByText(/Only workspace owners and admins can bind a Lark Bot/i),

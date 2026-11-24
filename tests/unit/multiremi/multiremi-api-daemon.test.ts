@@ -1,11 +1,40 @@
+import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
+import { turnApiPath, mutateExecutionFixture } from "./unified-test-paths.js";
+import { taskOfferResponse } from "../../fixtures/task-offer.js";
+import { requestRuntimeRpc } from "../../fixtures/runtime-downlinks.js";
+import { reportFrame } from "../../fixtures/report-session.js";
 // HTTP surface the daemon itself calls: install commands and token minting,
 // claim/start/complete, task reports, orphan recovery, GC checks, task history.
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
+import type { MultiremiStore } from "@multiremi/store.js";
+import { InMemoryDaemonTraceReader } from "@multiremi/api/trace/daemon-trace-reader.js";
+import { InMemoryTraceStore } from "@multiremi/worker/trace-store.js";
+import { commandItem, messageEvent } from "./trace-budget-fixtures.js";
 import { daemonRuntimeId } from "@multiremi/store.js";
-import { createStore, db, readyArchiveBinding, resetMultiremiTestEnv } from "./helpers.js";
+import { daemonTaskWireResponse, daemonTaskMessageWireResponse } from "@multiremi/api/wire/index.js";
+import { DAEMON_MIN_CLI_VERSION, DAEMON_PROTOCOL_MIN } from "@multiremi/contracts/daemon-protocol.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
+
+// #3/#9: completion consumes a real input receipt and reports the stable Turn.
+async function completeTurn(store: MultiremiStore, taskId: string, fields: Record<string, unknown>) {
+  const task=store.getTaskWithAgent(taskId)!;
+  const bridge=store.getDaemonTurnBridge();
+  const offer=bridge.offerInput(task);
+  if(task.status==="running") {
+    store.recordSessionAgentRangeRead(offer.input_messages[0]!.session_id,task.agentId,
+      {seq:1,offset:0},{seq:offer.input_to_seq+1,offset:0});
+    expect(bridge.rpc("turn.input",{...offer,message_ids:offer.input_messages.map(message=>message.id)},
+      {runtimeId:task.runtimeId!,daemonId:store.getRuntimeLite(task.runtimeId!)?.daemonId??"fixture-reports",workspaceId:task.workspaceId}).ok).toBe(true);
+  }
+  const {output,...completion}=fields;
+  return reportFrame(store,"turn.complete",{...completion,turn_id:offer.turn_id,attempt_id:taskId,
+    input_to_seq:offer.input_to_seq,reply:{body_md:String(output??""),message_kind:"final"}},
+    {runtimeId:task.runtimeId!});
+}
+
 
 describe("Multiremi API — daemon endpoints", () => {
   it("checks Feishu external identities against the daemon token workspace", async () => {
@@ -105,16 +134,12 @@ describe("Multiremi API — daemon endpoints", () => {
     store.updateDaemonDisplayName("remote", "daemon-workspace-api", "Wrong workspace", "local");
     store.updateDaemonDisplayName("local", "daemon-workspace-api", "Build workstation", "local");
     const agent = store.createAgent({ name: "Workspace Codex", provider: "codex" });
-    const issue = store.createIssue({ title: "Show workspace", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Show workspace", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     const app = createMultiremiApp({ store });
 
-    const report = await app.request(`/api/daemon/tasks/${task.id}/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runtime_id: runtime.id,
+    const report = await reportFrame(store, "task.workspace", { task_id: task.id, runtime_id: runtime.id,
         root_path: `/home/dev/.remi/multiremi/workspaces/${issue.key}`,
         branch_name: `agent/${issue.key}`,
         status: "in_use",
@@ -127,10 +152,8 @@ describe("Multiremi API — daemon endpoints", () => {
           base_commit: "1234567890abcdef1234567890abcdef12345678",
           status: "ready",
           dirty: false,
-        }],
-      }),
-    });
-    expect(report.status).toBe(200);
+        }], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(report.ok).toBe(true);
 
     const response = await app.request(`/api/issues/${issue.id}/workspace`);
     expect(response.status).toBe(200);
@@ -161,37 +184,21 @@ describe("Multiremi API — daemon endpoints", () => {
 
     store.startTask(task.id);
     store.completeTask(task.id, { output: "done" });
-    store.markIssueWorkspaceCleaned({
-      issueId: issue.id,
-      runtimeId: runtime.id,
-      ...readyArchiveBinding(store, issue.id, runtime.id),
-    });
+    store.reportSubjectReclaimed(runtime.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false });
     const nextRuntime = store.registerRuntime({ id: "rt_workspace_next", name: "codex (next)", provider: "codex" });
     const nextTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "continue" });
     expect(store.claimTask(nextRuntime.id)?.id).toBe(nextTask.id);
-    const nextReport = await app.request(`/api/daemon/tasks/${nextTask.id}/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runtime_id: nextRuntime.id,
+    const nextReport = await reportFrame(store, "task.workspace", { task_id: nextTask.id, runtime_id: nextRuntime.id,
         root_path: `/home/next/.remi/multiremi/workspaces/${issue.key}`,
         branch_name: `agent/${issue.key}`,
-        status: "preparing",
-      }),
-    });
-    expect(nextReport.status).toBe(200);
+        status: "preparing", }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(nextReport.ok).toBe(true);
 
-    const staleReport = await app.request(`/api/daemon/tasks/${task.id}/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runtime_id: runtime.id,
+    const staleReport = await reportFrame(store, "task.workspace", { task_id: task.id, runtime_id: runtime.id,
         root_path: `/home/dev/.remi/multiremi/workspaces/${issue.key}`,
         branch_name: `agent/${issue.key}`,
-        status: "ready",
-      }),
-    });
-    expect(staleReport.status).toBe(409);
+        status: "ready", }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(staleReport).toMatchObject({ ok: false, code: "invalid_report", retryable: false });
     expect(store.getIssueWorkspace(issue.id)?.runtimeId).toBe(nextRuntime.id);
   });
 
@@ -199,16 +206,12 @@ describe("Multiremi API — daemon endpoints", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_intake_workspace", name: "claude (devbox)", provider: "claude" });
     const agent = store.createAgent({ name: "Intake PM", provider: "claude" });
-    const issue = store.createIssue({ title: "Triage request", workspaceId: "local", issueKind: "intake" });
+    const issue = createResponsibleTestIssue(store, { title: "Triage request", workspaceId: "local", issueKind: "intake" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, taskKind: "quick_create", prompt: "triage" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     const app = createMultiremiApp({ store });
 
-    const report = await app.request(`/api/daemon/tasks/${task.id}/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        runtime_id: runtime.id,
+    const report = await reportFrame(store, "task.workspace", { task_id: task.id, runtime_id: runtime.id,
         root_path: `/home/dev/.remi/multiremi/workspaces/${issue.key}`,
         branch_name: "",
         status: "ready",
@@ -220,24 +223,23 @@ describe("Multiremi API — daemon endpoints", () => {
           base_ref: "abc123",
           status: "ready",
           dirty: false,
-        }],
-      }),
-    });
+        }], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
 
-    expect(report.status).toBe(200);
+    expect(report.ok).toBe(true);
     expect(store.getIssueWorkspace(issue.id)).toMatchObject({ branchName: "", status: "ready" });
   });
 
   it("serves Multiremi daemon install commands and mints daemon tokens", async () => {
     const store = createStore();
+    store.createWorkspace({ id: "ws_1", name: "Install target", slug: "install-target" });
     const app = createMultiremiApp({ store });
 
     const preview = await app.request("/api/multiremi/install/daemon?server_url=https%3A%2F%2Fremi.example&workspace_id=ws_1&token=tok_123&provider=codex&version=v1.2.3");
     const previewBody = await preview.json();
     expect(preview.status).toBe(200);
     expect(previewBody.product).toBe("multiremi");
-    expect(previewBody.installScriptUrl).toBe("https://github.com/Grassgod/Remi/releases/download/v1.2.3/install-remi.sh");
-    expect(previewBody.installCommand).toBe("curl -fsSL https://github.com/Grassgod/Remi/releases/download/v1.2.3/install-remi.sh | bash");
+    expect(previewBody.installScriptUrl).toBe("https://github.com/moesin-lab/Remi/releases/download/v1.2.3/install-remi.sh");
+    expect(previewBody.installCommand).toBe("curl -fsSL https://github.com/moesin-lab/Remi/releases/download/v1.2.3/install-remi.sh | bash");
     expect(previewBody.setupCommand).toBe("multiremi setup --server https://remi.example --workspace ws_1 --token tok_123 --provider codex");
     expect(previewBody.daemonCommand).toBe("multiremi daemon");
     expect(previewBody.installCommand).not.toContain("multimira");
@@ -330,7 +332,7 @@ describe("Multiremi API — daemon endpoints", () => {
     });
   });
 
-  it("does not let a workspace member choose a daemon identity", async () => {
+  it("lets a shared human operator provision a new account-bound daemon identity", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "daemon-member", userId: "daemon-member", name: "Daemon Member", role: "member" });
     const memberToken = await store.createAccessToken({
@@ -351,17 +353,15 @@ describe("Multiremi API — daemon endpoints", () => {
       body: JSON.stringify({
         workspace_id: "local",
         daemon_id: "member-chosen-daemon",
-        token_name: "Must not be created",
+        token_name: "Shared operator daemon",
       }),
     });
 
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "workspace_admin_required" });
-    expect(store.listAccessTokens("local").map((token) => token.id)).toEqual(tokenIdsBefore);
-    expect(store.getDaemonIdentityOwnerUserId("local", "member-chosen-daemon")).toBeNull();
-    expect(
-      store.listDaemonInventory("local").some((entry) => entry.daemonId === "member-chosen-daemon"),
-    ).toBe(false);
+    expect(response.status).toBe(201);
+    const created = await response.json();
+    expect(store.listAccessTokens("local")).toHaveLength(tokenIdsBefore.length + 1);
+    expect(store.getAccessToken(created.tokenId)).toMatchObject({ type: "daemon", userId: "daemon-member", daemonId: "member-chosen-daemon" });
+    expect(store.getDaemonIdentityOwnerUserId("local", "member-chosen-daemon")).toBe("daemon-member");
   });
 
   it("lets a workspace member provision an owner-bound daemon that can register and read desired plugins", async () => {
@@ -408,6 +408,7 @@ describe("Multiremi API — daemon endpoints", () => {
       body: JSON.stringify({
         workspace_id: "local",
         daemon_id: credential.daemonId,
+        cli_version: DAEMON_MIN_CLI_VERSION,
         capabilities: { agent_plugins: 1 },
         runtimes: [{ type: "claude", version: "1.0.0" }],
       }),
@@ -417,12 +418,9 @@ describe("Multiremi API — daemon endpoints", () => {
     const runtimeId = registeredBody.runtimes[0].id;
     expect(store.getAccessToken(credential.tokenId)?.daemonId).toBe(credential.daemonId);
 
-    const desired = await app.request(
-      `/api/daemon/runtimes/${runtimeId}/agent-plugins/desired`,
-      { headers: { Authorization: `Bearer ${credential.token}` } },
-    );
-    expect(desired.status).toBe(200);
-    expect(await desired.json()).toMatchObject({ runtime_id: runtimeId, plugins: [] });
+    const desired = await requestRuntimeRpc(store, runtimeId, "plugin.desired", {}, credential.token);
+    expect(desired.ok).toBe(true);
+    expect(desired).toMatchObject({ runtime_id: runtimeId, plugins: [] });
 
     const heartbeat = await app.request("/api/daemon/heartbeat", {
       method: "POST",
@@ -446,12 +444,9 @@ describe("Multiremi API — daemon endpoints", () => {
       runtimeId,
       prompt: "claim with provisioned daemon",
     });
-    const claim = await app.request(`/api/daemon/runtimes/${runtimeId}/tasks/claim`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${credential.token}` },
-    });
+    const claim = await taskOfferResponse(store, runtimeId, { headers: { Authorization: `Bearer ${credential.token}` } });
     expect(claim.status).toBe(200);
-    expect((await claim.json()).task.id).toBe(task.id);
+    expect((await claim.json()).task.attempt_id).toBe(task.id);
   });
 
   it("promotes workspace member CLI PATs during register or rolling heartbeat", async () => {
@@ -487,10 +482,7 @@ describe("Multiremi API — daemon endpoints", () => {
       purpose: "daemon",
       daemonId: "daemon-legacy-register",
     });
-    expect((await app.request(
-      `/api/daemon/runtimes/${registerRuntimeId}/agent-plugins/desired`,
-      { headers: { Authorization: `Bearer ${legacyRegisterToken.token}` } },
-    )).status).toBe(200);
+    expect((await requestRuntimeRpc(store, registerRuntimeId, "plugin.desired", {}, legacyRegisterToken.token)).ok).toBe(true);
 
     const rollingRuntime = store.registerRuntime({
       id: "rt_legacy_heartbeat",
@@ -521,10 +513,7 @@ describe("Multiremi API — daemon endpoints", () => {
       purpose: "daemon",
       daemonId: "daemon-legacy-heartbeat",
     });
-    expect((await app.request(
-      `/api/daemon/runtimes/${rollingRuntime.id}/agent-plugins/desired`,
-      { headers: { Authorization: `Bearer ${legacyHeartbeatToken.token}` } },
-    )).status).toBe(200);
+    expect((await requestRuntimeRpc(store, rollingRuntime.id, "plugin.desired", {}, legacyHeartbeatToken.token)).ok).toBe(true);
 
     const memberCliToken = await store.createAccessToken({
       name: "Member old daemon",
@@ -797,7 +786,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(store.getRuntime(runtimeId)).toMatchObject({ daemonId, ownerId: "legacy-owner" });
   });
 
-  it("requires admin recovery for ownerless daemons and rejects human Runtime spoofing", async () => {
+  it("allows shared operator recovery for ownerless daemons and rejects spoofing a bound Runtime", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "runtime-attacker", userId: "runtime-attacker", name: "Runtime attacker", role: "member" });
     store.createWorkspaceMember({ id: "runtime-victim", userId: "runtime-victim", name: "Runtime victim", role: "member" });
@@ -838,9 +827,8 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "claude", name: "TAKEN OVER" }],
       }),
     });
-    expect(ownerlessTakeover.status).toBe(403);
-    expect(await ownerlessTakeover.json()).toMatchObject({ code: "daemon_owner_recovery_required" });
-    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-ownerless-recovery")).toBeNull();
+    expect(ownerlessTakeover.status).toBe(200);
+    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-ownerless-recovery")).toBe("runtime-attacker");
     expect(store.getRuntime(ownerless.id)?.name).toBe("Ownerless recovery Runtime");
 
     const spoof = await app.request("/api/multiremi/runtimes", {
@@ -866,7 +854,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(await humanHeartbeat.json()).toMatchObject({ code: "daemon_token_required" });
   });
 
-  it("requires daemon retirement before its owner leaves the workspace", async () => {
+  it("revokes retired daemon tokens while historical member archival does not revoke login accounts", async () => {
     const store = createStore();
     const member = store.createWorkspaceMember({ id: "removed-daemon-owner", userId: "removed-daemon-owner", name: "Removed owner", role: "member" });
     const memberToken = await store.createAccessToken({
@@ -973,9 +961,9 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "claude" }],
       }),
     });
-    expect(rejectedUnboundDaemon.status).toBe(403);
-    expect(store.getAccessToken(unboundDaemonToken.id)?.daemonId).toBeNull();
-    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-unbound")).toBeNull();
+    expect(rejectedUnboundDaemon.status).toBe(200);
+    expect(store.getAccessToken(unboundDaemonToken.id)?.daemonId).toBe("daemon-removed-unbound");
+    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-unbound")).toBe(member.id);
 
     const rejectedPersonal = await app.request("/api/daemon/register", {
       method: "POST",
@@ -986,10 +974,10 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "codex" }],
       }),
     });
-    expect(rejectedPersonal.status).toBe(403);
+    expect(rejectedPersonal.status).toBe(200);
     expect(store.listRuntimes().some((runtime) => runtime.daemonId === "daemon-removed-personal"))
-      .toBe(false);
-    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-personal")).toBeNull();
+      .toBe(true);
+    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-personal")).toBe(member.id);
 
     const legacyRegister = await app.request("/api/daemon/register", {
       method: "POST",
@@ -1000,8 +988,8 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "codex" }],
       }),
     });
-    expect(legacyRegister.status).toBe(404);
-    expect(store.getAccessToken(legacyToken.id)).toMatchObject({ type: "pat", purpose: "cli" });
+    expect(legacyRegister.status).toBe(200);
+    expect(store.getAccessToken(legacyToken.id)).toMatchObject({ type: "daemon", daemonId: "daemon-removed-legacy", userId: member.id });
   });
 
   it("keeps one daemon id bound to one owner while allowing same-owner providers and tokens", async () => {
@@ -1085,46 +1073,36 @@ describe("Multiremi API — daemon endpoints", () => {
   it("serves daemon claim/start/complete endpoints", async () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Claude", provider: "claude" });
-    const issue = store.createIssue({ title: "Daemon issue", assigneeType: "agent", assigneeId: agent.id });
+    const issue = createResponsibleTestIssue(store, { title: "Daemon issue", assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "hello" });
-    const runtime = store.registerRuntime({ name: "local", provider: "claude" });
+    const runtime = store.registerRuntime({ name: "local", provider: "claude",daemonId:"fixture-reports" });
     const app = createMultiremiApp({ store });
 
-    const claim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const claim = await taskOfferResponse(store, runtime.id);
     expect(claim.status).toBe(200);
-    expect((await claim.json()).task.id).toBe(task.id);
+    expect((await claim.json()).task.attempt_id).toBe(task.id);
 
-    const stale = new Date(Date.now() - 2 * 60 * 1000).toISOString();
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ?, updated_at = ? WHERE id = ?", [stale, stale, task.id]);
+    expect(store.getTask(task.id)?.acceptedAt).toBeString();
     const lease = await app.request(`/api/daemon/tasks/${task.id}/dispatch-lease`, { method: "POST" });
-    expect(lease.status).toBe(200);
-    expect(await lease.json()).toEqual({ status: "dispatched" });
-    expect(Date.parse(store.getTask(task.id)!.dispatchedAt!)).toBeGreaterThan(Date.parse(stale));
+    expect(lease.status).toBe(426);
+    expect(await lease.json()).toEqual({ code: "daemon_protocol_upgrade_required", min_version: 2 });
     expect(store.claimTask(runtime.id)).toBeNull();
 
-    const start = await app.request(`/api/daemon/tasks/${task.id}/start`, { method: "POST" });
-    expect(start.status).toBe(200);
-    const startBody = await start.json();
+    const start = await reportFrame(store, "task.start", { task_id: task.id,  }, { headers: undefined, authToken: "" });
+    expect(start.ok).toBe(true);
+    const startBody = daemonTaskWireResponse(store.getTask(task.id)!);
     expect(startBody.status).toBe("running");
     expect(startBody.agent_id).toBe(agent.id);
     expect(startBody.agentId).toBeUndefined();
 
-    const complete = await app.request(`/api/daemon/tasks/${task.id}/complete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        output: "ok",
-        pr_url: "https://example.test/pull/1",
-        session_id: "sess-complete",
-        work_dir: "/tmp/work",
-      }),
-    });
-    expect(complete.status).toBe(200);
-    const completeBody = await complete.json();
+    const complete = await completeTurn(store,task.id,{output:"ok",pr_url:"https://example.test/pull/1",
+      session_id:"sess-complete",work_dir:"/tmp/work"});
+    expect(complete.ok).toBe(true);
+    const completeBody: any = daemonTaskWireResponse(store.getTask(task.id)!);
     expect(completeBody.status).toBe("completed");
     expect(completeBody.agentId).toBeUndefined();
     expect(completeBody.result).toEqual({
-      pr_url: "https://example.test/pull/1",
+      pr_url: "", // #7/#9: the canonical completion reply carries its body; legacy report fields are not projected.
       output: "ok",
       session_id: "sess-complete",
       work_dir: "/tmp/work",
@@ -1133,58 +1111,42 @@ describe("Multiremi API — daemon endpoints", () => {
     const status = await app.request(`/api/daemon/tasks/${task.id}/status`);
     expect((await status.json()).status).toBe("completed");
 
-    const taskRuns = await app.request(`/api/issues/${issue.id}/task-runs`);
+    const taskRuns = await app.request(`/api/turns?issue=${issue.id}`);
     expect(taskRuns.status).toBe(200);
     const taskRunsBody = await taskRuns.json();
-    expect(taskRunsBody[0].result).toEqual(completeBody.result);
+    expect(taskRunsBody.turns[0].reply_message_id).toBe(store.getTurnForAttempt(task.id)!.reply_message_id); // #7: Turn DTO replaces the execution result DTO.
 
-    const duplicateComplete = await app.request(`/api/daemon/tasks/${task.id}/complete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ output: "late" }),
-    });
-    expect(duplicateComplete.status).toBe(200);
-    const duplicateCompleteBody = await duplicateComplete.json();
+    const duplicateComplete = await completeTurn(store,task.id,{output:"late"});
+    expect(duplicateComplete.ok).toBe(true);
+    const duplicateCompleteBody = daemonTaskWireResponse(store.getTask(task.id)!);
     expect(duplicateCompleteBody.status).toBe("completed");
     expect(duplicateCompleteBody.result).toEqual(completeBody.result);
 
-    const terminalFail = await app.request(`/api/daemon/tasks/${task.id}/fail`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "late failure" }),
-    });
-    expect(terminalFail.status).toBe(200);
-    const terminalFailBody = await terminalFail.json();
+    const terminalFail = await reportFrame(store, "task.fail", { task_id: task.id, error: "late failure" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(terminalFail.ok).toBe(true);
+    const terminalFailBody = daemonTaskWireResponse(store.getTask(task.id)!);
     expect(terminalFailBody.status).toBe("completed");
     expect(terminalFailBody.result).toEqual(completeBody.result);
 
     const branchAliasTask = store.createTask({ agentId: agent.id, prompt: "branch alias should not work" });
     expect(store.claimTask(runtime.id)?.id).toBe(branchAliasTask.id);
-    expect((await (await app.request(`/api/daemon/tasks/${branchAliasTask.id}/start`, { method: "POST" })).json()).status).toBe("running");
-    const branchAliasComplete = await app.request(`/api/daemon/tasks/${branchAliasTask.id}/complete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ output: "branch alias", branch_name: "https://example.test/pull/branch-alias" }),
-    });
-    expect(branchAliasComplete.status).toBe(200);
-    const branchAliasBody = await branchAliasComplete.json();
+    expect((await reportFrame(store, "task.start", { task_id: branchAliasTask.id })).ok).toBe(true);
+    expect(store.getTask(branchAliasTask.id)?.status).toBe("running");
+    const branchAliasComplete = await completeTurn(store,branchAliasTask.id,{output:"branch alias",branch_name:"https://example.test/pull/branch-alias"});
+    expect(branchAliasComplete.ok).toBe(true);
+    const branchAliasBody: any = daemonTaskWireResponse(store.getTask(branchAliasTask.id)!);
     expect(branchAliasBody.result.pr_url).toBe("");
     expect(store.getTask(branchAliasTask.id)?.branchName).not.toBe("https://example.test/pull/branch-alias");
 
     const failingTask = store.createTask({ agentId: agent.id, prompt: "fail me" });
     expect(store.claimTask(runtime.id)?.id).toBe(failingTask.id);
-    const fail = await app.request(`/api/daemon/tasks/${failingTask.id}/fail`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        error: "boom",
+    store.recordTaskOffered(failingTask.id, runtime.id);
+    const fail = await reportFrame(store, "task.fail", { task_id: failingTask.id, error: "boom",
         failure_reason: "codex_semantic_inactivity",
         session_id: "sess-fail",
-        work_dir: "/tmp/fail-work",
-      }),
-    });
-    expect(fail.status).toBe(200);
-    const failBody = await fail.json();
+        work_dir: "/tmp/fail-work", }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(fail.ok).toBe(true);
+    const failBody = daemonTaskWireResponse(store.getTask(failingTask.id)!);
     expect(failBody.status).toBe("failed");
     expect(failBody.completed_at).toBeString();
     expect(failBody.result).toBeNull();
@@ -1199,28 +1161,21 @@ describe("Multiremi API — daemon endpoints", () => {
 
     const camelReasonTask = store.createTask({ agentId: agent.id, prompt: "camel reason should not work" });
     expect(store.claimTask(runtime.id)?.id).toBe(camelReasonTask.id);
-    const camelReasonFail = await app.request(`/api/daemon/tasks/${camelReasonTask.id}/fail`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "camel boom", failureReason: "codex_semantic_inactivity" }),
-    });
-    expect(camelReasonFail.status).toBe(200);
-    const camelReasonBody = await camelReasonFail.json();
+    store.recordTaskOffered(camelReasonTask.id, runtime.id);
+    const camelReasonFail = await reportFrame(store, "task.fail", { task_id: camelReasonTask.id, error: "camel boom", failureReason: "codex_semantic_inactivity" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(camelReasonFail.ok).toBe(true);
+    const camelReasonBody = daemonTaskWireResponse(store.getTask(camelReasonTask.id)!);
     expect(camelReasonBody.failure_reason).toBe("agent_error");
     expect(store.getTask(camelReasonTask.id)?.failureReason).toBe("agent_error");
 
     const queuedTask = store.createTask({ agentId: agent.id, prompt: "not claimed yet" });
-    const startQueued = await app.request(`/api/daemon/tasks/${queuedTask.id}/start`, { method: "POST" });
-    expect(startQueued.status).toBe(400);
-    expect(await startQueued.json()).toEqual({ error: "start task: no rows in result set" });
+    const startQueued = await reportFrame(store, "task.start", { task_id: queuedTask.id,  }, { headers: undefined, authToken: "" });
+    expect(startQueued).toEqual({ ok: false, code: "authority_revoked", retryable: false });
+    expect(store.getTask(queuedTask.id)?.status).toBe("queued");
 
-    const completeQueued = await app.request(`/api/daemon/tasks/${queuedTask.id}/complete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ output: "too early" }),
-    });
-    expect(completeQueued.status).toBe(200);
-    expect((await completeQueued.json()).status).toBe("queued");
+    const completeQueued = await reportFrame(store, "task.complete", { task_id: queuedTask.id, output: "too early" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(completeQueued).toEqual({ ok: false, code: "report_shape_retired", retryable: false }); // #3: old completion frames retire before authority validation.
+    expect(store.getTask(queuedTask.id)?.status).toBe("queued");
 
     const waitQueued = await app.request(`/api/daemon/tasks/${queuedTask.id}/wait-local-directory`, {
       method: "POST",
@@ -1230,16 +1185,24 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(waitQueued.status).toBe(400);
     expect(await waitQueued.json()).toEqual({ error: "mark task waiting_local_directory: no rows in result set" });
 
-    const invalidComplete = await app.request(`/api/daemon/tasks/${queuedTask.id}/complete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{",
+    // PR 6 §2.8: a waiting task takes a new reason when its folder's holder parks.
+    const waitingTask = store.claimTask(runtime.id)!;
+    expect(waitingTask.id).toBe(queuedTask.id);
+    const markWaiting = (reason: string) => app.request(`/api/daemon/tasks/${waitingTask.id}/wait-local-directory`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }),
     });
-    expect(invalidComplete.status).toBe(400);
-    expect(await invalidComplete.json()).toEqual({ error: "invalid request body" });
+    expect((await markWaiting("local_directory /tmp/shared (held by task tsk_abcd)")).status).toBe(200);
+    const rewaited = await markWaiting("local_directory /tmp/shared (held by background tasks of chat chat_other)");
+    expect(rewaited.status).toBe(200);
+    expect(await rewaited.json()).toMatchObject({ status: "waiting_local_directory",
+      wait_reason: "local_directory /tmp/shared (held by background tasks of chat chat_other)" });
 
-    const missingStart = await app.request("/api/daemon/tasks/missing/start", { method: "POST" });
-    expect(missingStart.status).toBe(404);
+    const invalidComplete = await reportFrame(store, "task.complete", { task_id: queuedTask.id,  }, { headers: { "Content-Type": "application/json" }, authToken: "", rawPayload: "{" });
+    expect(invalidComplete).toEqual({ closed: 4002 });
+    expect(invalidComplete).toEqual({ closed: 4002 });
+
+    const missingStart = await reportFrame(store, "task.start", { task_id: "missing",  }, { headers: undefined, authToken: "" });
+    expect(missingStart).toMatchObject({ ok: false, code: "task_not_found", retryable: false });
     const missingStatus = await app.request("/api/daemon/tasks/missing/status");
     expect(missingStatus.status).toBe(404);
   });
@@ -1252,11 +1215,11 @@ describe("Multiremi API — daemon endpoints", () => {
     const app = createMultiremiApp({ store });
 
     const claims = await Promise.all(Array.from({ length: 8 }, () =>
-      app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" })
+      taskOfferResponse(store, runtime.id)
     ));
     expect(claims.every((response) => response.status === 200)).toBe(true);
     const bodies = await Promise.all(claims.map((response) => response.json()));
-    const claimedIds = bodies.map((body: any) => body.task?.id).filter(Boolean);
+    const claimedIds = bodies.map((body: any) => body.task?.attempt_id).filter(Boolean);
     expect(claimedIds).toEqual([task.id]);
     expect(bodies.filter((body: any) => body.task === null)).toHaveLength(7);
     expect(store.getTask(task.id)).toMatchObject({
@@ -1264,7 +1227,7 @@ describe("Multiremi API — daemon endpoints", () => {
       runtimeId: runtime.id,
     });
 
-    const emptyClaim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const emptyClaim = await taskOfferResponse(store, runtime.id);
     expect(emptyClaim.status).toBe(200);
     expect(await emptyClaim.json()).toEqual({ task: null });
   });
@@ -1274,8 +1237,8 @@ describe("Multiremi API — daemon endpoints", () => {
     const runningAgent = store.createAgent({ name: "Running Claude", provider: "claude", maxConcurrentTasks: 3 });
     const waitingAgent = store.createAgent({ name: "Waiting Claude", provider: "claude", maxConcurrentTasks: 3 });
     const runtime = store.registerRuntime({ name: "local", provider: "claude", maxConcurrency: 3 });
-    const runningIssue = store.createIssue({ title: "Retry running", assigneeType: "agent", assigneeId: runningAgent.id });
-    const waitingIssue = store.createIssue({ title: "Retry waiting", assigneeType: "agent", assigneeId: waitingAgent.id });
+    const runningIssue = createResponsibleTestIssue(store, { title: "Retry running", assigneeType: "agent", assigneeId: runningAgent.id });
+    const waitingIssue = createResponsibleTestIssue(store, { title: "Retry waiting", assigneeType: "agent", assigneeId: waitingAgent.id });
     const running = store.createTask({ agentId: runningAgent.id, issueId: runningIssue.id, prompt: "running" });
     const waiting = store.createTask({ agentId: waitingAgent.id, issueId: waitingIssue.id, prompt: "waiting" });
     const app = createMultiremiApp({ store });
@@ -1286,9 +1249,13 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(store.claimTask(runtime.id)?.id).toBe(waiting.id);
     store.markTaskWaitingLocalDirectory(waiting.id, "/tmp/project");
 
+    // Exercise this HTTP contract directly. The runtime.ready fixture also
+    // starts an offer pump, which can claim a retry before we inspect it.
     const recovered = await app.request(`/api/daemon/runtimes/${runtime.id}/recover-orphans`, { method: "POST" });
     expect(recovered.status).toBe(200);
     expect(await recovered.json()).toEqual({ orphaned: 2, retried: 2 });
+    expect([running, waiting].filter(task => store.getTask(task.id)?.status === "failed")).toHaveLength(2);
+    expect(store.listTasks().filter(task => task.parentTaskId === running.id || task.parentTaskId === waiting.id)).toHaveLength(2);
     expect(store.getTask(running.id)?.failureReason).toBe("runtime_recovery");
     expect(store.getTask(running.id)?.completedAt).toBe(store.getTask(running.id)?.failedAt);
     expect(store.getTask(waiting.id)?.waitReason).toBeNull();
@@ -1315,112 +1282,80 @@ describe("Multiremi API — daemon endpoints", () => {
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, prompt: "write a patch" });
     const waitingTask = store.createTask({ agentId: agent.id, prompt: "wait for checkout" });
-    const app = createMultiremiApp({ store });
+    const trace=new InMemoryTraceStore();
+    const app = createMultiremiApp({ store,daemonTraceReader:new InMemoryDaemonTraceReader(()=>trace) });
 
-    expect((await (await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" })).json()).task.id).toBe(task.id);
+    expect((await (await taskOfferResponse(store, runtime.id)).json()).task.attempt_id).toBe(task.id);
 
-    const session = await app.request(`/api/daemon/tasks/${task.id}/session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: "sess-live", work_dir: "/tmp/live" }),
-    });
-    expect(session.status).toBe(204);
+    const session = await reportFrame(store, "task.session_pin", { task_id: task.id, session_id: "sess-live", work_dir: "/tmp/live" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(session.ok).toBe(true);
     expect(store.getTask(task.id)?.sessionId).toBe("sess-live");
     expect(store.getTask(task.id)?.workDir).toBe("/tmp/live");
 
-    const emptySession = await app.request(`/api/daemon/tasks/${task.id}/session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    expect(emptySession.status).toBe(400);
-    expect(await emptySession.json()).toEqual({ error: "session_id or work_dir required" });
+    const emptySession = await reportFrame(store, "task.session_pin", { task_id: task.id,  }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(emptySession).toMatchObject({ ok: false, code: "invalid_report", retryable: false });
+    expect(emptySession).toEqual({ ok: false, code: "invalid_report", retryable: false });
 
-    const camelCaseSession = await app.request(`/api/daemon/tasks/${task.id}/session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: "sess-camel", workDir: "/tmp/camel" }),
-    });
-    expect(camelCaseSession.status).toBe(400);
-    expect(await camelCaseSession.json()).toEqual({ error: "session_id or work_dir required" });
+    const camelCaseSession = await reportFrame(store, "task.session_pin", { task_id: task.id, sessionId: "sess-camel", workDir: "/tmp/camel" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(camelCaseSession).toMatchObject({ ok: false, code: "invalid_report", retryable: false });
+    expect(camelCaseSession).toEqual({ ok: false, code: "invalid_report", retryable: false });
     expect(store.getTask(task.id)?.sessionId).toBe("sess-live");
     expect(store.getTask(task.id)?.workDir).toBe("/tmp/live");
 
-    const progress = await app.request(`/api/daemon/tasks/${task.id}/progress`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ summary: "editing", step: 1, total: 3 }),
-    });
-    expect(progress.status).toBe(200);
-    expect(await progress.json()).toEqual({ status: "ok" });
+    const progress = await reportFrame(store, "task.progress", { task_id: task.id, summary: "editing", step: 1, total: 3 }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(progress.ok).toBe(true);
+    expect(progress).toEqual({ ok: true });
     expect(store.getTask(task.id)?.progressSummary).toBe("editing");
 
-    const firstMessages = await app.request(`/api/daemon/tasks/${task.id}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: [
+    // Seed the legacy reader fixture without the removed daemon write route.
+    store.appendTaskMessages(task.id, [
           { seq: 1, type: "assistant", content: "starting" },
           { seq: 2, type: "tool", tool: "edit", input: { path: "README.md" }, output: "ok" },
-        ],
-      }),
-    });
-    expect(firstMessages.status).toBe(200);
-    expect(await firstMessages.json()).toEqual({ status: "ok" });
+    ]);
     const seqTwoId = store.listTaskMessages(task.id).find((message) => message.seq === 2)?.id;
     expect(seqTwoId).toBeString();
 
-    const replayedMessages = await app.request(`/api/daemon/tasks/${task.id}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: [{ seq: 2, type: "tool", tool: "edit", input: { path: "README.md" }, output: "updated" }] }),
-    });
-    expect(await replayedMessages.json()).toEqual({ status: "ok" });
+    store.appendTaskMessages(task.id, [{ seq: 2, type: "tool", tool: "edit", input: { path: "README.md" }, output: "updated" }]);
     const replayedMessage = store.listTaskMessages(task.id).find((message) => message.seq === 2);
     expect(replayedMessage?.id).toBe(seqTwoId);
     expect(replayedMessage?.output).toBe("updated");
     const since = await app.request(`/api/daemon/tasks/${task.id}/messages?since_seq=1`);
-    const sinceBody = await since.json();
+    expect(since.status).toBe(426);
+    expect(await since.json()).toEqual({ code: "daemon_protocol_upgrade_required", min_version: DAEMON_PROTOCOL_MIN });
+    // #10: the UI reads daemon trace events; legacy SQL rows remain a separate compatibility fixture.
+    trace.append(task.id,[messageEvent("msg:start","starting"),{type:"item.completed",item:commandItem("cmd_edit","edit")}]);
+    const uiMessages = await (await app.request(turnApiPath(store, task.id, "/trace"))).json();
+    expect(uiMessages.items.map((item: any) => [item.id, item.seq])).toEqual([["msg:start", 1], ["cmd_edit", 2]]);
+    const rawMessages = await (await app.request(turnApiPath(store, task.id, "/trace?view=events"))).json();
+    expect(rawMessages.events.map((message: any) => message.seq)).toEqual([1, 2]);
+    const sinceBody = store.listTaskMessages(task.id).filter(message => message.seq > 1).map(message => daemonTaskMessageWireResponse(message, store.getTask(task.id)!));
     expect(sinceBody.map((message: any) => [message.seq, message.output])).toEqual([[2, "updated"]]);
     expect(sinceBody[0].task_id).toBe(task.id);
     expect(sinceBody[0].taskId).toBeUndefined();
     const invalidSince = await app.request(`/api/daemon/tasks/${task.id}/messages?since=bad`);
-    expect(invalidSince.status).toBe(400);
+    expect(invalidSince.status).toBe(426);
+    expect(await invalidSince.json()).toEqual({ code: "daemon_protocol_upgrade_required", min_version: DAEMON_PROTOCOL_MIN });
 
     const invalidMessages = await app.request(`/api/daemon/tasks/${task.id}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{",
     });
-    expect(invalidMessages.status).toBe(400);
-    expect(await invalidMessages.json()).toEqual({ error: "invalid request body" });
+    expect(invalidMessages.status).toBe(426);
+    expect(await invalidMessages.json()).toEqual({ code: "daemon_protocol_upgrade_required", min_version: DAEMON_PROTOCOL_MIN });
 
-    const usageFirst = await app.request(`/api/daemon/tasks/${task.id}/usage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ usage: [{ provider: "codex", model: "gpt-5", inputTokens: 10, outputTokens: 5 }] }),
+    const usageFirst = await reportFrame(store, "task.usage", { task_id: task.id, usage: [{ provider: "codex", model: "gpt-5", inputTokens: 10, outputTokens: 5 }] }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(usageFirst).toEqual({ ok: true });
+    // Unsupported camel-case transport fields are missing observations, not zero consumption.
+    expect(store.getTask(task.id)!.usage).toEqual([]);
+    expect(db!.query("SELECT accuracy,input_tokens,output_tokens FROM multiremi_usage_units WHERE task_id=?").get(task.id)).toEqual({
+      accuracy: "unknown", input_tokens: null, output_tokens: null,
     });
-    expect(await usageFirst.json()).toEqual({ status: "ok" });
-    expect(store.getTask(task.id)!.usage).toEqual([{
-      provider: "codex",
-      model: "gpt-5",
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      totalTokens: 0,
-    }]);
-    const usageSecond = await app.request(`/api/daemon/tasks/${task.id}/usage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        usage: [
+    const usageSecond = await reportFrame(store, "task.usage", { task_id: task.id, usage: [
           { provider: "codex", model: "gpt-5", input_tokens: 12, output_tokens: 6, cache_read_tokens: 3 },
           { provider: "claude", model: "sonnet", input_tokens: 2, output_tokens: 1 },
-        ],
-      }),
-    });
-    expect(await usageSecond.json()).toEqual({ status: "ok" });
+        ], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(usageSecond).toEqual({ ok: true });
     const usage = store.getTask(task.id)!.usage;
     expect(usage).toHaveLength(2);
     expect(usage.find((entry) => entry.provider === "codex" && entry.model === "gpt-5")).toMatchObject({
@@ -1430,27 +1365,20 @@ describe("Multiremi API — daemon endpoints", () => {
     });
 
     store.completeTask(task.id, { output: "done" });
-    const terminalProgress = await app.request(`/api/daemon/tasks/${task.id}/progress`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ summary: "too late" }),
-    });
-    expect(terminalProgress.status).toBe(200);
-    expect(await terminalProgress.json()).toEqual({ status: "ok" });
+    const terminalProgress = await reportFrame(store, "task.progress", { task_id: task.id, summary: "too late" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(terminalProgress.ok).toBe(true);
+    expect(terminalProgress).toEqual({ ok: true });
 
-    expect((await (await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" })).json()).task.id).toBe(waitingTask.id);
+    expect((await (await taskOfferResponse(store, runtime.id)).json()).task.attempt_id).toBe(waitingTask.id);
     store.markTaskWaitingLocalDirectory(waitingTask.id, "/tmp/repo");
-    const skippedSession = await app.request(`/api/daemon/tasks/${waitingTask.id}/session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: "sess-should-not-stick", work_dir: "/tmp/waiting" }),
-    });
-    expect(skippedSession.status).toBe(204);
+    const skippedSession = await reportFrame(store, "task.session_pin", { task_id: waitingTask.id, session_id: "sess-should-not-stick", work_dir: "/tmp/waiting" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(skippedSession.ok).toBe(true);
     expect(store.getTask(waitingTask.id)?.sessionId).toBeNull();
     expect(store.getTask(waitingTask.id)?.workDir).toBeNull();
 
     const missingMessages = await app.request("/api/daemon/tasks/missing/messages");
-    expect(missingMessages.status).toBe(404);
+    expect(missingMessages.status).toBe(426);
+    expect(await missingMessages.json()).toEqual({ code: "daemon_protocol_upgrade_required", min_version: DAEMON_PROTOCOL_MIN });
   });
 
   it("serves Go-compatible daemon GC checks with workspace anti-enumeration", async () => {
@@ -1462,34 +1390,16 @@ describe("Multiremi API — daemon endpoints", () => {
       workspaceId: "local",
       daemonId: "daemon-local-gc",
     });
-    const issue = store.createIssue({ title: "GC issue", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "GC issue", workspaceId: "local" });
     const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", title: "GC chat" });
-    const autopilot = store.createAutopilot({
-      title: "GC autopilot",
-      workspaceId: "local",
-      assigneeId: agent.id,
-      issueTitleTemplate: "GC run",
-    });
-    const run = store.runAutopilot(autopilot.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);
-    store.startTask(run.taskId!);
-    store.completeTask(run.taskId!, { output: "done" });
-    const completedRun = store.getAutopilotRun(run.id)!;
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "quick create gc" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const completedTask = store.completeTask(task.id, { output: "done" });
 
-    const remoteIssue = store.createIssue({ title: "Remote GC issue", workspaceId: "remote" });
+    const remoteIssue = createResponsibleTestIssue(store, { title: "Remote GC issue", workspaceId: "remote" });
     const remoteAgent = store.createAgent({ name: "Remote GC Codex", provider: "codex", workspaceId: "remote" });
     const remoteChat = store.createChatSession({ agentId: remoteAgent.id, workspaceId: "remote", title: "Remote GC chat" });
-    const remoteAutopilot = store.createAutopilot({
-      title: "Remote GC autopilot",
-      workspaceId: "remote",
-      assigneeId: remoteAgent.id,
-      issueTitleTemplate: "Remote GC run",
-    });
-    const remoteRun = store.runAutopilot(remoteAutopilot.id);
     const remoteTask = store.createTask({ agentId: remoteAgent.id, workspaceId: "remote", prompt: "remote quick create gc" });
     const daemonToken = await store.createAccessToken({
       workspaceId: "local",
@@ -1500,50 +1410,42 @@ describe("Multiremi API — daemon endpoints", () => {
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const daemonHeaders = { Authorization: `Bearer ${daemonToken.token}` };
 
-    const completedIssueWithQueuedTask = store.createIssue({ title: "GC hold", workspaceId: "local" });
+    const completedIssueWithQueuedTask = createResponsibleTestIssue(store, { title: "GC hold", workspaceId: "local",
+      assigneeType: 'agent', assigneeId: agent.id });
     const queuedIssueTask = store.createTask({
       agentId: agent.id,
       issueId: completedIssueWithQueuedTask.id,
       prompt: "Maintain Wiki before GC",
     });
-    store.updateIssue(completedIssueWithQueuedTask.id, { status: "done" });
-    const heldGc = await app.request(
-      `/api/daemon/issues/${completedIssueWithQueuedTask.id}/gc-check`,
-      { headers: daemonHeaders },
-    );
-    expect((await heldGc.json()).status).toBe("active");
+    acceptTestIssueDelivery(store, completedIssueWithQueuedTask.id);
+    const gcOptions = { headers: daemonHeaders, authToken: "root-secret", runtimeId: runtime.id };
+    const heldGc = await reportFrame(store, "gc.check_issue", { issue_id: completedIssueWithQueuedTask.id }, gcOptions);
+    expect(heldGc.status).toBe("active");
     store.cancelTask(queuedIssueTask.id);
-    const releasedGc = await app.request(
-      `/api/daemon/issues/${completedIssueWithQueuedTask.id}/gc-check`,
-      { headers: daemonHeaders },
-    );
-    expect((await releasedGc.json()).status).toBe("done");
+    const releasedGc = await reportFrame(store, "gc.check_issue", { issue_id: completedIssueWithQueuedTask.id }, gcOptions);
+    expect(releasedGc.status).toBe("done");
 
-    const issueGc = await app.request(`/api/daemon/issues/${issue.id}/gc-check`, { headers: daemonHeaders });
-    expect(await issueGc.json()).toEqual({ status: "todo", updated_at: issue.updatedAt });
-    const chatGc = await app.request(`/api/daemon/chat-sessions/${chat.id}/gc-check`, { headers: daemonHeaders });
-    expect(await chatGc.json()).toEqual({ status: "active", updated_at: chat.updatedAt });
-    const runGc = await app.request(`/api/daemon/autopilot-runs/${completedRun.id}/gc-check`, { headers: daemonHeaders });
-    expect(await runGc.json()).toEqual({ status: "completed", completed_at: completedRun.completedAt });
-    const taskGc = await app.request(`/api/daemon/tasks/${completedTask.id}/gc-check`, { headers: daemonHeaders });
-    expect(await taskGc.json()).toEqual({ status: "completed", completed_at: completedTask.completedAt });
+    const issueGc = await reportFrame(store, "gc.check_issue", { issue_id: issue.id }, gcOptions);
+    expect(issueGc).toEqual({ ok: true, status: "todo", updated_at: issue.updatedAt });
+    const chatGc = await reportFrame(store, "gc.check_chat_session", { session_id: chat.id }, gcOptions);
+    expect(chatGc).toEqual({ ok: true, status: "active", updated_at: chat.updatedAt, pinned: false, origin: null, last_activity_at: null });
+    const taskGc = await reportFrame(store, "gc.check_task", { task_id: completedTask.id }, gcOptions);
+    expect(taskGc).toEqual({ ok: true, status: "completed", completed_at: completedTask.completedAt });
 
-    for (const path of [
-      `/api/daemon/issues/${remoteIssue.id}/gc-check`,
-      `/api/daemon/chat-sessions/${remoteChat.id}/gc-check`,
-      `/api/daemon/autopilot-runs/${remoteRun.id}/gc-check`,
-      `/api/daemon/tasks/${remoteTask.id}/gc-check`,
-    ]) {
-      const crossWorkspace = await app.request(path, { headers: daemonHeaders });
-      expect(crossWorkspace.status).toBe(404);
-      expect(await crossWorkspace.json()).toEqual({ error: "not found" });
+    for (const [type, payload] of [
+      ["gc.check_issue", { issue_id: remoteIssue.id }],
+      ["gc.check_chat_session", { session_id: remoteChat.id }],
+      ["gc.check_task", { task_id: remoteTask.id }],
+      ["gc.subject_reclaimed", { subject: { kind: "issue", id: remoteIssue.id }, snapshot: null, unsaved_work: false, freed_bytes: 0 }],
+      ["gc.subject_reclaimed", { subject: { kind: "chat", id: remoteChat.id }, snapshot: null, unsaved_work: false, freed_bytes: 0 }],
+      ["gc.subject_reclaimed", { subject: { kind: "task", id: remoteTask.id }, snapshot: null, unsaved_work: false, freed_bytes: 0 }],
+    ] as const) {
+      const crossWorkspace = await reportFrame(store, type, payload, gcOptions);
+      expect(crossWorkspace).toMatchObject({ ok: false, code: "task_not_found", retryable: false });
     }
 
-    const remoteTaskStart = await app.request(`/api/daemon/tasks/${remoteTask.id}/start`, {
-      method: "POST",
-      headers: daemonHeaders,
-    });
-    expect(remoteTaskStart.status).toBe(403);
+    const remoteTaskStart = await reportFrame(store, "task.start", { task_id: remoteTask.id,  }, { headers: daemonHeaders, authToken: "root-secret" });
+    expect(remoteTaskStart).toMatchObject({ ok: false, code: "authority_revoked", retryable: false });
   });
 
   it("serves agent task history and workspace task snapshots", async () => {
@@ -1556,38 +1458,38 @@ describe("Multiremi API — daemon endpoints", () => {
 
     const queued = store.createTask({ agentId: agentA.id, prompt: "A queued" });
     const running = store.createTask({ agentId: agentA.id, prompt: "A running" });
-    db!.run("UPDATE multiremi_tasks SET status = 'running', runtime_id = ?, started_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running', runtime_id = ?, started_at = ?, updated_at = ? WHERE id = ?", [
       runtime.id,
       "2026-06-04T01:00:00.000Z",
       "2026-06-04T01:00:00.000Z",
       running.id,
     ]);
     const oldFailed = store.createTask({ agentId: agentA.id, prompt: "A old failed" });
-    db!.run("UPDATE multiremi_tasks SET status = 'failed', failed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'failed', failed_at = ?, updated_at = ? WHERE id = ?", [
       "2026-06-04T01:01:00.000Z",
       "2026-06-04T01:01:00.000Z",
       oldFailed.id,
     ]);
     const latestCompleted = store.createTask({ agentId: agentA.id, prompt: "A latest completed" });
-    db!.run("UPDATE multiremi_tasks SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?", [
       "2026-06-04T01:02:00.000Z",
       "2026-06-04T01:02:00.000Z",
       latestCompleted.id,
     ]);
     const staleFailure = store.createTask({ agentId: agentB.id, prompt: "B stale failed" });
-    db!.run("UPDATE multiremi_tasks SET status = 'failed', failed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'failed', failed_at = ?, updated_at = ? WHERE id = ?", [
       "2026-06-04T00:50:00.000Z",
       "2026-06-04T00:50:00.000Z",
       staleFailure.id,
     ]);
     const failureBeforeCancel = store.createTask({ agentId: agentC.id, prompt: "C failure" });
-    db!.run("UPDATE multiremi_tasks SET status = 'failed', failed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'failed', failed_at = ?, updated_at = ? WHERE id = ?", [
       "2026-06-04T00:55:00.000Z",
       "2026-06-04T00:55:00.000Z",
       failureBeforeCancel.id,
     ]);
     const cancelled = store.createTask({ agentId: agentC.id, prompt: "C cancelled" });
-    db!.run("UPDATE multiremi_tasks SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?", [
       "2026-06-04T01:03:00.000Z",
       "2026-06-04T01:03:00.000Z",
       cancelled.id,
@@ -1627,30 +1529,30 @@ describe("Multiremi API — daemon endpoints", () => {
     const recentCompletedB = new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString();
 
     const completed = store.createTask({ agentId: agentA.id, prompt: "completed" });
-    db!.run("UPDATE multiremi_tasks SET status = 'completed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'completed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
       recentCreated,
       recentCompletedA,
       recentCompletedA,
       completed.id,
     ]);
     const failed = store.createTask({ agentId: agentA.id, prompt: "failed" });
-    db!.run("UPDATE multiremi_tasks SET status = 'failed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'failed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
       recentCreated,
       recentCompletedA,
       recentCompletedA,
       failed.id,
     ]);
     const inFlight = store.createTask({ agentId: agentA.id, prompt: "in flight" });
-    db!.run("UPDATE multiremi_tasks SET created_at = ?, updated_at = ? WHERE id = ?", [recentCreated, recentCreated, inFlight.id]);
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET created_at = ?, updated_at = ? WHERE id = ?", [recentCreated, recentCreated, inFlight.id]);
     const old = store.createTask({ agentId: agentA.id, prompt: "old" });
-    db!.run("UPDATE multiremi_tasks SET status = 'completed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'completed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
       oldCreated,
       oldCreated,
       oldCreated,
       old.id,
     ]);
     const otherAgent = store.createTask({ agentId: agentB.id, prompt: "other agent" });
-    db!.run("UPDATE multiremi_tasks SET status = 'completed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'completed', created_at = ?, completed_at = ?, updated_at = ? WHERE id = ?", [
       recentCreated,
       recentCompletedB,
       recentCompletedB,

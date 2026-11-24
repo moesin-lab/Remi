@@ -1,6 +1,7 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -38,31 +39,39 @@ describe("chat workspace request context", () => {
         const result = await created.json();
         const session = result.session ?? result;
         expect(session.workspaceId ?? session.workspace_id).toBe(workspace.id);
-        expect(session.creatorId ?? session.creator_id).toBe(user.id);
+        expect(session.creatorId ?? session.creator_id).toBe('local');
         const listed = await app.request(route, { headers: selected });
         expect(listed.status).toBe(200);
         const list = await listed.json();
         expect((list.sessions ?? list).map((item: { id: string }) => item.id)).toEqual([session.id]);
-        const sent = await app.request(`${route}/${session.id}/messages`, {
-          method: "POST", headers, body: JSON.stringify({ content: "Hello" }),
+        const sent = await app.request(`/api/sessions/${session.id}/messages`, {
+          method: "POST", headers, body: JSON.stringify({ body_md: "Hello", to: { type: "agent", ref: agent.id } }),
         });
-        expect(sent.status).toBe(201);
-        const pending = await app.request("/api/chat/pending-tasks", { headers: selected });
+        expect(sent.status).toBe(200);
+        const pending = await app.request("/api/turns?status=pending", { headers: selected });
         expect(pending.status).toBe(200);
-        expect((await pending.json()).tasks.map((item: { chat_session_id: string }) => item.chat_session_id)).toEqual([session.id]);
+        expect((await pending.json()).turns.map((item: { session_id: string }) => item.session_id)).toEqual([session.id]);
       });
     }
 
-    it(`rejects unknown and inaccessible workspace selectors: ${route}`, async () => {
+    it(`accepts existing workspace selectors and rejects missing workspaces or mismatched Agents: ${route}`, async () => {
       const { workspace, other, agent, headers, app } = await fixture();
+      for(const context of [{...headers,'X-Workspace-Slug':other.slug},{...headers,'X-Workspace-ID':other.id}]) {
+        for(const path of [route,'/api/turns?status=pending']) {
+          const response=await app.request(path,{headers:context});
+          expect(response.status).toBe(200);
+          const result=await response.json();
+          expect(result.sessions??result.turns??result).toEqual([]);
+        }
+        const mismatched=await app.request(route,{method:'POST',headers:context,body:JSON.stringify({agent_id:agent.id})});
+        expect(mismatched.status).toBe(404);
+      }
       const contexts = [
-        { ...headers, "X-Workspace-Slug": other.slug },
-        { ...headers, "X-Workspace-ID": other.id },
         { ...headers, "X-Workspace-ID": "missing" },
         { ...headers, Authorization: "Bearer root-secret", "X-Workspace-Slug": "missing" },
       ];
       for (const context of contexts) {
-        for (const path of [route, "/api/chat/pending-tasks"]) {
+        for (const path of [route, "/api/turns?status=pending"]) {
           const response = await app.request(path, { headers: context });
           expect(response.status).toBe(404);
           expect(await response.json()).toEqual({ error: "workspace not found" });
@@ -100,7 +109,7 @@ describe("chat workspace request context", () => {
       }
     });
 
-    it(`keeps session resources bound to their workspace and creator: ${route}`, async () => {
+    it(`resolves sessions by their own workspace and shares historical human creators: ${route}`, async () => {
       const { store, workspace, other, agent, user, headers, app } = await fixture();
       const session = store.createChatSession({ workspaceId: workspace.id, agentId: agent.id, creatorId: user.id });
       const contexts: Record<string, string>[] = [{}, { "X-Workspace-Slug": "missing" }, { "X-Workspace-ID": other.id }];
@@ -111,15 +120,17 @@ describe("chat workspace request context", () => {
         expect((result.session ?? result).id).toBe(session.id);
       }
       const someoneElse = store.createChatSession({ workspaceId: workspace.id, agentId: agent.id, creatorId: "another-user" });
-      const denied = await app.request(`${route}/${someoneElse.id}`, { headers });
-      expect(denied.status).toBe(403);
-      expect(await denied.json()).toEqual({ error: "not your chat session" });
+      const shared = await app.request(`${route}/${someoneElse.id}`, { headers });
+      expect(shared.status).toBe(200);
+      const result=await shared.json();
+      expect((result.session??result).id).toBe(someoneElse.id);
+      expect(store.getChatSession(someoneElse.id)?.creatorId).toBe('another-user');
     });
 
     it(`keeps task, ownerless PAT and daemon credentials scoped: ${route}`, async () => {
       const { store, workspace, other, user, agent, headers, app } = await fixture();
       store.createWorkspaceMember({ workspaceId: other.id, userId: user.id, name: user.name, role: "member" });
-      const issue = store.createIssue({ workspaceId: workspace.id, title: "Task" });
+      const issue = createResponsibleTestIssue(store, { workspaceId: workspace.id, title: "Task" });
       const task = store.createTask({ workspaceId: workspace.id, agentId: agent.id, issueId: issue.id, prompt: "Work" });
       const taskToken = await store.createTaskAccessToken(task, user.id);
       const pat = await store.createAccessToken({ workspaceId: workspace.id, name: "Scoped PAT", type: "pat" });
@@ -130,7 +141,7 @@ describe("chat workspace request context", () => {
       for (const credential of [taskToken, pat, daemon]) {
         const auth = { ...headers, Authorization: `Bearer ${credential.token}` };
         for (const context of contexts) {
-          for (const path of [route, "/api/chat/pending-tasks", `${route}/${foreignSession.id}`]) {
+          for (const path of [route, "/api/turns?status=pending", `${route}/${foreignSession.id}`]) {
             const response = await app.request(path, { headers: { ...auth, ...context } });
             expect([403, 404]).toContain(response.status);
           }

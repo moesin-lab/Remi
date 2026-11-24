@@ -1,3 +1,6 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
+import { taskOfferResponse } from "../../fixtures/task-offer.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHmac } from "node:crypto";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -5,7 +8,7 @@ import { decryptScmCredential, encryptScmCredential } from "@multiremi/scm/crede
 import { reconcileObservation } from "@multiremi/scm/reconcile.js";
 import { scmIngestionStore } from "@multiremi/scm/store.js";
 import { ScmWebhookIngestor } from "@multiremi/scm/webhook.js";
-import { configureRepositoryWikiAutomation, createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { acceptTestIssueDelivery, configureRepositoryWikiAutomation, createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 const previousScmKey = process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
 const previousAllowedApiHosts = process.env.MULTIREMI_SCM_ALLOWED_API_HOSTS;
@@ -95,6 +98,20 @@ function projectChangeRequest(
     contentHash: `change-${externalId}`,
     payload,
   });
+}
+
+/** A merge only records itself: the status stays, nothing is held, the effect settles once. */
+function expectMergeRecorded(store: ReturnType<typeof createLocalStore>, issueId: string, status = 'todo') {
+  expect(store.getIssue(issueId)?.status).toBe(status);
+  expect(store.listIssueActivity(issueId).filter(entry => entry.type === 'parent_status_held')).toHaveLength(0);
+  expect(store.listIssueActivity(issueId).filter(entry => entry.type === 'scm_merge_completed')).toHaveLength(1);
+  expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_scm_effects WHERE issue_id=? AND status='applied'").get(issueId)).toEqual({ count: 1 });
+}
+
+function retainLegacyParentGrant(issueId: string, agentId: string) {
+  // A persisted parent-done grant stays readable as an old row; nothing reads it.
+  db!.run('UPDATE multiremi_issues SET parent_done_grant_at=?,parent_done_grant_by=?,parent_done_grant_agent_id=? WHERE id=?',
+    [new Date().toISOString(), 'mem_local_local', agentId, issueId]);
 }
 
 describe("SCM connection and canonical event store", () => {
@@ -250,7 +267,7 @@ describe("SCM connection and canonical event store", () => {
       contentHash: "old",
       payload: { head_sha: "old" },
     });
-    const issue = store.createIssue({ title: "Transferred projection", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Transferred projection", workspaceId: "local" });
     store.upsertScmEntitySnapshot({
       connectionId: connection.id,
       repositoryId: "repo_widgets",
@@ -582,7 +599,7 @@ describe("SCM connection and canonical event store", () => {
 
   it("explicitly cleans baseline state when deleting a connection without event history", () => {
     const { store, connection } = seedConnection();
-    const issue = store.createIssue({ title: "Delete projection", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Delete projection", workspaceId: "local" });
     expect(store.deleteScmRepositoryBinding(connection.id, "repo_missing")).toBe(false);
     store.upsertScmSyncCursor({
       connectionId: connection.id,
@@ -822,7 +839,7 @@ describe("SCM connection and canonical event store", () => {
 
   it("projects baseline change requests and auto-links issue keys from title, branch, or body", () => {
     const { store, connection } = seedConnection();
-    const issue = store.createIssue({ title: "Projection target", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Projection target", workspaceId: "local" });
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     store.onWorkspaceEvent((event) => events.push(event));
 
@@ -866,7 +883,7 @@ describe("SCM connection and canonical event store", () => {
 
   it("keeps a manual unlink suppressed across later auto-link projection updates", () => {
     const { store, connection } = seedConnection();
-    const issue = store.createIssue({ title: "Manual unlink", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Manual unlink", workspaceId: "local" });
     store.advanceScmEntitySnapshot({
       connectionId: connection.id,
       repositoryId: "repo_widgets",
@@ -895,12 +912,12 @@ describe("SCM connection and canonical event store", () => {
     expect(store.listScmChangeRequestsForIssue(issue.id)).toHaveLength(1);
   });
 
-  it("completes linked issues through the standard lifecycle once when enabled", () => {
+  it("records linked merge evidence once without changing the status; a member closes the Issue", () => {
     const { store, connection } = seedConnection();
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const issue = store.createIssue({ title: "Complete after merge", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Complete after merge", workspaceId: "local" });
     store.advanceScmEntitySnapshot({
       connectionId: connection.id,
       repositoryId: "repo_widgets",
@@ -926,13 +943,10 @@ describe("SCM connection and canonical event store", () => {
     });
     expect(first.created).toBe(true);
     expect(duplicate.created).toBe(false);
-    expect(store.getIssue(issue.id)?.status).toBe("done");
+    expectMergeRecorded(store, issue.id);
     expect(db!.query(
       "SELECT COUNT(*) AS count FROM multiremi_system_events WHERE resource_id = ? AND event = 'status_changed'",
-    ).get(issue.id)).toEqual({ count: 1 });
-    expect(db!.query(
-      "SELECT COUNT(*) AS count FROM multiremi_scm_effects WHERE issue_id = ? AND status = 'applied'",
-    ).get(issue.id)).toEqual({ count: 1 });
+    ).get(issue.id)).toEqual({ count: 0 });
     expect(store.listIssueActivity(issue.id).find((activity) => activity.type === "scm_merge_completed"))
       .toMatchObject({
         actorType: "system",
@@ -946,15 +960,122 @@ describe("SCM connection and canonical event store", () => {
           attribution: ["branch", "title"],
         },
       });
+    expect(db!.query('SELECT event_id,issue_id FROM multiremi_scm_effects WHERE issue_id=?').get(issue.id))
+      .toEqual({ event_id: first.event.id, issue_id: issue.id });
+    expect(store.listScmChangeRequestsForIssue(issue.id)![0]).toMatchObject({ title: `${issue.key} merge`, sourceBranch: `agent/${issue.key}` });
+    expect(acceptTestIssueDelivery(store, issue.id).status).toBe('done');
+    expect(store.listIssueActivity(issue.id).filter(entry => entry.type === 'scm_merge_completed')).toHaveLength(1);
   });
 
-  it("completes only the owning issue while preserving weak cross-reference links", () => {
+  it("records a merge on a parent with open children without closing or holding it", () => {
     const { store, connection } = seedConnection();
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const mentionedIssue = store.createIssue({ title: "Mentioned defect", workspaceId: "local" });
-    const owningIssue = store.createIssue({ title: "Delivered change", workspaceId: "local" });
+    // MUL-400 E1: a parent with a running child. The merged change request is a
+    // CHILD's PR that names the parent key in its title, which is exactly how
+    // auto-link ends up linking it to the parent.
+    const parent = createResponsibleTestIssue(store, { title: "Parent with a running child", workspaceId: "local" });
+    store.updateIssue(parent.id, { status: "in_progress" });
+    createResponsibleTestIssue(store, {
+      title: "Still running child",
+      parentIssueId: parent.id,
+      status: "in_progress",
+    });
+    expect(store.getIssue(parent.id)?.status).toBe("in_progress");
+    // The child PR carries the parent key, as the real ones do.
+    projectChangeRequest(store, connection.id, "42", {
+      number: 42,
+      title: `${parent.key}: deliver one slice`,
+      state: "merged",
+      source_branch: `agent/${parent.key}-slice`,
+      url: "https://github.com/acme/widgets/pull/42",
+    });
+    expect(store.listScmChangeRequestsForIssue(parent.id)).toHaveLength(1);
+
+    const merged = recordChange(store, connection.id, { logicalKey: "change.merged:42:held" });
+
+    // The parent must NOT close and nothing is held: the merge is only recorded.
+    expectMergeRecorded(store, parent.id, "in_progress");
+    expect(db!.query(
+      "SELECT COUNT(*) AS count FROM multiremi_scm_effects WHERE issue_id = ? AND status = 'pending'",
+    ).get(parent.id)).toEqual({ count: 0 });
+    expect(merged.event.id).toBeTruthy();
+
+    // Finishing the child does NOT auto-close the parent: closing is a member's
+    // or the parent owner's decision, not a deferred merge effect.
+    const child = store.listChildIssues(parent.id)[0]!;
+    acceptTestIssueDelivery(store, child.id);
+    expect(store.getIssue(parent.id)?.status).not.toBe("done");
+  });
+
+  it("records a merge on a finished parent without closing it, whatever its legacy grant columns hold", () => {
+    for (const grantEnabled of [false, true]) {
+      const { store, connection } = seedConnection();
+      store.updateWorkspace("local", {
+        settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
+      });
+      const owner = store.createAgent({ name: "SCM parent owner", provider: "codex" });
+      const parent = createResponsibleTestIssue(store, {
+        title: "Finished parent without summary", workspaceId: "local", status: "in_progress",
+        assigneeType: "agent", assigneeId: owner.id,
+      });
+      const child = createResponsibleTestIssue(store, { title: "Finished child", parentIssueId: parent.id, status: "in_progress" });
+      acceptTestIssueDelivery(store, child.id);
+      if (grantEnabled) retainLegacyParentGrant(parent.id, owner.id);
+      projectChangeRequest(store, connection.id, "42", { number: 42, title: `${parent.key} delivery`, state: "merged" });
+      recordChange(store, connection.id, { logicalKey: `change.merged:42:hold-${grantEnabled}` });
+      expectMergeRecorded(store, parent.id, "in_progress");
+      expect(store.listIssueActivity(parent.id).filter((entry) => entry.type === "parent_done_grant_used")).toHaveLength(0);
+    }
+  });
+
+  it("records a merge on a legacy-granted summarized parent; a member closes it without a force", () => {
+    const { store, connection } = seedConnection();
+    store.updateWorkspace("local", {
+      settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
+    });
+    const owner = store.createAgent({ name: "SCM parent owner", provider: "codex" });
+    const parent = createResponsibleTestIssue(store, {
+      title: "Parent with finished children", workspaceId: "local", status: "in_progress",
+      assigneeType: "agent", assigneeId: owner.id,
+    });
+    const child = createResponsibleTestIssue(store, {
+      title: "Finished child",
+      parentIssueId: parent.id,
+      status: "in_progress",
+    });
+    acceptTestIssueDelivery(store, child.id);
+    retainLegacyParentGrant(parent.id, owner.id);
+    store.createIssueComment(parent.id, { body: "All child work delivered", authorType: "agent", authorId: owner.id });
+
+    // `recordChange` addresses subject id "42" (the shared fixture), so this case
+    // projects the same external id in its own store.
+    projectChangeRequest(store, connection.id, "42", {
+      number: 42,
+      title: `${parent.key} final delivery`,
+      state: "merged",
+      source_branch: `agent/${parent.key}`,
+      url: "https://github.com/acme/widgets/pull/42",
+    });
+    recordChange(store, connection.id, { logicalKey: "change.merged:42:closed" });
+
+    expectMergeRecorded(store, parent.id, 'in_progress');
+    // The merge record must not look like a human force.
+    expect(store.listIssueActivity(parent.id).filter((activity) => activity.type === "issue_status_forced"))
+      .toHaveLength(0);
+    expect(store.listIssueActivity(parent.id).filter((activity) => activity.type === "parent_done_grant_used")).toHaveLength(0);
+    expect(acceptTestIssueDelivery(store, parent.id).status).toBe('done');
+    expect(store.listIssueActivity(parent.id).filter((activity) => activity.type === "issue_status_forced")).toHaveLength(0);
+  });
+
+  it("records the merge only on the owning issue while preserving weak cross-reference links", () => {
+    const { store, connection } = seedConnection();
+    store.updateWorkspace("local", {
+      settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
+    });
+    const mentionedIssue = createResponsibleTestIssue(store, { title: "Mentioned defect", workspaceId: "local" });
+    const owningIssue = createResponsibleTestIssue(store, { title: "Delivered change", workspaceId: "local" });
     projectChangeRequest(store, connection.id, "42", {
       number: 42,
       title: `${owningIssue.key} delivery`,
@@ -965,9 +1086,11 @@ describe("SCM connection and canonical event store", () => {
 
     recordChange(store, connection.id, { logicalKey: "change.merged:42:cross-reference" });
 
-    expect(store.getIssue(owningIssue.id)?.status).toBe("done");
+    expectMergeRecorded(store, owningIssue.id);
     expect(store.getIssue(mentionedIssue.id)?.status).toBe("todo");
     expect(store.listScmChangeRequestsForIssue(mentionedIssue.id)).toHaveLength(1);
+    expect(store.listIssueActivity(mentionedIssue.id).filter(entry => entry.type === 'parent_status_held')).toHaveLength(0);
+    expect(db!.query('SELECT COUNT(*) AS count FROM multiremi_scm_effects WHERE issue_id=?').get(mentionedIssue.id)).toEqual({ count: 0 });
   });
 
   it("does not complete an issue while another non-draft owning change request is open", () => {
@@ -975,7 +1098,7 @@ describe("SCM connection and canonical event store", () => {
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const issue = store.createIssue({ title: "Split delivery", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Split delivery", workspaceId: "local" });
     projectChangeRequest(store, connection.id, "42", {
       number: 42,
       title: `${issue.key} first part`,
@@ -994,6 +1117,7 @@ describe("SCM connection and canonical event store", () => {
     expect(store.getIssue(issue.id)?.status).toBe("todo");
     expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_scm_effects WHERE issue_id = ?").get(issue.id))
       .toEqual({ count: 0 });
+    expect(store.listIssueActivity(issue.id).filter(entry => entry.type === 'parent_status_held')).toHaveLength(0);
   });
 
   it("keeps branch-only owning change requests eligible for merge completion", () => {
@@ -1001,7 +1125,7 @@ describe("SCM connection and canonical event store", () => {
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const issue = store.createIssue({ title: "Branch-owned delivery", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Branch-owned delivery", workspaceId: "local" });
     projectChangeRequest(store, connection.id, "42", {
       number: 42,
       title: "Implement the delivery",
@@ -1011,7 +1135,7 @@ describe("SCM connection and canonical event store", () => {
 
     recordChange(store, connection.id, { logicalKey: "change.merged:42:branch-owner" });
 
-    expect(store.getIssue(issue.id)?.status).toBe("done");
+    expectMergeRecorded(store, issue.id);
   });
 
   it("treats issue keys anywhere in release titles as ownership", () => {
@@ -1019,7 +1143,7 @@ describe("SCM connection and canonical event store", () => {
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const issue = store.createIssue({ title: "Release delivery", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Release delivery", workspaceId: "local" });
     projectChangeRequest(store, connection.id, "42", {
       number: 42,
       title: `release: prepare v0.2.54 (${issue.key})`,
@@ -1029,7 +1153,7 @@ describe("SCM connection and canonical event store", () => {
 
     recordChange(store, connection.id, { logicalKey: "change.merged:42:release-title" });
 
-    expect(store.getIssue(issue.id)?.status).toBe("done");
+    expectMergeRecorded(store, issue.id);
   });
 
   it("ignores draft owners and weak open mentions when checking merge completion blockers", () => {
@@ -1037,7 +1161,7 @@ describe("SCM connection and canonical event store", () => {
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const issue = store.createIssue({ title: "Draft follow-up", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Draft follow-up", workspaceId: "local" });
     projectChangeRequest(store, connection.id, "42", {
       number: 42,
       title: `${issue.key} delivery`,
@@ -1058,7 +1182,7 @@ describe("SCM connection and canonical event store", () => {
 
     recordChange(store, connection.id, { logicalKey: "change.merged:42:draft-blocker" });
 
-    expect(store.getIssue(issue.id)?.status).toBe("done");
+    expectMergeRecorded(store, issue.id);
   });
 
   it("accepts declarative body ownership and explicit manual links", () => {
@@ -1066,8 +1190,8 @@ describe("SCM connection and canonical event store", () => {
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const bodyOwnedIssue = store.createIssue({ title: "Body-owned delivery", workspaceId: "local" });
-    const manuallyLinkedIssue = store.createIssue({ title: "Manual delivery", workspaceId: "local" });
+    const bodyOwnedIssue = createResponsibleTestIssue(store, { title: "Body-owned delivery", workspaceId: "local" });
+    const manuallyLinkedIssue = createResponsibleTestIssue(store, { title: "Manual delivery", workspaceId: "local" });
     projectChangeRequest(store, connection.id, "42", {
       number: 42,
       title: "Combined delivery",
@@ -1079,8 +1203,8 @@ describe("SCM connection and canonical event store", () => {
 
     recordChange(store, connection.id, { logicalKey: "change.merged:42:declared-and-manual" });
 
-    expect(store.getIssue(bodyOwnedIssue.id)?.status).toBe("done");
-    expect(store.getIssue(manuallyLinkedIssue.id)?.status).toBe("done");
+    expectMergeRecorded(store, bodyOwnedIssue.id);
+    expectMergeRecorded(store, manuallyLinkedIssue.id);
   });
 
   // The three sentence shapes below are verbatim from the change requests that
@@ -1095,8 +1219,8 @@ describe("SCM connection and canonical event store", () => {
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const mentioned = store.createIssue({ title: "Merely mentioned", workspaceId: "local" });
-    const owner = store.createIssue({ title: "Actually delivered", workspaceId: "local" });
+    const mentioned = createResponsibleTestIssue(store, { title: "Merely mentioned", workspaceId: "local" });
+    const owner = createResponsibleTestIssue(store, { title: "Actually delivered", workspaceId: "local" });
     projectChangeRequest(store, connection.id, "42", {
       number: 42,
       title: `${owner.key} deliver the real change`,
@@ -1108,8 +1232,10 @@ describe("SCM connection and canonical event store", () => {
     recordChange(store, connection.id, { logicalKey: "change.merged:42:prose-mention" });
 
     expect(store.getIssue(mentioned.id)?.status).toBe("todo");
-    expect(store.getIssue(owner.id)?.status).toBe("done");
+    expectMergeRecorded(store, owner.id);
     expect(store.listScmChangeRequestsForIssue(mentioned.id)).toHaveLength(1);
+    expect(store.listIssueActivity(mentioned.id).filter(entry => entry.type === 'parent_status_held')).toHaveLength(0);
+    expect(db!.query('SELECT COUNT(*) AS count FROM multiremi_scm_effects WHERE issue_id=?').get(mentioned.id)).toEqual({ count: 0 });
   });
 
   it("judges ownership by the derived issue key when issue_key is not stored", () => {
@@ -1117,7 +1243,7 @@ describe("SCM connection and canonical event store", () => {
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const issue = store.createIssue({ title: "Legacy row", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Legacy row", workspaceId: "local" });
     // Pre-backfill rows carry a NULL key column while Issue.key derives from the number.
     db!.run("UPDATE multiremi_issues SET issue_key = NULL WHERE id = ?", [issue.id]);
     const derivedKey = store.getIssue(issue.id)!.key;
@@ -1134,14 +1260,16 @@ describe("SCM connection and canonical event store", () => {
     recordChange(store, connection.id, { logicalKey: "change.merged:42:null-key" });
 
     expect(store.getIssue(issue.id)?.status).toBe("todo");
+    expect(store.listIssueActivity(issue.id).filter(entry => entry.type === 'parent_status_held')).toHaveLength(0);
+    expect(db!.query('SELECT COUNT(*) AS count FROM multiremi_scm_effects WHERE issue_id=?').get(issue.id)).toEqual({ count: 0 });
   });
 
-  it("keeps merge completion retryable after a transient lifecycle failure", () => {
+  it("keeps the merge record retryable after a transient lifecycle failure", () => {
     const { store, connection } = seedConnection();
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
     });
-    const issue = store.createIssue({ title: "Retry merge completion", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Retry merge completion", workspaceId: "local" });
     store.advanceScmEntitySnapshot({
       connectionId: connection.id,
       repositoryId: "repo_widgets",
@@ -1154,8 +1282,8 @@ describe("SCM connection and canonical event store", () => {
     });
     db!.exec(`
       CREATE TRIGGER fail_merge_completion
-      BEFORE UPDATE OF status ON multiremi_issues
-      WHEN NEW.status = 'done'
+      BEFORE INSERT ON multiremi_issue_activity
+      WHEN NEW.issue_id = '${issue.id}' AND NEW.type = 'scm_merge_completed'
       BEGIN
         SELECT RAISE(ABORT, 'transient merge completion failure');
       END
@@ -1166,6 +1294,7 @@ describe("SCM connection and canonical event store", () => {
     expect(store.dispatchPendingScmEvents(firstDispatchAt)).toEqual([]);
     expect(store.getIssue(issue.id)?.status).toBe("todo");
     expect(store.getScmCanonicalEvent(recorded.event.id)?.status).toBe("pending");
+    expect(store.listIssueActivity(issue.id).filter(entry => entry.type === 'scm_merge_completed')).toHaveLength(0);
     expect(db!.query(
       "SELECT status, last_error FROM multiremi_scm_effects WHERE event_id = ?",
     ).get(recorded.event.id)).toEqual({
@@ -1175,13 +1304,16 @@ describe("SCM connection and canonical event store", () => {
 
     db!.exec("DROP TRIGGER fail_merge_completion");
     expect(store.dispatchPendingScmEvents(new Date(firstDispatchAt.getTime() + 60_000))).toEqual([]);
-    expect(store.getIssue(issue.id)?.status).toBe("done");
+    expectMergeRecorded(store, issue.id);
     expect(store.getScmCanonicalEvent(recorded.event.id)?.status).toBe("processed");
+    expect(store.dispatchPendingScmEvents(new Date(firstDispatchAt.getTime() + 120_000))).toEqual([]);
+    expectMergeRecorded(store, issue.id);
+    expect(acceptTestIssueDelivery(store, issue.id).status).toBe('done');
   });
 
   it("does not replay merge completion when the setting is enabled after event history exists", () => {
     const { store, connection } = seedConnection();
-    const issue = store.createIssue({ title: "Historical merge", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Historical merge", workspaceId: "local" });
     store.advanceScmEntitySnapshot({
       connectionId: connection.id,
       repositoryId: "repo_widgets",
@@ -1236,7 +1368,7 @@ describe("SCM connection and canonical event store", () => {
       observedAt: "2020-01-01T00:00:00.000Z",
     });
     const agent = store.createAgent({ name: "Wiki Maintainer", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Update repository wiki",
       description: "Rebuild the affected wiki pages",
       workspaceId: "local",
@@ -1396,13 +1528,11 @@ describe("SCM connection and canonical event store", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ autopilotId: ordinary.id, repositoryId: null, dedupeKey: null });
 
-    const claimResponse = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, {
-      method: "POST",
-      headers: { Authorization: "Bearer root-secret" },
-    });
+    const claimResponse = await taskOfferResponse(store, runtime.id, { headers: { Authorization: "Bearer root-secret" }, authToken: "root-secret" });
     expect(claimResponse.status).toBe(200);
     const claim = (await claimResponse.json() as any).task;
-    expect(claim.id).toBe(runs[0]!.taskId);
+    expect(claim.attempt_id).toBe(runs[0]!.taskId);
+    expect(claim.turn_id).toBe(store.getTurnForAttempt(runs[0]!.taskId!)!.id);
     expect(claim).not.toHaveProperty("scm_revision");
     const runTask = store.getTask(runs[0]!.taskId!);
     const runToken = await store.createTaskAccessToken(runTask!, "local");
@@ -1439,7 +1569,7 @@ describe("SCM connection and canonical event store", () => {
       },
     });
     const userAgent = store.createAgent({ name: "User wiki agent", provider: "claude" });
-    const sameTitleUserWiki = store.createAutopilot({
+    const sameTitleUserWiki = createResponsibleTestAutopilot(store, {
       title: "Atlas · Repository Wiki",
       workspaceId: "local",
       assigneeId: userAgent.id,
@@ -1455,7 +1585,7 @@ describe("SCM connection and canonical event store", () => {
       },
     });
     const announcerAgent = store.createAgent({ name: "Merge announcer", provider: "claude" });
-    const announcer = store.createAutopilot({
+    const announcer = createResponsibleTestAutopilot(store, {
       title: "Merge announcer",
       workspaceId: "local",
       assigneeId: announcerAgent.id,
@@ -1535,13 +1665,13 @@ describe("SCM connection and canonical event store", () => {
     const app = createMultiremiApp({ store });
     const claims = new Map<string, any>();
     for (let index = 0; index < 5; index++) {
-      const response = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+      const response = await taskOfferResponse(store, runtime.id);
       expect(response.status).toBe(200);
       const claim = (await response.json() as any).task;
       expect(claim).not.toBeNull();
       if (!claim) throw new Error("expected SCM automation task claim");
-      claims.set(claim.id, claim);
-      store.completeTask(claim.id, { output: "claim probe complete" });
+      claims.set(claim.attempt_id, claim);
+      store.completeTask(claim.attempt_id, { output: "claim probe complete" });
     }
 
     expect(claims.get(wikiRuns[0]!.taskId!)?.scm_revision).toBe("abc123");
@@ -1555,7 +1685,7 @@ describe("SCM connection and canonical event store", () => {
   it("retries the persisted delivery set after filters change and explicitly skips disabled triggers", () => {
     const { store, connection } = seedConnection();
     const agent = store.createAgent({ name: "Wiki Maintainer", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Update repository wiki",
       workspaceId: "local",
       assigneeId: agent.id,
@@ -1611,13 +1741,13 @@ describe("SCM connection and canonical event store", () => {
   it("dispatches GitHub Actions pipeline events only to matching branch filters", () => {
     const { store, connection } = seedConnection();
     const agent = store.createAgent({ name: "Pipeline Agent", provider: "codex" });
-    const main = store.createAutopilot({
+    const main = createResponsibleTestAutopilot(store, {
       title: "Main pipeline",
       workspaceId: "local",
       assigneeId: agent.id,
       executionMode: "run_only",
     });
-    const feature = store.createAutopilot({
+    const feature = createResponsibleTestAutopilot(store, {
       title: "Feature pipeline",
       workspaceId: "local",
       assigneeId: agent.id,
@@ -1666,7 +1796,7 @@ describe("SCM connection and canonical event store", () => {
   it("rejects SCM automation filters outside the automation workspace bindings", () => {
     const { store } = seedConnection();
     const agent = store.createAgent({ name: "Wiki Maintainer", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Update repository wiki",
       workspaceId: "local",
       assigneeId: agent.id,
@@ -1694,7 +1824,7 @@ describe("SCM connection and canonical event store", () => {
     const { store, connection } = seedConnection();
     store.updateScmConnection(connection.id, { mode: "poll" });
     const agent = store.createAgent({ name: "Wiki Maintainer", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Update repository wiki",
       workspaceId: "local",
       assigneeId: agent.id,
@@ -1828,7 +1958,7 @@ describe("SCM connection and canonical event store", () => {
 
   it("serves camelCase issue change requests and supports manual link and unlink", async () => {
     const { store, connection } = seedConnection();
-    const issue = store.createIssue({ title: "Manual API link", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Manual API link", workspaceId: "local" });
     store.advanceScmEntitySnapshot({
       connectionId: connection.id,
       repositoryId: "repo_widgets",

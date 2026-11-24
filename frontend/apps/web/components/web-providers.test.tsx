@@ -18,6 +18,7 @@ vi.mock("@multiremi/core/platform", () => ({
 vi.mock("@/platform/navigation", () => ({
   WebNavigationProvider: ({ children }: { children: ReactNode }) => children,
 }));
+vi.mock("./update-continuity", () => ({ UpdateContinuity: () => null }));
 vi.mock("./pageview-tracker", () => ({ PageviewTracker: () => null }));
 
 function json(body: unknown, status = 200) {
@@ -25,7 +26,7 @@ function json(body: unknown, status = 200) {
 }
 
 function browserStore() {
-  render(<WebProviders locale="en" resources={{}}><div>Application</div></WebProviders>);
+  render(<WebProviders locale="en" resources={{}} renderedAt={0}><div>Application</div></WebProviders>);
   const props = captured.props!;
   const client = new ApiClient("");
   setApiInstance(client);
@@ -53,6 +54,12 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("WebProviders logout", () => {
+  it('passes deployed version and URLs through the runtime configuration', () => {
+    render(<WebProviders locale="en" resources={{}} renderedAt={0} runtime={{ version: '1.2.3', apiUrl: 'https://api.example', wsUrl: 'wss://api.example/ws' }}><div>Application</div></WebProviders>);
+    expect(captured.props?.identity).toEqual({ platform: 'web', version: '1.2.3' });
+    expect(captured.props?.apiBaseUrl).toBe('https://api.example');
+    expect(captured.props?.wsUrl).toBe('wss://api.example/ws');
+  });
   it("posts browser cookies to /auth/logout even though the Web store uses bearer tokens", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json({ token: "browser-session-fixture", user: { id: "reader", email: "reader@example.test" } }))

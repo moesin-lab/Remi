@@ -1,7 +1,9 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 // The fleet catalog the UI reads: which engines/models an any-provider runtime
 // surfaces, how models bucket by runtime engine, and cross-connection claim atomicity.
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -70,6 +72,7 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     const providers = new Map(body.providers.map((entry: any) => [entry.provider, entry]));
     expect((providers.get("claude") as any)?.online_runtime_count).toBe(1);
     expect((providers.get("codex") as any)?.online_runtime_count).toBe(1);
+    expect((providers.get("grok") as any)?.online_runtime_count).toBe(1);
   });
 
   it("maps an any-runtime's vendor models onto the right engine buckets", async () => {
@@ -82,17 +85,21 @@ describe("Multiremi store — fleet engine and model catalog", () => {
       models: [
         { id: "gpt-5.5", label: "GPT-5.5", provider: "openai", default: true },
         { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "anthropic", default: true },
+        { id: "grok-4.6", label: "Grok 4.6", provider: "xai", default: true },
       ],
     });
     const app = createMultiremiApp({ store });
     const body = await (await app.request("/api/models")).json();
     const codex = body.providers.find((e: any) => e.provider === "codex");
     const claude = body.providers.find((e: any) => e.provider === "claude");
+    const grok = body.providers.find((e: any) => e.provider === "grok");
     expect(codex.models.map((m: any) => m.id)).toEqual(["gpt-5.5"]);
     expect(claude.models.map((m: any) => m.id)).toEqual(["claude-sonnet-4-6"]);
+    expect(grok.models.map((m: any) => m.id)).toEqual(["grok-4.6"]);
     // No vendor buckets leak into the response.
     expect(body.providers.find((e: any) => e.provider === "openai")).toBeUndefined();
     expect(body.providers.find((e: any) => e.provider === "anthropic")).toBeUndefined();
+    expect(body.providers.find((e: any) => e.provider === "xai")).toBeUndefined();
   });
 
   it("buckets fleet models by the runtime engine, not the model vendor", async () => {
@@ -117,7 +124,7 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     expect(body.providers.find((entry: any) => entry.provider === "openai")).toBeUndefined();
   });
 
-  it("counts only the caller's usable runtimes in the fleet catalog", async () => {
+  it("shares historical private runtimes within the selected workspace fleet", async () => {
     const store = createStore();
     store.createWorkspaceMember({ workspaceId: "local", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ workspaceId: "local", userId: "bob", name: "Bob", role: "member" });
@@ -126,13 +133,19 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     store.registerRuntime({ id: "rt_cap_alice", name: "alice codex", provider: "codex", workspaceId: "local", ownerId: "alice", visibility: "private" });
     store.registerRuntime({ id: "rt_cap_bob", name: "bob codex", provider: "codex", workspaceId: "local", ownerId: "bob", visibility: "private" });
     store.registerRuntime({ id: "rt_cap_pub", name: "shared codex", provider: "codex", workspaceId: "local", ownerId: "bob", visibility: "public" });
+    const foreign = store.createWorkspace({ name: "Other fleet" });
+    store.registerRuntime({ id: "rt_cap_foreign", name: "foreign codex", provider: "codex", workspaceId: foreign.id, ownerId: "alice" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
 
     const response = await app.request("/api/models", { headers: { Authorization: `Bearer ${aliceToken.token}` } });
     const body = await response.json();
     const codex = body.providers.find((entry: any) => entry.provider === "codex");
-    // Alice sees her own private + the public one, NOT bob's private one.
-    expect(codex.online_runtime_count).toBe(2);
+    // Historical ownership no longer divides this workspace's human fleet.
+    expect(response.status).toBe(200);
+    expect(codex.online_runtime_count).toBe(3);
+    const bobToken = await store.createAccessToken({ name: "Bob", type: "pat", workspaceId: "local", userId: "bob" });
+    const bobResponse = await app.request("/api/models", { headers: { Authorization: `Bearer ${bobToken.token}` } });
+    expect(await bobResponse.json()).toEqual(body);
   });
 
   it("serves the fleet model catalog grouped by provider", async () => {
@@ -263,6 +276,74 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     // This legacy fixture intentionally covers exact-id precedence only. The
     // production namespace mismatch is exercised separately below.
     expect(fable.thinking.supported_levels.map((level: any) => level.value).sort()).toEqual(["high", "low"]);
+  });
+
+  it("overlays the Antigravity gateway listing with its configured default and no reasoning levels", async () => {
+    const store = createStore();
+    store.ensureLocalWorkspace();
+    store.registerRuntime({
+      id: "rt_antigravity_gateway",
+      name: "antigravity gateway",
+      provider: "antigravity",
+      workspaceId: "local",
+      // The server's own first model is not what an Agent without a model runs.
+      models: [{ id: "gemini-3.7-flash", label: "Runtime label", provider: "google", default: true }],
+    });
+    store.setRelayModelDiscovery("local", true);
+    const revision = store.upsertRelayConfig("local", "antigravity", {
+      fragment: JSON.stringify({ base_url: "https://gateway.example", default_model: "gemini-3.1-pro" }),
+      tokenOp: "set",
+      authToken: "test-token",
+    });
+    const unsupported = { status: "unsupported" as const, supportedLevels: [] };
+    store.saveGatewayModels("local", "antigravity", {
+      sourceRevision: revision,
+      models: [
+        { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash", thinking: unsupported },
+        { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", thinking: unsupported },
+      ],
+    });
+    const app = createMultiremiApp({ store });
+    const headers = { "Content-Type": "application/json" };
+    const catalog = async () => (await (await app.request("/api/models")).json()).providers
+      .find((entry: any) => entry.provider === "antigravity");
+
+    const antigravity = await catalog();
+    expect(antigravity.online_runtime_count).toBe(1);
+    const noLevels = { supported_levels: [], status: "unsupported" };
+    expect(antigravity.models).toEqual([
+      { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash", provider: "antigravity", thinking: noLevels, thinking_source: "gateway" },
+      { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", provider: "antigravity", default: true, thinking: noLevels, thinking_source: "gateway" },
+    ]);
+
+    // Gateway models are not reasoning-capable, so an explicit effort is refused.
+    const withEffort = await app.request("/api/agents", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Gemini effort", provider: "antigravity", model: "gemini-3.1-pro", thinking_level: "high" }),
+    });
+    expect(withEffort.status).toBe(400);
+    const plain = await app.request("/api/agents", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Gemini", provider: "antigravity", model: "gemini-3.1-pro" }),
+    });
+    expect(plain.status).toBe(201);
+
+    // Without a configured default_model nothing is marked default.
+    store.upsertRelayConfig("local", "antigravity", {
+      fragment: JSON.stringify({ base_url: "https://gateway.example" }), tokenOp: "keep",
+    });
+    store.saveGatewayModels("local", "antigravity", { sourceRevision: revision + 1, models: [
+      { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash", thinking: unsupported },
+    ] });
+    expect((await catalog()).models.map((model: any) => [model.id, model.default ?? false]))
+      .toEqual([["gemini-3.7-flash", false]]);
+
+    // A cleared key hides the snapshot again: back to the Runtime's own report.
+    store.upsertRelayConfig("local", "antigravity", { fragment: JSON.stringify({ base_url: "https://gateway.example" }), tokenOp: "clear" });
+    expect((await catalog()).models.map((model: any) => [model.id, model.label, model.default ?? false]))
+      .toEqual([["gemini-3.7-flash", "Runtime label", true]]);
   });
 
   it("resolves known Claude families without inventing effort metadata for unrelated models", async () => {
@@ -832,13 +913,17 @@ describe("Multiremi store — fleet engine and model catalog", () => {
   it("intersects default capabilities across mixed daemon versions and preserves them under gateway overlays", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
-    const modern = store.registerRuntime({ id: "rt_modern", name: "Modern", provider: "claude", executionGroupId: "mixed",
+    const modern = store.registerRuntime({ id: "rt_modern", name: "Modern", provider: "claude",
       models: [
         { id: "default", label: "Default", provider: "anthropic", default: true, providerDefault: true, thinking: runtimeThinking(["high", "max"]) },
         { id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["low", "high"]) },
       ] });
-    const legacy = store.registerRuntime({ id: "rt_legacy", name: "Legacy", provider: "claude", executionGroupId: "mixed",
+    const legacy = store.registerRuntime({ id: "rt_legacy", name: "Legacy", provider: "claude",
       models: [{ id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["low", "high"]) }] });
+    store.saveExecutionGroup("local", { name: "Mixed", provider: "claude", profile_id: null, runtime_ids: [modern.id, legacy.id] }, "mixed");
+    for (const runtime of [modern, legacy]) {
+      store.recordRuntimeExecutionBindingAcks(runtime.id, store.getRuntimeExecutionBindings(runtime.id).map(binding => ({ ...binding, status: "ready" })));
+    }
     saveGatewayCatalog(store, "claude", [{ id: "claude-sonnet-5", label: "Sonnet 5" }]);
     const app = createMultiremiApp({ store });
     for (const query of ["", "?execution_group_id=mixed"]) {
@@ -861,8 +946,8 @@ describe("Multiremi store — fleet engine and model catalog", () => {
   it("claims runtime tasks atomically across sqlite connections", () => {
     const dir = mkdtempSync(join(tmpdir(), "multiremi-task-claim-"));
     const path = join(dir, "multiremi.db");
-    const dbA = new Database(path);
-    const dbB = new Database(path);
+    const dbA = openSqliteDatabase(path);
+    const dbB = openSqliteDatabase(path);
     try {
       const storeA = new MultiremiStore(dbA);
       const storeB = new MultiremiStore(dbB);
@@ -884,5 +969,5 @@ describe("Multiremi store — fleet engine and model catalog", () => {
       dbB.close();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });

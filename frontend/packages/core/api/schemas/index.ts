@@ -25,3 +25,6 @@ export * from "./issue-shares";
 export * from "./platform";
 export * from "./feishu";
 export * from "./feishu-bot";
+
+export * from "./messages";
+export * from "./issue-responsibility";

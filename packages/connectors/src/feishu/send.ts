@@ -3,6 +3,7 @@
  * Adapted from OpenClaw feishu extension send.ts — removed runtime/account dependencies.
  */
 
+import { feishuMessageRequest } from "./message-request.js";
 import type * as Lark from "@larksuiteoapi/node-sdk";
 import { feishuResponseError } from "./native-cot.js";
 import type { FeishuSendResult } from "./types.js";
@@ -10,7 +11,7 @@ import type { MentionTarget } from "./mention.js";
 import { buildMentionedMessage, buildMentionedCardContent } from "./mention.js";
 import { resolveReceiveIdType } from "./client.js";
 import { parsePostContent } from "./receive.js";
-import { getSessionName, getNewbornName } from "@shared/session-name.js";
+import { buildCardHeader } from "@shared/feishu-task-card.js";
 
 /** Build Feishu post message payload (rich text with markdown support). */
 function buildFeishuPostMessagePayload(params: { messageText: string }): {
@@ -55,22 +56,22 @@ export async function sendMessageFeishu(
   const { content, msgType } = buildFeishuPostMessagePayload({ messageText: rawText });
 
   if (options?.replyToMessageId) {
-    const response = await client.im.message.reply({
-      path: { message_id: options.replyToMessageId },
+    const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
+      path: { message_id: options.replyToMessageId! },
       data: {
         content,
         msg_type: msgType,
         reply_in_thread: true,
         ...(options.idempotencyKey ? { uuid: options.idempotencyKey } : {}),
       },
-    });
+    }));
     if (response.code !== 0) {
       throw feishuResponseError("Feishu reply", response);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
 
-  const response = await client.im.message.create({
+  const response = await feishuMessageRequest("Feishu message create", () => client.im.message.create({
     params: { receive_id_type: receiveIdType },
     data: {
       receive_id: receiveId,
@@ -78,55 +79,19 @@ export async function sendMessageFeishu(
       msg_type: msgType,
       ...(options?.idempotencyKey ? { uuid: options.idempotencyKey } : {}),
     },
-  });
+  }));
   if (response.code !== 0) {
     throw feishuResponseError("Feishu send", response);
   }
   return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
 }
 
-export interface CardHeaderOptions {
-  /** Provider session the reply belongs to; drives the conversation label. */
-  sessionId?: string | null;
-  /** Pre-resolved title from the legacy session registry — used verbatim. */
-  displayName?: string | null;
-  /** The bot's own name, substituted into the generated session label. */
-  agentName?: string | null;
-  nameSuffix?: string;
-  subtitle?: string | null;
-}
-
 /**
- * Build a Remi branded card header.
- * - displayName string → use as-is (from DB registry)
- * - sessionId string + no displayName → deterministic name ("好奇的 Remi·Vulpes")
- * - sessionId null → newborn name ("刚醒来的 Remi")
- * - sessionId undefined → plain agent name (non-streaming and command cards)
+ * The branded header is shared with the control plane, which builds decision
+ * cards itself (MUL-407). Re-exported here because every connector caller
+ * already imports its card helpers from this module.
  */
-export function buildCardHeader(options: CardHeaderOptions = {}) {
-  const { sessionId, displayName, agentName, nameSuffix, subtitle } = options;
-  const agent = agentName?.trim() || "Remi";
-  const baseName =
-    displayName ? displayName :
-    sessionId ? getSessionName(sessionId, agent) :
-    sessionId === null ? getNewbornName(agent) :
-    agent;
-  const title = nameSuffix ? `${baseName}${nameSuffix}` : baseName;
-  const now = new Date();
-  const hh = String(((now.getUTCHours() + 8) % 24)).padStart(2, "0");
-  const mm = String(now.getUTCMinutes()).padStart(2, "0");
-  const header: Record<string, unknown> = {
-    title: { tag: "plain_text" as const, content: `${title}  ${hh}:${mm}` },
-    template: "default" as const,
-    icon: { tag: "standard_icon" as const, token: "robot_outlined", color: "grey" },
-  };
-  if (subtitle) {
-    // Feishu's native subtitle is single-line and ellipsizes overflow.
-    header.subtitle = { tag: "plain_text", content: subtitle.replace(/\s+/g, " ") };
-  }
-  return header;
-}
-
+export { buildCardHeader, type CardHeaderOptions } from "@shared/feishu-task-card.js";
 
 /** Feishu image marker pattern: ![alt](feishu-image:img_key) */
 const FEISHU_IMAGE_RE = /!\[([^\]]*)\]\(feishu-image:(img_[a-zA-Z0-9_-]+)\)/g;
@@ -192,22 +157,22 @@ export async function sendCardFeishu(
   const content = JSON.stringify(card);
 
   if (options?.replyToMessageId) {
-    const response = await client.im.message.reply({
-      path: { message_id: options.replyToMessageId },
+    const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
+      path: { message_id: options.replyToMessageId! },
       data: { content, msg_type: "interactive", reply_in_thread: true,
         ...(options.idempotencyKey ? { uuid: options.idempotencyKey } : {}) },
-    });
+    }));
     if (response.code !== 0) {
       throw feishuResponseError("Feishu card reply", response);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
 
-  const response = await client.im.message.create({
+  const response = await feishuMessageRequest("Feishu message create", () => client.im.message.create({
     params: { receive_id_type: receiveIdType },
     data: { receive_id: receiveId, content, msg_type: "interactive",
       ...(options?.idempotencyKey ? { uuid: options.idempotencyKey } : {}) },
-  });
+  }));
   if (response.code !== 0) {
     throw feishuResponseError("Feishu card send", response);
   }

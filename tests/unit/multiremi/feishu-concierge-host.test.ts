@@ -13,11 +13,45 @@ import type { bootFeishuChannel, FeishuChannelHandle } from "../../../apps/remi/
 import type { MultiremiDaemon } from "@multiremi/worker/daemon.js";
 import type {
   MultiremiAgent,
+  MultiremiFeishuBotOutboundDelivery,
+  MultiremiTaskHumanRequest,
   MultiremiFeishuBotDaemonConfig,
 } from "@multiremi/contracts/types.js";
+import { FeishuDeliveryError } from "@shared/feishu-delivery-error.js";
+import { DECISION_RECIPIENT_SENTINEL } from "@shared/feishu-task-card.js";
+import { handleTaskInteractionEvent, interactionMarker } from "@connectors/feishu/task-interaction.js";
 import type { MultiremiFeishuBotAssignment } from "@multiremi/worker/client.js";
 
 const APP_SECRET = "wJ4tQ7xR2nB8vC5mZ1kL0pS6dF3gH9jA";
+
+/** A delivery on one of the MUL-407 decision lanes. */
+function decisionDelivery(
+  overrides: Partial<MultiremiFeishuBotOutboundDelivery> & { kind: MultiremiFeishuBotOutboundDelivery["kind"] },
+): MultiremiFeishuBotOutboundDelivery {
+  return {
+    id: "fbo_decision",
+    claimToken: "lease",
+    chatId: "oc_decision",
+    threadId: "om_topic_root",
+    replyToMessageId: "om_topic_root",
+    body: "",
+    bodyOrigin: "issue",
+    idempotencyKey: "fbo_decision",
+    humanRequestId: "hrq_1",
+    ...overrides,
+  };
+}
+
+/** A pending card carrying the sentinel the host is expected to resolve. */
+function cardWithSentinel(): Record<string, unknown> {
+  return {
+    schema: "2.0",
+    body: { elements: [
+      { tag: "markdown", content: "**Continue?**" },
+      { tag: "markdown", content: `<at id=${DECISION_RECIPIENT_SENTINEL}></at>` },
+    ] },
+  };
+}
 
 function assignment(overrides: Partial<MultiremiFeishuBotDaemonConfig> = {}): MultiremiFeishuBotAssignment {
   return {
@@ -46,8 +80,11 @@ function fakeDaemon(): FakeDaemon {
   const botMenuPublishers: unknown[] = [];
   const failures: unknown[] = [];
   const daemon = {
+    getFeishuDecisionMessage: async (messageId: string) => ({ message: { id: messageId, message_kind: "decision", resolved_at: "2026-10-04T00:00:00Z", deleted_at: null } }),
     localPort: () => 4242,
     ensureTopicWorkspace: async () => null,
+    // Recovery runs on every start; default to "no cards to restore".
+    listFeishuBotDecisionCards: async () => [],
     setBotMenuPublisher: (publisher: unknown) => { botMenuPublishers.push(publisher); },
     reportFeishuConciergeFailure: async (error: unknown) => { failures.push(error); },
   } as unknown as MultiremiDaemon;
@@ -76,6 +113,7 @@ function fakeChannel(): {
   const start = new Promise<void>((_resolve, reject) => { fail = reject; });
   return {
     handle: {
+      appId: "cli_a1b2c3d4e5f6g7h8",
       start,
       stop: async () => { stops += 1; },
       publishBotMenu: async () => ({ dryRun: true, defaultPublished: false, userMenuCount: 0 }),
@@ -117,6 +155,20 @@ function host(input: {
 }
 
 describe("control-plane Feishu concierge host", () => {
+  it("publishes only for the bot identity and revision hosted by this connector", async () => {
+    const fake = fakeDaemon();
+    const test = host({ daemon: fake.daemon });
+    await test.conciergeHost.start(assignment({ bot_id: "second" }));
+    const publish = fake.botMenuPublishers.at(-1) as NonNullable<Parameters<MultiremiDaemon["setBotMenuPublisher"]>[0]>;
+    const target = { botId: "second", appId: "cli_a1b2c3d4e5f6g7h8", domain: "feishu", revision: 4 };
+    await expect(publish({ default: [], target }, true)).resolves.toMatchObject({ dryRun: true });
+    for (const changed of [{ botId: "default" }, { appId: "cli_other" }, { domain: "lark" }, { revision: 5 }]) {
+      await expect(publish({ default: [], target: { ...target, ...changed } }, true)).rejects.toThrow("does not match");
+    }
+    await expect(publish({ default: [] }, true)).rejects.toThrow("does not match");
+    await test.conciergeHost.stop();
+  });
+
   it("hosts either co-resident provider without letting a sibling stop or detach its channel", async () => {
     const daemons = [fakeDaemon(), fakeDaemon()];
     const hosts: FeishuConciergeHost[] = [];
@@ -185,22 +237,20 @@ describe("control-plane Feishu concierge host", () => {
     expect(sends).toBe(1);
   });
 
-  it("opens a Task stream without a session and surfaces the provider session as soon as it is pinned", async () => {
+  it("opens without a session and reads the final provider session once on closed", async () => {
     const { daemon } = fakeDaemon();
-    const statuses = [
-      { status: "running" as const, sessionId: null },
-      { status: "running" as const, sessionId: "sess_pinned" },
-      // A repeat poll must not replay the same session as another snapshot.
-      { status: "running" as const, sessionId: "sess_pinned" },
-      { status: "completed" as const, sessionId: "sess_pinned" },
-    ];
-    let poll = 0;
+    let reads = 0;
     Object.assign(daemon, {
-      listFeishuBotTaskMessages: async () => [],
+      subscribeTrace: async (_taskId: string, fromSeq: number, onEvents: Parameters<MultiremiDaemon["subscribeTrace"]>[2]) => {
+        expect(fromSeq).toBe(0);
+        expect(reads).toBe(0);
+        await onEvents([], true);
+        return async () => {};
+      },
       getFeishuBotTaskSnapshot: async () => {
-        const next = statuses[Math.min(poll++, statuses.length - 1)]!;
-        return { taskId: "tsk_private", status: next.status, result: "done", error: null,
-          sessionId: next.sessionId, workDir: null, usage: [] };
+        reads++;
+        return { taskId: "tsk_private", status: "completed", result: "done", error: null,
+          sessionId: "sess_pinned", workDir: null, usage: [] };
       },
     });
     const test = host({ daemon });
@@ -218,7 +268,8 @@ describe("control-plane Feishu concierge host", () => {
       { signal: new AbortController().signal, onStarted: async () => {} });
     // `null`, not `undefined`: the card starts as a newborn, not a bare agent name.
     expect(metaSessionId).toBeNull();
-    expect(observed).toEqual(["sess_pinned", "sess_pinned"]);
+    expect(observed).toEqual(["sess_pinned"]);
+    expect(reads).toBe(1);
   });
 
   it("checkpoints a group owner before sending through the existing Task card", async () => {
@@ -234,7 +285,6 @@ describe("control-plane Feishu concierge host", () => {
     test.channel.handle.streamProactiveTask = async (_chat, _session, _stream, _meta, options) => {
       sequence.push("card");
       expect(options.mentionOpenId).toBe("ou_saved");
-      await options.onStarted!("om_card");
       return { messageId: "om_card" };
     };
     const delivery = { id: "fbo_owner", claimToken: "lease", chatId: "oc_topic", threadId: "om_root",
@@ -245,13 +295,14 @@ describe("control-plane Feishu concierge host", () => {
       prepareMention: async id => { sequence.push("checkpoint"); expect(id).toBe("ou_candidate"); return "ou_saved"; },
       onStarted: async () => { sequence.push("started"); },
     });
-    expect(sequence).toEqual(["resolve", "checkpoint", "card", "started"]);
+    // The Task card's message ID is the result the lane returns, not a start callback.
+    expect(sequence).toEqual(["resolve", "checkpoint", "card"]);
     expect(test.channel.sent).toHaveLength(0);
     sequence.length = 0;
     await test.conciergeHost.sendOutbound!({ ...delivery, resumeMessageId: "om_card", mention: { mode: "group_owner", resolvedOpenId: "ou_saved" } }, {
       signal: new AbortController().signal, onStarted: async () => { sequence.push("started"); },
     });
-    expect(sequence).toEqual(["card", "started"]);
+    expect(sequence).toEqual(["card"]);
   });
 
   it("does not send a card when the recipient checkpoint loses its lease", async () => {
@@ -288,9 +339,12 @@ describe("control-plane Feishu concierge host", () => {
     const fake = fakeDaemon();
     const reads: number[] = [];
     Object.assign(fake.daemon, {
-      listFeishuBotTaskMessages: async (_id: string, since: number) => {
-        reads.push(since);
-        return since === 0 ? [{ id: "msg_tool", taskId: "tsk_live", seq: 1, type: "tool_use", tool: "Bash" }] : [];
+      subscribeTrace: async (_id: string, fromSeq: number, onEvents: Parameters<MultiremiDaemon["subscribeTrace"]>[2]) => {
+        reads.push(fromSeq);
+        await onEvents([{ seq: 1, ts: "2026-09-28T00:00:00.000Z", type: "item.started", item: { id: "toolu_bash", parent_id: null,
+          status: "in_progress", started_at: "2026-09-28T00:00:00.000Z", completed_at: null, type: "command", tool: "Bash",
+          source: "shell", command: "git status", cwd: null, actions: [], output: null, exit_code: null, duration_ms: null } }], true);
+        return async () => {};
       },
       getFeishuBotTaskSnapshot: async () => ({ taskId: "tsk_live", status: "completed", result: "done", usage: [] }),
     });
@@ -299,8 +353,8 @@ describe("control-plane Feishu concierge host", () => {
     test.channel.handle.streamProactiveTask = async (chatId, _sessionKey, stream, meta, options) => {
       expect(chatId).toBe("oc_topic");
       expect(meta.taskId).toBe("tsk_live");
+      // A resume message ID without a checkpoint reaches the channel, which finishes it final-only.
       expect(options.durable).toEqual({ idempotencyKey: "fbo_live", messageId: "om_existing" });
-      await options.onStarted!("om_existing");
       for await (const event of stream) events.push(event);
       return { messageId: "om_existing" };
     };
@@ -310,12 +364,40 @@ describe("control-plane Feishu concierge host", () => {
       replyToMessageId: "om_root", body: "", bodyOrigin: "agent", taskId: "tsk_live", resumeMessageId: "om_existing",
       idempotencyKey: "fbo_live" }, { signal: new AbortController().signal, onStarted: async id => { checkpoints.push(id); } });
     expect(test.channel.sent).toHaveLength(0);
-    expect(checkpoints).toEqual(["om_existing"]);
-    expect(reads).toEqual([0, 1]);
+    expect(checkpoints).toEqual([]);
+    expect(reads).toEqual([0]);
     expect(events).toEqual([
-      expect.objectContaining({ kind: "message", message: expect.objectContaining({ type: "tool_use" }) }),
+      expect.objectContaining({ kind: "message", message: expect.objectContaining({ type: "item.started" }) }),
       expect.objectContaining({ kind: "snapshot", snapshot: expect.objectContaining({ status: "completed" }) }),
     ]);
+  });
+
+  it("replays canonical trace from zero while retaining the presentation checkpoint", async () => {
+    const fake = fakeDaemon();
+    const cursors: number[] = [];
+    const received: number[] = [];
+    Object.assign(fake.daemon, {
+      subscribeTrace: async (_id: string, fromSeq: number, onEvents: Parameters<MultiremiDaemon["subscribeTrace"]>[2]) => {
+        cursors.push(fromSeq);
+        await onEvents([{ seq: fromSeq + 1, ts: "2026-09-28T00:00:00.000Z", type: "turn.updated", patch: { model: "claude-test" } }], true);
+        return async () => {};
+      },
+      getFeishuBotTaskSnapshot: async () => ({ taskId: "tsk_resume", status: "completed", result: "done", usage: [] }),
+    });
+    const test = host({ daemon: fake.daemon });
+    test.channel.handle.resolveProactiveMention = async () => null;
+    test.channel.handle.streamProactiveTask = async (_chat, _session, stream, _meta, options) => {
+      expect(options.durable?.presentation?.throughSeq).toBe(7);
+      for await (const event of stream) if (event.kind === "message") received.push(event.message.seq);
+      return { messageId: "om_existing" };
+    };
+    await test.conciergeHost.start(assignment());
+    await test.conciergeHost.sendOutbound!({ id: "fbo_resume", claimToken: "lease", chatId: "oc_topic", threadId: "om_root",
+      replyToMessageId: "om_root", body: "", bodyOrigin: "agent", taskId: "tsk_resume", resumeMessageId: "om_existing",
+      idempotencyKey: "fbo_resume", presentation: { version: "native_cot_v1", startedAt: 1, throughSeq: 7, interactions: {} } },
+      { signal: new AbortController().signal, onStarted: async () => {} });
+    expect(cursors).toEqual([0]);
+    expect(received).toEqual([1]);
   });
 
   it("applies live no-mention settings to exactly the configured group", async () => {
@@ -438,5 +520,334 @@ describe("control-plane Feishu concierge host", () => {
     expect(test.channel.stops()).toBe(1);
     expect(test.current()).toBeNull();
     expect(fake.botMenuPublishers.at(-1)).toBeNull();
+  });
+
+  it("resolves the topic owner into the decision card before sending it", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    const cards: Array<{ chatId: string; replyToMessageId?: string; card: Record<string, unknown> }> = [];
+    const receipts: Array<{ messageId: string; interactionOpenId?: string | null; degraded?: string | null }> = [];
+    test.channel.handle.resolveProactiveMention = async () => "ou_group_owner";
+    test.channel.handle.sendProactiveCard = async (input) => {
+      cards.push({ chatId: input.chatId, replyToMessageId: input.replyToMessageId, card: input.card });
+      return { messageId: "om_card" };
+    };
+    await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card",
+      body: JSON.stringify({ card: cardWithSentinel(), fallback_text: "问题：继续吗？" }),
+    }), {
+      signal: new AbortController().signal, onStarted: async () => {},
+      onDecisionSent: async receipt => { receipts.push(receipt); },
+    });
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.chatId).toBe("oc_decision");
+    expect(cards[0]!.replyToMessageId).toBe("om_topic_root");
+    const rendered = JSON.stringify(cards[0]!.card);
+    expect(rendered).toContain("<at id=ou_group_owner></at>");
+    expect(rendered).not.toContain("__remi_decision_recipient__");
+    // The recipient the card actually used is checkpointed with the send.
+    expect(receipts).toEqual([{ messageId: "om_card", interactionOpenId: "ou_group_owner", degraded: null }]);
+  });
+
+  it("degrades a rejected decision card to its text twin instead of retrying it", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    const replies: string[] = [];
+    const receipts: Array<{ messageId: string; interactionOpenId?: string | null; degraded?: string | null }> = [];
+    test.channel.handle.resolveProactiveMention = async () => "ou_group_owner";
+    test.channel.handle.sendProactiveCard = async () => {
+      // A permanent rejection: retrying the same payload cannot succeed.
+      throw new FeishuDeliveryError("Feishu card send: Feishu code 99991672", false);
+    };
+    test.channel.handle.sendProactiveThreadReply = async (input: { body: string }) => {
+      replies.push(input.body);
+      return { messageId: "om_fallback" };
+    };
+    const sent = await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card",
+      body: JSON.stringify({ card: cardWithSentinel(), fallback_text: "**MUL-1 - 问题**\n\n1. 继续" }),
+    }), {
+      signal: new AbortController().signal, onStarted: async () => {},
+      onDecisionSent: async receipt => { receipts.push(receipt); },
+    });
+
+    expect(sent).toEqual({ messageId: "om_fallback" });
+    expect(replies).toEqual(["<at id=ou_group_owner></at> **MUL-1 - 问题**\n\n1. 继续"]);
+    // The control plane must learn it degraded, or it would later PATCH a card
+    // that does not exist.
+    expect(receipts).toEqual([{ messageId: "om_fallback", interactionOpenId: "ou_group_owner", degraded: "send_failed" }]);
+  });
+
+  it("sends text when the group owner cannot be resolved at all", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    const replies: string[] = [];
+    const receipts: Array<{ messageId: string; interactionOpenId?: string | null; degraded?: string | null }> = [];
+    let cardsSent = 0;
+    test.channel.handle.resolveProactiveMention = async () => null;
+    test.channel.handle.sendProactiveCard = async () => { cardsSent += 1; return { messageId: "om_card" }; };
+    test.channel.handle.sendProactiveThreadReply = async (input: { body: string }) => {
+      replies.push(input.body);
+      return { messageId: "om_no_recipient" };
+    };
+    const sent = await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card",
+      body: JSON.stringify({ card: cardWithSentinel(), fallback_text: "**MUL-1 - 问题**\n\n1. 继续" }),
+    }), {
+      signal: new AbortController().signal, onStarted: async () => {},
+      onDecisionSent: async receipt => { receipts.push(receipt); },
+    });
+
+    // No card: a card nobody can press is worse than the plain question.
+    expect(cardsSent).toBe(0);
+    expect(sent).toEqual({ messageId: "om_no_recipient" });
+    expect(replies).toEqual(["**MUL-1 - 问题**\n\n1. 继续"]);
+    expect(receipts).toEqual([{ messageId: "om_no_recipient", interactionOpenId: null, degraded: "unresolved_recipient" }]);
+    // No @ to a person who was never identified.
+    expect(replies[0]).not.toContain("<at id=");
+  });
+
+  it("sends text for a request the control plane already marked unaddressable", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    const replies: string[] = [];
+    let cardsSent = 0;
+    let mentionLookups = 0;
+    test.channel.handle.resolveProactiveMention = async () => { mentionLookups += 1; return "ou_group_owner"; };
+    test.channel.handle.sendProactiveCard = async () => { cardsSent += 1; return { messageId: "om_card" }; };
+    test.channel.handle.sendProactiveThreadReply = async (input: { body: string }) => {
+      replies.push(input.body);
+      return { messageId: "om_degraded" };
+    };
+    const sent = await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card",
+      degraded: "notify_none",
+      // A degraded row carries plain text, not an envelope.
+      body: "**MUL-1 - 问题**\n\n1. 继续",
+    }), { signal: new AbortController().signal, onStarted: async () => {} });
+
+    expect(sent).toEqual({ messageId: "om_degraded" });
+    expect(cardsSent).toBe(0);
+    // No lookup: the control plane already decided there is nobody to ask.
+    expect(mentionLookups).toBe(0);
+    expect(replies).toEqual(["**MUL-1 - 问题**\n\n1. 继续"]);
+  });
+
+  it("lets a retryable card failure reach the outbox backoff", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    test.channel.handle.resolveProactiveMention = async () => "ou_group_owner";
+    test.channel.handle.sendProactiveCard = async () => {
+      throw new FeishuDeliveryError("Feishu card send: Feishu code 99991400", true);
+    };
+    let textFallbacks = 0;
+    test.channel.handle.sendProactiveThreadReply = async () => {
+      textFallbacks += 1;
+      return { messageId: "om_fallback" };
+    };
+    await expect(test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card",
+      body: JSON.stringify({ card: cardWithSentinel(), fallback_text: "问题" }),
+    }), { signal: new AbortController().signal, onStarted: async () => {} })).rejects.toThrow(/99991400/);
+    expect(textFallbacks).toBe(0);
+  });
+
+  it("B2: the terminal PATCH carries the real card, never an empty one", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    // Records exactly what the fake Feishu client is asked to PUT on the wire.
+    const patches: Array<{ messageId: string; card: Record<string, unknown> }> = [];
+    test.channel.handle.updateProactiveCard = async (messageId, card) => {
+      patches.push({ messageId, card: { ...card } });
+    };
+    const terminalCard = {
+      schema: "2.0",
+      header: { title: { tag: "plain_text", content: "Concierge  09:00" } },
+      body: { elements: [
+        { tag: "markdown", content: "**已超时，未回答**" },
+        { tag: "markdown", content: "**Continue?**" },
+        { tag: "markdown", content: "超时视为未回答（2026-09-27 09:00），授权类请求不会被自动批准。" },
+      ] },
+    };
+    const sent = await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card_patch",
+      targetMessageId: "om_live_card",
+      body: JSON.stringify({ message_id: "msg_decision_1", card: terminalCard }),
+    }), { signal: new AbortController().signal, onStarted: async () => {} });
+
+    expect(sent).toEqual({ messageId: "om_live_card" });
+    expect(patches).toHaveLength(1);
+    expect(patches[0]!.messageId).toBe("om_live_card");
+    // The payload the client would send: a complete card, not `{}`.
+    expect(patches[0]!.card).toEqual(terminalCard);
+    expect(Object.keys(patches[0]!.card).length).toBeGreaterThan(0);
+    expect(JSON.stringify(patches[0]!.card)).toContain("已超时，未回答");
+    expect(JSON.stringify(patches[0]!.card)).toContain("Continue?");
+  });
+
+  it("refuses a patch whose body is not a card rather than blanking the message", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    let patches = 0;
+    test.channel.handle.updateProactiveCard = async () => { patches += 1; };
+    await expect(test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card_patch", targetMessageId: "om_live_card", body: "{}",
+    }), { signal: new AbortController().signal, onStarted: async () => {} })).rejects.toThrow(/not a card envelope/);
+    expect(patches).toBe(0);
+  });
+
+  it("refuses a patch without an explicit transport target instead of overwriting the thread root", async () => {
+    const test = host({ daemon: fakeDaemon().daemon }); await test.conciergeHost.start(assignment());
+    let patches = 0; test.channel.handle.updateProactiveCard = async () => { patches += 1; };
+    await expect(test.conciergeHost.sendOutbound!(decisionDelivery({ kind: "decision_card_patch", replyToMessageId: "om_thread_root",
+      body: JSON.stringify({ message_id: "msg_decision_1", card: { schema: "2.0" } }),
+    }), { signal: new AbortController().signal, onStarted: async () => {} })).rejects.toThrow(/no transport target/);
+    expect(patches).toBe(0);
+  });
+
+  it("B5: the reminder @s the person who was asked", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    const replies: string[] = [];
+    test.channel.handle.sendProactiveThreadReply = async (input: { body: string }) => {
+      replies.push(input.body);
+      return { messageId: "om_reminder" };
+    };
+    await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_reminder",
+      body: "**MUL-1 - 问题**\n\n上面这个问题还没人回答，再过一会儿就会超时。",
+      mention: { mode: "person", openId: "ou_the_person", resolvedOpenId: "ou_the_person" },
+      interactionOpenId: "ou_the_person",
+    }), { signal: new AbortController().signal, onStarted: async () => {} });
+
+    expect(replies).toHaveLength(1);
+    // The text actually handed to Feishu carries a card-lark @ for the person.
+    expect(replies[0]).toContain("<at id=ou_the_person></at>");
+    expect(replies[0]).toContain("超时");
+  });
+
+  it("B5: a reminder with nobody to address is sent without an @", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    const replies: string[] = [];
+    test.channel.handle.sendProactiveThreadReply = async (input: { body: string }) => {
+      replies.push(input.body);
+      return { messageId: "om_reminder" };
+    };
+    await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_reminder",
+      body: "**MUL-1 - 问题**\n\n上面这个问题还没人回答。",
+      mention: { mode: "none", resolvedOpenId: null },
+    }), { signal: new AbortController().signal, onStarted: async () => {} });
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toContain("<at id=");
+    expect(replies[0]).toContain("还没人回答");
+  });
+
+  it("B1: a click registers the card so the asked person can answer it", async () => {
+    const fake = fakeDaemon();
+    let pending: MultiremiTaskHumanRequest = { id: "hrq_1", taskId: "tsk_1", kind: "question", status: "pending",
+      payload: { questions: [{ question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }] },
+      response: null, respondedBy: null, createdAt: "2026-09-27T00:00:00.000Z", respondedAt: null };
+    const submitted: Array<Record<string, unknown>> = [];
+    Object.assign(fake.daemon, {
+      getMessageHumanRequest: async () => pending,
+      respondFeishuBotHumanRequest: async (_messageId: string, response: Record<string, unknown>, credential: { operatorOpenId: string; token: string }) => {
+        if (credential.operatorOpenId !== "ou_group_owner") throw Object.assign(new Error("recipient_mismatch"), { code: "recipient_mismatch" });
+        submitted.push(response);
+        pending = { ...pending, status: "responded", response, respondedBy: "feishu", respondedAt: "2026-09-27T00:10:00.000Z" };
+        return pending;
+      },
+    });
+    const test = host({ daemon: fake.daemon });
+    await test.conciergeHost.start(assignment());
+    test.channel.handle.resolveProactiveMention = async () => "ou_group_owner";
+    test.channel.handle.sendProactiveCard = async (input) => {
+      expect(input.idempotencyKey).toBe("fbo_decision");
+      return { messageId: "om_clickable" };
+    };
+    await test.conciergeHost.sendOutbound!(decisionDelivery({
+      kind: "decision_card",
+      humanRequestTaskId: "tsk_1",
+      body: JSON.stringify({ card: cardWithSentinel(), fallback_text: "问题" }),
+    }), { signal: new AbortController().signal, onStarted: async () => {} });
+
+    // A stranger clicking gets the toast and changes nothing.
+    const stranger = await handleTaskInteractionEvent("cli_a1b2c3d4e5f6g7h8", {
+      operator: { open_id: "ou_someone_else" },
+      context: { open_chat_id: "oc_decision", open_message_id: "om_clickable" },
+      action: { value: { t: "host-token-fixture", message_id: "hrq_1" }, tag: "button", name: interactionMarker("tsk_1", "hrq_1"), form_value: { q0_option0: true } },
+    });
+    expect(stranger).toMatchObject({ toast: { content: "请由卡片中指定的处理人提交" } });
+    expect(submitted).toHaveLength(0);
+
+    // The person who was asked submits the form and the request is answered.
+    const answer = await handleTaskInteractionEvent("cli_a1b2c3d4e5f6g7h8", {
+      operator: { open_id: "ou_group_owner" },
+      context: { open_chat_id: "oc_decision", open_message_id: "om_clickable" },
+      action: { value: { t: "host-token-fixture", message_id: "hrq_1" }, tag: "button", name: interactionMarker("tsk_1", "hrq_1"), form_value: { q0_option0: "true" } },
+    });
+    expect(answer).toMatchObject({ toast: { type: "success", content: "已提交" } });
+    expect(submitted).toEqual([{ answers: { "Continue?": "Yes" } }]);
+    expect((answer as { card: { data: Record<string, unknown> } }).card.data).toBeTruthy();
+    expect(JSON.stringify((answer as { card: { data: Record<string, unknown> } }).card.data)).toContain("已提交");
+  });
+
+  it("B1: a restarted host re-registers the cards it must still answer", async () => {
+    const fake = fakeDaemon();
+    let pending: MultiremiTaskHumanRequest = { id: "hrq_restart", taskId: "tsk_restart", kind: "question", status: "pending",
+      payload: { questions: [{ question: "Continue?", options: [{ label: "Yes" }] }] },
+      response: null, respondedBy: null, createdAt: "2026-09-27T00:00:00.000Z", respondedAt: null };
+    const cards = [{ requestId: "hrq_restart", taskId: "tsk_restart", chatId: "oc_decision",
+      messageId: "om_before_restart", recipientOpenId: "ou_group_owner" }];
+    const submitted: Array<Record<string, unknown>> = [];
+    Object.assign(fake.daemon, {
+      listFeishuBotDecisionCards: async () => cards,
+      getMessageHumanRequest: async () => pending,
+      respondFeishuBotHumanRequest: async (_messageId: string, response: Record<string, unknown>) => {
+        submitted.push(response);
+        pending = { ...pending, status: "responded", response, respondedBy: "feishu", respondedAt: "2026-09-27T00:10:00.000Z" };
+        return pending;
+      },
+    });
+    const test = host({ daemon: fake.daemon });
+    // A fresh process: nothing was sent here, but the card is still on screen.
+    await test.conciergeHost.start(assignment());
+
+    const answer = await handleTaskInteractionEvent("cli_a1b2c3d4e5f6g7h8", {
+      operator: { open_id: "ou_group_owner" },
+      context: { open_chat_id: "oc_decision", open_message_id: "om_before_restart" },
+      action: { value: { t: "host-token-fixture", message_id: "hrq_restart" }, tag: "button", name: interactionMarker("tsk_restart", "hrq_restart"), form_value: { q0_option0: "true" } },
+    });
+    expect(answer).toMatchObject({ toast: { type: "success", content: "已提交" } });
+    expect(submitted).toEqual([{ answers: { "Continue?": "Yes" } }]);
+  });
+
+  it("B1: a request already answered elsewhere is reported, not overwritten", async () => {
+    const fake = fakeDaemon();
+    const answered: MultiremiTaskHumanRequest = { id: "hrq_done", taskId: "tsk_done", kind: "question", status: "responded",
+      payload: { questions: [{ question: "Continue?", options: [{ label: "Yes" }] }] },
+      response: { answers: { "Continue?": "Yes" } }, respondedBy: "alice",
+      createdAt: "2026-09-27T00:00:00.000Z", respondedAt: "2026-09-27T00:05:00.000Z" };
+    let submits = 0;
+    Object.assign(fake.daemon, {
+      listFeishuBotDecisionCards: async () => [{ requestId: "hrq_done", taskId: "tsk_done", chatId: "oc_decision",
+        messageId: "om_already_answered", recipientOpenId: "ou_group_owner" }],
+      getMessageHumanRequest: async () => answered,
+      respondFeishuBotHumanRequest: async () => { submits += 1; return answered; },
+    });
+    const test = host({ daemon: fake.daemon });
+    await test.conciergeHost.start(assignment());
+
+    const click = await handleTaskInteractionEvent("cli_a1b2c3d4e5f6g7h8", {
+      operator: { open_id: "ou_group_owner" },
+      context: { open_chat_id: "oc_decision", open_message_id: "om_already_answered" },
+      action: { value: { t: "host-token-fixture", message_id: "hrq_done" }, tag: "button", name: interactionMarker("tsk_done", "hrq_done"), form_value: { q0_option0: "true" } },
+    });
+    expect(click).toMatchObject({ toast: { type: "info", content: "请求已结束" } });
+    // The web answer stands; the click must not write a second one.
+    expect(submits).toBe(0);
   });
 });

@@ -1,17 +1,45 @@
 import { createHash, randomBytes } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync, symlinkSync, unlinkSync } from "node:fs";
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { StorageSubjectRef } from "@multiremi/contracts/storage.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import { linkCodexAuthFromBase, seedCodexHomeFromBase } from "../agent-plugins/codex-home.js";
 import { AgentPluginError } from "../agent-plugins/types.js";
 import { sanitizeProviderConfigValue } from "../provider-config-sanitize.js";
 import { loadCodexModelCatalog, mergeClaudeSettings, mergeCodexSessionConfig, type CodexModelCatalogState } from "../relay-sync.js";
 import type { RelayHttpRequest } from "@shared/relay-http.js";
+import { antigravityHomeFiles } from "@acp/access/antigravity.js";
+import {
+  conversationForTask,
+  envDirectory,
+  laneForTask,
+  laneGenerationDirectory,
+  laneWorkDirectory,
+  segment,
+  subjectForTask,
+  TASK_TMP_DIRECTORY,
+  taskTmpRoot,
+  type LaneIdentity,
+} from "./layout.js";
 import { removeOwnedDirectorySync } from "./safe-remove.js";
 import { SIDE_CONVERSATION_INSTRUCTIONS } from "../prompts/side-conversation.js";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { createLogger } from "@shared/logger.js";
+
+const log = createLogger("multiremi-task-tmp");
+
+/**
+ * macOS caps a unix socket path at 104 bytes (`sun_path`), while the real task
+ * temp directory lives deep below the workspaces root and can exceed that.
+ * Each execution therefore gets a short `/tmp/remi-XXXXXXXX` alias pointing at
+ * the real directory; TMPDIR/TMP/TEMP use the alias so tools that bind sockets
+ * inside them work.
+ */
+const TASK_TMP_ALIAS_DIRECTORY = "/tmp";
+const TASK_TMP_ALIAS_PREFIX = "remi-";
+const TASK_TMP_ALIAS_ATTEMPTS = 8;
 
 const SESSION_HOME_MARKER = ".multiremi-session-home.json";
 const PROVIDER_CONFIG_BASELINE = ".multiremi-provider-config-baseline.json";
@@ -21,28 +49,27 @@ export interface IssueSessionProviderHome {
   storageRoot: string;
   /** Workspace-visible lineage root for one provider lane generation. */
   root: string;
-  /** Actual CLAUDE_CONFIG_DIR/CODEX_HOME. Native history is written here. */
+  /** Provider-scoped daemon state. Claude/Codex also write native history here. */
   home: string;
   sessionId: string;
   agentId: string;
   generation: number;
-  provider: "claude" | "codex" | "antigravity";
+  provider: "claude" | "codex" | "grok" | "antigravity";
+  /** Explicit local development binding; Codex keeps that workspace's native user context. */
+  runtimeWorkspaceId?: string;
   /** Codex execution identity. Different Plugin sets must never share a Home. */
   executionFingerprint?: string;
-  /** Daemon-owned GC boundary for non-Issue provider state. */
-  runtimeStateRoot?: string;
-  /** Present only for non-Issue task-scoped homes that must be removed after the run. */
-  temporaryTaskRoot?: string;
-}
-
-export interface IssueSessionRuntimeRoot {
-  sessionId: string;
-  root: string;
 }
 
 export interface TaskPrivateTempDirectory {
   storageRoot: string;
   path: string;
+  /**
+   * macOS only: the short `/tmp/remi-XXXXXXXX` symlink that TMPDIR/TMP/TEMP
+   * point at. Absent when the alias could not be created (the execution then
+   * falls back to the long real path) or on every other platform.
+   */
+  aliasPath?: string;
 }
 
 export interface PrepareIssueSessionProviderHomeOptions {
@@ -64,6 +91,8 @@ export interface PrepareIssueSessionProviderHomeOptions {
   linkCodexAuth?: boolean;
   /** Link the base Claude credentials file for subscription OAuth. Defaults to true. */
   linkClaudeCredentials?: boolean;
+  /** The home whose personal `.agents/skills` Codex must not load (ADR 0023); defaults to the user's. */
+  personalSkillsHome?: string;
 }
 
 export interface IssueSessionProviderEnvOptions {
@@ -87,52 +116,19 @@ const CLAUDE_PROVIDER_ENV_KEYS = new Set([
 ]);
 
 /**
- * Resolve the canonical Issue working root. The fallback branch is defensive:
- * legacy local-directory tasks still redirect runtime state away from the
- * user's checkout and into `${R}/issues`.
+ * Resolve provider-native state under the daemon's `env/` tree. One lane
+ * generation (conversation, agent, execution scope, generation) owns one home
+ * regardless of which surface (Issue, discussion, Chat, task) started the run.
  */
-export function resolveIssueRuntimeStateRoot(
+export function resolveTaskProviderHome(
   task: AgentTask,
-  workDir: string,
-  workspacesRoot: string,
-  localDirectory: boolean,
-): string {
-  if (!localDirectory) return resolve(workDir);
-  const issueId = cleanString(task.issueId ?? task.issue_id);
-  if (!issueId) return resolve(workspacesRoot);
-  const issueKey = cleanString(task.issue?.key) ?? `legacy-${issueId}`;
-  return join(resolve(workspacesRoot), "issues", safePathSegment(issueKey));
-}
-
-/**
- * Resolve provider-native state under the single daemon-owned runtime tree.
- * One product session/Agent/generation tuple owns one home regardless of which
- * surface (Issue, discussion, Chat) initiated the run.
- */
-export function resolveIssueSessionProviderHome(
-  task: AgentTask,
-  _workDir: string,
   workspacesRoot: string,
 ): IssueSessionProviderHome | null {
-  const formalSessionId = cleanString(task.issueSessionId ?? task.issue_session_id);
-  const issueId = cleanString(task.issueId ?? task.issue_id);
-  const sessionId = formalSessionId ?? (issueId ? `legacy-${issueId}` : null);
-  const agentId = cleanString(task.agent?.id);
+  const lane = laneForTask(task);
   const provider = task.agent?.provider;
-  if (!sessionId || !agentId || (provider !== "claude" && provider !== "codex" && provider !== "antigravity")) return null;
-
-  const generation = formalSessionId
-    ? positiveInteger(task.issueSessionGeneration ?? task.issue_session_generation, 1)
-    : 1;
+  if (!lane || (provider !== "claude" && provider !== "codex" && provider !== "grok" && provider !== "antigravity")) return null;
   const storageRoot = resolve(workspacesRoot);
-  const generationRoot = join(
-    storageRoot,
-    ".runtime",
-    safePathSegment(sessionId),
-    safePathSegment(agentId),
-    ...(task.execution_scope ? ["delegations", safePathSegment(task.execution_scope)] : []),
-    String(generation),
-  );
+  const generationRoot = laneGenerationDirectory(storageRoot, lane);
   const execution = provider === "codex" || (provider === "claude" && task.claudeProfile) ? providerExecutionIdentity(task) : null;
   const root = execution
     ? join(generationRoot, "executions", execution.segment)
@@ -141,141 +137,139 @@ export function resolveIssueSessionProviderHome(
     storageRoot,
     root,
     home: join(root, "home"),
-    sessionId,
-    agentId,
-    generation,
+    sessionId: lane.conversation,
+    agentId: lane.agentId,
+    generation: lane.generation,
     provider,
+    ...(task.runtimeWorkspaceId ? { runtimeWorkspaceId: task.runtimeWorkspaceId } : {}),
     ...(execution ? { executionFingerprint: execution.fingerprint } : {}),
-    runtimeStateRoot: join(storageRoot, ".runtime", safePathSegment(sessionId)),
   };
 }
 
-/** Find the runtime Session roots that belong to one Issue without following links. */
-export function listIssueSessionRuntimeRoots(
-  workspacesRoot: string,
-  issueId: string,
-): IssueSessionRuntimeRoot[] {
-  const runtimeRoot = join(resolve(workspacesRoot), ".runtime");
-  let rootInfo;
+/**
+ * The conversation directories of an Issue's `env/` tree, which hold the
+ * provider-native session history of every Session that worked on it. Links are
+ * never followed.
+ */
+export function listIssueConversationRoots(workspacesRoot: string, issueId: string): string[] {
+  const issueEnv = envDirectory(workspacesRoot, { kind: "issue", id: issueId });
+  let info;
   try {
-    rootInfo = lstatSync(runtimeRoot);
+    info = lstatSync(issueEnv);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
-    throw new Error(`Runtime state root must be a real directory: ${runtimeRoot}`);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`Issue environment root must be a real directory: ${issueEnv}`);
   }
+  return readdirSync(issueEnv, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name !== TASK_TMP_DIRECTORY)
+    .map((entry) => join(issueEnv, entry.name))
+    .sort();
+}
 
-  const roots: IssueSessionRuntimeRoot[] = [];
-  for (const entry of readdirSync(runtimeRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    const sessionRoot = join(runtimeRoot, entry.name);
-    const metadataPath = join(sessionRoot, ".multiremi", "gc.json");
+/** A Chat-owned Session must never inherit another owner's or linked Issue's history. */
+export function listTaskConversationRoots(workspacesRoot: string, task: AgentTask): string[] {
+  const subject = subjectForTask(task);
+  if (subject.kind === "issue") return listIssueConversationRoots(workspacesRoot, subject.id);
+  if (subject.kind !== "chat") return [];
+
+  const ownerRoot = envDirectory(workspacesRoot, subject);
+  const conversationRoot = join(ownerRoot, segment(conversationForTask(task, subject), "conversation id"));
+  for (const path of [ownerRoot, conversationRoot]) {
     try {
-      const metadataInfo = lstatSync(metadataPath);
-      if (!metadataInfo.isFile() || metadataInfo.isSymbolicLink()) continue;
-      const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
-      if (metadata.kind === "issue_runtime" && metadata.issue_id === issueId) {
-        roots.push({ sessionId: entry.name, root: sessionRoot });
-      }
+      const info = lstatSync(path);
+      if (!info.isDirectory() || info.isSymbolicLink()) return [];
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
     }
   }
-  return roots.sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+  return [conversationRoot];
 }
 
 /**
- * Resolve an isolated provider home for every daemon task. Issue tasks keep
- * their stable, archiveable Session lineage. Chats reuse one home until Chat
- * GC, while one-shot task kinds get a temporary task-scoped home. Both live in
- * daemon-owned runtime state, independent of the provider cwd.
+ * Create the private current directory of an Issue holder's lane generation.
+ * Task context, skill directories and attachments go here, never into the
+ * workspace the Issue's concurrent holders share.
  */
-export function resolveTaskProviderHome(
-  task: AgentTask,
-  issueRuntimeStateRoot: string,
-  workspacesRoot: string,
-): IssueSessionProviderHome | null {
-  const issueId = cleanString(task.issueId ?? task.issue_id);
-  if (issueId && !cleanString(task.chatSessionId)) {
-    const issueHome = resolveIssueSessionProviderHome(task, issueRuntimeStateRoot, workspacesRoot);
-    return issueHome;
-  }
-
-  const agentId = cleanString(task.agent?.id);
-  const provider = task.agent?.provider;
-  if (!agentId || (provider !== "claude" && provider !== "codex" && provider !== "antigravity")) return null;
-
-  const taskId = cleanString(task.id);
-  if (!taskId) throw new Error("Task provider home requires a task id");
-  const storageRoot = resolve(workspacesRoot);
-  const execution = provider === "codex" || (provider === "claude" && task.claudeProfile) ? providerExecutionIdentity(task) : null;
-  const chatSessionId = cleanString(task.chatSessionId);
-  if (chatSessionId) {
-    const runtimeStateRoot = join(storageRoot, ".runtime", safePathSegment(chatSessionId));
-    const providerRoot = join(
-      runtimeStateRoot,
-      safePathSegment(agentId),
-      "1",
-    );
-    const root = execution
-      ? join(providerRoot, "executions", execution.segment)
-      : providerRoot;
-    return {
-      storageRoot,
-      root,
-      home: join(root, "home"),
-      sessionId: chatSessionId,
-      agentId,
-      generation: 1,
-      provider,
-      ...(execution ? { executionFingerprint: execution.fingerprint } : {}),
-      runtimeStateRoot,
-    };
-  }
-
-  const temporaryTaskRoot = join(storageRoot, ".runtime", safePathSegment(taskId));
-  const providerRoot = join(
-    temporaryTaskRoot,
-    safePathSegment(agentId),
-    "1",
-  );
-  const root = execution
-    ? join(providerRoot, "executions", execution.segment)
-    : providerRoot;
-  return {
-    storageRoot,
-    root,
-    home: join(root, "home"),
-    sessionId: taskId,
-    agentId,
-    generation: 1,
-    provider,
-    ...(execution ? { executionFingerprint: execution.fingerprint } : {}),
-    runtimeStateRoot: temporaryTaskRoot,
-    temporaryTaskRoot,
-  };
-}
-
-/** Keep task configuration beside the provider home, never in shared repositories. */
-export async function prepareIssueExecutionDirectory(resolvedHome: IssueSessionProviderHome): Promise<string> {
-  const workDir = join(resolvedHome.root, "work");
-  await ensureRealDirectoryTree(resolvedHome.storageRoot, workDir, "Execution directory");
-  return workDir;
+export async function prepareIssueExecutionDirectory(storageRoot: string, lane: LaneIdentity): Promise<string> {
+  const root = resolve(storageRoot);
+  const directory = laneWorkDirectory(root, lane);
+  await ensureOwnedDirectory(root, directory, "Execution directory");
+  return directory;
 }
 
 /** Create one non-reused /tmp backing directory for a claimed task execution. */
 export async function prepareTaskPrivateTempDirectory(
-  resolvedHome: IssueSessionProviderHome,
+  storageRoot: string,
+  subject: StorageSubjectRef,
   taskId: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<TaskPrivateTempDirectory> {
-  const parent = join(resolvedHome.root, "task-tmp");
-  await ensureRealDirectoryTree(resolvedHome.storageRoot, parent, "Task private temp root");
-  const path = await mkdtemp(join(parent, `${safePathSegment(taskId)}-`));
+  const root = resolve(storageRoot);
+  const parent = taskTmpRoot(root, subject);
+  await ensureOwnedDirectory(root, parent, "Task private temp root");
+  const path = await mkdtemp(join(parent, `${segment(taskId, "task id")}-`));
   await chmod(path, 0o700);
   await assertRealDirectory(path, "Task private temp directory");
-  return { storageRoot: resolvedHome.storageRoot, path };
+  const aliasPath = platform === "darwin"
+    ? createTaskTmpAlias(path)
+    : null;
+  return { storageRoot: root, path, ...(aliasPath ? { aliasPath } : {}) };
+}
+
+/**
+ * Create a short `/tmp/remi-XXXXXXXX` symlink to the real task temp directory.
+ *
+ * Names come from the CSPRNG and `symlink()` is atomic, so an existing path is
+ * never reused or followed: EEXIST just picks another name. Deliberately no
+ * startup sweep for links left behind by a daemon crash — macOS prunes /tmp
+ * periodically, and a leftover link points at a directory that is already gone,
+ * so it can leak a name but never data.
+ */
+function createTaskTmpAlias(realDirectory: string): string | null {
+  for (let attempt = 0; attempt < TASK_TMP_ALIAS_ATTEMPTS; attempt += 1) {
+    const name = `${TASK_TMP_ALIAS_PREFIX}${randomBytes(4).toString("hex")}`;
+    const alias = join(TASK_TMP_ALIAS_DIRECTORY, name);
+    try {
+      symlinkSync(realDirectory, alias);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      log.warn(`Could not create task temp alias ${alias}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+    // Prove it is the link WE just made before anyone depends on it.
+    try {
+      const info = lstatSync(alias);
+      if (info.isSymbolicLink() && readlinkSync(alias) === realDirectory) return alias;
+      log.warn(`Task temp alias ${alias} is not the expected symlink; falling back to the long path`);
+      return null;
+    } catch (error) {
+      log.warn(`Could not verify task temp alias ${alias}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+  log.warn(`Could not allocate a unique task temp alias after ${TASK_TMP_ALIAS_ATTEMPTS} attempts`);
+  return null;
+}
+
+/**
+ * Remove the alias, never the directory it points at. Both the link identity
+ * and the target are re-checked first, so a re-used name or a foreign link is
+ * left alone.
+ */
+function removeTaskTmpAlias(aliasPath: string, realDirectory: string): void {
+  try {
+    const info = lstatSync(aliasPath);
+    if (!info.isSymbolicLink()) return;
+    if (readlinkSync(aliasPath) !== realDirectory) return;
+    unlinkSync(aliasPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    log.warn(`Could not remove task temp alias ${aliasPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Remove only the exact directory allocated to this execution. */
@@ -284,6 +278,9 @@ export async function cleanupTaskPrivateTempDirectory(
   assertRootOwner?: () => void,
 ): Promise<void> {
   if (!directory) return;
+  // Drop the short alias first: it only ever names the directory, and removing
+  // it cannot recurse into (or delete) anything else.
+  if (directory.aliasPath) removeTaskTmpAlias(directory.aliasPath, directory.path);
   const runtimeRelative = relative(resolve(directory.storageRoot), resolve(directory.path));
   if (!runtimeRelative || runtimeRelative === ".." || runtimeRelative.startsWith(`..${sep}`) || isAbsolute(runtimeRelative)) {
     throw new Error(`Task private temp directory escapes daemon storage: ${directory.path}`);
@@ -295,38 +292,11 @@ export async function cleanupTaskPrivateTempDirectory(
 export async function ensureProviderHomeDirectory(
   resolvedHome: IssueSessionProviderHome,
 ): Promise<void> {
-  await ensureRealDirectoryTree(
+  await ensureOwnedDirectory(
     resolvedHome.storageRoot,
     resolvedHome.root,
     "Provider Home",
   );
-}
-
-/** Remove provider-native state for a completed non-Issue task. */
-export async function cleanupTemporaryTaskProviderHome(
-  resolvedHome: IssueSessionProviderHome | null | undefined,
-  workspacesRoot: string,
-  assertRootOwner?: () => void,
-): Promise<void> {
-  const temporaryTaskRoot = resolvedHome?.temporaryTaskRoot;
-  if (!resolvedHome || !temporaryTaskRoot) return;
-
-  const ownerRoot = join(resolve(workspacesRoot), ".runtime");
-  const expectedTaskRoot = join(ownerRoot, safePathSegment(resolvedHome.sessionId));
-  if (resolve(temporaryTaskRoot) !== resolve(expectedTaskRoot)) {
-    throw new Error(`Temporary provider home escapes task runtime root: ${temporaryTaskRoot}`);
-  }
-  const relativeHome = relative(resolve(temporaryTaskRoot), resolve(resolvedHome.root));
-  if (
-    !relativeHome
-    || relativeHome === ".."
-    || relativeHome.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
-    || isAbsolute(relativeHome)
-  ) {
-    throw new Error(`Temporary provider home is not contained by its task runtime: ${resolvedHome.root}`);
-  }
-
-  removeOwnedDirectorySync(workspacesRoot, temporaryTaskRoot, { assertRootOwner });
 }
 
 /** Seed a provider Home once, then reconcile its non-secret routing on every start. */
@@ -337,13 +307,15 @@ export async function prepareIssueSessionProviderHome(
   await ensureProviderHomeDirectory(resolvedHome);
   // The lineage root may be genuine while its home child has been replaced by
   // a link. Validate the whole path before reading its marker or reconciling.
-  await ensureRealDirectoryTree(resolvedHome.storageRoot, resolvedHome.home, "Provider Home");
-  if (resolvedHome.provider === "antigravity") {
-    // agy owns its native OAuth/history directory; this home owns only Remi
-    // task context. Never seed it with Claude/Codex credentials.
-    await ensureRealDirectoryTree(resolvedHome.storageRoot, resolvedHome.home, "Antigravity context");
+  await ensureOwnedDirectory(resolvedHome.storageRoot, resolvedHome.home, "Provider Home");
+  if (resolvedHome.provider === "antigravity" || resolvedHome.provider === "grok") {
+    // Antigravity owns transcripts here; its settings are seeded per spawn
+    // by seedIssueSessionAntigravityHome, while gateway auth stays in the shim.
+    // Grok keeps native OAuth/history in its own directory. Neither home is
+    // seeded with Claude or Codex credentials.
+    await ensureOwnedDirectory(resolvedHome.storageRoot, resolvedHome.home, `${resolvedHome.provider} context`);
     await writeFile(join(resolvedHome.root, "meta.json"), JSON.stringify({
-      schemaVersion: 1, provider: "antigravity", sessionId: resolvedHome.sessionId,
+      schemaVersion: 1, provider: resolvedHome.provider, sessionId: resolvedHome.sessionId,
       agentId: resolvedHome.agentId, generation: resolvedHome.generation, providerHome: "home",
     }) + "\n", { mode: 0o600 });
     return {};
@@ -425,7 +397,48 @@ export async function prepareIssueSessionProviderHome(
   return codexModelCatalog ? { codexModelCatalog } : {};
 }
 
-async function ensureRealDirectoryTree(
+/**
+ * Seed `GEMINI_HOME/antigravity-acp/` before an Antigravity server starts
+ * (PR 4 §2): gateway auth selected in `settings.json`, and the run's cwd and
+ * workspace marked untrusted in `trusted_workspaces.json`, so repository hooks
+ * stay off and no trust prompt is asked. Rewritten on every start because the
+ * run's directories change; a linked or replaced file fails closed.
+ */
+export async function seedIssueSessionAntigravityHome(
+  resolvedHome: IssueSessionProviderHome,
+  directories: { cwd: string; workspaceDir?: string | null },
+): Promise<void> {
+  if (resolvedHome.provider !== "antigravity") return;
+  await ensureOwnedDirectory(resolvedHome.storageRoot, join(resolvedHome.home, "antigravity-acp"), "Antigravity settings");
+  for (const file of antigravityHomeFiles(directories)) {
+    await writePrivateFileIfChanged(join(resolvedHome.home, file.path), file.content);
+  }
+}
+
+/** Copy only the local agy login; settings, hooks and conversations stay isolated. */
+export async function seedIssueSessionNativeAntigravityHome(
+  resolvedHome: IssueSessionProviderHome,
+  baseHome: string,
+): Promise<void> {
+  if (resolvedHome.provider !== "antigravity") throw new Error("Native Antigravity requires an Antigravity home");
+  const directory = join(resolvedHome.home, "antigravity-cli");
+  await ensureOwnedDirectory(resolvedHome.storageRoot, directory, "Antigravity login");
+  let credential: string;
+  try {
+    credential = await readFile(join(baseHome, "antigravity-cli", "antigravity-oauth-token"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new Error("[antigravity_login_required] Sign in with agy on the Runtime machine using the daemon account");
+  }
+  if (!credential.trim()) throw new Error("[antigravity_login_required] The local agy login is empty; sign in again");
+  await writePrivateFileIfChanged(join(directory, "antigravity-oauth-token"), credential);
+}
+
+/**
+ * Create `target` below `storageRoot` one level at a time, refusing a link at any
+ * level so a daemon-owned path can never be redirected out of the root.
+ */
+export async function ensureOwnedDirectory(
   storageRoot: string,
   target: string,
   label: string,
@@ -521,18 +534,52 @@ async function reconcileIssueSessionProviderConfig(
     options.relayFragment ?? "",
     options.codexRelayUsesEnvApiKey === true,
     catalogState.status === "loaded" ? catalogPath : undefined,
+    options.codexPluginInstalled === true,
   );
-  if (options.sideConversation) {
+  const personalSkills = resolvedHome.runtimeWorkspaceId ? [] : personalCodexSkillFiles(options.personalSkillsHome ?? homedir());
+  if (options.sideConversation || personalSkills.length) {
     const config = parseToml(merged);
-    const inheritedInstructions = typeof config.developer_instructions === "string"
-      ? config.developer_instructions : "";
-    config.developer_instructions = [inheritedInstructions, SIDE_CONVERSATION_INSTRUCTIONS]
-      .filter(Boolean).join("\n\n");
+    if (options.sideConversation) {
+      const inheritedInstructions = typeof config.developer_instructions === "string"
+        ? config.developer_instructions : "";
+      config.developer_instructions = [inheritedInstructions, SIDE_CONVERSATION_INSTRUCTIONS]
+        .filter(Boolean).join("\n\n");
+    }
+    if (personalSkills.length) {
+      // Codex 0.163 always loads `$HOME/.agents/skills` (user scope) and has no switch for that root, only
+      // per-skill `[[skills.config]] enabled = false`. Rebuilt on every start, so a newly added one is covered next turn.
+      const skills = (config.skills && typeof config.skills === "object" && !Array.isArray(config.skills)
+        ? config.skills : {}) as Record<string, unknown>;
+      const entries = Array.isArray(skills.config) ? skills.config as Array<Record<string, unknown>> : [];
+      skills.config = [...entries.filter((entry) => !personalSkills.includes(String(entry?.path ?? ""))),
+        ...personalSkills.map((path) => ({ path, enabled: false }))];
+      config.skills = skills as typeof config[string];
+    }
     await writePrivateFileIfChanged(target, stringifyToml(config));
   } else {
     await writePrivateFileIfChanged(target, merged);
   }
   return catalogState;
+}
+
+/**
+ * The user's personal Codex skills (`$HOME/.agents/skills/<name>/SKILL.md`). An
+ * ordinary Agent session must not depend on whose machine runs it, so its config
+ * disables them by path (ADR 0023). Explicit development workspaces keep native user context.
+ */
+function personalCodexSkillFiles(home: string): string[] {
+  const root = join(home, ".agents", "skills");
+  let names: string[];
+  let real: string;
+  try {
+    real = realpathSync(root);
+    names = readdirSync(real).sort();
+  } catch {
+    return [];
+  }
+  return names.map((name) => join(real, name, "SKILL.md")).filter((file) => {
+    try { return lstatSync(file).isFile() || statSync(file).isFile(); } catch { return false; }
+  });
 }
 
 interface ProviderConfigBaseline {
@@ -742,7 +789,7 @@ export async function loadIssueSessionProviderEnv(
   resolvedHome: IssueSessionProviderHome,
   options: IssueSessionProviderEnvOptions = {},
 ): Promise<Record<string, string>> {
-  if (resolvedHome.provider === "antigravity") return {};
+  if (resolvedHome.provider === "antigravity" || resolvedHome.provider === "grok") return {};
   if (resolvedHome.provider === "claude") {
     const relayAuthoritative = options.relayFragment !== undefined
       || options.relayAuthToken !== undefined;
@@ -879,19 +926,6 @@ async function pathExists(path: string): Promise<boolean> {
 
 function cleanString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function positiveInteger(value: unknown, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function safePathSegment(value: string): string {
-  const segment = value.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  if (!segment || segment === "." || segment === "..") {
-    throw new Error(`invalid Issue Session path segment: ${JSON.stringify(value)}`);
-  }
-  return segment;
 }
 
 function isNotFound(error: unknown): boolean {

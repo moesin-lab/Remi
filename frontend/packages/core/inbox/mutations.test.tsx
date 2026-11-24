@@ -1,140 +1,42 @@
-/**
- * @vitest-environment jsdom
- */
+/** @vitest-environment jsdom */
 import type { ReactNode } from "react";
-import { act, renderHook } from "@testing-library/react";
-import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { setApiInstance } from "../api";
-import type { ApiClient } from "../api/client";
-import type { InboxItem, InboxPage } from "../types";
-import { useArchiveInbox, useArchiveInboxItems } from "./mutations";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useMarkAllInboxRead, useMarkInboxRead } from "./mutations";
 import { inboxKeys } from "./queries";
-
-vi.mock("../hooks", () => ({
-  useWorkspaceId: () => "ws-1",
-}));
-
-function makeItem(id: string, type: InboxItem["type"]): InboxItem {
-  return {
-    id,
-    workspace_id: "ws-1",
-    recipient_type: "member",
-    recipient_id: "member-1",
-    actor_type: null,
-    actor_id: null,
-    type,
-    severity: "info",
-    issue_id: "issue-1",
-    title: id,
-    body: null,
-    issue_status: "done",
-    read: false,
-    archived: false,
-    created_at: "2026-08-25T10:00:00.000Z",
-    details: null,
-  };
-}
-
-function createWrapper(queryClient: QueryClient) {
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
-  };
-}
-
-describe("useArchiveInbox", () => {
-  let queryClient: QueryClient;
-  const archiveInbox = vi.fn();
-
-  beforeEach(() => {
-    queryClient = new QueryClient({
-      defaultOptions: { mutations: { retry: false } },
-    });
-    archiveInbox.mockResolvedValue(makeItem("ledger-selected", "autopilot_run_failed"));
-    setApiInstance({ archiveInbox } as unknown as ApiClient);
+const mock = vi.hoisted(() => ({ wsId: "ws-1", markInboxRead: vi.fn(), markAllInboxRead: vi.fn() }));
+vi.mock("../api", () => ({ api: mock }));
+vi.mock("../hooks", () => ({ useWorkspaceId: () => mock.wsId }));
+let qc: QueryClient;
+const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+beforeEach(() => { vi.clearAllMocks(); mock.wsId = "ws-1"; qc = new QueryClient({ defaultOptions: { mutations: { retry: false } } }); });
+describe("inbox cursor mutations", () => {
+  it("waits for the server cursor and leaves unread data intact on failure", async () => {
+    const cached = { unread_count: 8 }; qc.setQueryData(inboxKeys.summary("ws-1"), cached);
+    mock.markInboxRead.mockRejectedValue(new Error("offline"));
+    const { result } = renderHook(() => useMarkInboxRead(), { wrapper });
+    await act(async () => { await expect(result.current.mutateAsync({ session_id: "sess-1", to_seq: 4 })).rejects.toThrow("offline"); });
+    expect(mock.markInboxRead).toHaveBeenCalledTimes(1);
+    expect(qc.getQueryData(inboxKeys.summary("ws-1"))).toEqual(cached);
   });
-
-  afterEach(() => {
-    queryClient.clear();
-    vi.clearAllMocks();
+  it("returns the authoritative monotonic cursor and invalidates the originating workspace", async () => {
+    let resolve!: (data: { session_id: string; cursor_seq: number }) => void;
+    mock.markInboxRead.mockReturnValue(new Promise(r => { resolve = r; }));
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const { result, rerender } = renderHook(() => useMarkInboxRead(), { wrapper });
+    let pending!: Promise<unknown>;
+    await act(async () => { pending = result.current.mutateAsync({ session_id: "sess-1", to_seq: 4 }); });
+    mock.wsId = "ws-2"; rerender();
+    await act(async () => { resolve({ session_id: "sess-1", cursor_seq: 9 }); await pending; });
+    await waitFor(() => expect(result.current.data).toEqual({ session_id: "sess-1", cursor_seq: 9 }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: inboxKeys.all("ws-1") });
   });
-
-  it("optimistically archives only the requested row when an issue has several notifications", async () => {
-    const key = inboxKeys.list("ws-1");
-    queryClient.setQueryData<InboxItem[]>(key, [
-      makeItem("ledger-selected", "autopilot_run_failed"),
-      makeItem("ledger-neighbor", "autopilot_run_completed"),
-      makeItem("action-neighbor", "comment_mention"),
-    ]);
-    const { result } = renderHook(() => useArchiveInbox(), {
-      wrapper: createWrapper(queryClient),
-    });
-
-    await act(async () => {
-      await result.current.mutateAsync("ledger-selected");
-    });
-
-    expect(archiveInbox).toHaveBeenCalledWith("ledger-selected");
-    const after = queryClient.getQueryData<InboxItem[]>(key);
-    expect(after?.map(({ id, archived, read }) => ({ id, archived, read }))).toEqual([
-      { id: "ledger-selected", archived: true, read: true },
-      { id: "ledger-neighbor", archived: false, read: false },
-      { id: "action-neighbor", archived: false, read: false },
-    ]);
-  });
-
-  it("archives every immutable row covered by a collapsed run entry", async () => {
-    const key = inboxKeys.list("ws-1");
-    queryClient.setQueryData<InboxItem[]>(key, [
-      makeItem("run-latest", "autopilot_run_completed"),
-      makeItem("run-earlier", "autopilot_run_completed"),
-      makeItem("run-failed", "autopilot_run_failed"),
-    ]);
-    const { result } = renderHook(() => useArchiveInboxItems(), {
-      wrapper: createWrapper(queryClient),
-    });
-
-    await act(async () => {
-      await result.current.mutateAsync(["run-latest", "run-earlier"]);
-    });
-
-    expect(archiveInbox).toHaveBeenCalledTimes(2);
-    expect(archiveInbox).toHaveBeenCalledWith("run-latest");
-    expect(archiveInbox).toHaveBeenCalledWith("run-earlier");
-    expect(queryClient.getQueryData<InboxItem[]>(key)?.map(({ id, archived }) => ({ id, archived })))
-      .toEqual([
-        { id: "run-latest", archived: true },
-        { id: "run-earlier", archived: true },
-        { id: "run-failed", archived: false },
-      ]);
-  });
-
-  it("updates the paged inbox cache optimistically", async () => {
-    const key = inboxKeys.pages("ws-1");
-    queryClient.setQueryData<InfiniteData<InboxPage>>(key, {
-      pages: [{
-        items: [
-          makeItem("run-latest", "autopilot_run_completed"),
-          makeItem("run-earlier", "autopilot_run_completed"),
-        ],
-        limit: 50,
-        has_more: false,
-        next_cursor: null,
-      }],
-      pageParams: [null],
-    });
-    const { result } = renderHook(() => useArchiveInboxItems(), {
-      wrapper: createWrapper(queryClient),
-    });
-
-    await act(async () => {
-      await result.current.mutateAsync(["run-latest"]);
-    });
-
-    const after = queryClient.getQueryData<InfiniteData<InboxPage>>(key);
-    expect(after?.pages[0]?.items.map(({ id, archived }) => ({ id, archived }))).toEqual([
-      { id: "run-latest", archived: true },
-      { id: "run-earlier", archived: false },
-    ]);
+  it("uses one all-read command instead of enumerating loaded pages", async () => {
+    mock.markAllInboxRead.mockResolvedValue({ conversations_read: 10 });
+    const { result } = renderHook(() => useMarkAllInboxRead(), { wrapper });
+    await act(async () => { await result.current.mutateAsync(); });
+    expect(mock.markAllInboxRead).toHaveBeenCalledTimes(1);
+    expect(mock.markInboxRead).not.toHaveBeenCalled();
   });
 });

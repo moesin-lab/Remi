@@ -1,5 +1,18 @@
 export type {
+  AnswerIssueDecisionInput,
+  MultiremiIssueDecision,
+  MultiremiIssueDecisionAnswer,
+  MultiremiIssueDecisionAnswererType,
+  MultiremiIssueDecisionBucket,
+  MultiremiIssueDecisionEntry,
+  MultiremiIssueDecisionKind,
+  MultiremiIssueDecisionList,
+  MultiremiIssueDecisionStatus,
+} from "@multiremi/contracts";
+export type {
   Issue,
+  CreatedIssue,
+  IssueDependency,
   IssueStatus,
   IssuePriority,
   IssueAssigneeType,
@@ -81,8 +94,6 @@ export type {
   BotMenuUserIdType,
   BotMenuBehavior,
   BotMenuItem,
-  BotMenuTarget,
-  BotMenuAudience,
   BotMenuConfig,
   BotMenuResponse,
   BotMenuPublishResponse,
@@ -122,14 +133,18 @@ export type {
 export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse } from "./notification-preference";
 export type { Comment, CommentType, CommentAuthorType, Reaction } from "./comment";
 export type {
+  Session,
+  SessionStatus,
   IssueSession,
   IssueSessionStatus,
   SessionParticipant,
   SessionParticipantType,
   SessionEvent,
   SessionResult,
+  CreateSessionRequest,
   CreateIssueSessionRequest,
   CreateSessionTaskRequest,
+  SessionTask,
   IssueSessionTask,
 } from "./issue-session";
 export type { Label, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse } from "./label";
@@ -142,7 +157,7 @@ export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
-export type { ChatSession, ChatMessage, ChatMessagesPage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse, ChatQueuedTask, CreateChatSessionInput, UpdateChatSessionInput, PrioritizeChatQueuedTaskResponse } from "./chat";
+export type { ChatSession, ChatOrigin, ChatOriginFilter, ChatMessage, ChatMessagesPage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse, CreateChatSessionInput, UpdateChatSessionInput, ChatBackgroundTask, ChatBackgroundTasksSnapshot, ChatBackgroundStopTarget } from "./chat";
 export type { StorageAdapter } from "./storage";
 export type {
   Project,
@@ -180,6 +195,7 @@ export type {
   KnowledgeAgentSummary,
   KnowledgeTaskSummary,
   KnowledgeSubmission,
+  KnowledgeSubmissionListItem,
   KnowledgeCompilationRun,
   KnowledgeCompilationSource,
   KnowledgeArtifactSummary,

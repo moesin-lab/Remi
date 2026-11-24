@@ -6,6 +6,7 @@ import { Button } from "@multiremi/ui/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multiremi/ui/components/ui/tooltip"
 import { cn } from '@multiremi/ui/lib/utils'
 import { copyText } from '../lib/clipboard'
+import { useCopyFeedback } from '../hooks/use-copy-feedback'
 import {
   CODE_LIGATURE_CLASS,
   CODE_LIGATURE_DESCENDANT_CLASS,
@@ -70,7 +71,7 @@ export function CodeBlock({
   const { t } = useTranslation("ui")
   const [highlighted, setHighlighted] = React.useState<string | null>(null)
   const [isLoading, setIsLoading] = React.useState(true)
-  const [copied, setCopied] = React.useState(false)
+  const [copied, markCopied] = useCopyFeedback()
 
   // Resolve language alias - keep as string to allow 'text' fallback
   const langLower = language.toLowerCase()
@@ -135,11 +136,8 @@ export function CodeBlock({
   }, [code, resolvedLang])
 
   const handleCopy = React.useCallback(async () => {
-    if (await copyText(code)) {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
-  }, [code])
+    if (await copyText(code)) markCopied()
+  }, [code, markCopied])
 
   // Terminal mode: raw monospace with minimal styling
   if (mode === 'terminal') {
@@ -153,8 +151,11 @@ export function CodeBlock({
   // Minimal mode: just syntax highlighting, no chrome
   if (mode === 'minimal') {
     if (isLoading || !highlighted) {
+      // The highlighted branch below forces `break-all` onto the rendered
+      // `<pre>`; the placeholder has to wrap identically or a long line
+      // re-flows the whole block the moment Shiki resolves, which is a jump.
       return (
-        <pre className={cn('font-mono text-sm whitespace-pre-wrap', CODE_LIGATURE_CLASS, className)}>
+        <pre className={cn('font-mono text-sm whitespace-pre-wrap break-all', CODE_LIGATURE_CLASS, className)}>
           <code className={cn('font-mono', CODE_LIGATURE_CLASS)}>{code}</code>
         </pre>
       )
@@ -193,7 +194,7 @@ export function CodeBlock({
                 variant="ghost"
                 size="icon-xs"
                 onClick={handleCopy}
-                className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+                className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
                 aria-label={t(($) => $.copy_code)}
               >
                 {copied ? (

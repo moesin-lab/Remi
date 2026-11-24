@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 /**
  * Multiremi CLI — supported runtime providers and daemon health probing.
  *
@@ -6,9 +7,9 @@
 
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
-import { createRuntimeProvider, resolveAntigravityExecutable } from "@acp/index.js";
+import { createRuntimeProvider, installedAntigravity } from "@acp/index.js";
 
-export const SUPPORTED_DAEMON_PROVIDERS = ["claude", "codex", "antigravity"] as const;
+export const SUPPORTED_DAEMON_PROVIDERS = ["claude", "codex", "grok", "antigravity"] as const;
 
 export type SupportedDaemonProvider = typeof SUPPORTED_DAEMON_PROVIDERS[number];
 
@@ -107,7 +108,7 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await proxyFetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -125,19 +126,20 @@ export function detectMultiremiProviders(options: {
   pathEnv?: string;
   pathExt?: string;
   canExecute?: (path: string) => boolean;
+  /** Installed gateway server; local agy on PATH is also a candidate. */
+  antigravityInstalled?: () => boolean;
 } = {}): SupportedDaemonProvider[] {
   const pathEnv = options.pathEnv ?? process.env.PATH ?? "";
   const canExecute = options.canExecute ?? isExecutable;
   const paths = pathEnv.split(delimiter).filter(Boolean);
   const extensions = executableExtensions(options.pathExt);
   return SUPPORTED_DAEMON_PROVIDERS.filter((provider) => {
-    if (provider === "antigravity") {
-      const executable = resolveAntigravityExecutable();
-      if (executable !== "agy" && canExecute(executable)) return true;
-    }
+    if (provider === "antigravity" && (options.antigravityInstalled ?? (() => installedAntigravity() !== null))()) return true;
     const commands = provider === "claude"
       ? ["remi-claude-agent-acp", "claude-agent-acp", "claude"]
-      : provider === "codex" ? ["codex-acp", "codex"] : ["agy"];
+      : provider === "codex"
+        ? ["codex-acp", "codex"]
+        : provider === "grok" ? ["grok"] : provider === "antigravity" ? ["agy"] : [];
     return paths.some((dir) => commands.some((command) => {
       return extensions.some((extension) => canExecute(join(dir, `${command}${extension}`)));
     }));
@@ -148,7 +150,9 @@ export async function resolveHealthyDaemonProviders(explicitProvider: SupportedD
   const candidates = explicitProvider ? [explicitProvider] : detectMultiremiProviders();
   const healthy: SupportedDaemonProvider[] = [];
   for (const provider of candidates) {
-    const checker = createRuntimeProvider({ agentType: provider });
+    const checker = createRuntimeProvider({ agentType: provider,
+      antigravityNative: provider === "antigravity" && !!Bun.which("agy", { PATH: process.env.PATH }),
+    });
     try {
       if (await checker.healthCheck()) {
         healthy.push(provider);

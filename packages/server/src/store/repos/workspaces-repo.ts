@@ -1,7 +1,13 @@
 // Workspaces / members / users / invitations / notification preferences domain, plus the
 // workspace-scoped model-gateway relay config. Extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
+import { writeWorkspaceBotMenu } from "@multiremi/bot-menu/config.js";
 import { createId, nowIso } from "@multiremi/ids.js";
+import { ExecutionEndpointsRepo } from "./execution-endpoints-repo.js";
+import { endpointProtocolBaseUrl, providerEndpointProtocol } from "@multiremi/contracts/execution-endpoint.js";
+import { extractBaseUrl } from "@multiremi/relay/fragment.js";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { refreshResponsibilityEntityChange } from '../issue-responsibility-changes.js';
 import {
   cleanOptionalString,
   hasAnyField,
@@ -12,7 +18,9 @@ import {
   uniqueRefMatch,
 } from "@multiremi/store/helpers.js";
 import { type StoreContext } from "@multiremi/store/context.js";
+import { memoizeRequestRead, activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
 import type {
+  BotMenuConfig,
   CreateWorkspaceInput,
   CreateWorkspaceInvitationInput,
   CreateWorkspaceMemberInput,
@@ -30,11 +38,14 @@ import type {
 
 type Row = Record<string, unknown>;
 
-export type RelayEngine = "claude" | "codex";
+export type RelayEngine = "claude" | "codex" | "antigravity";
 export interface RelayEngineConfig {
   fragment: string;
   authToken: string;
   revision: number;
+  authHeader?: "bearer" | "x-api-key";
+  endpointId?: string;
+  headers?: Record<string, string>;
 }
 export interface RelayEngineBrowser {
   fragment: string;
@@ -44,11 +55,13 @@ export interface RelayEngineBrowser {
 export interface RelayConfigForDaemon {
   claude: RelayEngineConfig | null;
   codex: RelayEngineConfig | null;
+  antigravity: RelayEngineConfig | null;
   modelDiscovery: boolean;
 }
 export interface RelayConfigForBrowser {
   claude: RelayEngineBrowser | null;
   codex: RelayEngineBrowser | null;
+  antigravity: RelayEngineBrowser | null;
   modelDiscovery: boolean;
 }
 export interface GatewayModelsSnapshot {
@@ -81,6 +94,14 @@ export interface GatewayModelReasoningDecl {
   updatedAt: string;
 }
 
+/** Presence means 1M enabled; disabling deletes the declaration. */
+export interface GatewayModelContextDecl {
+  modelId: string;
+  contextWindow: "1m";
+  updatedBy: string | null;
+  updatedAt: string;
+}
+
 export class WorkspaceDaemonRetirementRequiredError extends Error {
   readonly code = "daemon_retirement_required";
 
@@ -108,6 +129,40 @@ export class WorkspaceSshMeshCleanupRequiredError extends Error {
 export class WorkspacesRepo {
   constructor(private ctx: StoreContext) {}
 
+  /** Historical members remain resolvable; only this row is the current operator. */
+  getWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember | null {
+    const row = this.ctx.db.query(`SELECT member.* FROM multiremi_workspace_members member
+      JOIN multiremi_workspaces workspace ON workspace.id = member.workspace_id
+      WHERE member.workspace_id = ? AND member.user_id = 'local'
+      ORDER BY CASE WHEN member.id = ? THEN 0 ELSE 1 END, member.created_at, member.id LIMIT 1`)
+      .get(workspaceId, `mem_${workspaceId}_local`) as Row | null;
+    return row ? { ...toWorkspaceMember(row), name: "Operator", email: null, role: "owner", archivedAt: null } : null;
+  }
+
+  ensureWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember {
+    if (!this.getWorkspace(workspaceId)) throw new Error("workspace not found");
+    const ready = this.getWorkspaceOperator(workspaceId);
+    const stored = ready ? this.getWorkspaceMember(ready.id) : null;
+    if (ready && stored?.role === "owner" && !stored.archivedAt) return ready;
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      // Legacy databases may not have the shared user yet. Acquire the
+      // workspace lifecycle lock before inserting any operator identity rows.
+      this.getCurrentUser();
+      const existing = this.getWorkspaceOperator(workspaceId);
+      if (existing) {
+        this.ctx.db.run("UPDATE multiremi_workspace_members SET role = 'owner', archived_at = NULL WHERE id = ?", [existing.id]);
+        return this.getWorkspaceOperator(workspaceId)!;
+      }
+      const id = `mem_${workspaceId}_local`;
+      // Do not overwrite an unrelated historical row if its id is occupied.
+      let stableId = id;
+      for (let suffix = 1; this.getWorkspaceMember(stableId); suffix++) stableId = `operator_${workspaceId}_local_${suffix}`;
+      this.createWorkspaceMember({ id: stableId, workspaceId, userId: "local", name: "Operator", role: "owner" });
+      return this.getWorkspaceOperator(workspaceId)!;
+    })();
+  }
+
   createWorkspaceMember(input: CreateWorkspaceMemberInput): MultiremiWorkspaceMember {
     if (!input.name?.trim()) throw new Error("Member name is required");
     const id = input.id ?? createId("mem");
@@ -131,7 +186,8 @@ export class WorkspacesRepo {
   }
 
   getWorkspaceMember(id: string): MultiremiWorkspaceMember | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE id = ?").get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_workspace_members'], `member:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE id = ?").get(id) as Row | null);
     return row ? toWorkspaceMember(row) : null;
   }
 
@@ -151,43 +207,56 @@ export class WorkspacesRepo {
     );
   }
 
-  listWorkspaceMembers(workspaceId?: string | null): MultiremiWorkspaceMember[] {
+  listWorkspaceMembers(workspaceId?: string | null, options: { includeArchived?: boolean } = {}): MultiremiWorkspaceMember[] {
+    // `findWorkspaceMemberForUser` re-lists this table for every role check, and one heartbeat
+    // makes that check twice. Membership writes invalidate the table's entries.
+    const cache = workspaceId ? activeRequestReadCache() : null;
+    const key = cacheKey("multiremi_workspace_members", options.includeArchived ? "list-archived" : "list", workspaceId ?? "");
+    const cached = cache?.get<MultiremiWorkspaceMember[]>(key);
+    if (cached !== undefined) return cached;
+    const activeOnly = options.includeArchived ? "1 = 1" : "archived_at IS NULL";
     const rows = workspaceId
-      ? this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE workspace_id = ? AND archived_at IS NULL ORDER BY name ASC").all(workspaceId) as Row[]
-      : this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE archived_at IS NULL ORDER BY workspace_id ASC, name ASC").all() as Row[];
-    return rows.map(toWorkspaceMember);
+      ? this.ctx.db.query(`SELECT * FROM multiremi_workspace_members WHERE workspace_id = ? AND ${activeOnly} ORDER BY name ASC`).all(workspaceId) as Row[]
+      : this.ctx.db.query(`SELECT * FROM multiremi_workspace_members WHERE ${activeOnly} ORDER BY workspace_id ASC, name ASC`).all() as Row[];
+    const members = rows.map(toWorkspaceMember);
+    cache?.set(key, members);
+    return members;
   }
 
   updateWorkspaceMember(id: string, input: UpdateWorkspaceMemberInput): MultiremiWorkspaceMember {
-    const current = this.getWorkspaceMember(id);
-    if (!current) throw new Error(`Member not found: ${id}`);
-    const nextWorkspaceId = input.workspaceId ?? current.workspaceId;
-    const nextRole = input.role ?? current.role;
-    if (!current.archivedAt && nextWorkspaceId !== current.workspaceId) {
-      this.assertMemberHasNoActiveDaemonIdentity(current);
-    }
-    if (current.role === "owner" && (nextRole !== "owner" || nextWorkspaceId !== current.workspaceId)) {
-      this.assertWorkspaceKeepsOwner(current);
-    }
-    const now = nowIso();
-    this.ctx.db.run(
-      `UPDATE multiremi_workspace_members SET
-        workspace_id = ?,
-        name = ?,
-        email = ?,
-        role = ?,
-        updated_at = ?
-       WHERE id = ?`,
-      [
-        nextWorkspaceId,
-        input.name ?? current.name,
-        input.email === undefined ? current.email : input.email,
-        nextRole,
-        now,
-        id,
-      ],
-    );
-    return this.getWorkspaceMember(id)!;
+    return this.ctx.db.transaction(() => {
+      const current = this.getWorkspaceMember(id);
+      if (!current) throw new Error(`Member not found: ${id}`);
+      const nextWorkspaceId = input.workspaceId ?? current.workspaceId;
+      for (const workspaceId of [...new Set([current.workspaceId,nextWorkspaceId])].sort()) this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const nextRole = input.role ?? current.role;
+      if (!current.archivedAt && nextWorkspaceId !== current.workspaceId) {
+        this.assertMemberHasNoActiveDaemonIdentity(current);
+      }
+      if (current.role === "owner" && (nextRole !== "owner" || nextWorkspaceId !== current.workspaceId)) {
+        this.assertWorkspaceKeepsOwner(current);
+      }
+      const now = nowIso();
+      this.ctx.db.run(
+        `UPDATE multiremi_workspace_members SET
+          workspace_id = ?,
+          name = ?,
+          email = ?,
+          role = ?,
+          updated_at = ?
+         WHERE id = ?`,
+        [
+          nextWorkspaceId,
+          input.name ?? current.name,
+          input.email === undefined ? current.email : input.email,
+          nextRole,
+          now,
+          id,
+        ],
+      );
+      if (nextWorkspaceId !== current.workspaceId) refreshResponsibilityEntityChange(this.ctx,'member',id,'responsible_human_workspace_changed',[current.workspaceId]);
+      return this.getWorkspaceMember(id)!;
+    })();
   }
 
   archiveWorkspaceMember(id: string): MultiremiWorkspaceMember {
@@ -198,11 +267,13 @@ export class WorkspacesRepo {
     const now = nowIso();
     const affectedProjects: Array<{ id: string; workspace_id: string }> = [];
     const tx = this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(current.workspaceId);
       affectedProjects.push(...this.ctx.db.query(
         `SELECT id, workspace_id FROM multiremi_projects
          WHERE default_assignee_type = 'member' AND default_assignee_id = ?`,
       ).all(id) as Array<{ id: string; workspace_id: string }>);
       this.ctx.db.run("UPDATE multiremi_workspace_members SET archived_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
+      if (!current.archivedAt) refreshResponsibilityEntityChange(this.ctx,'member',id,'responsible_human_archived');
       this.ctx.db.run(
         `UPDATE multiremi_projects
          SET default_assignee_type = NULL, default_assignee_id = NULL, updated_at = ?
@@ -267,12 +338,15 @@ export class WorkspacesRepo {
     const existing = this.getUser("local");
     if (existing) return existing;
     const now = nowIso();
+    // Another API process can create the default user after our read. Keep
+    // its profile intact and read back the winning row.
     this.ctx.db.run(
       `INSERT INTO multiremi_users (
         id, name, email, avatar_url, language, timezone, onboarded_at,
         onboarding_questionnaire, starter_content_state, profile_description,
         created_at, updated_at
-      ) VALUES ('local', 'Local User', 'local@multiremi.local', NULL, NULL, NULL, NULL, '{}', NULL, '', ?, ?)`,
+      ) VALUES ('local', 'Local User', 'local@multiremi.local', NULL, NULL, NULL, NULL, '{}', NULL, '', ?, ?)
+      ON CONFLICT (id) DO NOTHING`,
       [now, now],
     );
     return this.getUser("local")!;
@@ -486,12 +560,38 @@ export class WorkspacesRepo {
     return rows.map(toWorkspace);
   }
 
+  hasWorkspace(id: string): boolean {
+    const cache = activeRequestReadCache();
+    const row = cache?.get<Row | null>(cacheKey("multiremi_workspaces", "row", id));
+    if (row !== undefined) return row !== null;
+    const key = cacheKey("multiremi_workspaces", "exists", id);
+    const cached = cache?.get<boolean>(key);
+    if (cached !== undefined) return cached;
+    const exists = Boolean(this.ctx.db.query("SELECT id FROM multiremi_workspaces WHERE id = ?").get(id));
+    cache?.set(key, exists);
+    return exists;
+  }
+
   getWorkspace(id: string): MultiremiWorkspace | null {
+    // Several places in one request need the workspace (auth guard, response assembly, relays).
+    // Reads are cached per request and any write to the table — including the lifecycle lock's
+    // no-op self-write — invalidates them, so a read after a write still sees the write.
+    const cache = activeRequestReadCache();
+    const key = cacheKey("multiremi_workspaces", "row", id);
+    if (cache) {
+      const cached = cache.get<Row | null>(key);
+      if (cached !== undefined) return cached ? toWorkspace(cached) : null;
+    }
     const row = this.ctx.db.query("SELECT * FROM multiremi_workspaces WHERE id = ?").get(id) as Row | null;
+    cache?.set(key, row);
     return row ? toWorkspace(row) : null;
   }
 
   createWorkspace(input: CreateWorkspaceInput, actingUserId?: string | null): MultiremiWorkspace {
+    return this.createWorkspaceWithOperator(input);
+  }
+
+  private createWorkspaceWithOperator(input: CreateWorkspaceInput, ifAbsent = false): MultiremiWorkspace {
     const name = String(input.name ?? "").trim();
     const slug = normalizeWorkspaceSlug(input.slug ?? slugifyWorkspaceName(name));
     if (!name || !slug) throw new Error("name and slug are required");
@@ -501,7 +601,7 @@ export class WorkspacesRepo {
     this.ctx.db.run(
       `INSERT INTO multiremi_workspaces (
         id, name, slug, description, context, settings, repos, issue_prefix, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)${ifAbsent ? ' ON CONFLICT (id) DO NOTHING' : ''}`,
       [
         id,
         name,
@@ -515,22 +615,26 @@ export class WorkspacesRepo {
         now,
       ],
     );
-    // The authenticated creator (not the legacy "local" user) becomes the owner,
-    // otherwise a new user could create a workspace they cannot access.
-    const user = this.resolveActingUser(actingUserId);
-    const memberId = `mem_${id}_${user.id}`;
-    if (!this.getWorkspaceMember(memberId)) {
-      this.createWorkspaceMember({
-        id: memberId,
-        workspaceId: id,
-        userId: user.id,
-        name: user.name,
-        email: user.email,
-        role: "owner",
-      });
-    }
+    // All workspaces use the shared local operator identity.
+    const user = this.getCurrentUser();
+    // The row is visible before its operator exists. Startup in a peer can
+    // repair that operator now, so use the same lifecycle lock and re-read.
+    this.ensureWorkspaceOperator(id);
     this.ctx.db.run("UPDATE multiremi_users SET onboarded_at = COALESCE(onboarded_at, ?), updated_at = ? WHERE id = ?", [now, now, user.id]);
     return this.getWorkspace(id)!;
+  }
+
+  updateBotMenu(workspaceId: string, botId: string, menu: BotMenuConfig): MultiremiWorkspace | null {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const workspace = this.getWorkspace(workspaceId);
+      if (!workspace || (botId !== "default" && !this.ctx.db.query(
+        "SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?",
+      ).get(workspaceId, botId))) return null;
+      return this.updateWorkspace(workspaceId, {
+        settings: writeWorkspaceBotMenu(workspace.settings, botId, menu),
+      });
+    })();
   }
 
   updateWorkspace(id: string, input: Partial<CreateWorkspaceInput>): MultiremiWorkspace {
@@ -574,6 +678,10 @@ export class WorkspacesRepo {
       values,
     );
     if (result.changes === 0) throw new Error(`Workspace not found: ${id}`);
+    if (input.settings !== undefined) {
+      this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId: id,
+        actorType: "system", actorId: null, payload: { reason: "workspace_settings_changed" } });
+    }
     return this.getWorkspace(id)!;
   }
 
@@ -591,11 +699,13 @@ export class WorkspacesRepo {
       this.ctx.db.run("DELETE FROM multiremi_daemon_ssh_mesh_states WHERE workspace_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_workspace_ssh_mesh WHERE workspace_id = ?", [id]);
       const now = nowIso();
+      const membersToArchive=this.ctx.db.query('SELECT id FROM multiremi_workspace_members WHERE workspace_id=? AND archived_at IS NULL').all(id);
       this.ctx.db.run("UPDATE multiremi_workspace_members SET archived_at = COALESCE(archived_at, ?), updated_at = ? WHERE workspace_id = ?", [
         now,
         now,
         id,
       ]);
+      for(const member of membersToArchive)refreshResponsibilityEntityChange(this.ctx,'member',String(member.id),'responsible_human_workspace_deleted');
       return true;
     })();
   }
@@ -739,7 +849,9 @@ export class WorkspacesRepo {
   ensureLocalWorkspace(): MultiremiWorkspace {
     const existing = this.getWorkspace("local");
     if (existing) return existing;
-    return this.createWorkspace({ id: "local", name: "Local Workspace", slug: "local", issuePrefix: "MUL" });
+    // A row lock cannot protect a workspace that does not exist yet. Let the
+    // primary key select the winner, preserve its settings, then read it back.
+    return this.createWorkspaceWithOperator({ id: "local", name: "Local Workspace", slug: "local", issuePrefix: "MUL" }, true);
   }
 
   // ── Workspace env (task-session environment variables) ─────────
@@ -772,15 +884,51 @@ export class WorkspacesRepo {
   // ── Model gateway: relay config ────────────────────────────────
 
   private relayRow(workspaceId: string, engine: RelayEngine): RelayEngineConfig | null {
+    const cache = activeRequestReadCache();
+    const key = cacheKey("multiremi_relay_config", workspaceId, engine);
+    const cached = cache?.get<RelayEngineConfig | null>(key);
+    if (cached !== undefined) return cached;
     const row = this.ctx.db
-      .query("SELECT fragment, auth_token, revision FROM multiremi_relay_config WHERE workspace_id = ? AND engine = ?")
+      .query("SELECT fragment, auth_token, revision, endpoint_id FROM multiremi_relay_config WHERE workspace_id = ? AND engine = ?")
       .get(workspaceId, engine) as Row | null;
-    if (!row) return null;
-    return {
+    if (!row) {
+      cache?.set(key, null);
+      return null;
+    }
+    const value: RelayEngineConfig = {
       fragment: String(row.fragment ?? ""),
       authToken: String(row.auth_token ?? ""),
       revision: Number(row.revision ?? 0),
     };
+    if (row.endpoint_id) {
+      const endpoint = new ExecutionEndpointsRepo(this.ctx).get(String(row.endpoint_id), workspaceId);
+      const protocol = engine === "codex" ? "openai-chat-completions" : providerEndpointProtocol(engine)!;
+      if (!endpoint || !endpoint.connection.protocols.includes(protocol)) return null;
+      const connection = endpoint.connection;
+      value.authToken = connection.credential_id
+        ? this.ctx.executionProfiles().getKey(endpoint.id, workspaceId, endpoint.revision, connection.credential_id) ?? "" : "";
+      const resolvedUrl = endpointProtocolBaseUrl(connection, protocol);
+      value.authHeader = connection.auth_header;
+      value.endpointId = endpoint.id;
+      value.headers = connection.options?.headers;
+      if (extractBaseUrl(engine, value.fragment) !== resolvedUrl) {
+        if (engine === "codex") {
+          const fragment = value.fragment.trim() ? parseToml(value.fragment) : {};
+          const provider = typeof fragment.model_provider === "string" ? fragment.model_provider : "endpoint";
+          const providers = (fragment.model_providers ?? {}) as Record<string, Record<string, string>>;
+          value.fragment = stringifyToml({ ...fragment, model_provider: provider, model_providers: {
+            ...providers, [provider]: { ...providers[provider], base_url: resolvedUrl, wire_api: "responses" },
+          } });
+        } else {
+          const fragment = parseJson<Record<string, unknown>>(value.fragment, {});
+          value.fragment = engine === "claude"
+            ? JSON.stringify({ ...fragment, env: { ...(fragment.env as Record<string, string> ?? {}), ANTHROPIC_BASE_URL: resolvedUrl } })
+            : JSON.stringify({ ...fragment, base_url: resolvedUrl });
+        }
+      }
+    }
+    cache?.set(key, value);
+    return value;
   }
 
   /** Full config incl. plaintext tokens — daemon-facing only. */
@@ -788,6 +936,7 @@ export class WorkspacesRepo {
     return {
       claude: this.relayRow(workspaceId, "claude"),
       codex: this.relayRow(workspaceId, "codex"),
+      antigravity: this.relayRow(workspaceId, "antigravity"),
       modelDiscovery: this.getRelayModelDiscovery(workspaceId),
     };
   }
@@ -799,6 +948,7 @@ export class WorkspacesRepo {
     return {
       claude: mask(this.relayRow(workspaceId, "claude")),
       codex: mask(this.relayRow(workspaceId, "codex")),
+      antigravity: mask(this.relayRow(workspaceId, "antigravity")),
       modelDiscovery: this.getRelayModelDiscovery(workspaceId),
     };
   }
@@ -819,25 +969,44 @@ export class WorkspacesRepo {
     // (never two writers computing the same "existing + 1" in JS). The token for
     // "keep" is read inside the same transaction to avoid a lost update.
     this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const existing = this.relayRow(workspaceId, engine);
       let token = existing?.authToken ?? "";
       if (input.tokenOp === "set") token = String(input.authToken ?? "");
       else if (input.tokenOp === "clear") token = "";
+      let endpointId: string | null = null;
+      const baseUrl = extractBaseUrl(engine, input.fragment);
+      if (baseUrl && token) {
+        const previous = this.ctx.db.query("SELECT endpoint_id FROM multiremi_relay_config WHERE workspace_id=? AND engine=?")
+          .get(workspaceId, engine) as { endpoint_id: string | null } | null;
+        const endpoints = new ExecutionEndpointsRepo(this.ctx);
+        const endpoint = previous?.endpoint_id ? endpoints.get(previous.endpoint_id, workspaceId) : null;
+        endpointId = endpoints.save(workspaceId, {
+          name: endpoint?.name ?? `System endpoint / ${engine}`,
+          connection: { base_url: baseUrl, protocols: endpoint?.connection.protocols ?? (engine === "codex" ? ["openai-responses", "openai-chat-completions"] : [providerEndpointProtocol(engine)!]),
+            protocol_paths: { ...endpoint?.connection.protocol_paths, [providerEndpointProtocol(engine)!]: "" },
+            auth_mode: "api_key", env_key: "", auth_header: endpoint?.connection.auth_header ?? "bearer" },
+          ...(input.tokenOp === "set" || !endpoint ? { api_key: token } : {}),
+        }, endpoint?.id).id;
+      }
       this.ctx.db.run(
-        `INSERT INTO multiremi_relay_config (workspace_id, engine, fragment, auth_token, revision, updated_at, updated_by)
-         VALUES (?, ?, ?, ?, 1, ?, ?)
+        `INSERT INTO multiremi_relay_config (workspace_id, engine, fragment, auth_token, revision, updated_at, updated_by, endpoint_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(workspace_id, engine) DO UPDATE SET
            fragment = excluded.fragment,
            auth_token = excluded.auth_token,
-           revision = multiremi_relay_config.revision + 1,
+           revision = excluded.revision,
            updated_at = excluded.updated_at,
-           updated_by = excluded.updated_by`,
-        [workspaceId, engine, input.fragment, token, now, input.actor ?? null],
+           updated_by = excluded.updated_by,
+           endpoint_id = excluded.endpoint_id`,
+        [workspaceId, engine, input.fragment, endpointId ? "" : token, (existing?.revision ?? 0) + 1, now, input.actor ?? null, endpointId],
       );
       const row = this.ctx.db
         .query("SELECT revision FROM multiremi_relay_config WHERE workspace_id = ? AND engine = ?")
         .get(workspaceId, engine) as Row | null;
       revision = Number(row?.revision ?? 1);
+      this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId,
+        actorType: "system", actorId: null, payload: { reason: "workspace_relay_changed", engine } });
     })();
     return revision;
   }
@@ -960,6 +1129,56 @@ export class WorkspacesRepo {
       [workspaceId, engine, modelId],
     );
     return true;
+  }
+
+  listGatewayModelContext(workspaceId: string, engine: RelayEngine): GatewayModelContextDecl[] {
+    const rows = this.ctx.db.query(
+      "SELECT * FROM multiremi_gateway_model_context WHERE workspace_id = ? AND engine = ? ORDER BY model_id",
+    ).all(workspaceId, engine) as Row[];
+    return rows.map(row => this.gatewayModelContextFromRow(row));
+  }
+
+  getGatewayModelContext(workspaceId: string, engine: RelayEngine, modelId: string): GatewayModelContextDecl | null {
+    const row = this.ctx.db.query(
+      "SELECT * FROM multiremi_gateway_model_context WHERE workspace_id = ? AND engine = ? AND model_id = ?",
+    ).get(workspaceId, engine, modelId) as Row | null;
+    return row ? this.gatewayModelContextFromRow(row) : null;
+  }
+
+  saveGatewayModelContext(
+    workspaceId: string,
+    engine: RelayEngine,
+    input: { modelId: string; updatedBy?: string | null },
+  ): GatewayModelContextDecl {
+    if (engine !== "claude") throw new Error("1M context is only supported for Claude");
+    const modelId = input.modelId.trim();
+    if (!modelId) throw new Error("model id is required");
+    this.ctx.db.run(
+      `INSERT INTO multiremi_gateway_model_context (workspace_id, engine, model_id, context_window, updated_by, updated_at)
+       VALUES (?, ?, ?, '1m', ?, ?)
+       ON CONFLICT(workspace_id, engine, model_id) DO UPDATE SET
+         context_window = excluded.context_window,
+         updated_by = excluded.updated_by,
+         updated_at = excluded.updated_at`,
+      [workspaceId, engine, modelId, input.updatedBy ?? null, nowIso()],
+    );
+    return this.getGatewayModelContext(workspaceId, engine, modelId)!;
+  }
+
+  deleteGatewayModelContext(workspaceId: string, engine: RelayEngine, modelId: string): boolean {
+    if (!this.getGatewayModelContext(workspaceId, engine, modelId)) return false;
+    this.ctx.db.run(
+      "DELETE FROM multiremi_gateway_model_context WHERE workspace_id = ? AND engine = ? AND model_id = ?",
+      [workspaceId, engine, modelId],
+    );
+    return true;
+  }
+
+  private gatewayModelContextFromRow(row: Row): GatewayModelContextDecl {
+    return {
+      modelId: String(row.model_id), contextWindow: "1m",
+      updatedBy: nullableString(row.updated_by), updatedAt: String(row.updated_at),
+    };
   }
 
   private gatewayModelReasoningFromRow(row: Row): GatewayModelReasoningDecl {
@@ -1130,9 +1349,13 @@ export class WorkspacesRepo {
 
   getNotificationPreferences(input: { workspaceId?: string | null; memberId?: string | null } = {}): MultiremiNotificationPreferenceResponse {
     const workspaceId = input.workspaceId ?? "local";
-    const memberId = input.memberId ?? null;
+    const memberId = this.getWorkspaceOperator(workspaceId)?.id ?? null;
+    // Existing per-person settings remain stored. Prefer the shared setting,
+    // then the old workspace default, then the most recently saved setting.
     const row = this.ctx.db.query(
-      "SELECT * FROM multiremi_notification_preferences WHERE workspace_id = ? AND member_id = ?",
+      `SELECT * FROM multiremi_notification_preferences WHERE workspace_id = ?
+       ORDER BY CASE WHEN member_id = ? THEN 0 WHEN member_id = '' THEN 1 ELSE 2 END,
+         updated_at DESC, member_id ASC LIMIT 1`,
     ).get(workspaceId, memberId ?? "") as Row | null;
     return {
       workspaceId,
@@ -1148,7 +1371,7 @@ export class WorkspacesRepo {
     preferences: MultiremiNotificationPreferences;
   }): MultiremiNotificationPreferenceResponse {
     const workspaceId = input.workspaceId ?? "local";
-    const memberId = input.memberId ?? null;
+    const memberId = this.ensureWorkspaceOperator(workspaceId).id;
     const preferences = normalizeNotificationPreferences(input.preferences);
     const now = nowIso();
     this.ctx.db.run(

@@ -1,3 +1,7 @@
+import { z } from "zod";
+import { ExecutionProfileListSchema, ExecutionProfileResponseSchema, type ExecutionProfile, type ExecutionProfileInput, type ExecutionGroupInput } from "../schemas/execution-profiles";
+import { ExecutionEndpointListSchema, ExecutionEndpointResponseSchema, type ExecutionEndpoint, type ExecutionEndpointInput } from "../schemas/execution-endpoints";
+import { EndpointInspectionSchema, EndpointCatalogsSchema, type EndpointInspectionResponse, type EndpointCatalogs } from "../schemas/execution-endpoints";
 import type {
   AgentRuntime,
   CreateRuntimeDirectoryScanRequest,
@@ -50,6 +54,7 @@ import {
   AgentRuntimeListSchema,
   AgentRuntimeSchema,
   ExecutionGroupListSchema,
+  ExecutionGroupSchema,
   type ExecutionGroupList,
   CloudRuntimeNodeListSchema,
   CloudRuntimeNodeSchema,
@@ -75,12 +80,16 @@ import {
   EMPTY_DAEMON_ROUTING_RESPONSE,
   type RelayConfigResponse,
   RelayConfigResponseSchema,
+  type RelayEngine,
+  type RelayReasoningEngine,
   type RelayEngineProbe,
   RelayEngineProbeSchema,
   type RelayReasoningLevelSaveResult,
   RelayReasoningLevelSaveResultSchema,
   type RelayReasoningLevelsResponse,
   RelayReasoningLevelsResponseSchema,
+  type RelayContextWindowSaveResult,
+  RelayContextWindowSaveResultSchema,
   RuntimeDirectoryScanRequestSchema,
   RuntimeProvisionListResponseSchema,
   RuntimeProvisionResponseSchema,
@@ -90,12 +99,74 @@ import {
   RuntimeUsageByHourListSchema,
   RuntimeUsageListSchema,
   RetireDaemonResponseSchema,
+  RuntimeDeleteResponseSchema,
+  ArchiveAgentsAndDeleteRuntimeResponseSchema,
   SshMeshOverviewSchema,
   SshMeshTestResponseSchema,
 } from "../schemas/runtimes";
 
 export class RuntimesEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async listExecutionProfiles(wsId: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse<{ profiles: ExecutionProfile[] }>(raw, ExecutionProfileListSchema, { endpoint: "GET /api/execution-profiles" });
+  }
+  async listExecutionEndpoints(wsId: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse<{ endpoints: ExecutionEndpoint[] }>(raw, ExecutionEndpointListSchema, { endpoint: "GET /api/execution-endpoints" });
+  }
+  async inspectExecutionEndpoint(wsId: string, input: { endpoint_id?: string; connection: ExecutionEndpointInput["connection"]; api_key?: string;
+    operation: "models" | "detect" | "test"; protocol?: string; model?: string }, signal?: AbortSignal) {
+    const raw = await this.http.fetch<unknown>("/api/execution-endpoints/inspect",
+      { method: "POST", body: JSON.stringify({ ...input, workspace_id: wsId }), signal });
+    return parseStrictResponse<EndpointInspectionResponse>(raw, EndpointInspectionSchema, { endpoint: "POST /api/execution-endpoints/inspect" });
+  }
+  async getExecutionEndpointCatalog(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints/${encodeURIComponent(id)}/catalog?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse<EndpointCatalogs>(raw, EndpointCatalogsSchema, { endpoint: "GET /api/execution-endpoints/:id/catalog" });
+  }
+  async getSystemModelEndpoints(wsId: string) {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(wsId)}/system-model-endpoints`);
+    return parseStrictResponse<{ defaults: Record<string, string | null> }>(raw, z.object({ defaults: z.record(z.string(), z.string().nullable()) }),
+      { endpoint: "GET /api/workspaces/:id/system-model-endpoints" });
+  }
+  async saveSystemModelEndpoints(wsId: string, defaults: Record<string, string | null>) {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(wsId)}/system-model-endpoints`,
+      { method: "PUT", body: JSON.stringify({ defaults }) });
+    return parseStrictResponse<{ defaults: Record<string, string | null> }>(raw, z.object({ defaults: z.record(z.string(), z.string().nullable()) }),
+      { endpoint: "PUT /api/workspaces/:id/system-model-endpoints" });
+  }
+  async saveExecutionEndpoint(wsId: string, id: string | undefined, input: ExecutionEndpointInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints${id ? `/${encodeURIComponent(id)}` : ""}`, {
+      method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }),
+    });
+    return parseStrictResponse<{ endpoint: ExecutionEndpoint }>(raw, ExecutionEndpointResponseSchema, { endpoint: "SAVE /api/execution-endpoints" });
+  }
+  async deleteExecutionEndpoint(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-endpoints/:id" });
+  }
+
+  async saveExecutionProfile(wsId: string, id: string | undefined, input: ExecutionProfileInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles${id ? `/${encodeURIComponent(id)}` : ""}?workspace_id=${encodeURIComponent(wsId)}`, { method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }) });
+    return parseStrictResponse<{ profile: ExecutionProfile }>(raw, ExecutionProfileResponseSchema, { endpoint: "SAVE /api/execution-profiles" });
+  }
+
+  async deleteExecutionProfile(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-profiles/:id" });
+  }
+
+  async saveExecutionGroup(wsId: string, id: string | undefined, input: ExecutionGroupInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups${id ? `/${encodeURIComponent(id)}` : ""}?workspace_id=${encodeURIComponent(wsId)}`, { method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }) });
+    return parseStrictResponse<{ group: ExecutionGroupList["groups"][number] }>(raw, z.object({ group: ExecutionGroupSchema }), { endpoint: "SAVE /api/execution-groups" });
+  }
+
+  async deleteExecutionGroup(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-groups/:id" });
+  }
 
   async getRuntimeCodexProfile(runtimeId: string): Promise<RuntimeCodexProfileConfig> {
     const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/codex-profile`);
@@ -175,7 +246,7 @@ export class RuntimesEndpoints {
 
   async updateRelayConfig(
     workspaceId: string,
-    engine: "claude" | "codex",
+    engine: RelayEngine,
     data: { fragment: string; token_op: "keep" | "set" | "clear"; auth_token?: string },
   ): Promise<RelayConfigResponse> {
     const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/relay-config/${engine}`, {
@@ -187,7 +258,7 @@ export class RuntimesEndpoints {
     });
   }
 
-  async revealRelayToken(workspaceId: string, engine: "claude" | "codex"): Promise<string> {
+  async revealRelayToken(workspaceId: string, engine: RelayEngine): Promise<string> {
     const raw = await this.http.fetch<{ token?: unknown }>(
       `/api/workspaces/${workspaceId}/relay-config/${engine}/reveal`,
       { method: "POST" },
@@ -198,7 +269,7 @@ export class RuntimesEndpoints {
   // Explicit "probe now": run gateway discovery once and answer with the fresh
   // snapshot. Strictly parsed — the caller reports the model/effort counts as
   // fact, so a drifted body must surface as a contract error, not "0 models".
-  async probeRelayEngine(workspaceId: string, engine: "claude" | "codex"): Promise<RelayEngineProbe> {
+  async probeRelayEngine(workspaceId: string, engine: RelayEngine): Promise<RelayEngineProbe> {
     const raw = await this.http.fetch<unknown>(
       `/api/workspaces/${workspaceId}/relay-config/${engine}/probe`,
       { method: "POST" },
@@ -213,9 +284,10 @@ export class RuntimesEndpoints {
   // a per-model upsert where `levels: []` clears the declaration. Both parse
   // strictly: the editor renders these rows as enforcement facts, so a drifted
   // shape must surface as a contract error instead of "not declared".
+  // Antigravity has no reasoning selector, so the server refuses these routes for it.
   async getRelayReasoningLevels(
     workspaceId: string,
-    engine: "claude" | "codex",
+    engine: RelayReasoningEngine,
   ): Promise<RelayReasoningLevelsResponse> {
     const raw = await this.http.fetch<unknown>(
       `/api/workspaces/${workspaceId}/relay-config/${engine}/reasoning-levels`,
@@ -227,7 +299,7 @@ export class RuntimesEndpoints {
 
   async putRelayReasoningLevel(
     workspaceId: string,
-    engine: "claude" | "codex",
+    engine: RelayReasoningEngine,
     data: { model: string; levels: string[]; default_level?: string },
   ): Promise<RelayReasoningLevelSaveResult> {
     const body: { model: string; levels: string[]; default_level?: string } = {
@@ -241,6 +313,20 @@ export class RuntimesEndpoints {
     );
     return parseStrictResponse(raw, RelayReasoningLevelSaveResultSchema, {
       endpoint: "PUT /api/workspaces/:id/relay-config/:engine/reasoning-levels",
+    });
+  }
+
+  async putRelayContextWindow(
+    workspaceId: string,
+    engine: "claude",
+    data: { model: string; one_million: boolean },
+  ): Promise<RelayContextWindowSaveResult> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/relay-config/${engine}/context-window`,
+      { method: "PUT", body: JSON.stringify({ model: data.model, one_million: data.one_million }) },
+    );
+    return parseStrictResponse(raw, RelayContextWindowSaveResultSchema, {
+      endpoint: "PUT /api/workspaces/:id/relay-config/:engine/context-window",
     });
   }
 
@@ -294,8 +380,10 @@ export class RuntimesEndpoints {
     });
   }
 
-  async deleteRuntime(runtimeId: string): Promise<void> {
-    await this.http.fetch(`/api/runtimes/${runtimeId}`, { method: "DELETE" });
+  async deleteRuntime(runtimeId: string, abandonIssueWorkspaces = false) {
+    const search = abandonIssueWorkspaces ? "?abandon_issue_workspaces=true" : "";
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}${search}`, { method: "DELETE" });
+    return parseStrictResponse(raw, RuntimeDeleteResponseSchema, { endpoint: "DELETE /api/runtimes/:id" });
   }
 
   async getDaemonInventory(workspaceId: string): Promise<DaemonInventoryResponse> {
@@ -561,11 +649,14 @@ export class RuntimesEndpoints {
   async archiveAgentsAndDeleteRuntime(
     runtimeId: string,
     expectedActiveAgentIds: string[],
-  ): Promise<{ status: string; agents_archived: number; tasks_cancelled: number }> {
-    return this.http.fetch(`/api/runtimes/${runtimeId}/archive-agents-and-delete`, {
+    abandonIssueWorkspaces = false,
+  ) {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/archive-agents-and-delete`, {
       method: "POST",
-      body: JSON.stringify({ expected_active_agent_ids: expectedActiveAgentIds }),
+      body: JSON.stringify({ expected_active_agent_ids: expectedActiveAgentIds,
+        ...(abandonIssueWorkspaces ? { abandon_issue_workspaces: true } : {}) }),
     });
+    return parseStrictResponse(raw, ArchiveAgentsAndDeleteRuntimeResponseSchema, { endpoint: "POST /api/runtimes/:id/archive-agents-and-delete" });
   }
 
   async updateRuntime(

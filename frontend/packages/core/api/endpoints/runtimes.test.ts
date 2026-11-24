@@ -15,6 +15,23 @@ afterEach(() => {
 });
 
 describe("RuntimesEndpoints runtime response schema", () => {
+  it("passes explicit workspace abandonment to both deletion paths and validates their counts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ status: "ok", issue_workspaces_abandoned: 2 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const endpoints = new RuntimesEndpoints(new HttpClient("https://api.example.test"));
+    await expect(endpoints.deleteRuntime("rt/1", true)).resolves.toMatchObject({ issue_workspaces_abandoned: 2 });
+    expect(fetchMock.mock.calls[0]![0]).toBe("https://api.example.test/api/runtimes/rt%2F1?abandon_issue_workspaces=true");
+    fetchMock.mockImplementation(async () => jsonResponse({ status: "ok", agents_archived: 1, tasks_cancelled: 3, issue_workspaces_abandoned: 2 }));
+    await endpoints.archiveAgentsAndDeleteRuntime("rt/1", ["agent-1"], true);
+    expect(JSON.parse(fetchMock.mock.calls[1]![1].body)).toEqual({ expected_active_agent_ids: ["agent-1"], abandon_issue_workspaces: true });
+    await endpoints.archiveAgentsAndDeleteRuntime("rt/1", ["agent-1"]);
+    expect(JSON.parse(fetchMock.mock.calls[2]![1].body)).toEqual({ expected_active_agent_ids: ["agent-1"] });
+    for (const malformed of [{ status: "ok" }, { status: "ok", issue_workspaces_abandoned: "2" }]) {
+      fetchMock.mockImplementation(async () => jsonResponse(malformed));
+      await expect(endpoints.deleteRuntime("rt-1")).rejects.toBeInstanceOf(ApiContractError);
+      await expect(endpoints.archiveAgentsAndDeleteRuntime("rt-1", [])).rejects.toBeInstanceOf(ApiContractError);
+    }
+  });
   it("sends profile credentials only on write and rejects malformed profile responses", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ profile: null }));
     vi.stubGlobal("fetch", fetchMock);
@@ -62,6 +79,21 @@ describe("RuntimesEndpoints runtime response schema", () => {
     await expect(endpoints.listRuntimes({ workspace_id: "ws-1" })).resolves.toEqual([
       { ...runtime, daemon_display_name: null },
     ]);
+  });
+
+  it("preserves protocol states but drops malformed or future protocol fields without losing the runtime", async () => {
+    const endpoints = new RuntimesEndpoints(new HttpClient("https://api.example.test"));
+    for (const state of ["ok", "upgrade_pending", "upgrade_failed", "rejected"]) {
+      const protocol = { version: 1, state, min_version: "0.2.83", last_error: state === "upgrade_failed" ? "Permission denied" : null };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([{ ...runtime, protocol }])));
+      expect((await endpoints.listRuntimes())[0]?.protocol).toEqual(protocol);
+    }
+    for (const protocol of [42, { version: "2" }, { version: 3, state: "future", min_version: "1.0.0", last_error: null }]) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([{ ...runtime, protocol }])));
+      const list = await endpoints.listRuntimes();
+      expect(list).toHaveLength(1);
+      expect(list[0]?.protocol).toBeNull();
+    }
   });
 
   it("falls back instead of exposing a malformed daemon display name", async () => {
@@ -220,6 +252,7 @@ describe("RuntimesEndpoints daemon retirement", () => {
             local_path: "/private/path",
           }],
           issue_workspaces: [],
+          traces_to_lose: 4,
           impact: {
             runtimes_removed: 2,
             agents_detached: 0,
@@ -246,6 +279,7 @@ describe("RuntimesEndpoints daemon retirement", () => {
       queued_tasks: [{ issue_id: null }],
       local_directory_resources: [{ label: null }],
       runtimes: [],
+      traces_to_lose: 4,
       impact: { runtimes_removed: 2, agents_detached: 0 },
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe(

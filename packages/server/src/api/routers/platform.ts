@@ -1,4 +1,7 @@
+import { readCurrentDaemonBuild } from "../../releases/current-daemon-build.js";
+import { isPlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import type { Context, Hono } from "hono";
+import { runtimeProtocolSummary } from "@multiremi/contracts/runtime-protocol";
 import type {
   CreatePlatformOperationInput,
   MultiremiPlatformDeploymentDriver,
@@ -6,6 +9,8 @@ import type {
   MultiremiPlatformOperationStatus,
   MultiremiPlatformRelease,
   MultiremiPlatformService,
+  MultiremiPlatformPreflight,
+  MultiremiPlatformUpdateMode,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts/types.js";
 import {
@@ -14,29 +19,37 @@ import {
 import {
   PlatformOperationNotCancellableError,
   PlatformOperationConflictError,
+  PlatformOperationIdempotencyConflictError,
+  PlatformOperationReceiptConflictError,
+  PlatformOperationReceiptValidationError,
+  type PlatformOperationReceipt,
 } from "@multiremi/store/repos/platform-operations-repo.js";
 import { isValidDailyScheduleTime, isValidIanaTimezone } from "@multiremi/store/schedule.js";
 import { loadCurrentWorkspaceRole, readJson } from "../helpers.js";
 import { currentRequestUserId } from "../wire/index.js";
 import type { RouterDeps } from "./deps.js";
-import { observableConfiguration } from "../../config/startup-env.js";
+import { validateReleaseFeedUrl } from "@shared/platform-update.js";
 
 const OPERATION_KINDS = new Set<MultiremiPlatformOperationKind>([
   "check_updates", "restart", "update", "rollback",
 ]);
 const OPERATION_STATUSES = new Set<MultiremiPlatformOperationStatus>([
-  "queued", "preparing", "pulling", "draining", "switching", "restarting", "verifying",
+  "queued", "preparing", "pulling", "draining", "backing_up", "switching", "restarting", "verifying",
   "succeeded", "failed", "cancelled", "rolling_back", "rolled_back",
 ]);
-const DRIVERS = new Set<MultiremiPlatformDeploymentDriver>(["systemd_release", "docker_compose"]);
+const DRIVERS = new Set<MultiremiPlatformDeploymentDriver>(["systemd_release", "docker_compose", "local_profile"]);
+const UPDATE_MODES = new Set<MultiremiPlatformUpdateMode>(["images", "host_application", "internal_application", "systemd_release"]);
 
 export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  // App-local, successful decisions only. Cheap live fingerprints also observe a daemon
+  // arriving at an unchanged release and pending manual updates completing.
+  let reconciledCliKey: string | undefined;
 
   app.get("/api/multiremi/platform/config", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
     if (requester instanceof Response) return requester;
-    return c.json({ degradations: observableConfiguration(deps.daemonDirectBaseUrl) });
+    return c.json({ degradations: deps.startupDegradations });
   });
 
   app.get("/api/multiremi/platform/status", (c) => {
@@ -48,7 +61,11 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       : Number.POSITIVE_INFINITY;
     return c.json({
       canManage: true,
+      releaseFeedUrl: state.releaseFeedUrl,
+      defaultReleaseFeedUrl: state.defaultReleaseFeedUrl,
+      preflight: state.preflight,
       driver: state.driver,
+      updateMode: state.updateMode,
       currentRelease: state.currentRelease,
       latestRelease: state.latestRelease,
       updateAvailable: isReleaseNewer(state.latestRelease, state.currentRelease),
@@ -61,6 +78,7 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       lastOperation: store.listPlatformOperations(1)[0] ?? null,
       maintenance: store.getPlatformMaintenance(),
       recentReleases: state.recentReleases,
+      daemonProtocol: runtimeProtocolSummary(store.listRuntimes()),
     });
   });
 
@@ -75,16 +93,38 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     if (requester instanceof Response) return requester;
     const body = await readJson<CreatePlatformOperationInput>(c);
     if (!OPERATION_KINDS.has(body.kind)) return c.json({ error: "invalid platform operation kind" }, 400);
+    const requestId = clean(body.requestId);
+    if (requestId && !/^[A-Za-z0-9._:-]{1,128}$/.test(requestId)) {
+      return c.json({ error: "requestId is invalid" }, 400);
+    }
     if ((body.kind === "update" || body.kind === "rollback") && !clean(body.targetRef) && !clean(body.targetVersion)) {
       return c.json({ error: "targetVersion or targetRef is required" }, 400);
     }
-    const operation = store.createPlatformOperation({
-      kind: body.kind,
-      targetVersion: clean(body.targetVersion),
-      targetRef: clean(body.targetRef),
-      targetManifest: body.targetManifest ?? {},
-    }, currentRequestUserId(c));
-    return c.json({ operation }, 202);
+    const existingRequest = requestId && store.findPlatformOperationByRequestId(currentRequestUserId(c), requestId);
+    if (!existingRequest && body.kind !== "check_updates") {
+      const state = store.getPlatformState();
+      if (!state.updaterHeartbeatAt || Date.now() - Date.parse(state.updaterHeartbeatAt) > 90_000) {
+        return c.json({ error: "updater is offline or stale; run an update check first" }, 409);
+      }
+      if (!hasFreshPreflight(state.preflight)) {
+        return c.json({ error: "update preflight is missing, expired, or blocked; run an update check first" }, 409);
+      }
+    }
+    try {
+      const operation = store.createPlatformOperation({
+        kind: body.kind,
+        requestId,
+        targetVersion: clean(body.targetVersion),
+        targetRef: clean(body.targetRef),
+        targetManifest: body.targetManifest ?? {},
+      }, currentRequestUserId(c));
+      return c.json({ operation }, 202);
+    } catch (error) {
+      if (error instanceof PlatformOperationIdempotencyConflictError) {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
   });
 
   app.post("/api/multiremi/platform/operations/:id/cancel", (c) => {
@@ -109,13 +149,16 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     if (requester instanceof Response) return requester;
     const body = await readJson<{
       autoUpdateStable?: boolean;
+      releaseFeedUrl?: string | null;
+      updateMode?: unknown;
       autoUpdate?: { enabled?: boolean; time?: string; timezone?: string };
     }>(c);
+    if (body.updateMode !== undefined) return c.json({ error: "updateMode is reported by the updater; follow the deployment migration steps to change it" }, 400);
     const current = store.getPlatformState();
     const enabled = body.autoUpdate?.enabled ?? body.autoUpdateStable ?? current.autoUpdateStable;
     const time = clean(body.autoUpdate?.time) ?? current.autoUpdateTime;
     const timezone = clean(body.autoUpdate?.timezone) ?? current.autoUpdateTimezone;
-    const hasUpdate = body.autoUpdateStable !== undefined
+    const hasUpdate = body.releaseFeedUrl !== undefined || body.autoUpdateStable !== undefined
       || body.autoUpdate?.enabled !== undefined
       || body.autoUpdate?.time !== undefined
       || body.autoUpdate?.timezone !== undefined;
@@ -123,14 +166,24 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     if (typeof enabled !== "boolean") return c.json({ error: "autoUpdate.enabled must be a boolean" }, 400);
     if (!isValidDailyScheduleTime(time)) return c.json({ error: "autoUpdate.time must use HH:mm" }, 400);
     if (!isValidIanaTimezone(timezone)) return c.json({ error: "autoUpdate.timezone must be an IANA timezone" }, 400);
-    const state = store.setPlatformAutoUpdateSettings({ enabled, time, timezone });
-    return c.json({ state: { autoUpdateStable: state.autoUpdateStable, autoUpdate: autoUpdateScheduleWire(state) } });
+    let releaseFeedUrl: string | null | undefined;
+    if (body.releaseFeedUrl !== undefined) {
+      if (store.getActivePlatformOperation()) return c.json({ error: "cannot change update source during an operation" }, 409);
+      try { releaseFeedUrl = validateReleaseFeedUrl(body.releaseFeedUrl); }
+      catch { return c.json({ error: "releaseFeedUrl must be HTTPS without credentials or a fragment, or null to restore the default" }, 400); }
+    }
+    const state = store.setPlatformAutoUpdateSettings({ enabled, time, timezone, releaseFeedUrl });
+    return c.json({ state: { releaseFeedUrl: state.releaseFeedUrl, autoUpdateStable: state.autoUpdateStable, autoUpdate: autoUpdateScheduleWire(state) } });
   });
 
   app.post("/api/platform-updater/heartbeat", async (c) => {
     const denied = denyUpdater(c, deps);
     if (denied) return denied;
     const body = await readJson<{
+      updateMode?: MultiremiPlatformUpdateMode | null;
+      defaultReleaseFeedUrl?: string | null;
+      releaseFeedUrl?: string | null;
+      preflight?: MultiremiPlatformPreflight | null;
       driver?: MultiremiPlatformDeploymentDriver;
       currentRelease?: MultiremiPlatformRelease | null;
       latestRelease?: MultiremiPlatformRelease | null;
@@ -138,24 +191,51 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       services?: MultiremiPlatformService[];
     }>(c);
     if (!body.driver || !DRIVERS.has(body.driver)) return c.json({ error: "valid driver is required" }, 400);
-    const state = store.heartbeatPlatformUpdater({
+    if (body.updateMode != null && (!UPDATE_MODES.has(body.updateMode)
+      || (body.updateMode === "systemd_release") !== (body.driver === "systemd_release")
+      || (body.updateMode === "internal_application" && body.driver !== "docker_compose"))) {
+      return c.json({ error: "updateMode does not match the updater driver" }, 400);
+    }
+    const previous = body.updateMode ? store.getPlatformState() : null;
+    if (previous?.updateMode && previous.updateMode !== body.updateMode && store.getActivePlatformOperation()) {
+      return c.json({ error: "finish or recover the current operation before changing updater modes" }, 409);
+    }
+    let state = store.heartbeatPlatformUpdater({
+      updateMode: body.updateMode,
+      defaultReleaseFeedUrl: body.defaultReleaseFeedUrl,
+      releaseFeedUrl: body.releaseFeedUrl,
+      preflight: body.preflight,
       driver: body.driver,
       currentRelease: body.currentRelease,
       latestRelease: body.latestRelease,
       recentReleases: body.recentReleases,
       services: body.services,
     });
-    const due = store.claimDuePlatformAutoUpdateCheck();
+    const dueAt = state.autoUpdateNextCheckAt;
+    const due = state.autoUpdateStable && (!dueAt || !Number.isFinite(Date.parse(dueAt)) || Date.parse(dueAt) <= Date.now())
+      ? store.claimDuePlatformAutoUpdateCheck() : null;
     if (due) {
-      store.setPlatformAutoUpdateResult(runScheduledUpdateDecision(store, due));
+      state = store.setPlatformAutoUpdateResult(runScheduledUpdateDecision(store, due));
+    } else if (state.autoUpdateStable && (!dueAt || !Number.isFinite(Date.parse(dueAt)))) {
+      state = store.getPlatformState();
     }
     // A successful platform switch is observed here as currentRelease. Reconcile
     // daemons only after that switch is complete, and never compete with a release
     // operation that is still draining or replacing the API.
     if (!store.getActivePlatformOperation() && state.currentRelease?.version) {
-      store.reconcileRuntimeCliRelease(state.currentRelease.version);
+      const manifest = readCurrentDaemonBuild();
+      // The formal-release compatibility path remains available. Deployment
+      // versions require the API build's manifest and never compare by SemVer.
+      const version = manifest?.version ?? state.currentRelease.version;
+      const key = store.runtimeCliReleaseReconciliationKey(version, manifest?.commit);
+      if (key !== reconciledCliKey) {
+        if (manifest) store.reconcileRuntimeCliRelease(version, manifest.commit);
+        else if (/^v?\d+\.\d+\.\d+$/.test(version)) store.reconcileRuntimeCliRelease(version);
+        reconciledCliKey = key;
+      }
+      store.reconcileRuntimeUpdateFailures();
     }
-    return c.json({ state: store.getPlatformState() });
+    return c.json({ state });
   });
 
   app.post("/api/platform-updater/operations/claim", (c) => {
@@ -164,11 +244,39 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({ operation: store.claimPlatformOperation() });
   });
 
+  app.post("/api/platform-updater/operations/reconcile", async (c) => {
+    const denied = denyUpdater(c, deps);
+    if (denied) return denied;
+    const body = await readJson<{ receipts: PlatformOperationReceipt[] }>(c);
+    try {
+      const operations = store.reconcilePlatformOperations(body?.receipts);
+      return c.json({ reconciled: operations.map((operation) => operation.id) });
+    } catch (error) {
+      if (error instanceof PlatformOperationReceiptValidationError) {
+        return c.json({ error: error.message, code: error.code }, 400);
+      }
+      if (error instanceof PlatformOperationReceiptConflictError) {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
+  });
+
   app.post("/api/platform-updater/operations/:id/report", async (c) => {
     const denied = denyUpdater(c, deps);
     if (denied) return denied;
     const body = await readJson<ReportPlatformOperationInput>(c);
+    if (body.progress && Object.prototype.hasOwnProperty.call(body.progress, "failure") && !isPlatformSchemaContractFailure(body.progress.failure)) return c.json({ error: "invalid platform operation failure" }, 400);
     if (!OPERATION_STATUSES.has(body.status)) return c.json({ error: "invalid platform operation status" }, 400);
+    // This synchronous check + transition is the commit point. Cancellation and
+    // lease loss must be resolved before the host touches any running service.
+    if (body.status === "switching" || body.status === "restarting") {
+      const op = store.getPlatformOperation(c.req.param("id"));
+      const drain = store.getPlatformDrainStatus();
+      if (!op || op.cancelRequested || drain.maintenance.operationId !== op.id || !drain.ready) {
+        return c.json({ error: "switch refused: drain is not ready or cancellation was requested" }, 409);
+      }
+    }
     const operation = store.reportPlatformOperation(c.req.param("id"), body);
     if (!operation) return c.json({ error: "platform operation not found" }, 404);
     // Terminal outcomes must never leave the platform draining, even if the
@@ -241,6 +349,7 @@ function runScheduledUpdateDecision(
   state: ReturnType<RouterDeps["store"]["getPlatformState"]>,
 ) {
   if (!isReleaseNewer(state.latestRelease, state.currentRelease)) return "no_update" as const;
+  if (!hasFreshPreflight(state.preflight)) return "blocked" as const;
   if (!state.latestRelease?.manifestUrl) return "blocked" as const;
   if (store.getActivePlatformOperation()) return "busy" as const;
   if (hasRecentFailedAutoUpdate(store.listPlatformOperations(100), state.latestRelease.version)) {
@@ -257,6 +366,12 @@ function runScheduledUpdateDecision(
     if (error instanceof PlatformOperationConflictError) return "busy" as const;
     throw error;
   }
+}
+
+function hasFreshPreflight(preflight: MultiremiPlatformPreflight | null): boolean {
+  const age = preflight ? Date.now() - Date.parse(preflight.checkedAt) : NaN;
+  return preflight?.ready === true && Number.isFinite(age) && age >= -60_000 && age <= 360_000
+    && Array.isArray(preflight.checks) && preflight.checks.every((check) => check.ok === true);
 }
 
 function autoUpdateScheduleWire(state: ReturnType<RouterDeps["store"]["getPlatformState"]>) {

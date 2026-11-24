@@ -1,3 +1,5 @@
+import { fetchSkillImportResponse, SkillImportError, withSkillImportDeadline, type SkillImportOptions } from "./skill-import-network.js";
+export { SkillImportError } from "./skill-import-network.js";
 import type {
   CreateSkillInput,
   ImportSkillInput,
@@ -76,10 +78,9 @@ type ClawHubVersionResponse = {
   };
 };
 
-export class SkillImportError extends Error {
-  constructor(message: string, public readonly status = 400) {
-    super(message);
-    this.name = "SkillImportError";
+class UpstreamHttpError extends Error {
+  constructor(readonly status: number, url: string) {
+    super(`HTTP ${status} for ${url}`);
   }
 }
 
@@ -90,7 +91,11 @@ class ImportCapError extends Error {
   }
 }
 
-export async function buildImportedSkillInput(input: ImportSkillInput): Promise<ImportResult> {
+export async function buildImportedSkillInput(input: ImportSkillInput, options: SkillImportOptions = {}): Promise<ImportResult> {
+  return withSkillImportDeadline(options, () => buildImportedSkillInputWithinDeadline(input));
+}
+
+async function buildImportedSkillInputWithinDeadline(input: ImportSkillInput): Promise<ImportResult> {
   const sourceUrl = input.url ?? input.sourceUrl ?? input.source_url ?? "";
   const detected = detectImportSource(sourceUrl);
   let imported: ImportedSkill;
@@ -164,6 +169,7 @@ async function fetchFromGitHub(rawUrl: string): Promise<ImportedSkill> {
   try {
     skillMd = await fetchRawText(buildRawGitHubUrl(rawPrefix, skillMdPath));
   } catch (error) {
+    if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
     if (!spec.skillDir) {
       throw new Error(`SKILL.md not found at the root of ${spec.owner}/${spec.repo}@${spec.ref}. For multi-skill repositories, point to github.com/${spec.owner}/${spec.repo}/tree/${spec.ref}/<skill-dir>`);
     }
@@ -213,7 +219,8 @@ async function fetchFromSkillsSh(rawUrl: string): Promise<ImportedSkill> {
       skillMd = await fetchRawText(buildRawGitHubUrl(rawPrefix, `${dir}/SKILL.md`));
       skillDir = dir;
       break;
-    } catch {
+    } catch (error) {
+      if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
       // Try the next conventional location.
     }
   }
@@ -225,7 +232,8 @@ async function fetchFromSkillsSh(rawUrl: string): Promise<ImportedSkill> {
         skillMd = rootSkillMd;
         skillDir = "";
       }
-    } catch {
+    } catch (error) {
+      if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
       // Fall through to the repository tree scan.
     }
   }
@@ -294,6 +302,7 @@ async function fetchFromClawHub(rawUrl: string): Promise<ImportedSkill> {
     try {
       content = await fetchRawText(url.toString());
     } catch (error) {
+      if (error instanceof SkillImportError) throw error;
       if (isCapError(error) || filePath === "SKILL.md") throw new Error(`clawhub import: ${filePath}: ${errorMessage(error)}`);
       continue;
     }
@@ -332,39 +341,45 @@ async function collectGitHubSupportingFiles(input: {
   imported: ImportedSkill;
 }): Promise<void> {
   const apiUrl = buildGitHubContentsUrl(input.owner, input.repo, input.skillDir, input.ref);
-  const response = await fetchGitHubApi(apiUrl);
-  if (response.status !== 200) return;
-
-  let entries: GitHubContentEntry[];
-  try {
-    const decoded = await response.json();
-    entries = Array.isArray(decoded) ? decoded as GitHubContentEntry[] : [];
-  } catch {
-    return;
-  }
-
+  const entries = await readGitHubDirectory(apiUrl);
   const files: GitHubContentEntry[] = [];
   await collectGitHubFiles(entries, files, apiUrl);
   const basePath = input.skillDir ? `${input.skillDir}/` : "";
   for (const entry of files) {
-    const downloadUrl = entry.download_url ?? "";
-    if (!downloadUrl || !entry.path) continue;
+    if (!entry.download_url || !entry.path) {
+      throw new Error(`GitHub import: missing download URL or path for ${entry.name ?? "file"}`);
+    }
     try {
-      const body = await fetchRawText(downloadUrl);
+      const body = await fetchRawText(entry.download_url);
       addImportedFile(input.imported, entry.path.startsWith(basePath) ? entry.path.slice(basePath.length) : entry.path, body);
     } catch (error) {
-      if (isCapError(error)) throw error;
+      if (isCapError(error) || error instanceof SkillImportError) throw error;
+      throw new Error(`GitHub import: failed to download ${entry.path}: ${errorMessage(error)}`);
     }
   }
 }
 
-async function collectGitHubFiles(entries: GitHubContentEntry[], out: GitHubContentEntry[], parentUrl: string): Promise<void> {
+async function readGitHubDirectory(url: string): Promise<GitHubContentEntry[]> {
+  try {
+    const response = await fetchGitHubApi(url);
+    if (response.status !== 200) throw upstreamHttpError(response, url);
+    const decoded = await response.json();
+    if (!Array.isArray(decoded)) throw new Error("expected a directory listing");
+    return decoded as GitHubContentEntry[];
+  } catch (error) {
+    if (error instanceof SkillImportError) throw error;
+    throw new Error(`GitHub import: failed to list ${url}: ${errorMessage(error)}`);
+  }
+}
+
+async function collectGitHubFiles(entries: GitHubContentEntry[], out: GitHubContentEntry[], parentUrl: string, primaryDirectory = true): Promise<void> {
   for (const entry of entries) {
     const name = entry.name ?? "";
     const lower = name.toLowerCase();
-    if (lower === "skill.md" || lower === "license" || lower === "license.txt" || lower === "license.md") continue;
+    if ((primaryDirectory && lower === "skill.md") || lower === "license" || lower === "license.txt" || lower === "license.md") continue;
     if (entry.type === "file") {
-      if (entry.path && !isLikelyBinaryFilePath(entry.path)) {
+      if (!entry.path) throw new Error(`GitHub import: missing path for ${name}`);
+      if (!isLikelyBinaryFilePath(entry.path)) {
         if (out.length >= MAX_IMPORT_FILE_COUNT) {
           throw new ImportCapError(`import bundle exceeds ${MAX_IMPORT_FILE_COUNT} file limit`);
         }
@@ -375,11 +390,8 @@ async function collectGitHubFiles(entries: GitHubContentEntry[], out: GitHubCont
     if (entry.type !== "dir") continue;
 
     const subUrl = entry.url || deriveGitHubSubdirectoryUrl(parentUrl, name);
-    if (!subUrl) continue;
-    const response = await fetchGitHubApi(subUrl);
-    if (response.status !== 200) continue;
-    const decoded = await response.json().catch(() => []);
-    if (Array.isArray(decoded)) await collectGitHubFiles(decoded as GitHubContentEntry[], out, subUrl);
+    if (!subUrl) throw new Error(`GitHub import: missing URL for directory ${entry.path ?? name}`);
+    await collectGitHubFiles(await readGitHubDirectory(subUrl), out, subUrl, false);
   }
 }
 
@@ -387,7 +399,7 @@ async function resolveGitHubSkillDirByName(owner: string, repo: string, defaultB
   const treeUrl = `https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}/git/trees/${escapeRefPath(defaultBranch)}?recursive=1`;
   const response = await fetchGitHubApi(treeUrl);
   if (response.status !== 200) {
-    throw new Error(`failed to inspect repository ${owner}/${repo} for skill ${skillName}: HTTP ${response.status}`);
+    throw upstreamHttpError(response, treeUrl);
   }
   const tree = await response.json() as GitHubTreeResponse;
   const skillPaths = extractSkillMdPaths(tree.tree ?? []);
@@ -415,12 +427,14 @@ async function findSkillDirFromConventionalPrefixes(owner: string, repo: string,
 }
 
 async function listGitHubSkillMdPaths(owner: string, repo: string, repoPath: string, ref: string): Promise<string[]> {
-  const response = await fetchGitHubApi(buildGitHubContentsUrl(owner, repo, repoPath, ref));
+  const url = buildGitHubContentsUrl(owner, repo, repoPath, ref);
+  const response = await fetchGitHubApi(url);
   if (response.status === 404) return [];
-  if (response.status !== 200) return [];
-  const decoded = await response.json().catch(() => []);
+  if (response.status !== 200) throw upstreamHttpError(response, url);
+  const decoded = await response.json();
+  if (!Array.isArray(decoded)) throw new Error(`expected a directory listing for ${url}`);
   const paths: string[] = [];
-  if (Array.isArray(decoded)) await collectGitHubSkillMdPaths(decoded as GitHubContentEntry[], paths, buildGitHubContentsUrl(owner, repo, repoPath, ref));
+  await collectGitHubSkillMdPaths(decoded as GitHubContentEntry[], paths, url);
   return paths;
 }
 
@@ -433,11 +447,8 @@ async function collectGitHubSkillMdPaths(entries: GitHubContentEntry[], out: str
     }
     if (entry.type !== "dir") continue;
     const subUrl = entry.url || deriveGitHubSubdirectoryUrl(parentUrl, entry.name ?? "");
-    if (!subUrl) continue;
-    const response = await fetchGitHubApi(subUrl);
-    if (response.status !== 200) continue;
-    const decoded = await response.json().catch(() => []);
-    if (Array.isArray(decoded)) await collectGitHubSkillMdPaths(decoded as GitHubContentEntry[], out, subUrl);
+    if (!subUrl) throw new Error(`GitHub import: missing URL for directory ${entry.path ?? entry.name}`);
+    await collectGitHubSkillMdPaths(await readGitHubDirectory(subUrl), out, subUrl);
   }
 }
 
@@ -448,7 +459,8 @@ async function findMatchingSkillDirByFrontmatter(rawPrefix: string, skillName: s
       if (parseSkillFrontmatter(skillMd).name === skillName) {
         return { skillDir: skillDirFromSkillFilePath(skillPath), skillMd };
       }
-    } catch {
+    } catch (error) {
+      if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
       // Keep scanning other candidate SKILL.md files.
     }
   }
@@ -457,38 +469,32 @@ async function findMatchingSkillDirByFrontmatter(rawPrefix: string, skillName: s
 
 async function resolveGitHubRefAndPath(spec: GitHubSpec): Promise<void> {
   const tried: string[] = [];
-  let blocked = false;
   for (let length = spec.refSegments.length; length >= 1; length -= 1) {
     const candidate = spec.refSegments.slice(0, length).join("/");
     tried.push(candidate);
     const result = await githubRefExists(spec.owner, spec.repo, candidate);
-    if (result === "blocked") {
-      blocked = true;
-      continue;
-    }
     if (result) {
       spec.ref = candidate;
       spec.skillDir = length === spec.refSegments.length ? "" : spec.refSegments.slice(length).join("/");
       return;
     }
   }
-  if (blocked) return;
   throw new Error(`could not resolve ref in github.com/${spec.owner}/${spec.repo} URL; tried: ${tried.join(", ")}`);
 }
 
-async function githubRefExists(owner: string, repo: string, ref: string): Promise<boolean | "blocked"> {
+async function githubRefExists(owner: string, repo: string, ref: string): Promise<boolean> {
   const url = `https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}/commits/${escapeRefPath(ref)}`;
   const response = await fetchGitHubApi(url, { accept: "application/vnd.github.v3.sha" });
   if (response.status === 200) return true;
   if (response.status === 404 || response.status === 422) return false;
-  if (response.status === 401 || response.status === 403 || response.status === 429) return "blocked";
-  throw new Error(`github API returned status ${response.status} for ref ${ref}`);
+  throw upstreamHttpError(response, url);
 }
 
 async function fetchGitHubDefaultBranch(owner: string, repo: string): Promise<string> {
-  const response = await fetchGitHubApi(`https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}`);
-  if (response.status !== 200) return "main";
-  const info = await response.json().catch(() => ({})) as GitHubRepoInfo;
+  const url = `https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}`;
+  const response = await fetchGitHubApi(url);
+  if (response.status !== 200) throw upstreamHttpError(response, url);
+  const info = await response.json() as GitHubRepoInfo;
   return info.default_branch || "main";
 }
 
@@ -616,55 +622,40 @@ function skillNameHints(skillName: string): string[] {
 }
 
 async function fetchJson<T>(url: string, options: { allowNotFound?: boolean } = {}): Promise<T> {
-  const response = await fetch(url);
+  const response = await fetchSkillImportResponse(url, {}, MAX_IMPORT_TOTAL_SIZE);
   if (response.status === 404 && options.allowNotFound) return {} as T;
   if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
   return await response.json() as T;
 }
 
-async function fetchRawText(url: string): Promise<string> {
-  const response = await fetch(url);
-  if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
-  if (Number(response.headers.get("content-length") ?? 0) > MAX_IMPORT_FILE_SIZE) {
-    throw new ImportCapError(`file exceeds ${MAX_IMPORT_FILE_SIZE} byte limit`);
+function upstreamHttpError(response: Response, url: string): Error {
+  const limited = response.status === 429 || response.status === 403
+    && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"));
+  if (limited && ["api.github.com", "raw.githubusercontent.com"].includes(new URL(url).hostname)) {
+    const reset = Number(response.headers.get("x-ratelimit-reset"));
+    const resetTime = Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000) : null;
+    const resetHint = resetTime && !Number.isNaN(resetTime.getTime()) ? ` Resets at ${resetTime.toISOString()}.` : "";
+    const retryValue = response.headers.get("retry-after");
+    const retryAfter = retryValue && /^\d+$/.test(retryValue) ? retryValue : null;
+    return new SkillImportError(
+      `GitHub rate limit exceeded (HTTP ${response.status}) for ${url}.${resetHint}${retryAfter ? ` Retry-After: ${retryAfter}.` : ""} Configure GITHUB_TOKEN on the API server or retry later.`,
+      429,
+    );
   }
-  const bytes = await readLimitedBytes(response, MAX_IMPORT_FILE_SIZE);
-  return new TextDecoder().decode(bytes);
+  return new UpstreamHttpError(response.status, url);
 }
 
-async function readLimitedBytes(response: Response, limit: number): Promise<Uint8Array> {
-  const reader = response.body?.getReader();
-  if (!reader) {
-    const buffer = new Uint8Array(await response.arrayBuffer());
-    if (buffer.byteLength > limit) throw new ImportCapError(`file exceeds ${limit} byte limit`);
-    return buffer;
-  }
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > limit) throw new ImportCapError(`file exceeds ${limit} byte limit`);
-    chunks.push(value);
-  }
-  const output = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
+async function fetchRawText(url: string): Promise<string> {
+  const response = await fetchSkillImportResponse(url, {}, MAX_IMPORT_FILE_SIZE);
+  if (response.status !== 200) throw upstreamHttpError(response, url);
+  return await response.text();
 }
 
 async function fetchGitHubApi(url: string, options: { accept?: string } = {}): Promise<Response> {
   const headers = new Headers();
   headers.set("Accept", options.accept ?? "application/vnd.github+json");
   headers.set("X-GitHub-Api-Version", "2022-11-28");
-  const token = process.env.GITHUB_TOKEN?.trim();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  return await fetch(url, { headers });
+  return await fetchSkillImportResponse(url, { headers }, MAX_IMPORT_TOTAL_SIZE);
 }
 
 function buildRawGitHubUrl(rawPrefix: string, repoPath: string): string {

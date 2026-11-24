@@ -69,6 +69,9 @@ export const statusConfig: Record<
 > = {
   pending: { icon: Loader2, color: "text-muted-foreground" },
   running: { icon: Loader2, color: "text-info" },
+  restarting: { icon: Loader2, color: "text-info" },
+  verifying: { icon: Loader2, color: "text-info" },
+  rolled_back: { icon: XCircle, color: "text-warning" },
   completed: { icon: CheckCircle2, color: "text-success" },
   failed: { icon: XCircle, color: "text-destructive" },
   timeout: { icon: XCircle, color: "text-warning" },
@@ -140,9 +143,7 @@ function useUpdateFlow(
             if (result.status === "completed") {
               setOutput(result.output ?? completedFallback);
               clearTimers();
-              // The daemon restarts + re-registers after the update, so the new
-              // version lands a few seconds later. Refetch the runtime now and
-              // again over the next ~20s to catch it without a manual reload.
+              // Completion confirms the new daemon registration; refresh version metadata.
               onRefresh();
               [5000, 12000, 20000].forEach((ms) => schedule(onRefresh, ms));
               // Clear the completed pill after the row has had a chance to
@@ -150,6 +151,7 @@ function useUpdateFlow(
               schedule(() => setStatus(null), 6000);
             } else if (
               result.status === "failed" ||
+              result.status === "rolled_back" ||
               result.status === "timeout"
             ) {
               setError(result.error ?? t(($) => $.update.unknown_error));
@@ -168,7 +170,7 @@ function useUpdateFlow(
     [runtimeId, completedFallback, cancel, clearTimers, schedule, t, onRefresh],
   );
 
-  const active = status === "pending" || status === "running";
+  const active = status === "pending" || status === "running" || status === "restarting" || status === "verifying";
   return { status, error, output, active, run };
 }
 
@@ -181,6 +183,7 @@ function UpdateRow({
   onAction,
   flow,
   retryLabel,
+  completedLabel,
 }: {
   label: string;
   version: string | null;
@@ -190,6 +193,7 @@ function UpdateRow({
   onAction: () => void;
   flow: UpdateFlow;
   retryLabel: string;
+  completedLabel?: string;
 }) {
   const { t } = useT("runtimes");
   const config = flow.status ? statusConfig[flow.status] : null;
@@ -216,7 +220,9 @@ function UpdateRow({
             className={`inline-flex items-center gap-1 text-xs ${config.color}`}
           >
             <Icon className={`h-3 w-3 ${flow.active ? "animate-spin" : ""}`} />
-            {t(($) => $.update.status[flow.status as RuntimeUpdateStatus])}
+            {flow.status === "completed" && completedLabel
+              ? completedLabel
+              : t(($) => $.update.status[flow.status as RuntimeUpdateStatus])}
           </span>
         )}
       </div>
@@ -227,7 +233,7 @@ function UpdateRow({
         </div>
       )}
 
-      {(flow.status === "failed" || flow.status === "timeout") && flow.error && (
+      {(flow.status === "failed" || flow.status === "timeout" || flow.status === "rolled_back") && flow.error && (
         <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2">
           <p className="text-xs text-destructive">{flow.error}</p>
           {flow.status === "failed" && (
@@ -248,6 +254,7 @@ function UpdateRow({
 
 interface UpdateSectionProps {
   runtimeId: string;
+  provider: string;
   agentVersion: string | null;
   acpVersion: string | null;
   isOnline: boolean;
@@ -255,6 +262,7 @@ interface UpdateSectionProps {
 
 export function UpdateSection({
   runtimeId,
+  provider,
   agentVersion,
   acpVersion,
   isOnline,
@@ -269,14 +277,16 @@ export function UpdateSection({
   }, [qc]);
 
   const agentFlow = useUpdateFlow(runtimeId, "Agent updated", refresh);
-  const acpFlow = useUpdateFlow(runtimeId, "ACP bridge updated", refresh);
+  const acpFlow = useUpdateFlow(runtimeId, t(($) => $.update.acp_reinstalled), refresh);
+  const managedAgent = ["claude", "codex", "antigravity"].includes(provider);
+  const supportsAcpReinstall = managedAgent;
 
   return (
     <div className="space-y-2.5">
       <UpdateRow
         label={t(($) => $.update.agent_label)}
         version={agentVersion}
-        showAction={isOnline && !agentFlow.active}
+        showAction={isOnline && provider === "grok" && !agentFlow.active}
         actionLabel={t(($) => $.update.agent_action)}
         onAction={() =>
           agentFlow.run(() =>
@@ -290,14 +300,20 @@ export function UpdateSection({
       <UpdateRow
         label={t(($) => $.update.acp_label)}
         version={acpVersion}
-        showAction={isOnline && !acpFlow.active}
+        showAction={isOnline && supportsAcpReinstall && !acpFlow.active}
         actionLabel={t(($) => $.update.acp_action)}
         onAction={() =>
           acpFlow.run(() => api.initiateUpdate(runtimeId, "latest", "acp"))
         }
         flow={acpFlow}
         retryLabel={t(($) => $.update.retry)}
+        completedLabel={t(($) => $.update.acp_reinstalled)}
       />
+      {managedAgent && (
+        <p className="text-xs text-muted-foreground">
+          {t(($) => $.update.managed_runtime_hint)}
+        </p>
+      )}
     </div>
   );
 }
@@ -397,7 +413,7 @@ export function MachineCliUpdate({
             {t(($) => $.update.managed_by_desktop_title)}
           </TooltipContent>
         </Tooltip>
-      ) : flow.status === "failed" || flow.status === "timeout" ? (
+      ) : flow.status === "failed" || flow.status === "timeout" || flow.status === "rolled_back" ? (
         <Popover>
           <PopoverTrigger
             render={

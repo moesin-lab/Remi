@@ -2,18 +2,21 @@
 // Drives the carved-out repo directly over its StoreContext (not through the
 // MultiremiStore facade) so a broken delegation cannot mask a broken move.
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { StoreContext } from "@multiremi/store/context.js";
 import { ChatRepo } from "@multiremi/store/repos/chat-repo.js";
+import { createResponsibleTestIssue } from './helpers.js';
 
 let db: Database | null = null;
 let store: MultiremiStore | null = null;
 
 function createRepo(): ChatRepo {
-  db = new Database(":memory:");
+  db = openSqliteDatabase(":memory:");
   // The store owns migrations and is the lazy cross-domain host the context resolves.
   store = new MultiremiStore(db);
+  store.ensureLocalWorkspace();
   return new ChatRepo(new StoreContext(db, () => store!));
 }
 
@@ -39,7 +42,7 @@ describe("ChatRepo", () => {
   it("rejects removed Issue binding fields and retains ordinary session controls", () => {
     const repo = createRepo();
     const agent = store!.createAgent({ name: "Chatty", provider: "codex", workspaceId: "local" });
-    const issue = store!.createIssue({ title: "Separate work", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store!,{ title: "Separate work", workspaceId: "local" });
     const session = repo.createChatSession({ agentId: agent.id, workspaceId: "local" });
 
     expect(session).not.toHaveProperty("issueId");
@@ -86,4 +89,32 @@ describe("ChatRepo", () => {
     expect(seen).toEqual(["chat:session_updated", "chat:session_read"]);
     expect(repo.getChatSession(session.id)?.title).toBe("Renamed");
   });
+
+  for (const outcome of ["completed", "failed"] as const) {
+    it(`routes the ${outcome} reply to the shared operator inbox while retaining its Chat creator`, () => {
+      const repo = createRepo();
+      const user = store!.getOrCreateUser({ name: "Chat creator", email: "creator@example.test" });
+      const member = store!.createWorkspaceMember({ name: user.name, userId: user.id });
+      const agent = store!.createAgent({ name: "Worker", provider: "codex" });
+      const runtime = store!.registerRuntime({ name: "Chat runtime", provider: "codex" });
+      const chat = repo.createChatSession({ agentId: agent.id, creatorId: user.id });
+      const sent = repo.sendChatMessage(chat.id, { body: "Request" });
+      expect(store!.claimTask(runtime.id)?.id).toBe(sent.task.id);
+      store!.startTask(sent.task.id);
+      if (outcome === "completed") store!.completeTask(sent.task.id, { output: "Result" });
+      else store!.failTask(sent.task.id, { error: "Failure", failureReason: "unknown" });
+
+      const reply = store!.listMessages(chat.id).find(message => message.sender_type === "agent")!;
+      const operator = store!.getWorkspaceOperator("local")!;
+      expect(reply).toMatchObject({ to_type: "member", to_ref: operator.id, to_member_id: operator.id, wake_applied: "inbox_only" });
+      expect(store!.listMessageInbox(member.id, "local").items.some(item => item.session_id === chat.id)).toBe(true);
+      expect(store!.listMessageInbox(operator.id, "local").items.some(item => item.session_id === chat.id)).toBe(true);
+      expect(repo.getChatSession(chat.id)?.creatorId).toBe(user.id);
+      expect(repo.getChatSession(chat.id)).toMatchObject({ hasUnread: true, unreadCount: 1 });
+      store!.readMessageInbox(member.id, chat.id, store!.getMessage(sent.message.id)!.seq);
+      expect(repo.getChatSession(chat.id)?.hasUnread).toBe(true);
+      store!.readMessageInbox(member.id, chat.id, reply.seq);
+      expect(repo.getChatSession(chat.id)).toMatchObject({ hasUnread: false, unreadCount: 0 });
+    });
+  }
 });

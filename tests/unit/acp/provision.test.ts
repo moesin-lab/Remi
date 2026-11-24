@@ -7,12 +7,16 @@ import {
   bridgeVersion,
   bridgeSatisfied,
   patchCodexUsageBridge,
+  patchClaudeUsageBridge,
   BRIDGE_PIN,
   CODEX_USAGE_PATCH,
   RUNTIME_PIN,
   ensureAcpBridges,
 } from "@acp/provision.js";
 import { runtimeBundlePrefix, runtimeBundleManifest, runtimePackageSatisfied } from "@acp/runtime-bundle.js";
+import { CODEX_SESSION_BOUNDARY } from "../../fixtures/acp/codex-acp-session-boundary.js";
+import { CLAUDE_SUBAGENT_BOUNDARY } from "../../fixtures/acp/claude-acp-subagent-boundary.js";
+import { stripClaudeSubagentPatch } from "@acp/usage-bridge-patches.js";
 
 let dir: string | null = null;
 const savedHome = process.env.REMI_HOME;
@@ -39,17 +43,26 @@ function writeBridgePackage(home: string, pkg: string, version: string): string 
   const pkgDir = join(home, "acp", "node_modules", ...pkg.split("/"));
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: pkg, version }));
+  if (pkg.endsWith("claude-agent-acp")) {
+    mkdirSync(join(pkgDir, "dist"), { recursive: true });
+    writeFileSync(join(pkgDir, "dist", "acp-agent.js"), "                if (session.emitRawSDKMessages && true) {}\n" + CLAUDE_SUBAGENT_BOUNDARY);
+    patchClaudeUsageBridge(() => {}, pkgDir);
+  }
   return pkgDir;
 }
 
-function writeCodexDist(pkgDir: string, source = `  createUsageUpdate() {
+function writeCodexDist(pkgDir: string, source = `  async handleNotification(notification) {}
+  async createUpdateEvent(notification) { switch(notification.method) { case "rawResponse/completed": return null; } }
+  createUsageUpdate(params) {
     return {
       sessionUpdate: "usage_update",
       used,
       size
     };
   }
-`): string {
+  handleRateLimitsUpdated(params) {}
+  routeChild(childEvent, session) { if (session.current.supportsSubagents) session.current.dispatch(childEvent); }
+` + CODEX_SESSION_BOUNDARY): string {
   const dist = join(pkgDir, "dist", "index.js");
   mkdirSync(join(pkgDir, "dist"), { recursive: true });
   writeFileSync(dist, source);
@@ -111,6 +124,19 @@ test("a current Claude ACP with the old bundled SDK still needs preparation", ()
   expect(runtimePackageSatisfied("claude", bridge)).toBe(false);
 });
 
+test("a Claude bridge with only the usage patch is stale until the subagent patch is in (PR 5)", () => {
+  const home = freshHome();
+  const bridge = writeBridgePackage(home, "@agentclientprotocol/claude-agent-acp", BRIDGE_PIN.claude);
+  writeSdk(home, "claude");
+  expect(bridgeSatisfied("claude")).toBe(true);
+  // As installed before the subagent patch existed.
+  const dist = join(bridge, "dist", "acp-agent.js");
+  writeFileSync(dist, stripClaudeSubagentPatch(readFileSync(dist, "utf8")));
+  expect(bridgeSatisfied("claude")).toBe(false);
+  expect(patchClaudeUsageBridge(() => {}, bridge)).toBe(true);
+  expect(bridgeSatisfied("claude")).toBe(true);
+});
+
 test("release bundle takes precedence over legacy/global bridges", () => {
   const home = freshHome();
   writeBridgePackage(home, "@agentclientprotocol/claude-agent-acp", "0.53.0");
@@ -138,7 +164,7 @@ test("preflight preserves the old Codex launcher until normal daemon startup act
   expect(readlinkSync(launcher)).toBe(dist);
 });
 
-test("codex usage patch is idempotent and carries the complete last-request split", () => {
+test("codex usage patch is idempotent and carries response consumption separately from context", () => {
   const home = freshHome();
   const pkgDir = writeBridgePackage(home, "@agentclientprotocol/codex-acp", BRIDGE_PIN.codex);
   const dist = writeCodexDist(pkgDir);
@@ -150,7 +176,9 @@ test("codex usage patch is idempotent and carries the complete last-request spli
   const once = readFileSync(dist, "utf8");
   expect(once).toContain(`const CODEX_USAGE_PATCH = "${CODEX_USAGE_PATCH}";`);
   expect(once).toContain("remiTokenUsage");
-  expect(once).toContain("cachedInputTokens: this.sessionState.lastTokenUsage.cachedInputTokens");
+  expect(once).toContain('notification.method === "rawResponse/completed"');
+  expect(once).toContain('remiUsageMode: "request"');
+  expect(once).toContain("experimentalRawEvents: true");
   expect(patchCodexUsageBridge((message) => logs.push(message), pkgDir)).toBe(true);
   expect(readFileSync(dist, "utf8")).toBe(once);
   expect(once.match(/remiTokenUsage/g)).toHaveLength(1);

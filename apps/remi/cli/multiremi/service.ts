@@ -1,3 +1,4 @@
+import { DAEMON_SERVICE_STOP_SECONDS } from "@shared/daemon-update.js";
 /**
  * Multiremi CLI — daemon launch spec plus launchd/systemd unit templating.
  *
@@ -5,8 +6,9 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, delimiter, extname, join, relative, resolve, sep } from "node:path";
 import { type CliOptions, stringOpt, numberOpt } from "./options.js";
 
 export const DEFAULT_DAEMON_PORT = 6131;
@@ -41,6 +43,9 @@ export type DaemonRestartPlan =
  * Ask the manager for a restart instead. It replaces the entire cgroup with a
  * single process on the new binary, which also clears any pile left behind by
  * an older release.
+ * systemctl itself can receive SIGTERM from that stop job before returning;
+ * the caller must leave replacement to systemd rather than spawn in the dying
+ * cgroup when that happens.
  */
 export function planDaemonRestart(input: {
   platform: NodeJS.Platform;
@@ -189,8 +194,9 @@ export function buildMultiremiDaemonLaunchSpec(
   programName = "multiremi",
   argv = process.argv,
   execPath = process.execPath,
+  forRestart = false,
 ): MultiremiDaemonLaunchSpec {
-  const launcher = currentProcessLauncher(argv, execPath);
+  const launcher = currentProcessLauncher(argv, execPath, forRestart);
   const port = daemonPortFromOptions(options);
   const paths = multiremiDaemonPaths();
   return {
@@ -340,6 +346,10 @@ ${envBlock}  <key>WorkingDirectory</key>
   <string>${escapeXml(input.spec.logPath)}</string>
   <key>RunAtLoad</key>
   <true/>
+  <key>ExitTimeOut</key>
+  <integer>${DAEMON_SERVICE_STOP_SECONDS}</integer>
+  <key>AbandonProcessGroup</key>
+  <false/>
   <key>KeepAlive</key>
   <true/>
 </dict>
@@ -367,6 +377,8 @@ WorkingDirectory=${systemdQuote(input.spec.stateDir)}
 ${envLines}
 Restart=always
 RestartSec=10
+TimeoutStopSec=${DAEMON_SERVICE_STOP_SECONDS}
+KillMode=control-group
 StandardOutput=append:${input.spec.logPath}
 StandardError=append:${input.spec.logPath}
 
@@ -396,13 +408,88 @@ export function runServiceCommands(commands: string[][]): void {
   }
 }
 
-export function currentProcessLauncher(argv: string[], execPath: string): { command: string; argsPrefix: string[] } {
+export function currentProcessLauncher(argv: string[], execPath: string, forRestart = false): { command: string; argsPrefix: string[] } {
   const executable = basename(execPath, extname(execPath)).toLowerCase();
   const script = argv[1];
   if ((executable === "bun" || executable.startsWith("bun-")) && script) {
     return { command: execPath, argsPrefix: [script] };
   }
-  return { command: execPath, argsPrefix: [] };
+  return { command: stableDaemonLauncher(execPath, forRestart) ?? execPath, argsPrefix: [] };
+}
+
+/** Only prefer a stable launcher when it execs this installed version. Never run it to probe. */
+function stableDaemonLauncher(execPath: string, forRestart: boolean): string | null {
+  const installRoot = process.env.MULTIREMI_INSTALL_ROOT?.trim() || join(homedir(), ".local", "lib", "remi");
+  let executable: string;
+  let versions: string;
+  try {
+    executable = realpathSync(execPath);
+    versions = realpathSync(join(installRoot, "versions"));
+  } catch {
+    return null;
+  }
+  const versionPath = relative(versions, executable).split(sep);
+  if (versionPath.length !== 2 || versionPath[0] === ".." || versionPath[1] !== "remi") return null;
+
+  const binDir = process.env.MULTIREMI_BIN_DIR?.trim();
+  // POSIX PATH empty entries mean cwd; an unset MULTIREMI_BIN_DIR does not.
+  const directories = [...(binDir ? [binDir] : []), ...(process.env.PATH?.split(delimiter) ?? [])];
+  for (const directory of directories) {
+    const candidate = resolve(directory, "remi");
+    if (candidate === resolve(execPath)) continue;
+    try {
+      accessSync(candidate, constants.X_OK);
+      const stat = statSync(candidate);
+      if (!stat.isFile() || stat.size > 64 * 1024) continue;
+      const content = readFileSync(candidate, "utf8");
+      if (!/^#!\s*\/(?:bin|usr\/bin)\/(?:sh|bash)(?:\r?\n)/.test(content)) continue;
+      const matches = content.split("\n").some((line) => {
+        const command = line.match(/^\s*exec\s+(.+)$/)?.[1];
+        const target = command && literalShellCommand(command);
+        // Relative exec paths depend on the service cwd, so only trust absolute targets.
+        if (!target || !target.startsWith(sep)) return false;
+        const resolved = realpathSync(target);
+        if (resolved === executable) return true;
+        const next = relative(versions, resolved).split(sep);
+        return forRestart && next.length === 2 && next[0] !== ".." && next[1] === "remi";
+      });
+      if (matches) return candidate;
+    } catch {
+      // Missing, unreadable or non-executable PATH entries leave the binary unchanged.
+    }
+  }
+  return null;
+}
+
+/** Decode one literal shell word without evaluating substitutions or running the script. */
+function literalShellCommand(command: string): string | null {
+  let value = "";
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index]!;
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else value += char;
+    } else if (char === "\\") {
+      const next = command[++index];
+      if (next === undefined || next === "\n") return null;
+      if (quote === '"' && !'"\\$`'.includes(next)) value += "\\";
+      value += next;
+    } else if (char === quote) {
+      quote = null;
+    } else if (!quote && (char === "'" || char === '"')) {
+      quote = char;
+    } else if (char === "$" || char === "`") {
+      return null;
+    } else if (!quote && /\s/.test(char)) {
+      return value || null;
+    } else if (!quote && /[;&|<>()*?\[~]/.test(char)) {
+      return null;
+    } else {
+      value += char;
+    }
+  }
+  return quote ? null : value || null;
 }
 
 export function programSubcommandPrefix(programName: string): string[] {

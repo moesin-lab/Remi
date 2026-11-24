@@ -15,11 +15,13 @@ summary: 从 CLI、Web 和飞书入口追踪到 API、存储与 Agent 执行，�
 |---|---|---|
 | `apps/remi` | `remi` CLI、登录、服务生命周期和平台命令 | [main.ts](../apps/remi/main.ts)、[CommandRegistry](../apps/remi/cli/core/command-registry.ts) |
 | `apps/server` | 平台 CLI 入口，复用服务端启动分发 | [main.ts](../apps/server/main.ts)、[multiremi.ts](../apps/remi/cli/multiremi.ts) |
-| `frontend/apps/web` | Next.js Web 入口 | [应用目录](../frontend/apps/web)、[前端地图](dev/frontend.md) |
+| `apps/edge` / `packages/edge` | 独立 L7 代理，持有监听端口；HTTP/WS 流式转发、hold、健康检查和后端摘流；不拉起 slot | [入口](../apps/edge/main.ts)、[库](../packages/edge/src/index.ts)、[控制与验证](dev/edge.md) |
+| `apps/platform-updater` | 独立更新循环；Compose 内部更新器经共享卷监管 API/Web 子进程，应用包携带 Bun/Node；另保留宿主应用包、systemd 与镜像驱动 | [内部入口](../apps/platform-updater/internal.ts)、[内部驱动](../packages/platform-updater/src/internal-driver.ts)、[监管进程](../packages/platform-updater/src/supervisor.mjs)、[部署说明](../deploy/README.md#internal-compose-updater) |
+| `frontend/apps/web` | Next.js Web 入口；主侧栏含工作区、[IM 平台](dev/im-platforms.md)和配置分组 | [应用目录](../frontend/apps/web)、[前端地图](dev/frontend.md) |
 | `packages/server` | Hono API、wire 序列化、领域存储、平台 worker | [API 组合与服务启动](../packages/server/src/api/server.ts)、[Store](../packages/server/src/store/store.ts) |
 | `packages/daemon` | 共享 AgentRuntime、工作目录/插件/MCP/提示词组装、lane 和定时调度 | [runtime.ts](../packages/daemon/src/agent-runtime/runtime.ts)、[orchestrator.ts](../packages/daemon/src/orchestrator.ts)、[scheduler.ts](../packages/daemon/src/scheduler.ts) |
 | `packages/remi` | Remi core 库与会话辅助代码；当前 foreground 的飞书消息接线位于 `apps/remi/cli/multiremi.ts` | [core.ts](../packages/remi/src/core.ts)、[当前 foreground](../apps/remi/cli/multiremi.ts) |
-| `packages/acp` | ACP 连接、原生 agy 与统一 provider 事件 | [provider 工厂](../packages/acp/src/runtime-provider.ts)、[client.ts](../packages/acp/src/client.ts)、[adapter registry](../packages/acp/src/adapters/index.ts) |
+| `packages/acp` | ACP 连接、接入配置（Antigravity）与统一 provider 事件 | [provider 工厂](../packages/acp/src/runtime-provider.ts)、[client.ts](../packages/acp/src/client.ts)、[adapter registry](../packages/acp/src/adapters/index.ts) |
 | `packages/connectors` | 平台消息接收与回复适配 | [base.ts](../packages/connectors/src/base.ts)、[feishu](../packages/connectors/src/feishu) |
 | `packages/contracts` / `shared` / `auth` | 共享类型、配置/基础设施、认证 | [contracts](../packages/contracts/src)、[shared](../packages/shared/src)、[auth](../packages/auth/src) |
 
@@ -32,27 +34,123 @@ summary: 从 CLI、Web 和飞书入口追踪到 API、存储与 Agent 执行，�
 **Web / CLI 读写平台数据**：前端查询或 CommandRegistry → Hono [routers](../packages/server/src/api/routers) →
 [Store facade](../packages/server/src/store/store.ts) / [领域 repos](../packages/server/src/store/repos) → 数据库。
 对外形状集中到 [wire](../packages/server/src/api/wire)；事件经 [realtime](../packages/server/src/api/realtime.ts) 到前端缓存。
+store 的四路实时事件由 [realtime-fanout](../packages/server/src/api/realtime-fanout.ts) 统一订阅，按进程角色投本进程的浏览器或 daemon 注册表；
+两个 API 进程之间用 [peer channel](../packages/server/src/api/peer/peer-channel.ts)（`POST /internal/peer/events`）互转，`MULTIREMI_PEER_URL` 不设即完全关闭。
+协议、消息引用、字节预算与角色解析链见 [Realtime peer channel](dev/realtime-peer.md)。
 
-**任务执行**：issue/chat/autopilot 产生 task → [任务存储](../packages/server/src/store/repos/tasks-repo.ts) →
-[daemon client](../packages/server/src/worker/client.ts) / [worker loop](../packages/server/src/worker/daemon.ts) 领取 →
-[AgentRuntime](../packages/daemon/src/agent-runtime/runtime.ts) 组装执行上下文 → ACP 或原生 agy provider → 消息、usage 和终态上报。
+**服务端 Skill 导入**：API 路由与 Agent 模板导入通过
+[GitHub 只读鉴权](../packages/server/src/scm/github-read-auth.ts)按当前工作区和目标仓库解析凭据：
+已启用的显式仓库绑定优先，其次为同源的全部仓库默认连接，再回退到 API 进程的 `GITHUB_TOKEN`，最后匿名。
+连接解密失败时继续回退，不记录凭据或异常内容。凭据提供者只注入
+[Skill 导入网络层](../packages/daemon/src/agent-runtime/skills/skill-import-network.ts)，不进入任务环境或 daemon 配置。
+仅 GitHub 官方 HTTPS 主机的 GET 请求可携带鉴权；跨源重定向及其后续请求均不携带鉴权，导入期限覆盖整个跳转链。
+响应文本和错误中的已用凭据被脱敏，provider 错误正文不透传；daemon CLI 更新不使用工作区连接。
+
+**任务执行**：issue/chat/autopilot 经[统一消息入口](../packages/server/src/store/inbox/send-message.ts)写 Message →
+[lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)创建或合并 Turn → current attempt →
+[服务端 offer 泵](../packages/server/src/api/daemon-protocol/task-offers.ts) 推送 →
+[worker loop](../packages/server/src/worker/daemon.ts) accept 并执行 →
+[AgentRuntime](../packages/daemon/src/agent-runtime/runtime.ts) 组装执行上下文 → ACP provider → 消息、usage 和终态上报。
 权限请求、会话延续、工作目录归属与重试都在这条链路中，不可只以模型输出判断完成。
+
+当前工作树已经使用服务端 `task.offer` / accept / reject，不再发 HTTP claim 或 dispatch-lease。
+ACP 通知由 [trace 翻译器](../packages/server/src/worker/trace-translator.ts)转成「轮 + 条目」事件
+（[ADR 0019](adr/0019-turn-and-item-traces.md)），经 [TraceFileStore](../packages/server/src/worker/trace-file-store.ts)
+写入 `<workspacesRoot>/traces/<主体>/<task_id>.jsonl`（`multiremi.trace.v2`）；写入完成后才公布连续 seq，
+同批事件再应用到运行中尝试的内存 fold（[turn-trace.ts](../packages/shared/src/turn-trace.ts)，所有读者共用）。
+Claude 与 Codex 的子代理走桥的原生子会话：provider 按会话登记表接收子会话帧并加 `_meta.remiSessionId`、不让它们改根会话状态，翻译器把每个子代理合成一个嵌套的 `subagent` 条目；Claude 在 prompt 结束后自开的后续轮（后台子代理的迟到回答）由 daemon 作为自主轮在同一 attempt 里等待，运行中的子代理数经 best-effort `task.activity` 上报（[ADR 0021](adr/0021-subagent-sessions-and-autonomous-rounds.md)）。
+提示词（[ADR 0023](adr/0023-turn-input-and-provider-agents-md.md)）：每个尝试的 [prompt 构建](../packages/daemon/src/agent-runtime/prompts/ephemeral.ts)产出会话设定和本轮输入。会话设定（Agent 定义与 Remi 的规则、工作区、项目、Issue 说明）由 daemon 在每次启动 provider 前写进会话 provider home 的 `AGENTS.md`（Claude 另写 `@AGENTS.md` 的 `CLAUDE.md`），provider 自己加载；本轮输入只有新消息、必要的作者标签、未读说明和回复对象。Agent 的 Skill 每轮同步到 provider 原生加载的目录。
+后台任务（[ADR 0022](adr/0022-background-tasks-keep-alive-on-demand.md)）：Chat 会话线在 attempt 结束时仍有后台任务运行，就由 [ParkedLanes](../packages/server/src/worker/parked-lanes.ts) 驻留桥进程（不占并发槽位，上限、保活时长、崩溃清扫与快照 `lane.background_tasks` 都在这里），下一个 offer 接手同一进程；驻留的 Claude 任务结束时 daemon 以 RPC `lane.background_wake` 请服务端写一条平台门铃消息，交给普通的会话线状态机建轮。服务端把快照写进会话级登记表（[background-tasks-repo](../packages/server/src/store/repos/background-tasks-repo.ts)），停止与释放是由它推导的下行，受能力位 `lane.background` 约束。
+[TraceStreamer](../packages/server/src/worker/trace-streamer.ts)按游标将规范化事件推给 Live Hub，
+过程事件不再写消息表或 outbox；`trace.read` 反向 RPC 按持久化 Runtime 归属读取有界页：
+`view=turn` 是运行中的 fold 或关闭时写下的快照，`view=events` 是原始行。
+daemon 启动只登记 trace 文件路径，首次读取或追加时才建索引，常驻索引按 LRU 限量；已关闭历史仅按需读取，活跃 trace 按 Hub head 续传。服务端只保存指向 daemon 的指针，不再归档或回填 trace。
+**A-2 连接层已接线**：[客户端](../packages/server/src/worker/daemon-protocol-client.ts)每进程一条 socket，
+`hello` 汇总所有 provider lane，`hb` 每 15 秒一次，ack 独立调度。主循环不再发 HTTP 心跳；
+4426、HTTP 426 或 v1 `ready` 会暂停全部 lane 接单，改走每 60 秒一次的 HTTP 升级探测。
+**A-3/A-4 下行已接线**：[DB 快照下发](../packages/server/src/api/daemon-protocol/downlinks.ts)在创建后及重连时
+推送待办和配置；steer、human request、取消与 plugin desired 使用 v2 帧和 RPC，不再搭心跳 ack 或定时轮询。
+跨进程触发依赖 MUL-462 的实时扇出，临时同进程接线不能替代该交付门禁。
+HTTP 心跳 ack 只保留升级请求和 drain，不添加 v1 业务兼容层。规范见
+[daemon 协议 v2](daemon-protocol-v2.md)，取舍见 [ADR 0012](adr/0012-daemon-protocol-v2-single-socket-and-db-derived-downlink.md)。
+任务开始、usage、终态等可靠报告由 [report transport](../packages/server/src/worker/report-transport.ts)
+持久化到本地 outbox，经同一 socket 按任务顺序发送和重试。完成摘要（含轮卡的 `context_usage`、
+`worked_ms`、`process_item_count`）由 fold 随追加维护，恢复后的历史任务只在首次需要摘要时分页重建。执行记录（trace、原生会话历史）永久留在 daemon；
+代码目录和运行环境只是缓存，主体（Issue 或 Chat）结束后由 `reclaim.ts`（`packages/daemon/src/agent-runtime/workspace/`）
+按保留期回收，删前对未保存的工作打快照，重开时恢复。布局、生命周期、策略和运维入口见[存储与保留](dev/storage-retention.md)，
+取舍见 [ADR 0018](adr/0018-local-records-and-recyclable-workspaces.md)。
+文件恢复与旧内存版本的升级边界见 [Daemon 升级](daemon-runtime-upgrades.md)。
 
 Runtime 可持有独立的[持久化工作区](dev/runtime-workspaces.md)：绑定 daemon 的已有目录。任务和聊天通过统一的「工作位置」选择项目或本机目录，二者互斥；Agent 可在不同任务中选择不同位置。目录绑定只能在所属机器执行；未指定位置时沿用自动任务目录。
 
-Chat 与 Issue 独立，Chat 创建时保存项目或本机目录选择；Runtime 本机目录不附加项目仓库；项目聊天优先采用项目所选的 `local_directory`，否则在托管 Chat 目录自动准备项目显式声明的仓库，后续复用已有 worktree。未选工作位置时使用自动 Chat 目录。在 Chat 中创建 Issue 不绑定会话，也不继承新 Issue 的上下文；普通私聊不接收 Issue 播报。飞书群 Issue 话题的归属由 [FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护，投递和任务领取检查绑定、Issue、工作区、Chat 与 Agent 一致性；归属不明的旧关联按[迁移手册](migrations/chat-issue-decoupling.md)审计恢复。[claim wire](../packages/server/src/api/wire/tasks.ts)保留有预算的会话 projection，仅向已确认的 Issue 话题附加 Issue 与增量摘要。详见 [Chat 契约](chat.md)。
+**外部 Codex 会话**：[专用路由](../packages/server/src/api/routers/external-chats.ts)经所属 Runtime 的
+`external_chat.request` 反向 RPC，调用 [daemon 原生 driver](../packages/daemon/src/external-chats/index.ts)。
+项目目录与 thread 由来源 Home 扫描、只读展示；历史分页、原线程续聊和原生审批独立于 Remi Agent/Task 链路，
+不创建平台 Chat 或复制来源配置。共享权限、回执不确定性及跨原客户端并发限制见 [Chat 契约](chat.md#外部-codex-chat)。
+
+Chat 与 Issue 独立，Chat 创建时保存项目或本机目录选择；Runtime 本机目录不附加项目仓库；项目聊天优先采用项目所选的 `local_directory`，否则在托管 Chat 目录自动准备项目显式声明的仓库，后续复用已有 worktree。未选工作位置时使用自动 Chat 目录。`run_only` 自动化每次运行新开一个带来源（`origin`）的 Chat，运行判断无需报告时执行 `remi automation quiet`，完成后该 Chat 自动归档；列表默认只显示用户的对话。在 Chat 中创建 Issue 不绑定会话，也不继承新 Issue 的上下文；普通私聊不接收 Issue 播报。飞书群 Issue 话题的归属由 [FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护，投递和任务领取检查绑定、Issue、工作区、Chat 与 Agent 一致性；归属不明的旧关联按[迁移手册](migrations/chat-issue-decoupling.md)审计恢复。[claim wire](../packages/server/src/api/wire/tasks.ts)保留有预算的会话 projection，仅向已确认的 Issue 话题附加按 `relay:<chat_session_id>` 游标读取的 Issue 日志（最多 100 条，并给出续读位置）；转述任务完成才推进游标。详见 [Chat 契约](chat.md)。
+
+产品 Session 恰好由一个 Chat 或 Issue 拥有，二者创建时都在同一事务内建立自己的 `Main`。
+[IssueSessionsRepo](../packages/server/src/store/repos/issue-sessions-repo.ts)以非空 `chat_id` 判定 Chat owner，
+否则以非空 `issue_id` 判定 Issue owner；Chat-owned 的 `issue_id` 只是可选工作投影。
+API wire 显式提供 `owner_type`、`owner_id`，读取、继承、派发与删除遵循真实 owner 的权限和生命周期。
+Issue-owned Session Task 不需要 Chat；普通 Chat 输入仍使用 Chat Task。
+字段、迁移、Web 与 CLI 入口见[对话与工作会话模型](conversation-model.md)。
 
 **飞书聊天**：[controlPlaneConciergeHost / createFeishuTaskHandler](../apps/remi/cli/multiremi.ts)启动 connector；普通消息经 daemon client 提交平台 Chat/Task，再走上面的任务执行链。connector 从 task 事件流回复；去重、运行中 steering、取消与人工请求也使用平台 task。当前 foreground 不实例化 `packages/remi` 的 `Remi` core，不能以该库的 `_process()` 作为当前 bot 入口。
-工作区的 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)指定 Agent 和 Runtime；
-bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。心跳还可领取持久化出站投递，由 connector 发送并回报；自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。
+工作区可保存多个 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)，以 `workspace_id + bot_id` 标识，各自指定 Agent 和独立 Runtime；Runtime v1 协议仍为单 connector，绑定和停止确认防止重复分配。旧配置迁移为 `default`，路由、发送者、入站去重及审计按机器人隔离；
+bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。持久化出站投递使用 `feishu.outbound`，发出后收到 ACK 才领取原有租约；断连前未确认的投递由 DB 快照重推，不改变投递数据模型。自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。
+
+平台登录账号与工作区业务身份分离。登录后的人类共享全部工作区，并使用统一 operator；历史作者、创建者和外部身份映射保留，成员邀请与角色管理退出日常操作。Chat、Agent、Runtime、收件箱、收藏和通知不再按人类 owner 分区，机器凭据仍保留工作区与执行范围限制。入口和迁移规则见[认证与共享身份](dev/auth.md)。
 
 ## 存储与事务
 
+Issue 只配置执行负责人：[统一 resolver](../packages/server/src/store/issue-responsibility.ts)按明确指派和父链
+解析指派的 Agent 或团队可用 Leader，不指定人类。来自 Issue 的问题沿执行负责人链从本单交到根单，再交给
+工作区任何有效成员；轮结束只派生 `in_review`，关单是普通状态修改：成员可关任何 Issue，Agent 只能关
+自己作为父单执行负责人的直接子单，SCM merge 只记录 activity。入口与退役接口见[Issue 执行与上交](dev/issue-responsibility.md)。
+
+用量由 [collector](../packages/acp/src/usage-collector.ts) 和可靠 task usage ledger 产生可修订单位，写入 [规范化标量表](../packages/server/src/store/usage-accounting.ts)；[UsageAccountingRepo](../packages/server/src/store/repos/usage-accounting-repo.ts)统一 SQL 聚合及价格版本匹配，Web 与 CLI 共用 report。消费按单位证据时间、任务状态与耗时按独立生命周期时间归属；历史聚合单独标明任务归属日，run 保存执行 Runtime/项目，不从 task 最新绑定改写旧消费。真实请求有跨 task/run 的持久 owner；累计 meter 用已证明的区间认领，重叠或归属竞争保留审计而不叠加，身份事务锁先于 domain 写入。schema migration 只建表，启动随后在全局 schema 锁外执行 bounded/resumable 标量迁移，成功前不开放 HTTP/jobs；未完成切换的 report 返回 503。字段、计价来源和维护命令见[统一用量与价格](usage-accounting.md)。
+
 当前 Store 使用同步 `SqlDatabase` 接口。[openMultiremiDatabase](../packages/server/src/store/db/postgres.ts)
 根据 `MULTIREMI_DATABASE_URL` 选择 PostgreSQL，否则使用本地 SQLite。
+SQLite handle 统一由 [openSqliteDatabase](../packages/server/src/store/db/sqlite.ts) 创建并标记
+`dialect: "sqlite"`；恢复备份使用同文件的 `deserializeSqliteDatabase`。
+已有 SQLite handle 或包装对象使用 `markSqliteDialect`，支持两种后端的包装对象转发内层 `dialect`。
+shared 的 `getDb` 不依赖 server，由 `openMultiremiDatabase` 给返回的同一对象打标记。
+[架构扫描](../tests/arch/sqlite-handle-entry.test.ts)禁止其他 git 跟踪源码直接构造或恢复 `bun:sqlite` handle。
+SQLite 最外层事务以 `BEGIN IMMEDIATE` 取得写锁，嵌套事务仍用 savepoint，避免跨进程先读后写升级锁时立即失败；PostgreSQL 事务语义不变。详见 [ADR 0011](adr/0011-transaction-ownership-and-side-effect-timing.md)。
 这是底层存储适配的选择；生产 server 启动还有[必要配置检查](dev/auth.md)，不能据此省略部署配置。
+数据库可用性与进程存活分离：`/healthz` 不访问数据库，`/readyz` 执行轻量探针，连接不可用时返回
+503 与 `database_unavailable`。HTTP 在鉴权前探测（健康结果最多缓存一秒），失败响应带 `Retry-After: 1`；
+请求期间数据库断连也映射为 503。同步桥在连接失败后一秒内快速拒绝后续 SQL，随后允许探测恢复，
+不自动重放 SQL 或提交。HTTP 单条 SQL 的等待预算为两秒，后台循环为五秒；超时后丢弃连接，
+写入结果可能未知，调用者必须使用既有幂等键重试。迁移等无预算作用域的操作保留桥原来的等待上限。
+
+[后台恢复边界](../packages/shared/src/db/recovery.ts)只重试有类型标记的连接/服务不可用错误，
+按循环以 1、2、4、8、16、30 秒退避，警告每循环最多每 30 秒一次，恢复后回到正常间隔。
+Scheduler 的各 tick 共用一次 sync 边界；failure monitor、归档、SCM、messaging、标题、通知、
+能力维护、HTML 回填和 Wiki storage 各自恢复。Offer pump 和 downlink 按 Runtime 使用相同上限与日志频率。
+循环边界将非连接错误记为 ERROR 并按正常周期继续，一次性任务结束而不自动重放；动态周期读取失败时沿用上次周期（首次失败暂用 30 秒）。
+能力维护逐项隔离程序错误，整轮结束后传播连接错误以保留退避。已有 provider/领域错误仍由各模块处理。断连时不确认 system event，
+保留 processing 租约；到期后重新领取，已提交的自动化运行由 `(trigger_id, event_id)` 去重。
+
 PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packages/server/src/store/db/pg-worker.ts)，worker 使用单连接。
 这是真实实现约束，不应被“整体 async/await”概述掩盖。
+嵌套 `transaction()` 在 PostgreSQL 使用 savepoint；外层提交前会拒绝未恢复的语句失败。
+活动记录随主事务提交；可选的活动通知聚合、广播查表在提交后执行，避免给深度 1 的入口增加 savepoint。
+可选聚合写入使用独立事务，失败时仅回滚聚合；轮次结束时的聚合及 flush 仍使用调用方事务。
+没有接收者时不启动聚合事务。事务代理在原 runner 返回、读缓存事务结束后执行提交后回调；
+外层回滚会丢弃这些回调。不能在 PostgreSQL 事务内用裸 `try/catch` 吞掉 SQL 错误，否则事务会进入 aborted 状态。
+调用方事件队列先保留活动位置，提交后补齐路由；路由失败时移除该活动，保持其余评论事件的顺序。
+
+[统一存储](../packages/server/src/store/unified-model-schema.ts)把消息头放到日志列，工作身份放到 turns，执行放到 turn_attempts，agent/member 游标共用 session_lanes。
+[启动迁移](../packages/server/src/store/unified-model-migration.ts)预检后一次切换；运行路径不再读写三张退役对话表。
+执行消费者使用 [只读投影](../packages/server/src/store/turn-execution-records.ts)，写入口更新规范表；轮卡由 [轮和当前尝试](../packages/server/src/store/turn-attempts.ts)投影，统计及最终回复不再镜像到日志 turn 行。
+自动重试、监督者 redispatch 与孤儿恢复只替换尝试，不写 Issue 状态。成员经 canonical Turn retry 恢复 failed/cancelled 轮时保留同一 Turn、Agent、Session 和输入；公开 Issue 按 pending 规则单次推导状态，Chat-owned 工作投影不推导，done/cancelled Issue 不重开。授权与事务边界见[统一收件箱 Store](dev/inbox-store.md)。自动化账本引用轮，在 `auto_*` 对话保留 timer 输入与运行消息。
+[sendMessageWithinTransaction](../packages/server/src/store/inbox/send-message.ts)是唯一消息写入口，领域 producer 与执行投影均经它落库；[lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)负责 pending 合并、运行中插话、补铃和兜底扫描。人的收件箱使用工作区共享已读游标，旧 member lane 仅保留历史已读依据；提问与决定及其一次性令牌保存在消息。Issue 只由轮和未答 decision 推导，子单变化发送父单 status。Daemon 适配器与用户接口所需 Store facade 已提供，传输/CLI/页面由消费者集成；接口和事务边界见[统一收件箱 Store](dev/inbox-store.md)。
+Chat 跟进队列放行前存在 `multiremi_queued_messages`，放行时经同一写入口变成普通 now 消息（[ADR 0020](adr/0020-chat-follow-up-queue-and-native-steering.md)）。
+完整边界见 [ADR 0016](adr/0016-unified-message-inbox-and-turn.md)及[切换手册](deploy/unified-model-cutover.md)。
 
 该适配文件记录的动机是兼容已有同步 Store 调用；不能据此推断它仍适合当前并发负载。
 改为异步时需同时处理调用链与事务连接归属，不能只调大连接数。
@@ -61,7 +159,7 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 ## 配置与能力定位
 
 - bot assignment 由工作区独立的 `multiremi_feishu_bot_configs` 记录关联 Agent/Runtime；实际任务通过 Agent 行组装执行参数。bot 凭据在控制面配置，daemon 环境仅承载连接和进程设置，见[配置说明](deploy/66-8-remi-environment.md)。
-- 当前运行时支持 Claude、Codex 和 [Antigravity](antigravity.md)：前两者通过 ACP，Antigravity 通过原生 `agy` CLI，统一输出 Remi 事件。认证方式按各 CLI 和[安装说明](../README.md)配置，不能把所有后端概括为“不需要 API key”。
+- 当前运行时支持 Claude、Codex 和 [Antigravity](antigravity.md)，都通过 ACP：前两者用 npm bridge，Antigravity 本机登录使用已安装的 `agy acp` 与隔离会话凭据，端点连接使用按机器下载并固定版本的 Google ACP server（网关认证；真实 key 与用量都在 daemon 的[网关垫片](../packages/daemon/src/agent-runtime/antigravity/gateway-shim.ts)），统一输出 Remi 事件。认证方式按各 CLI 和[安装说明](../README.md)配置，不能把所有后端概括为“不需要 API key”。
 - Codex 与 Claude Code 的 Runtime 详情支持自定义模型连接，执行时注入隔离 Home；鉴权、任务快照与协议分别见 [Codex 连接](design/acp-codex-via-codex-acp.md) 和 [Claude Code 连接](design/acp-claude-via-claude-agent-acp.md)。
 - [MCP 组装](../packages/daemon/src/agent-runtime/mcp/ephemeral.ts)当前接受 `command` 形式的 stdio 服务；远程 HTTP 配置不能仅因存进 agent 字段就视为已注入。
 - 项目知识由[知识服务](../packages/server/src/project-knowledge/service.ts)和[知识路由](../packages/server/src/api/routers/knowledge.ts)提供；用户项目知识与本仓库开发文档分别维护。
@@ -78,10 +176,14 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 
 链接和静态检查只提供定位依据。本页不宣称已经启动生产服务、通过全部测试或完成性能测量。
 
-## 云友执行能力组
+## Agent 执行能力组
 
-[执行组存储](../packages/server/src/store/execution-groups.ts)与[调度](../packages/server/src/store/repos/tasks-repo.ts)共同管理执行能力组。云友通过 `execution_group_id` 选择执行能力组，`provider` 表示 Runtime 类型。系统默认按工作区、机器（优先使用 daemon ID）与 Runtime 类型生成稳定的 `eg_` 组标识；Runtime 也可配置自定义组标识，将同工作区、同类型的多个 Runtime 合并调度。自定义标识使用 1–128 位字母、数字、下划线、点、冒号或连字符，首位必须为字母或数字，`eg_` 前缀保留给默认组。旧机器身份补齐时保留默认组，已有同机器默认组时归并并迁移云友引用。将 Runtime 的 `execution_group_id` 设为 `null` 可恢复默认组；`execution_group_ids` 返回实际成员关系。通用 `any` Runtime 自动加入 Claude/Codex 默认组，自定义组要求具体类型。
+[执行组存储](../packages/server/src/store/execution-groups.ts)与[中央 Profile 存储](../packages/server/src/store/repos/execution-profiles-repo.ts)分别管理执行成员和连接配置。Profile 属于工作区，保存 Claude/Codex 连接及不可变版本；能力组是独立配置对象，包含名称、用途说明、provider、Profile 和 Runtime 成员，同一个 Runtime 可以加入多个组。组内 Provider/模型与成员可在同一事务保存；失败时连接、凭据版本及成员均回滚。自动发现只登记机器的引擎与健康状态，不再创建能力组。配置入口、权限与升级兼容见[执行配置](dev/execution-configuration.md)。
 
-创建和编辑云友共用能力组选择器，显示组标识、成员和在线数量；也可选择「自动调度」，保留按引擎和归属在工作区内跨机器调度的原有行为。自动调度的模型与思考选项使用云友所有者可用的工作区目录。选择具体组时，模型及思考选项取各可执行成员（含离线成员）的有效连接目录交集：自定义连接优先，并保留 daemon 为配置模型实际探测到的思考能力，否则应用工作区网关；成员一致时才标记默认模型。组内任务领取及重领通过 `runtimeCanRunAgent` 复验成员关系、模型能力、类型、工作区和归属，并与项目设备和本机目录约束取交集。组离线或无可用成员时排队，不转到组外机器。
+Agent 通过 `execution_group_id` 选择能力组，也可保留「自动调度」。组内任务领取通过 `runtimeCanRunAgent` 复验成员关系、模型、类型、工作区与归属，并与项目设备和本机目录约束取交集。受管能力组还要求 daemon 对当前 Profile 版本回报 ready；在线数量不代表配置已就绪。无可用成员时排队，不转到组外机器。中央 Profile 的模型用于该组目录，未配置中央 Profile 的路径沿用有效连接目录；目录声明不代表服务连通。
 
-切换云友执行组默认清空模型和思考覆盖，未冻结的排队任务清除旧会话信息，已冻结但未启动的任务取消，运行中任务继续原执行。组和成员关系持久化；Runtime 离组或删除后保留组，已有云友不会静默转组。旧 `runtime_id` 绑定迁移到对应组并保留机器约束与手填模型兼容行为，显式选择组（包括重选当前组）后解除旧机器绑定并启用组模型校验；原先未绑定的云友保留原调度行为。当前分组由默认规则和显式组标识决定，后续可在组成员解析层扩展能力匹配。
+[调度](../packages/server/src/store/repos/tasks-repo.ts)首次 claim 时冻结完整连接与凭据版本，并纳入执行指纹。daemon 按任务快照构造隔离的 provider 配置，不以组配置覆盖机器全局配置。配置变更不改写运行中任务。
+
+迁移按每个 Runtime/provider 独立导入旧连接与凭据，并保留原数据供旧任务快照使用；可确定单一连接的旧组转换为受管组，连接不一致的旧组保留原行为。新组由用户显式创建，不按名称合并 Profile。组被 Agent 引用时不可删除，Profile 被组引用时不可删除；历史 Profile 版本与加密凭据保留供任务快照使用。
+
+切换 Agent 执行组默认清空模型和思考覆盖，未冻结的排队任务清除旧会话信息，已冻结但未启动的任务取消，运行中任务继续原执行。Runtime 离组或删除后保留组，已有 Agent 不会静默转组。旧 `runtime_id` 绑定保留机器约束与手填模型兼容行为，显式选择组后解除旧机器绑定并启用组模型校验；原先未绑定的 Agent 保留原调度行为。

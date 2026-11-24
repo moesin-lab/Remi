@@ -20,6 +20,32 @@ import type {
 } from "../../runtimes/types";
 import type { CloudRuntimeNode } from "../../runtimes/cloud-runtime";
 
+export const RuntimeProtocolStatusSchema = z.object({
+  version: z.number().int().positive(),
+  state: z.enum(["ok", "upgrade_pending", "upgrade_failed", "rejected"]),
+  min_version: z.string(),
+  last_error: z.string().nullable(),
+});
+
+export const RuntimeDeleteResponseSchema = z.object({
+  status: z.literal("ok"),
+  issue_workspaces_abandoned: z.number().int().nonnegative(),
+});
+
+export const ArchiveAgentsAndDeleteRuntimeResponseSchema = RuntimeDeleteResponseSchema.extend({
+  agents_archived: z.number().int().nonnegative(),
+  tasks_cancelled: z.number().int().nonnegative(),
+});
+
+export const RuntimeActiveIssueWorkspacesConflictSchema = z.object({
+  code: z.literal("runtime_has_active_issue_workspaces"),
+  issues: z.array(z.object({
+    id: z.string().min(1), key: z.string().min(1), title: z.string(), status: z.string(),
+  })).min(1),
+});
+
+export type RuntimeIssueWorkspaceImpact = z.infer<typeof RuntimeActiveIssueWorkspacesConflictSchema>["issues"][number];
+
 export const AgentRuntimeSchema = z.object({
   id: z.string(),
   execution_group_id: z.string().nullable().optional(),
@@ -34,6 +60,7 @@ export const AgentRuntimeSchema = z.object({
   status: z.enum(["online", "offline"]),
   device_info: z.string(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  protocol: RuntimeProtocolStatusSchema.nullable().optional().catch(null),
   owner_id: z.string().nullable(),
   visibility: z.enum(["private", "public"]).optional().default("private"),
   last_seen_at: z.string().nullable(),
@@ -44,16 +71,23 @@ export const AgentRuntimeSchema = z.object({
 export const AgentRuntimeListSchema = z.array(AgentRuntimeSchema);
 export const EMPTY_AGENT_RUNTIME_LIST: AgentRuntime[] = [];
 
-export const ExecutionGroupListSchema = z.object({
-  groups: z.array(z.object({
+export const ExecutionGroupSchema = z.object({
+  endpoint_id: z.string().nullable().optional(),
+  connection_mode: z.enum(["legacy", "native", "endpoint"]).optional(),
+  model_policy: z.object({ model: z.string().optional(), models: z.array(z.string()).optional(), blocked_models: z.array(z.string()).optional() }).optional(),
     id: z.string().min(1),
     workspace_id: z.string(),
     name: z.string(),
+    description: z.string().default(""),
     provider: z.string(),
     runtime_ids: z.array(z.string()),
     online_runtime_count: z.number().int().nonnegative(),
-  })),
+    managed: z.boolean().optional(),
+    profile_id: z.string().nullable().optional(),
+    profile_revision: z.number().nullable().optional(),
+    members: z.array(z.object({ runtime_id: z.string(), status: z.string(), error: z.string().nullable().optional() }).loose()).optional(),
 });
+export const ExecutionGroupListSchema = z.object({ groups: z.array(ExecutionGroupSchema) });
 export type ExecutionGroupList = z.infer<typeof ExecutionGroupListSchema>;
 
 export const DaemonProfileResponseSchema = z.object({
@@ -238,6 +272,7 @@ const ModelThinkingSchema = z.object({
 });
 
 const FleetProviderModelsSchema = z.object({
+  blocked_models: z.array(z.string()).optional(),
   provider: z.string(),
   model_catalog_status: z.enum(["ready", "error", "unknown"]).catch("unknown").optional(),
   online_runtime_count: z.number().default(0),
@@ -264,6 +299,11 @@ export const EMPTY_FLEET_MODELS: FleetModelsResponse = { providers: [] };
 // Model gateway (relay config) schemas
 // ---------------------------------------------------------------------------
 
+/** Every engine the workspace model gateway holds a config for. */
+export type RelayEngine = "claude" | "codex" | "antigravity";
+/** Engines whose gateway models accept administrator-declared reasoning levels. */
+export type RelayReasoningEngine = Exclude<RelayEngine, "antigravity">;
+
 const RelayEngineConfigSchema = z.object({
   fragment: z.string().default(""),
   hasToken: z.boolean().default(false),
@@ -273,6 +313,8 @@ const RelayEngineConfigSchema = z.object({
 export const RelayConfigResponseSchema = z.object({
   claude: RelayEngineConfigSchema.default(null),
   codex: RelayEngineConfigSchema.default(null),
+  // Older servers omit the engine; it then reads as unconfigured.
+  antigravity: RelayEngineConfigSchema.default(null),
   modelDiscovery: z.boolean().default(false),
 }).loose();
 
@@ -280,7 +322,7 @@ export type RelayConfigResponse = z.infer<typeof RelayConfigResponseSchema>;
 
 export type RelayEngineConfig = z.infer<typeof RelayEngineConfigSchema>;
 
-export const EMPTY_RELAY_CONFIG: RelayConfigResponse = { claude: null, codex: null, modelDiscovery: false };
+export const EMPTY_RELAY_CONFIG: RelayConfigResponse = { claude: null, codex: null, antigravity: null, modelDiscovery: false };
 
 // Explicit gateway probe (`POST /api/workspaces/:id/relay-config/:engine/probe`).
 // The server answers with the snapshot it just refreshed: `status` is `error`
@@ -354,6 +396,11 @@ export const RelayReasoningLevelEffectiveSchema = z.object({
 const RelayReasoningLevelModelSchema = z.object({
   model_id: z.string(),
   label: z.string().default(""),
+  context_window: z.object({
+    one_million: z.literal(true),
+    updated_by: z.string().nullable(),
+    updated_at: z.string(),
+  }).nullable().default(null),
   manual: RelayReasoningLevelManualSchema.nullable().default(null),
   effective: RelayReasoningLevelEffectiveSchema.nullable().default(null),
 }).loose();
@@ -377,6 +424,10 @@ export const RelayReasoningLevelSaveResultSchema = z.object({
 }).loose();
 
 export type RelayReasoningLevelManual = z.infer<typeof RelayReasoningLevelManualSchema>;
+export const RelayContextWindowSaveResultSchema = RelayReasoningLevelsResponseSchema.extend({
+  deleted: z.boolean(),
+});
+export type RelayContextWindowSaveResult = z.infer<typeof RelayContextWindowSaveResultSchema>;
 export type RelayReasoningLevelManualState = z.infer<typeof RelayReasoningLevelManualStateSchema>;
 export type RelayReasoningLevelManualStateCode = z.infer<typeof RelayReasoningLevelManualStateCodeSchema>;
 export type RelayReasoningLevelEffective = z.infer<typeof RelayReasoningLevelEffectiveSchema>;
@@ -631,6 +682,7 @@ export const DaemonRetirementPlanSchema = z
           })
           .loose(),
       ),
+    traces_to_lose: z.number().int().nonnegative().default(0),
     impact: DaemonRetirementImpactSchema,
   })
   .loose();
@@ -654,6 +706,7 @@ export const EMPTY_DAEMON_RETIREMENT_PLAN_RESPONSE: DaemonRetirementPlanResponse
     queued_tasks: [],
     local_directory_resources: [],
     issue_workspaces: [],
+    traces_to_lose: 0,
     impact: {
       runtimes_removed: 0,
       agents_detached: 0,

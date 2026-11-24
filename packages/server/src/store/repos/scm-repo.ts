@@ -1,7 +1,8 @@
 import { createId, nowIso } from "@multiremi/ids.js";
-import type { StoreContext } from "@multiremi/store/context.js";
+import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
 import { hasActivityForChange } from "../repository-activity.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
+import { lockIssueRowWithinTransaction } from "../issue-row-lock.js";
 import { decryptScmCredential, encryptScmCredential } from "@multiremi/scm/credentials.js";
 import { assertScmRepositoryMatchesConnection } from "@multiremi/scm/repository-url.js";
 import {
@@ -1245,7 +1246,7 @@ export class ScmRepo {
           // repository and a revision-pinned dedupe key so change.merged and
           // default_branch.updated for the same merge produce a single run.
           const wikiAutopilot = resolveRepositoryWikiAutomation({
-            listAgents: () => this.ctx.agents().listAgents(),
+            listAgents: () => this.ctx.agents().listAgentsLite(),
             listAutopilots: (workspaceId) => this.ctx.autopilots().listAutopilots(workspaceId),
             listAgentPlugins: (workspaceId, options) => this.ctx.agentPlugins().listAgentPlugins(workspaceId, options),
             listAgentPluginBindings: (agentId) => this.ctx.agentPlugins().listAgentPluginBindings(agentId),
@@ -1649,6 +1650,7 @@ export class ScmRepo {
     return { changeRequestId: changeRequest.id, issueIds: this.activeIssueIds(changeRequest.id) };
   }
 
+  /** The workspace merge setting keeps its stored name; a merge is only recorded on the Issue. */
   private scheduleLinkedIssueMergeEffectsLocked(event: MultiremiScmCanonicalEvent): void {
     if (event.type !== "change.merged" || event.subjectType !== "change_request") return;
     const workspace = this.ctx.workspaces().getWorkspace(event.workspaceId);
@@ -1667,7 +1669,7 @@ export class ScmRepo {
       // Read the derived key rather than the raw column: `issue_key` is nullable and
       // Issue.key falls back to the formatted issue number. Using the column directly
       // would stringify NULL to "null" and match any change request that merely
-      // contains the word "null" — the very over-completion this guard exists to stop.
+      // contains the word "null" — the very misattribution this guard exists to stop.
       const issueKey = this.ctx.issues().getIssue(issueId)?.key;
       if (!issueKey) continue;
       const attribution = scmIssueOwnershipAttribution({
@@ -1707,9 +1709,15 @@ export class ScmRepo {
     }
   }
 
+  /**
+   * A merge never closes an Issue and never holds its status: closing is a
+   * member's or the parent execution owner's decision (the done rule), and the
+   * status keeps following the ordinary derivation. The effect type keeps its
+   * stored `complete_issue_on_merge` name; it only records `scm_merge_completed`.
+   */
   private processPendingMergeEffects(event: MultiremiScmCanonicalEvent): void {
     // The pending row is committed with the canonical event. Retrying after a
-    // crash is safe: updateIssue emits status automation only on a real change.
+    // crash is safe: the record and the `applied` mark commit together.
     const rows = this.ctx.db.query(
       `SELECT id, issue_id FROM multiremi_scm_effects
        WHERE event_id = ? AND effect_type = 'complete_issue_on_merge' AND status = 'pending'
@@ -1719,7 +1727,6 @@ export class ScmRepo {
       const effectId = String(row.id);
       const issueId = String(row.issue_id);
       try {
-        const current = this.ctx.issues().getIssue(issueId);
         const changeRequestRow = this.ctx.db.query(
           `SELECT cr.id AS change_request_id, cr.number, cr.url, cr.source_branch,
                   cr.title, cr.body, l.source AS link_source
@@ -1729,43 +1736,43 @@ export class ScmRepo {
            WHERE cr.connection_id = ? AND cr.repository_id = ? AND cr.external_id = ?`,
         ).get(issueId, event.connectionId, event.repositoryId, event.subjectId) as Row | null;
         if (!changeRequestRow) throw new Error("SCM change request for merge completion could not be found");
-        const updated = current && current.status !== "done"
-          ? this.ctx.issues().updateIssue(issueId, { status: "done" })
-          : null;
-        if (updated) {
-          this.ctx.appendIssueActivity(issueId, {
-            actorType: "system",
-            actorId: null,
-            type: "scm_merge_completed",
-            data: {
-              change_request_id: String(changeRequestRow.change_request_id),
-              number: changeRequestRow.number == null ? null : Number(changeRequestRow.number),
-              url: nullableString(changeRequestRow.url),
-              source_branch: nullableString(changeRequestRow.source_branch),
-              event_id: event.id,
-              attribution: scmIssueOwnershipAttribution({
-                issueKey: updated.key,
-                linkSource: String(changeRequestRow.link_source ?? ""),
-                title: String(changeRequestRow.title ?? ""),
-                body: nullableString(changeRequestRow.body),
-                sourceBranch: nullableString(changeRequestRow.source_branch),
-              }),
-            },
-          });
-        }
-        this.ctx.db.run(
-          "UPDATE multiremi_scm_effects SET status = 'applied', applied_at = ?, last_error = NULL WHERE id = ? AND status = 'pending'",
-          [nowIso(), effectId],
-        );
-        if (updated) {
-          this.ctx.emitWorkspaceEvent({
-            type: "issue:updated",
-            workspaceId: updated.workspaceId,
-            actorType: "system",
-            actorId: null,
-            payload: { issue: updated },
-          });
-        }
+        // `scm_merge_completed` and the effect's own `applied` mark are one
+        // transaction, so a failure leaves the effect pending for the next dispatch.
+        const deferredEvents = createCommitEventQueue();
+        this.ctx.db.transaction(() => {
+          const workspaceId = this.ctx.issueWorkspaceId(issueId);
+          if (workspaceId) this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+          // Serialize with status writers so a just-closed Issue records no merge.
+          lockIssueRowWithinTransaction(this.ctx.db, issueId);
+          const current = this.ctx.issues().getIssue(issueId);
+          if (current && current.status !== "done") {
+            this.ctx.appendIssueActivity(issueId, {
+              actorType: "system",
+              actorId: null,
+              type: "scm_merge_completed",
+              data: {
+                change_request_id: String(changeRequestRow.change_request_id),
+                number: changeRequestRow.number == null ? null : Number(changeRequestRow.number),
+                url: nullableString(changeRequestRow.url),
+                source_branch: nullableString(changeRequestRow.source_branch),
+                event_id: event.id,
+                attribution: scmIssueOwnershipAttribution({
+                  issueKey: current.key,
+                  linkSource: String(changeRequestRow.link_source ?? ""),
+                  title: String(changeRequestRow.title ?? ""),
+                  body: nullableString(changeRequestRow.body),
+                  sourceBranch: nullableString(changeRequestRow.source_branch),
+                }),
+              },
+            }, deferredEvents);
+          }
+          const marked = this.ctx.db.run(
+            "UPDATE multiremi_scm_effects SET status = 'applied', applied_at = ?, last_error = NULL WHERE id = ? AND status = 'pending'",
+            [nowIso(), effectId],
+          );
+          if (marked.changes === 0) throw new Error(`SCM effect ${effectId} was already settled`);
+        })();
+        this.ctx.emitCommitEvents(deferredEvents);
       } catch (error) {
         this.ctx.db.run(
           "UPDATE multiremi_scm_effects SET last_error = ? WHERE id = ? AND status = 'pending'",

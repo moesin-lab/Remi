@@ -18,25 +18,48 @@ export class PlatformDrainConflictError extends Error {
 
 /**
  * Persistent platform maintenance (drain) state. One row, survives API
- * restarts. The lease expiry is enforced lazily on every read: if the updater
- * stops renewing (crash), the next reader observes `normal` and daemons resume
- * claiming on their next heartbeat — no background sweeper required.
+ * restarts. Pre-switch leases expire lazily so an abandoned preparation does
+ * not stop scheduling. Once switching starts, only a terminal host receipt
+ * may release the gate: the API can return before Web verification or rollback.
  */
 export class PlatformMaintenanceRepo {
   constructor(private readonly db: SqlDatabase) {}
 
+  /** One fresh, narrow read per mutation; no operation payload or lease writes. */
+  writeBlockingOperationId(): string | null {
+    const row = this.db.query(
+      `SELECT operation.id FROM multiremi_platform_maintenance maintenance
+       JOIN multiremi_platform_operations operation ON operation.id = maintenance.operation_id
+       WHERE maintenance.id = 'platform' AND maintenance.mode = 'draining'
+         AND operation.active_slot = 1
+         AND operation.status IN ('switching', 'restarting', 'verifying', 'rolling_back')`,
+    ).get() as { id: string } | null;
+    return row?.id ?? null;
+  }
+
   get(nowMs = Date.now()): MultiremiPlatformMaintenance {
-    this.ensureRow();
     const maintenance = this.read();
     if (maintenance.mode !== "draining") return maintenance;
     const expiresAt = maintenance.expiresAt ? Date.parse(maintenance.expiresAt) : Number.NaN;
     if (Number.isFinite(expiresAt) && expiresAt > nowMs) return maintenance;
-    // Lease expired (or unparsable): auto-recover so a crashed updater can
-    // never freeze the platform in draining.
+    // API downtime can outlast the lease during migration or a DB restore.
+    // Do not admit new tasks until the host verifies both API and Web, or
+    // finishes recovery. This state is persisted in the pre-switch backup.
+    const switching = maintenance.operationId && this.db.query(
+      `SELECT id FROM multiremi_platform_operations
+       WHERE id = ? AND active_slot = 1 AND status IN ('switching', 'restarting', 'verifying', 'rolling_back')`,
+    ).get(maintenance.operationId);
+    if (switching) return maintenance;
+    // An abandoned preparation/drain is safe to release on lease expiry.
     this.db.run(
       `UPDATE multiremi_platform_maintenance
        SET mode = 'normal', operation_id = NULL, started_at = NULL, expires_at = NULL, reason = NULL, updated_at = ?
-       WHERE id = 'platform' AND mode = 'draining'`,
+       WHERE id = 'platform' AND mode = 'draining'
+         AND NOT EXISTS (
+           SELECT 1 FROM multiremi_platform_operations
+           WHERE id = multiremi_platform_maintenance.operation_id AND active_slot = 1
+             AND status IN ('switching', 'restarting', 'verifying', 'rolling_back')
+         )`,
       [nowIso()],
     );
     return this.read();
@@ -89,24 +112,32 @@ export class PlatformMaintenanceRepo {
     return result.changes > 0 ? this.read() : null;
   }
 
-  /** Idempotent: releasing an already-released (or foreign) drain is a no-op. */
+  /**
+   * Idempotent, and fail closed during a switch. The host must reconcile a
+   * terminal result before releasing a gate that protects possible rollback.
+   */
   releaseDrain(operationId: string): MultiremiPlatformMaintenance {
     this.ensureRow();
     this.db.run(
       `UPDATE multiremi_platform_maintenance
        SET mode = 'normal', operation_id = NULL, started_at = NULL, expires_at = NULL, reason = NULL, updated_at = ?
-       WHERE id = 'platform' AND mode = 'draining' AND operation_id = ?`,
+       WHERE id = 'platform' AND mode = 'draining' AND operation_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM multiremi_platform_operations
+           WHERE id = multiremi_platform_maintenance.operation_id AND active_slot = 1
+             AND status IN ('switching', 'restarting', 'verifying', 'rolling_back')
+         )`,
       [nowIso(), operationId],
     );
     return this.get();
   }
 
-  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null): void {
+  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null, scope: "daemon" | "runtime" = "daemon"): void {
     this.db.run(
       `UPDATE multiremi_runtimes
-       SET drain_ack_generation = ?, drain_ack_at = ?, drain_reported_active_tasks = ?
+       SET drain_ack_generation = ?, drain_ack_at = ?, drain_reported_active_tasks = ?, drain_ack_scope = ?
        WHERE id = ?`,
-      [Math.max(0, Math.floor(generation)), nowIso(), activeTasks == null ? null : Math.max(0, Math.floor(activeTasks)), runtimeId],
+      [Math.max(0, Math.floor(generation)), nowIso(), activeTasks == null ? null : Math.max(0, Math.floor(activeTasks)), scope, runtimeId],
     );
   }
 
@@ -120,7 +151,7 @@ export class PlatformMaintenanceRepo {
   drainStatus(nowMs = Date.now()): MultiremiPlatformDrainStatus {
     const maintenance = this.get(nowMs);
     const runtimes = this.db.query(
-      "SELECT id, name, daemon_id, status, last_heartbeat_at, drain_ack_generation FROM multiremi_runtimes",
+      "SELECT id, name, daemon_id, status, last_heartbeat_at, drain_ack_generation, drain_reported_active_tasks FROM multiremi_runtimes",
     ).all() as Row[];
     const online = runtimes.filter((row) => {
       if (String(row.status ?? "") === "offline") return false;
@@ -138,10 +169,13 @@ export class PlatformMaintenanceRepo {
         daemonId: row.daemon_id ? String(row.daemon_id) : null,
       }));
     const activeRow = this.db.query(
-      `SELECT COUNT(*) AS n FROM multiremi_tasks
+      `SELECT COUNT(*) AS n FROM multiremi_turn_execution_records
        WHERE status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`,
     ).get() as { n?: number } | null;
-    const activeTasks = Number(activeRow?.n ?? 0);
+    // A provider can still be shutting down or flushing its outbox after the
+    // task row is terminal. Both the daemon and server must report zero.
+    const reportedActive = runtimes.reduce((sum, row) => sum + Math.max(0, Number(row.drain_reported_active_tasks ?? 0)), 0);
+    const activeTasks = Math.max(Number(activeRow?.n ?? 0), reportedActive);
     return {
       maintenance,
       onlineDaemons: online.length,
@@ -153,9 +187,13 @@ export class PlatformMaintenanceRepo {
   }
 
   private read(): MultiremiPlatformMaintenance {
-    const row = this.db.query(
+    let row = this.db.query(
       "SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'",
-    ).get() as Row;
+    ).get() as Row | null;
+    if (!row) {
+      this.ensureRow();
+      row = this.db.query("SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'").get() as Row;
+    }
     return {
       mode: String(row.mode ?? "normal") === "draining" ? "draining" : "normal",
       generation: Number(row.generation ?? 0),

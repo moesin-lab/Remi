@@ -6,6 +6,15 @@ import type {
   ListIssuesResponse,
 } from "../../types";
 
+export const BatchUpdateIssuesResponseSchema = z.object({
+  updated: z.number().int().nonnegative(),
+  skipped: z.array(z.object({
+    issueId: z.string(),
+    error: z.string(),
+    code: z.string().nullable(),
+  })).default([]),
+});
+
 // Metadata is primitive-only by API/DB contract. Stay lenient on shape:
 // unknown keys land as `unknown` to a caller, but the field itself defaults
 // to {} so consumers never need to nil-guard `issue.metadata`.
@@ -26,6 +35,7 @@ export const IssueSchema = z.object({
   creator_type: z.string(),
   creator_id: z.string(),
   parent_issue_id: z.string().nullable(),
+  blocked_by: z.array(z.string()).optional(),
   issue_kind: z.enum(["execution", "intake"]).default("execution"),
   source_issue_id: z.string().nullable().default(null),
   project_id: z.string().nullable(),
@@ -41,9 +51,109 @@ export const IssueSchema = z.object({
   updated_at: z.string(),
 }).loose();
 
+export const IssueDetailSchema = IssueSchema.extend({
+  /** This Issue's own questions waiting at the human stage; Agent-stage questions are excluded. */
+  pending_decision_count: z.number().int().nonnegative(),
+}).loose();
+
+// Older servers omit the acknowledgement. Unknown statuses are displayed as
+// unconfirmed; never infer that execution started from the issue's status.
+export const CreatedIssueSchema = IssueSchema.extend({
+  task_id: z.string().min(1).nullable().optional(),
+  dispatch_status: z.string().optional(),
+  dispatch_skipped_reason: z.string().nullable().optional(),
+}).superRefine((issue, ctx) => {
+  if (issue.dispatch_status === "dispatched" && !issue.task_id) {
+    ctx.addIssue({ code: "custom", message: "Dispatched issue must identify its task", path: ["task_id"] });
+  }
+  if (issue.dispatch_status === "skipped" && issue.task_id) {
+    ctx.addIssue({ code: "custom", message: "Skipped dispatch cannot identify a task", path: ["task_id"] });
+  }
+});
+
+const IssueDecisionKindSchema = z.enum([
+  "merge",
+  "production_change",
+  "criteria",
+  "question",
+  "permission",
+  "other",
+]);
+
+export const IssueDecisionAnswerSchema = z.object({
+  answererType: z.enum(["member", "agent"]),
+  answererId: z.string(),
+  answer: z.string(),
+  reason: z.string(),
+  overturn: z.string().nullable(),
+  answeredAt: z.string(),
+}).loose();
+
+export const IssueDecisionSchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  issueId: z.string(),
+  sourceIssueId: z.string(),
+  sourceTaskId: z.string().nullable(),
+  kind: IssueDecisionKindSchema,
+  title: z.string(),
+  body: z.string(),
+  options: z.array(z.string()).nullable(),
+  status: z.enum(["pending", "escalated", "answered", "withdrawn"]),
+  answer: IssueDecisionAnswerSchema.nullable(),
+  answeredByMemberId: z.string().nullable(),
+  answeredAt: z.string().nullable(),
+  history: z.array(IssueDecisionAnswerSchema),
+  ownerAgentId: z.string().nullable(),
+  createdByAgentId: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+}).loose();
+
+export const IssueDecisionEntrySchema = z.object({
+  id: z.string(),
+  bucket: z.enum(["waiting_on_human", "pending_owner", "answered"]),
+  type: z.enum(["decision", "human_request"]),
+  kind: IssueDecisionKindSchema,
+  title: z.string(),
+  body: z.string().nullable(),
+  status: z.string(),
+  issueId: z.string(),
+  sourceIssueId: z.string().nullable(),
+  sourceTaskId: z.string().nullable(),
+  options: z.array(z.string()).nullable(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+  answer: IssueDecisionAnswerSchema.nullable(),
+  history: z.array(IssueDecisionAnswerSchema).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+}).loose();
+
+export const IssueDecisionListSchema = z.object({
+  waiting_on_human: z.array(IssueDecisionEntrySchema),
+  owner_and_answered: z.object({
+    pending: z.array(IssueDecisionEntrySchema),
+    answered: z.array(IssueDecisionEntrySchema),
+  }).loose(),
+  count: z.number().int().nonnegative(),
+}).loose();
+
+export const IssueDecisionMutationResponseSchema = z.object({
+  decision: IssueDecisionSchema,
+}).loose();
+
 export const ListIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
   total: z.number().default(0),
+}).loose();
+
+export const IssueStatusPagesResponseSchema = z.object({
+  groups: z.record(z.string(), z.object({
+    issues: z.array(IssueSchema),
+    total: z.number().int().nonnegative(),
+    has_more: z.boolean(),
+  }).loose()),
+  archived_total: z.number().int().nonnegative().optional(),
 }).loose();
 
 export const EMPTY_LIST_ISSUES_RESPONSE: ListIssuesResponse = {
@@ -61,6 +171,7 @@ const IssueAssigneeGroupSchema = z.object({
 
 export const GroupedIssuesResponseSchema = z.object({
   groups: z.array(IssueAssigneeGroupSchema).default([]),
+  archived_total: z.number().int().nonnegative().optional(),
 }).loose();
 
 export const EMPTY_GROUPED_ISSUES_RESPONSE: GroupedIssuesResponse = {
@@ -79,6 +190,30 @@ export const SubscribersListSchema = z.array(SubscriberSchema);
 
 export const ChildIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
+}).loose();
+
+export const IssueDependencySchema = z.object({
+  id: z.string(),
+  issue_id: z.string(),
+  depends_on_issue_id: z.string(),
+  direction: z.enum(["blocked_by", "blocks"]).nullable(),
+  issue: IssueSchema.nullable(),
+  depends_on_issue: IssueSchema.nullable(),
+  created_at: z.string(),
+}).loose();
+
+export const IssueDependenciesResponseSchema = z.object({
+  dependencies: z.array(IssueDependencySchema),
+}).loose();
+
+export const IssueDependencyMutationSchema = z.object({
+  dependency: IssueDependencySchema,
+}).loose();
+
+export const IssueStatusHeldErrorSchema = z.object({
+  code: z.enum(["issue_status_held", "final_summary_missing"]),
+  reason: z.enum(["children_open", "final_summary_missing"]),
+  open_children: z.number().int().nonnegative(),
 }).loose();
 
 const IssueWorkspaceRepoSchema = z.object({

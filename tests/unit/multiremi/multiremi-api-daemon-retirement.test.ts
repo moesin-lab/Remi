@@ -1,11 +1,12 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, db, readyArchiveBinding, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi API — daemon retirement", () => {
-  it("funnels bound credential revocation and member removal through daemon retirement", async () => {
+  it("retires bound credentials while historical member mutations remain unavailable", async () => {
     const store = createStore();
     const member = store.createWorkspaceMember({
       id: "machine-member-record",
@@ -58,10 +59,8 @@ describe("Multiremi API — daemon retirement", () => {
       method: "DELETE",
       headers,
     });
-    expect(removeOwner.status).toBe(409);
-    expect(await removeOwner.json()).toMatchObject({
-      error: expect.stringContaining("retire them before removing the member"),
-    });
+    expect(removeOwner.status).toBe(410);
+    expect(await removeOwner.json()).toMatchObject({ code: "workspace_members_retired" });
 
     const plan = store.getDaemonRetirementPlan("local", "daemon-trust-revocation");
     const retired = await app.request("/api/multiremi/daemons/daemon-trust-revocation/retire", {
@@ -80,7 +79,8 @@ describe("Multiremi API — daemon retirement", () => {
       method: "DELETE",
       headers,
     });
-    expect(removed.status).toBe(204);
+    expect(removed.status).toBe(410);
+    expect(store.getWorkspaceMember(member.id)?.archivedAt).toBeNull();
   });
 
   it("rejects expiring daemon credentials at the storage and admin API boundaries", async () => {
@@ -121,7 +121,7 @@ describe("Multiremi API — daemon retirement", () => {
     expect(await compatibilityRenew.json()).toMatchObject({ code: "daemon_token_expiry_not_allowed" });
   });
 
-  it("lists every daemon for managers and only owner-claimed daemons for members", async () => {
+  it("lists the shared daemon inventory for every human account", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "inventory-admin", userId: "inventory-admin", name: "Inventory Admin", role: "admin" });
     store.createWorkspaceMember({ id: "inventory-member", userId: "inventory-member", name: "Inventory Member", role: "member" });
@@ -203,20 +203,22 @@ describe("Multiremi API — daemon retirement", () => {
       headers: { Authorization: `Bearer ${memberToken.token}` },
     });
     expect(memberInventory.status).toBe(200);
-    expect((await memberInventory.json()).daemons).toEqual([
+    const sharedInventory = await memberInventory.json();
+    expect(sharedInventory.daemons).toEqual(expect.arrayContaining([
       expect.objectContaining({
         daemon_id: "daemon-inventory-member",
         owner_user_id: "inventory-member",
         runtime_count: 0,
         token_count: 1,
       }),
-    ]);
+    ]));
 
     const response = await app.request("/api/multiremi/daemons?workspace_id=local", {
       headers: { Authorization: `Bearer ${adminToken.token}` },
     });
     expect(response.status).toBe(200);
     const body = await response.json();
+    expect(body.daemons).toEqual(sharedInventory.daemons);
     expect(body.workspace_id).toBe("local");
     expect(body.daemons.find((daemon: any) => daemon.daemon_id === "daemon-inventory-token-only")).toMatchObject({
       runtime_count: 0,
@@ -260,12 +262,12 @@ describe("Multiremi API — daemon retirement", () => {
       daemon_id: "daemon-rename",
       display_name: "My workstation",
       display_name_customized: true,
-      updated_by: "rename-owner",
+      updated_by: "local",
     });
     expect(store.getDaemonProfile("local", "daemon-rename")).toMatchObject({
       displayName: "My workstation",
       displayNameCustomized: true,
-      updatedBy: "rename-owner",
+      updatedBy: "local",
     });
 
     const list = await app.request("/api/runtimes?workspace_id=local", { headers });
@@ -323,7 +325,7 @@ describe("Multiremi API — daemon retirement", () => {
     expect(store.getDaemonProfile("local", "daemon-rename-validation")).toBeNull();
   });
 
-  it("rejects daemon rename attempts from another member", async () => {
+  it("lets another human account rename a shared workspace daemon", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "rename-owner-2", userId: "rename-owner-2", name: "Rename owner", role: "member" });
     store.createWorkspaceMember({ id: "rename-other", userId: "rename-other", name: "Rename other", role: "member" });
@@ -351,15 +353,14 @@ describe("Multiremi API — daemon retirement", () => {
           Authorization: `Bearer ${otherToken.token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ display_name: "Hijacked" }),
+        body: JSON.stringify({ display_name: "Shared workstation" }),
       },
     );
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "daemon_owner_required" });
-    expect(store.getDaemonProfile("local", "daemon-rename-forbidden")).toBeNull();
+    expect(response.status).toBe(200);
+    expect(store.getDaemonProfile("local", "daemon-rename-forbidden")).toMatchObject({ displayName: "Shared workstation", updatedBy: "local" });
   });
 
-  it("lets a member retire their own last-runtime daemon but rejects another member", async () => {
+  it("shares human retirement control while retaining explicit machine owner fencing", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "machine-owner", userId: "machine-owner", name: "Machine owner", role: "member" });
     store.createWorkspaceMember({ id: "other-member", userId: "other-member", name: "Other member", role: "member" });
@@ -406,8 +407,7 @@ describe("Multiremi API — daemon retirement", () => {
     const crossOwner = await app.request(planPath, {
       headers: { Authorization: `Bearer ${otherToken.token}` },
     });
-    expect(crossOwner.status).toBe(403);
-    expect(await crossOwner.json()).toMatchObject({ code: "daemon_owner_required" });
+    expect(crossOwner.status).toBe(200);
     const directPlan = store.getDaemonRetirementPlan("local", "daemon-member-owned-retire");
     expect(store.retireDaemon(
       "local",
@@ -473,7 +473,7 @@ describe("Multiremi API — daemon retirement", () => {
         resourceRef: { local_path: "/work/project", daemon_id: "daemon-blocked" },
       }],
     });
-    const issue = store.createIssue({ title: "Running work", workspaceId: "local", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Running work", workspaceId: "local", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "keep running" });
     expect(store.claimTask(claude.id)?.id).toBe(task.id);
     store.startTask(task.id);
@@ -515,8 +515,8 @@ describe("Multiremi API — daemon retirement", () => {
     const memberDenied = await app.request(path, {
       headers: { Authorization: `Bearer ${memberToken.token}` },
     });
-    expect(memberDenied.status).toBe(403);
-    expect(await memberDenied.json()).toMatchObject({ code: "daemon_owner_required" });
+    expect(memberDenied.status).toBe(200);
+    expect((await memberDenied.json()).plan.can_retire).toBeFalse();
 
     const planResponse = await app.request(path, {
       headers: { Authorization: `Bearer ${adminToken.token}` },
@@ -560,7 +560,7 @@ describe("Multiremi API — daemon retirement", () => {
       workspaceId: "local",
       daemonId: "daemon-abandon-issue-workspace",
     });
-    const issue = store.createIssue({ title: "Workspace left on dead machine", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Workspace left on dead machine", workspaceId: "local" });
     store.reportIssueWorkspace({
       issueId: issue.id,
       runtimeId: runtime.id,
@@ -665,7 +665,7 @@ describe("Multiremi API — daemon retirement", () => {
     });
     const queued = store.createTask({ agentId: agent.id, prompt: "run later" });
     expect(queued.runtimeId).toBe(claude.id);
-    const issue = store.createIssue({ title: "Clean workspace", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Clean workspace", workspaceId: "local" });
     store.reportIssueWorkspace({
       issueId: issue.id,
       runtimeId: claude.id,
@@ -673,17 +673,13 @@ describe("Multiremi API — daemon retirement", () => {
       branchName: `agent/${issue.key}`,
       status: "ready",
     });
-    store.markIssueWorkspaceCleaned({
-      issueId: issue.id,
-      runtimeId: claude.id,
-      ...readyArchiveBinding(store, issue.id, claude.id),
-    });
+    store.reportSubjectReclaimed(claude.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     store.getOrCreateSessionAgentLane(session.id, agent.id);
     db!.run(
-      `UPDATE multiremi_session_agent_lanes
+      `UPDATE multiremi_session_lanes
        SET provider_session_id = 'provider-session', runtime_id = ?, provider = 'claude', work_dir = '/work/lane'
-       WHERE session_id = ? AND agent_id = ?`,
+       WHERE session_id = ? AND reader_id = ?`,
       [claude.id, session.id, agent.id],
     );
     const chat = store.createChatSession({ agentId: agent.id, title: "Retirement chat", workspaceId: "local" });
@@ -759,7 +755,7 @@ describe("Multiremi API — daemon retirement", () => {
     });
     expect(revokedHeartbeat.status).toBe(401);
     expect(store.getIssueWorkspace(issue.id)?.runtimeId).toBeNull();
-    expect(db!.query("SELECT runtime_id, provider_session_id FROM multiremi_session_agent_lanes WHERE session_id = ?").get(session.id)).toMatchObject({
+    expect(db!.query("SELECT runtime_id, provider_session_id FROM multiremi_agent_lane_records WHERE session_id = ?").get(session.id)).toMatchObject({
       runtime_id: null,
       provider_session_id: null,
     });
@@ -866,13 +862,8 @@ describe("Multiremi API — daemon retirement", () => {
       branchName: `agent/${issue.key}`,
       status: "ready",
     })).toThrow(`Runtime not found: ${claude.id}`);
-    expect(() => store.markIssueWorkspaceCleaned({
-      issueId: issue.id,
-      runtimeId: claude.id,
-      archiveId: "sar_retired",
-      sourceRevision: "retired",
-      sha256: "0".repeat(64),
-    })).toThrow("runtime does not own issue workspace");
+    expect(() => store.reportSubjectReclaimed(claude.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false }))
+      .toThrow(`Runtime not found: ${claude.id}`);
     expect(() => store.updateRuntimeModels(claude.id, [{ id: "late-model", label: "Late", provider: "anthropic", default: false }]))
       .toThrow(`Runtime not found: ${claude.id}`);
     expect(() => store.createRuntimeModelListRequest(claude.id)).toThrow(`Runtime not found: ${claude.id}`);
@@ -906,7 +897,7 @@ describe("Multiremi API — daemon retirement", () => {
       workspaceId: "local",
       daemonId: "daemon-issue-delete",
     });
-    const issue = store.createIssue({ title: "Delete checkout", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Delete checkout", workspaceId: "local" });
     store.reportIssueWorkspace({
       issueId: issue.id,
       runtimeId: runtime.id,
@@ -916,12 +907,7 @@ describe("Multiremi API — daemon retirement", () => {
     });
 
     expect(store.getDaemonRetirementPlan("local", "daemon-issue-delete").canRetire).toBeFalse();
-    expect(store.deleteIssue(issue.id)).toBeFalse();
-    store.markIssueWorkspaceCleaned({
-      issueId: issue.id,
-      runtimeId: runtime.id,
-      ...readyArchiveBinding(store, issue.id, runtime.id),
-    });
+    // Deleting the Issue releases its checkout record; the daemon forgets the directory itself.
     expect(store.deleteIssue(issue.id)).toBeTrue();
     expect(store.getIssueWorkspace(issue.id)).toBeNull();
     expect(Number((db!.query(
@@ -940,7 +926,7 @@ describe("Multiremi API — daemon retirement", () => {
       daemonId: "daemon-snapshot",
     });
     const agent = store.createAgent({ name: "Snapshot agent", provider: "claude", workspaceId: "local" });
-    const issue = store.createIssue({ title: "Snapshot issue", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Snapshot issue", workspaceId: "local" });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
 
     let plan = store.getDaemonRetirementPlan("local", "daemon-snapshot");
@@ -948,7 +934,7 @@ describe("Multiremi API — daemon retirement", () => {
 
     store.getOrCreateSessionAgentLane(session.id, agent.id);
     db!.run(
-      "UPDATE multiremi_session_agent_lanes SET runtime_id = ? WHERE session_id = ? AND agent_id = ?",
+      "UPDATE multiremi_session_lanes SET runtime_id = ? WHERE session_id = ? AND reader_id = ?",
       [runtime.id, session.id, agent.id],
     );
     plan = store.getDaemonRetirementPlan("local", "daemon-snapshot");
@@ -978,13 +964,80 @@ describe("Multiremi API — daemon retirement", () => {
       branchName: `agent/${issue.key}`,
       status: "ready",
     });
-    store.markIssueWorkspaceCleaned({
-      issueId: issue.id,
-      runtimeId: runtime.id,
-      ...readyArchiveBinding(store, issue.id, runtime.id),
-    });
+    store.reportSubjectReclaimed(runtime.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false });
     plan = store.getDaemonRetirementPlan("local", "daemon-snapshot");
     expect(plan.snapshot).not.toBe(auxiliarySnapshot);
     expect(plan.canRetire).toBeTrue();
+  });
+
+  it("counts the traces a daemon holds as traces_to_lose and marks them lost, runtime kept, when it retires", async () => {
+    const store = createStore();
+    const claude = store.registerRuntime({ id: "rt_trace_claude", name: "Claude", provider: "claude", workspaceId: "local", daemonId: "daemon-traces", maxConcurrency: 4 });
+    const codex = store.registerRuntime({ id: "rt_trace_codex", name: "Codex", provider: "codex", workspaceId: "local", daemonId: "daemon-traces", maxConcurrency: 4 });
+    const other = store.registerRuntime({ id: "rt_trace_other", name: "Other", provider: "claude", workspaceId: "local", daemonId: "daemon-other-traces" });
+    const agents = { claude: store.createAgent({ name: "Trace claude", provider: "claude", workspaceId: "local" }),
+      codex: store.createAgent({ name: "Trace codex", provider: "codex", workspaceId: "local" }) };
+    const finished = (runtimeId: string, traceEventCount: number) => {
+      const agent = agents[store.getRuntime(runtimeId)!.provider as "claude" | "codex"];
+      const task = store.createTask({ agentId: agent.id, runtimeId, prompt: `trace ${runtimeId} ${traceEventCount}` });
+      expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+      store.startTask(task.id);
+      store.completeTask(task.id, { output: "done", traceEventCount });
+      return task.id;
+    };
+    const held = [finished(claude.id, 3), finished(codex.id, 2)];
+    const empty = finished(claude.id, 0);
+    const elsewhere = finished(other.id, 1);
+    const app = createMultiremiApp({ store, authToken: "root-secret" });
+    const headers = { Authorization: "Bearer root-secret", "Content-Type": "application/json" };
+
+    const planned = await app.request("/api/multiremi/daemons/daemon-traces/retirement-plan?workspace_id=local", { headers });
+    expect(planned.status).toBe(200);
+    const { plan } = await planned.json();
+    expect(plan.traces_to_lose).toBe(2);
+    expect(plan.can_retire).toBe(true);
+    expect(plan.blocking_reasons).toEqual([]);
+    expect(plan).not.toHaveProperty("unarchived_hot_traces");
+    expect(plan).not.toHaveProperty("archive_requests");
+
+    const retired = await app.request("/api/multiremi/daemons/daemon-traces/retire", {
+      method: "POST", headers, body: JSON.stringify({ workspace_id: "local", expected_snapshot: plan.snapshot }),
+    });
+    expect(retired.status).toBe(200);
+    expect(store.getTaskTrace(held[0]!)).toMatchObject({ location: "lost", runtimeId: claude.id });
+    expect(store.getTaskTrace(held[1]!)).toMatchObject({ location: "lost", runtimeId: codex.id });
+    expect(store.getTaskTrace(empty)?.location).toBe("none");
+    expect(store.getTaskTrace(elsewhere)).toMatchObject({ location: "daemon", runtimeId: other.id });
+  });
+
+  it("marks only the deleted Runtime's daemon traces lost and drops its storage report with the daemon", async () => {
+    const store = createStore();
+    const keep = store.registerRuntime({ id: "rt_trace_keep", name: "Keep", provider: "claude", workspaceId: "local", daemonId: "daemon-delete-traces", maxConcurrency: 4 });
+    const drop = store.registerRuntime({ id: "rt_trace_drop", name: "Drop", provider: "codex", workspaceId: "local", daemonId: "daemon-delete-traces", maxConcurrency: 4 });
+    const agents = { claude: store.createAgent({ name: "Delete claude", provider: "claude", workspaceId: "local" }),
+      codex: store.createAgent({ name: "Delete codex", provider: "codex", workspaceId: "local" }) };
+    const run = (runtimeId: string) => {
+      const agent = agents[store.getRuntime(runtimeId)!.provider as "claude" | "codex"];
+      const task = store.createTask({ agentId: agent.id, runtimeId, prompt: runtimeId });
+      expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+      store.startTask(task.id);
+      store.completeTask(task.id, { output: "done", traceEventCount: 1 });
+      return task.id;
+    };
+    const kept = run(keep.id);
+    const dropped = run(drop.id);
+    expect(store.deleteRuntime(drop.id)).toBe(true);
+    expect(store.getTaskTrace(dropped)).toMatchObject({ location: "lost", runtimeId: drop.id });
+    expect(store.getTaskTrace(kept)).toMatchObject({ location: "daemon", runtimeId: keep.id });
+
+    store.saveDaemonStorageReport("daemon-delete-traces", keep.id, {
+      version: 1, generated_at: "2026-10-13T00:00:00.000Z", mode: "periodic", root: "/w", bytes: null, bytes_measured_at: null,
+      subjects: { total: 0, active: 0, ended: 0, reclaimed: 0 }, retained: {}, reclaimed_this_round: 0,
+      forgotten_this_round: 0, freed_bytes: 0, plan: [], errors: [],
+    });
+    const plan = store.getDaemonRetirementPlan("local", "daemon-delete-traces");
+    expect(store.retireDaemon("local", "daemon-delete-traces", plan.snapshot, "admin").status).toBe("retired");
+    expect(store.getTaskTrace(kept)).toMatchObject({ location: "lost", runtimeId: keep.id });
+    expect(store.listDaemonStorageReports("local", ["daemon-delete-traces"])).toEqual([]);
   });
 });

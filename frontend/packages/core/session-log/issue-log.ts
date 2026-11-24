@@ -1,0 +1,551 @@
+import { api } from "../api";
+import { ApiError } from "../api/http";
+import { openBrowserReplica, type BrowserReplica, type BrowserReplicaOptions } from "../replica/browser";
+import { ReplicaView } from "../replica/view";
+import type { SessionLogEntry } from "../replica/port";
+import type { IssueLogBootstrap, SessionLogRow, SessionLogWindow } from "../api/schemas/session-log";
+import { SessionLogEntrySchema } from "../api/schemas/session-log";
+import type { HubFrame, HubSeqRange } from "@multiremi/contracts/live-hub";
+import { createSafeId } from "../utils";
+import { issueActivityLayer, type IssueActivityEntry } from "@multiremi/contracts/issue-activity";
+import { subscribeFromWindow } from "../replica/engine";
+
+/**
+ * A bounded presentation window over C7; persisted coverage may be sparse.
+ *
+ * One instance can connect again after `disconnect()`: React StrictMode, a
+ * hidden floating Chat and the Chat log pool all do. `generation` retires the
+ * frame batches and C7 imports of the earlier connection. Window reads check
+ * only `disconnected`, so one still in flight when the log connects again is
+ * applied like a current read: a tail replaces the window, refreshes and pages
+ * merge by row revision.
+ */
+export class IssueLogReplica extends ReplicaView {
+  window: SessionLogWindow | null = null;
+  headRow: SessionLogRow | null = null;
+  missingCommentId: string | null = null;
+  private browser: BrowserReplica | null = null;
+  private disconnected = false;
+  private from = 0;
+  private to = Number.MAX_SAFE_INTEGER;
+  private targetCommentId: string | null = null;
+  private knownWindows: Array<{ range: HubSeqRange; entries: SessionLogRow[] }> = [];
+  /**
+   * Per session and seq, the newest revision the read route was asked about
+   * during hydration and did not serve. A hidden placeholder at that revision
+   * or older brings nothing new; a newer one can be a row that became visible.
+   */
+  private settledHidden = new Map<string, Map<number, number>>();
+  private frameQueue: Promise<void> = Promise.resolve();
+  private importingWindows = 0;
+  private syncBrowser: (() => void) | null = null;
+  private windowRead: Promise<void> | null = null;
+  private generation = 0;
+
+  /**
+   * `withHead = false` (Chat) never reads, holds or persists the seq-0 head row:
+   * Chat does not display it and takes its title from the sessions query.
+   */
+  constructor(readonly sessionId: string, initial?: IssueLogBootstrap, private readonly preferCached = false,
+    private readonly withActivity = false, private readonly withHead = true) {
+    super();
+    if (initial?.sessionId === sessionId) {
+      this.targetCommentId = initial.targetCommentId ?? null;
+      this.missingCommentId = initial.missingCommentId ?? null;
+      this.accept(initial.window, initial.head);
+    }
+  }
+
+  accept(window: SessionLogWindow, head: SessionLogRow | null = this.headRow): void {
+    this.window = window;
+    this.headRow = this.withHead ? head : null;
+    this.from = window.entries.find(e => e.seq > 0)?.seq ?? 0;
+    this.to = window.has_more_after ? window.entries.at(-1)?.seq ?? 0 : Number.MAX_SAFE_INTEGER;
+    const entries = this.displayRows(window.entries);
+    this.setWindow(this.sessionId, entries, { head: window.head_seq, fresh: true, ready: true });
+    const end = window.entries.at(-1)?.seq;
+    if (end !== undefined) this.knownWindows.push({ range: { from: window.entries[0]!.seq, to: end }, entries: window.entries });
+    this.knownWindows = this.knownWindows.slice(-32);
+  }
+
+  private displayRows(entries: readonly SessionLogEntry[]): SessionLogEntry[] {
+    const rows = entries.filter(e => e.seq > 0 && e.seq >= this.from && e.seq <= this.to
+      && e.kind !== "thread_resolved" && e.kind !== "thread_unresolved");
+    return this.headRow ? [this.headRow, ...rows.slice(-299)] : rows.slice(-300);
+  }
+
+  loadTail(): Promise<void> {
+    return this.windowRead = this.readTail();
+  }
+
+  /** Activities are presentation data; they never enter C7 or its seq coverage. */
+  appendActivity(activity: IssueActivityEntry): void {
+    if (!this.withActivity || !this.window || this.window.has_more_after || !issueActivityLayer(activity.action)) return;
+    if (this.window.activities?.some(entry => entry.id === activity.id)) return;
+    this.window = { ...this.window, activities: mergeActivities(this.window.activities, [activity]) };
+    const snapshot = this.getSnapshot(this.sessionId);
+    this.setWindow(this.sessionId, [...snapshot.entries], { head: snapshot.head, fresh: snapshot.fresh, ready: snapshot.ready });
+  }
+
+  private activityParams(): { with_activity?: 1 } { return this.withActivity ? { with_activity: 1 } : {}; }
+
+  /** The seq-0 head read, or nothing for a log that does not show it. */
+  private readHead(): Promise<SessionLogRow | null> {
+    if (!this.withHead) return Promise.resolve(null);
+    return api.getSessionLog(this.sessionId, { anchor: 0, before: 1 })
+      .then(head => head.entries.find(e => e.seq === 0) ?? null);
+  }
+
+  private async readTail(missingCommentId?: string): Promise<void> {
+    const [window, head] = await Promise.all([
+      api.getSessionLog(this.sessionId, { before: 30, ...this.activityParams() }),
+      this.readHead(),
+    ]);
+    if (this.disconnected || (missingCommentId && this.targetCommentId !== missingCommentId)) return;
+    this.targetCommentId = null;
+    if (missingCommentId) this.missingCommentId = missingCommentId;
+    this.accept(window, head);
+    await this.persist(window);
+  }
+
+  hasWindowFor(commentId?: string): boolean {
+    if (!this.window) return false;
+    if (commentId && this.missingCommentId === commentId) return this.targetCommentId === null;
+    return this.targetCommentId === (commentId ?? null) && (!commentId
+      || this.getSnapshot(this.sessionId).entries.some(entry => entry.id === commentId));
+  }
+
+  /**
+   * The window a connection imports into C7.
+   *
+   * C7 owns which rows are shown, and a new connection's C7 can start with
+   * only what this import gives it: a per-tab memory replica (no Web Locks or
+   * OPFS, as on a plain-HTTP origin) is new for every connection, and the
+   * stream resumes after the window's head. The rows on screen are what the
+   * previous connection's C7 held, including rows that arrived as frames after
+   * the last read, so the import is the last read with those rows merged in
+   * and without the read's rows C7 had removed since (deleted or hidden).
+   */
+  private windowForImport(): SessionLogWindow | null {
+    const window = this.window;
+    const shown = this.getSnapshot(this.sessionId).entries.filter(entry => entry.seq > 0);
+    if (!window || !shown.length) return window;
+    const shownSeqs = new Set(shown.map(entry => entry.seq));
+    const entries = mergeRows(window.entries.filter(entry => entry.seq === 0 || shownSeqs.has(entry.seq)),
+      shown.map(entry => SessionLogEntrySchema.parse(entry)));
+    const first = entries[0]!.seq, last = entries.at(-1)!.seq;
+    this.knownWindows.push({ range: { from: first, to: last }, entries });
+    this.knownWindows = this.knownWindows.slice(-32);
+    return { ...window, entries };
+  }
+
+  loadAround(commentId: string, preserveWindow = false): Promise<void> {
+    return this.windowRead = this.readAround(commentId, preserveWindow);
+  }
+
+  private async readAround(commentId: string, preserveWindow = false): Promise<void> {
+    const previous = preserveWindow && this.withActivity ? this.window : null;
+    this.targetCommentId = commentId;
+    this.missingCommentId = null;
+    if (!preserveWindow) {
+      this.window = null;
+      this.setWindow(this.sessionId, [], { fresh: false, ready: false });
+    }
+    let location;
+    try {
+      location = await api.locateSessionLogEntry(this.sessionId, commentId);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      if (this.disconnected || this.targetCommentId !== commentId) return;
+      // Publish the missing target together with the ready tail so consumers
+      // choose the bottom anchor before revealing any fallback rows.
+      await this.readTail(commentId);
+      return;
+    }
+    const [window, head] = await Promise.all([
+      api.getSessionLog(this.sessionId, { anchor: location.seq, before: 15, after: 15, ...this.activityParams() }),
+      this.readHead(),
+    ]);
+    if (this.disconnected || this.targetCommentId !== commentId) return;
+    const keepsOlder = previous && (previous.entries[0]?.seq ?? Infinity) < (window.entries[0]?.seq ?? Infinity);
+    const keepsNewer = previous && (previous.entries.at(-1)?.seq ?? 0) > (window.entries.at(-1)?.seq ?? 0);
+    this.accept(previous ? { ...window, ...mergeActivityWindows(previous, window),
+      entries: mergeRefreshedRows(previous.entries, window),
+      ...(keepsOlder ? { has_more_before: previous.has_more_before, prev_entry_created_at: previous.prev_entry_created_at,
+        before_visible_count: previous.before_visible_count, before_visible_count_capped: previous.before_visible_count_capped } : {}),
+      ...(keepsNewer ? { has_more_after: previous.has_more_after } : {}),
+    } : window, head);
+    await this.persist(window);
+  }
+
+  async refreshVisible(): Promise<void> {
+    if (this.targetCommentId) await this.loadAround(this.targetCommentId, true);
+    else if (this.withActivity && this.window) await this.refreshTailPreservingWindow();
+    else await this.loadTail();
+  }
+
+  /** Refresh the tail without collapsing an expanded history window. */
+  async refreshTailPreservingWindow(): Promise<void> {
+    if (!this.window || this.targetCommentId) { await this.refreshVisible(); return; }
+    const current = this.window;
+    const tail = await api.getSessionLog(this.sessionId, { before: 30, ...this.activityParams() });
+    if (this.disconnected || this.window !== current) return;
+    const last = current.entries.at(-1)?.seq ?? 0;
+    const firstNew = tail.entries.find(entry => entry.seq > last)?.seq;
+    let bridge: SessionLogRow[] = [];
+    let activityWindow = mergeActivityWindows(current, tail);
+    if (this.withActivity) {
+      // Refresh the loaded prefix too: a union of old log rows would retain
+      // deleted comments. Activities are immutable and still merge by id.
+      let cursor = (current.entries.find(entry => entry.seq > 0)?.seq ?? 1) - 1;
+      const firstTail = tail.entries.find(entry => entry.seq > 0)?.seq ?? tail.head_seq + 1;
+      while (cursor < firstTail - 1) {
+        const page = await api.getSessionLog(this.sessionId, { anchor: cursor, after: 100, ...this.activityParams() });
+        bridge = mergeRows(bridge, page.entries.filter(entry => entry.seq > 0 && entry.seq < firstTail));
+        activityWindow = mergeActivityWindows({ ...current, ...activityWindow }, page);
+        const next = page.entries.at(-1)?.seq;
+        if (!page.has_more_after || next === undefined || next <= cursor) break;
+        cursor = next;
+      }
+    } else if (firstNew !== undefined && firstNew > last + 1) {
+      bridge = (await this.readRange(this.sessionId, { from: last + 1, to: firstNew - 1 }))
+        .map(entry => SessionLogEntrySchema.parse(entry));
+    }
+    if (this.disconnected || this.window !== current) return;
+    this.accept({ ...tail,
+      ...activityWindow, prev_entry_created_at: current.prev_entry_created_at,
+      entries: mergeRows(this.withActivity ? bridge : mergeRows(current.entries, bridge), tail.entries),
+      has_more_before: current.has_more_before,
+      before_visible_count: current.before_visible_count,
+      before_visible_count_capped: current.before_visible_count_capped,
+    }, tail.entries.find(entry => entry.seq === 0) ?? this.headRow);
+    await this.persist(tail);
+  }
+
+  async earlier(): Promise<void> {
+    const first = this.window?.entries.find(e => e.seq > 0)?.seq;
+    if (first === undefined) return;
+    const older = await api.getSessionLog(this.sessionId, { anchor: first - 1, before: 30, ...this.activityParams() });
+    if (this.disconnected || !this.window) return;
+    this.accept({ ...this.window, entries: mergeRows(older.entries, this.window.entries),
+      ...mergeActivityWindows(older, this.window), prev_entry_created_at: older.prev_entry_created_at,
+      has_more_before: older.has_more_before, before_visible_count: older.before_visible_count,
+      before_visible_count_capped: older.before_visible_count_capped });
+    await this.persist(older);
+  }
+
+  async newer(): Promise<void> {
+    const last = this.window?.entries.at(-1)?.seq;
+    if (last === undefined) return;
+    const newer = await api.getSessionLog(this.sessionId, { anchor: last, after: 30, ...this.activityParams() });
+    if (this.disconnected || !this.window) return;
+    this.accept({ ...this.window, entries: mergeRows(this.window.entries, newer.entries),
+      ...mergeActivityWindows(this.window, newer),
+      head_seq: newer.head_seq, log_version: newer.log_version, has_more_after: newer.has_more_after });
+    await this.persist(newer);
+  }
+
+  async refreshHead(): Promise<void> {
+    if (!this.withHead) return;
+    const head = await api.getSessionLog(this.sessionId, { anchor: 0, before: 1 });
+    if (this.disconnected || !this.window) return;
+    this.accept(this.window, head.entries.find(e => e.seq === 0) ?? null);
+    await this.persist(head);
+  }
+
+  async connect(options: Pick<BrowserReplicaOptions, "userId" | "workspaceId" | "subscribe" | "unsubscribe" | "env">): Promise<() => void> {
+    this.disconnected = false;
+    // CSR starts its read in the preceding effect; SSR already accepted the seed.
+    // Subscribe only after that read, while preserving the replica's resume cursor.
+    await this.windowRead;
+    if (this.disconnected) return () => {};
+    const browser = await openBrowserReplica({ ...options,
+      subscribe: (id, fromSeq) => options.subscribe(id, subscribeFromWindow(fromSeq, id === this.sessionId ? this.window?.head_seq : null)),
+      tabId: createSafeId(), readRange: (id, range) => this.readRange(id, range) });
+    if (this.disconnected) { browser.dispose(); return () => {}; }
+    this.browser = browser;
+    const update = () => {
+      const snapshot = browser.port.getSnapshot(this.sessionId);
+      const visible = this.getSnapshot(this.sessionId);
+      if (!snapshot.ready || this.importingWindows > 0) return;
+      const current = snapshot.entries.map(e => SessionLogEntrySchema.safeParse(e))
+        .filter(p => p.success).map(p => p.data!);
+      // C7 may contain raw Hub entries from an earlier tab or version. The
+      // read route supplies attachment metadata, so never paint raw rows first.
+      const displayable = current.filter(e => (e.kind !== "message" && e.kind !== "turn")
+        || Array.isArray((e.metadata as Record<string, unknown> | undefined)?.attachments));
+      if (!this.window) {
+        if (!this.preferCached) return;
+        if (displayable.length !== current.length) return;
+        const cached = displayable.filter(entry => entry.seq > 0).slice(-30);
+        this.accept({ entries: cached, head_seq: Math.max(0, snapshot.head ?? 0), log_version: 0,
+          has_more_before: (cached[0]?.seq ?? 0) > 1, has_more_after: false },
+          displayable.find(entry => entry.seq === 0) ?? null);
+        this.setWindow(this.sessionId, this.getSnapshot(this.sessionId).entries, {
+          head: snapshot.head, fresh: snapshot.fresh, ready: true,
+        });
+        return;
+      }
+      const held = this.withHead ? current.find(e => e.seq === 0) : undefined;
+      if (held && held.revision >= (this.headRow?.revision ?? 0)) this.headRow = held;
+      // C7 owns row existence. Keep hydrated display fields only for rows it
+      // still holds; a union with the old window would resurrect deletions.
+      const heldSeqs = new Set(current.map(entry => entry.seq));
+      const rows = mergeRows(visible.entries.filter(entry => heldSeqs.has(entry.seq))
+        .map(entry => SessionLogEntrySchema.parse(entry)), displayable);
+      const newerHead = (snapshot.head ?? -1) > (visible.head ?? -1);
+      this.setWindow(this.sessionId, this.displayRows(rows), {
+        head: Math.max(visible.head ?? 0, snapshot.head ?? 0),
+        fresh: newerHead ? snapshot.fresh : visible.fresh || snapshot.fresh, ready: true,
+      });
+    };
+    const off = browser.port.subscribe(this.sessionId, update);
+    this.syncBrowser = update;
+    this.importingWindows++;
+    try {
+      browser.open(this.sessionId);
+      const imported = this.windowForImport();
+      if (imported) await this.persist(imported);
+    } finally {
+      this.importingWindows--;
+      if (this.browser === browser) update();
+    }
+    return () => { off(); browser.close(this.sessionId); browser.dispose(); if (this.browser === browser) { this.browser = null; this.syncBrowser = null; } };
+  }
+
+  frames(...args: Parameters<BrowserReplica["frames"]>): void { this.browser?.frames(...args); }
+  /**
+   * Read-side metadata is authoritative for attachments and reactions.
+   *
+   * As the leader this page's socket also carries the sessions other tabs (and
+   * other logs on this page, such as the floating chat over an Issue) show, so
+   * their frames arrive here too. Only this session reuses the windows this page
+   * read; another session's rows always come from the read route.
+   */
+  hydratedFrames(sessionId: string, frames: readonly HubFrame[]): Promise<void> {
+    const generation = this.generation;
+    const own = sessionId === this.sessionId;
+    const job = this.frameQueue.then(async () => {
+      if (this.disconnected || generation !== this.generation) return;
+      const missing: HubFrame[] = [];
+      const entries = new Map<number, SessionLogRow>();
+      const candidates = own ? [...(this.window ? [this.window.entries] : []), ...this.knownWindows.toReversed().map(w => w.entries)] : [];
+      // The hub fails closed: a row its projection could not check arrives as a
+      // bare hidden placeholder, also for a row this reader may see, such as
+      // their own message just sent. One that could remove a row shown here,
+      // or settle a seq not read yet, is checked against the read route first.
+      // So is one at a seq known only as hidden, unless the read route already
+      // left that revision out: a placeholder is a write, and a write can make
+      // a row visible (a Chat turn card when its turn ends).
+      const held = this.browser?.port.getSnapshot(sessionId);
+      const readUpTo = Math.max(held?.head ?? -1, own ? this.window?.head_seq ?? -1 : -1);
+      const settled = this.settledHidden.get(sessionId);
+      const mayHideReadable = (seq: number, revision: number) => seq > readUpTo || !!held?.entries.some(entry => entry.seq === seq)
+        || candidates.some(rows => rows.some(row => row.seq === seq)) || (settled?.get(seq) ?? -1) < revision;
+      const settle = (seq: number, revision: number) => {
+        const bySeq = this.settledHidden.get(sessionId) ?? new Map<number, number>();
+        bySeq.set(seq, Math.max(bySeq.get(seq) ?? -1, revision));
+        this.settledHidden.set(sessionId, bySeq);
+      };
+      for (const frame of frames) {
+        if (frame.kind !== "entry" || !frame.payload || typeof frame.payload !== "object") continue;
+        const payload = frame.payload as Record<string, unknown>;
+        const placeholder = isHiddenPlaceholder(payload);
+        if (!placeholder && payload.kind !== "message" && payload.kind !== "turn") continue;
+        if (payload.session_id !== undefined && payload.session_id !== sessionId) throw new Error("Log payload belongs to another session");
+        if (payload.seq !== undefined && payload.seq !== frame.seq) throw new Error("Log payload has an inconsistent sequence");
+        if (placeholder) {
+          if (mayHideReadable(frame.seq, Number(payload.revision ?? 0))) missing.push(frame);
+          continue;
+        }
+        const candidate = candidates.map(rows => rows.find(row => row.seq === frame.seq)).find(Boolean);
+        if (candidate && candidate.id === payload.id && candidate.session_id === sessionId && candidate.kind === payload.kind
+          && candidate.revision >= Number(payload.revision ?? 0)) entries.set(frame.seq, candidate);
+        else missing.push(frame);
+      }
+      // One range for all misses within one API window, instead of N single-row reads.
+      const seqs = [...new Set(missing.map(frame => frame.seq))].sort((a, b) => a - b);
+      for (let index = 0; index < seqs.length;) {
+        const first = seqs[index]!;
+        let end = index + 1;
+        while (end < seqs.length && seqs[end]! - first < 100) end += 1;
+        const last = seqs[end - 1]!;
+        const window = await api.getSessionLog(sessionId, { anchor: first - 1, after: last - first + 1 });
+        if (this.disconnected || generation !== this.generation) return;
+        // Every log write bumps `log_version`, the one that produced these
+        // frames included, so this read is normally newer than the window.
+        // Row revisions decide staleness.
+        for (const frame of missing.filter(frame => frame.seq >= first && frame.seq <= last)) {
+          const payload = frame.payload as Record<string, unknown>;
+          if (isHiddenPlaceholder(payload)) {
+            // The read route checks visibility now: a row it still serves, at
+            // the placeholder's revision or later, stays. Otherwise it hides.
+            const row = window.entries.find(row => row.session_id === sessionId && row.seq === frame.seq);
+            if (row && row.revision >= Number(payload.revision ?? 0)) entries.set(frame.seq, row);
+            else settle(frame.seq, Number(payload.revision ?? 0));
+            continue;
+          }
+          const row = window.entries.find(row => row.session_id === sessionId && row.seq === frame.seq && row.id === payload.id);
+          if (row && row.revision < Number(payload.revision ?? 0)) throw new Error(`Log entry ${frame.seq} was unavailable for hydration`);
+          if (row) entries.set(frame.seq, row);
+          else settle(frame.seq, Number(payload.revision ?? 0));
+        }
+        if (own) {
+          this.knownWindows.push({ range: { from: first, to: last }, entries: window.entries });
+          this.knownWindows = this.knownWindows.slice(-32);
+        }
+        index = end;
+      }
+      const hydrated = frames.map(frame => {
+        if (frame.kind !== "entry" || !frame.payload || typeof frame.payload !== "object") return frame;
+        const payload = frame.payload as Record<string, unknown>;
+        if (isHiddenPlaceholder(payload)) {
+          const entry = entries.get(frame.seq);
+          return entry ? { ...frame, payload: entry } : frame;
+        }
+        if (payload.kind !== "message" && payload.kind !== "turn") return frame;
+        const entry = entries.get(frame.seq);
+        // A successful read can omit a row deleted/hidden since this frame was
+        // emitted. Settle its seq without retaining a body or dropping patches.
+        if (!entry) return { ...frame, payload: { session_id: sessionId, seq: frame.seq,
+          revision: payload.revision, visibility: "hidden" } };
+        return { ...frame, payload: entry };
+      });
+      if (!this.disconnected && generation === this.generation) this.frames(sessionId, hydrated);
+    });
+    this.frameQueue = job.catch(() => {});
+    return job;
+  }
+  /**
+   * Subscribe to a session's `log:` stream again, from the head the replica
+   * holds: the hub ended the previous subscription (`stream.error`). Only the
+   * tab that leads the replica subscribes, so a follower does nothing.
+   */
+  resubscribe(sessionId: string): void { this.browser?.resubscribe(sessionId); }
+
+  /**
+   * A mid-stream gap in a session another tab or log shows: read the range into
+   * the shared replica, which publishes it to whoever shows that session. This
+   * session's own gaps refresh its window instead (`refreshVisible`).
+   */
+  async backfill(sessionId: string, range: HubSeqRange): Promise<void> {
+    if (sessionId === this.sessionId) throw new Error("This session refreshes its own window");
+    if (range.to < range.from) return;
+    await this.browser?.loadWindow(sessionId, range);
+  }
+  /** An ack resumes the stream; its `log_version` is a freshness token, not a reset. */
+  ack(...args: Parameters<BrowserReplica["ack"]>): void { this.browser?.ack(...args); }
+  disconnect(): void { this.generation += 1; this.disconnected = true; this.browser?.dispose(); this.browser = null; this.syncBrowser = null; }
+
+  /**
+   * Show a retained window again (the Chat log pool): its rows stay on screen
+   * while the tail refreshes. `connect()` subscribes after the refresh settles,
+   * as after a first read, and a failed refresh still connects: the stream
+   * resumes from the retained head.
+   */
+  resume(): Promise<void> {
+    this.disconnected = false;
+    const refresh = this.refreshTailPreservingWindow();
+    this.windowRead = refresh.catch(() => {});
+    return refresh;
+  }
+
+  /**
+   * Drop what only a connection needs once released into the pool: the windows
+   * kept for frame hydration and C7 backfill, except the current one, which
+   * `persist` imports on the next connect. Display rows and heights stay.
+   */
+  trimRetained(): void {
+    const window = this.window;
+    const first = window?.entries[0]?.seq;
+    const last = window?.entries.at(-1)?.seq;
+    this.knownWindows = window && first !== undefined && last !== undefined
+      ? [{ range: { from: first, to: last }, entries: window.entries }] : [];
+  }
+
+  /** Evicted from the pool: disconnect and drop every row this replica held. */
+  dispose(): void {
+    this.disconnect();
+    this.window = null;
+    this.headRow = null;
+    this.knownWindows = [];
+    this.settledHidden.clear();
+    this.targetCommentId = null;
+    this.missingCommentId = null;
+    this.dropAll();
+  }
+
+  override readRowHeight(sessionId: string, seq: number, key: string): number | null {
+    return this.browser?.port.readRowHeight(sessionId, seq, key) ?? super.readRowHeight(sessionId, seq, key);
+  }
+  override writeRowHeight(sessionId: string, seq: number, key: string, height: number): void {
+    super.writeRowHeight(sessionId, seq, key, height);
+    this.browser?.port.writeRowHeight(sessionId, seq, key, height);
+  }
+
+  private async persist(window: SessionLogWindow): Promise<void> {
+    const browser = this.browser;
+    const generation = this.generation;
+    if (!browser || !window.entries.length) return;
+    // Head and body import separately; publish C7's authoritative membership
+    // after both writes so a partial import cannot erase the HTTP/SSR seed.
+    this.importingWindows++;
+    try {
+      if (this.headRow) {
+        this.knownWindows.push({ range: { from: 0, to: 0 }, entries: [this.headRow] });
+        await browser.loadWindow(this.sessionId, { from: 0, to: 0 });
+      }
+      if (this.disconnected || generation !== this.generation) return;
+      await browser.loadWindow(this.sessionId, { from: window.entries[0]!.seq, to: window.entries.at(-1)!.seq });
+    } finally {
+      this.importingWindows--;
+      if (this.browser === browser) this.syncBrowser?.();
+    }
+  }
+
+  private async readRange(sessionId: string, range: HubSeqRange): Promise<SessionLogEntry[]> {
+    // As the leader this also reads for other tabs' sessions; the windows held
+    // here are this session's.
+    const seed = sessionId === this.sessionId
+      ? this.knownWindows.findLast(w => w.range.from <= range.from && w.range.to >= range.to) : undefined;
+    if (seed) return seed.entries.filter(e => e.seq >= range.from && e.seq <= range.to);
+    const rows: SessionLogRow[] = [];
+    let cursor = range.from - 1;
+    while (cursor < range.to) {
+      const window = await api.getSessionLog(sessionId, { anchor: Math.max(0, cursor), after: 100 });
+      rows.push(...window.entries.filter(e => e.seq >= range.from && e.seq <= range.to));
+      const next = window.entries.at(-1)?.seq;
+      if (!window.has_more_after || next === undefined || next <= cursor) break;
+      cursor = next;
+    }
+    return rows;
+  }
+}
+
+/** The hub's placeholder for a row it does not show: no kind, no body. */
+function isHiddenPlaceholder(payload: Record<string, unknown>): boolean {
+  return payload.visibility === "hidden" && payload.kind === undefined;
+}
+
+function mergeRows(left: SessionLogRow[], right: SessionLogRow[]): SessionLogRow[] {
+  const rows = new Map(left.map(e => [e.seq, e]));
+  for (const row of right) if ((rows.get(row.seq)?.revision ?? -1) <= row.revision) rows.set(row.seq, row);
+  return [...rows.values()].sort((a, b) => a.seq - b.seq);
+}
+
+function mergeRefreshedRows(previous: SessionLogRow[], window: SessionLogWindow): SessionLogRow[] {
+  const first = window.has_more_before ? window.entries[0]?.seq ?? Infinity : 0;
+  const last = window.has_more_after ? window.entries.at(-1)?.seq ?? -1 : Infinity;
+  return mergeRows(previous.filter(entry => entry.seq < first || entry.seq > last), window.entries);
+}
+
+function mergeActivities(left: IssueActivityEntry[] = [], right: IssueActivityEntry[] = []): IssueActivityEntry[] {
+  return [...new Map([...left, ...right].map(entry => [entry.id, entry])).values()]
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+}
+function mergeActivityWindows(left: SessionLogWindow, right: SessionLogWindow): Pick<SessionLogWindow, "activities" | "activities_truncated"> {
+  return left.activities || right.activities ? {
+    activities: mergeActivities(left.activities, right.activities),
+    activities_truncated: Boolean(left.activities_truncated || right.activities_truncated),
+  } : {};
+}

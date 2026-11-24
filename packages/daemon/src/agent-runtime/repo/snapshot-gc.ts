@@ -1,9 +1,6 @@
 import { lstatSync, mkdirSync, readdirSync, type Stats } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import {
-  OWNED_DIRECTORY_QUARANTINE,
-  removeOwnedDirectorySync,
-} from "../workspace/safe-remove.js";
+import { removeOwnedDirectorySync } from "../workspace/safe-remove.js";
 
 export interface SnapshotGcSummary {
   /** Snapshot trees (including abandoned temporary trees), excluding empty containers. */
@@ -24,13 +21,12 @@ export interface RunSnapshotGcOnceOptions {
   onError?: (path: string, error: unknown) => void;
 }
 
-/** Sweep independently of workspace GC, which reserves the .snapshots tree. */
+/** Sweep the shared code-view tree independently of workspace reclaim. */
 export async function runSnapshotGcOnce(options: RunSnapshotGcOnceOptions): Promise<SnapshotGcSummary> {
   const root = resolve(options.workspacesRoot);
   const snapshotsRoot = resolve(options.snapshotsRoot);
   const rel = relative(root, snapshotsRoot);
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)
-    || rel.split(sep).includes(OWNED_DIRECTORY_QUARANTINE)) {
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     throw new Error(`snapshot root must be inside the workspace root: ${snapshotsRoot}`);
   }
   if (!Number.isFinite(options.ttlMs) || options.ttlMs < 0) {
@@ -39,7 +35,11 @@ export async function runSnapshotGcOnce(options: RunSnapshotGcOnceOptions): Prom
   const now = options.now ?? Date.now();
   const summary: SnapshotGcSummary = { removed: 0, retained: 0, skipped: 0 };
   const expired = (info: Stats) => now - info.mtimeMs > options.ttlMs;
+  // One unremovable snapshot must not abort the sweep, but ownership loss must:
+  // re-probe the same process-ownership fence workspace GC uses, and only
+  // report the entry when the fence still holds.
   const failed = (path: string, error: unknown) => {
+    options.assertRootOwner?.();
     summary.skipped++;
     options.onError?.(path, error);
   };
@@ -63,7 +63,7 @@ export async function runSnapshotGcOnce(options: RunSnapshotGcOnceOptions): Prom
       for (const name of readdirSync(parent)) {
         const path = join(parent, name);
         try {
-          if (name === OWNED_DIRECTORY_QUARANTINE || !realDirectory(path)) {
+          if (!realDirectory(path)) {
             summary.skipped++;
             continue;
           }

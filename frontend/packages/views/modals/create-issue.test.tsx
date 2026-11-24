@@ -2,6 +2,7 @@ import { forwardRef, useImperativeHandle, useRef, useState, type ReactNode } fro
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { Issue } from "@multiremi/core/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import enCommon from "../locales/en/common.json";
@@ -84,6 +85,7 @@ vi.mock("@multiremi/core/projects/queries", () => ({
         { id: "prj_squad", default_assignee_type: "squad", default_assignee_id: "sqd_ops", archived_at: null },
         { id: "prj_agent", default_assignee_type: "agent", default_assignee_id: "agt_build", archived_at: null },
         { id: "prj_plain", default_assignee_type: null, default_assignee_id: null, archived_at: null },
+        { id: "prj_legacy", default_assignee_type: "member", default_assignee_id: "member-old", archived_at: null },
       ]),
   }),
 }));
@@ -219,8 +221,8 @@ vi.mock("../issues/components", () => ({
       data-assignee-type={assigneeType ?? ""}
       data-assignee-id={assigneeId ?? ""}
     >
-      <button type="button" onClick={() => onUpdate?.({ assignee_type: "member", assignee_id: "user-9" })}>
-        Pick member assignee
+      <button type="button" onClick={() => onUpdate?.({ assignee_type: "agent", assignee_id: "agent-9" })}>
+        Pick Agent assignee
       </button>
     </div>
   ),
@@ -275,7 +277,8 @@ vi.mock("@multiremi/ui/components/ui/dropdown-menu", () => ({
 }));
 
 vi.mock("./issue-picker-modal", () => ({
-  IssuePickerModal: () => null,
+  IssuePickerModal: ({ open, title, onSelect }: { open: boolean; title: string; onSelect: (issue: Issue) => void }) =>
+    open ? <button type="button" onClick={() => onSelect({ id: "prereq-1", identifier: "TES-10", title: "Prerequisite" } as Issue)}>{title}: TES-10</button> : null,
 }));
 
 vi.mock("@multiremi/ui/components/ui/tooltip", () => ({
@@ -414,13 +417,8 @@ describe("CreateIssueModal", () => {
 
     expect(mockSetLastAssignee).toHaveBeenCalledWith(undefined, undefined);
     expect(mockClearDraft).toHaveBeenCalled();
-    expect(onClose).toHaveBeenCalled();
-    expect(mockToastCustom).toHaveBeenCalledTimes(1);
-
-    const renderToast = mockToastCustom.mock.calls[0]?.[0];
-    expect(typeof renderToast).toBe("function");
-
-    render(renderToast("toast-1"));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("region", { name: "Creation receipt" })).toBeInTheDocument();
 
     expect(screen.getByText("Issue created")).toBeInTheDocument();
     expect(screen.getByText(/TES-123/)).toBeInTheDocument();
@@ -429,7 +427,7 @@ describe("CreateIssueModal", () => {
     await user.click(screen.getByRole("button", { name: "View issue" }));
 
     expect(mockPush).toHaveBeenCalledWith("/ws-test/issues/issue-123");
-    expect(mockToastDismiss).toHaveBeenCalledWith("toast-1");
+    expect(onClose).toHaveBeenCalled();
   });
 
   it("keeps manual mode open and clears content when create another is enabled", async () => {
@@ -669,6 +667,29 @@ describe("CreateIssueModal", () => {
     );
   });
 
+  it("submits a selected prerequisite with the new child in one create request", async () => {
+    const user = userEvent.setup();
+    renderModal(
+      <ManualCreatePanel
+        onClose={vi.fn()}
+        data={{ parent_issue_id: "parent-uuid-1", parent_issue_identifier: "TES-1" }}
+        isExpanded={false}
+        setIsExpanded={vi.fn()}
+        backlogHintIssueId={null}
+        setBacklogHintIssueId={vi.fn()}
+      />,
+    );
+    await user.type(screen.getByPlaceholderText("Issue title"), "Waiting child");
+    await user.click(screen.getByRole("button", { name: "Prerequisite" }));
+    await user.click(screen.getByRole("button", { name: "Prerequisite: TES-10" }));
+    expect(screen.getByText("After TES-10")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create Issue" }));
+    await waitFor(() => expect(mockCreateIssue).toHaveBeenCalledWith(expect.objectContaining({
+      parent_issue_id: "parent-uuid-1",
+      blocked_by: ["prereq-1"],
+    })));
+  });
+
   // Start date is a low-frequency field — by default it lives behind the
   // ⋯ overflow menu and is not rendered inline. Clicking the overflow
   // entry opens it (and mounts the inline pill so the popover has an
@@ -715,6 +736,26 @@ describe("CreateIssueModal", () => {
     await user.click(screen.getByRole("button", { name: /Switch to Agent/i }));
 
     expect(mockSetDraft).toHaveBeenCalledWith({ title: "", description: "" });
+  });
+
+  it("creates an explicitly unconfigured execution owner instead of inheriting a legacy human default", async () => {
+    const user = userEvent.setup();
+    renderModal(<CreateIssueModal onClose={vi.fn()} data={{ project_id: "prj_legacy" }} />);
+    await waitFor(() => expect(screen.getByTestId("assignee-picker").dataset.assigneeType).toBe(""));
+    fireEvent.change(screen.getByPlaceholderText("Issue title"), { target: { value: "Configure execution later" } });
+    await user.click(screen.getByRole("button", { name: "Create Issue" }));
+    await waitFor(() => expect(mockCreateIssue).toHaveBeenCalledWith(expect.objectContaining({ assignee_type: null, assignee_id: null })));
+  });
+
+  it("creates a root issue without asking for a designated human", async () => {
+    const user = userEvent.setup();
+    renderModal(<CreateIssueModal onClose={vi.fn()} data={{ responsible_member_id: "member-legacy" }} />);
+    expect(screen.queryByRole("combobox", { name: /human/i })).toBeNull();
+    expect(screen.queryByText(/Designated human|Choose a human/)).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("Issue title"), { target: { value: "No root human" } });
+    await user.click(screen.getByRole("button", { name: "Create Issue" }));
+    await waitFor(() => expect(mockCreateIssue).toHaveBeenCalledTimes(1));
+    expect(mockCreateIssue.mock.calls[0]?.[0]).not.toHaveProperty("responsible_member_id");
   });
 
   it("prefills the assignee from the picked project's bound default", async () => {
@@ -768,9 +809,9 @@ describe("CreateIssueModal", () => {
     });
 
     // A manual pick overrides the auto-fill and sticks.
-    await user.click(screen.getByRole("button", { name: "Pick member assignee" }));
-    expect(screen.getByTestId("assignee-picker").dataset.assigneeType).toBe("member");
-    expect(screen.getByTestId("assignee-picker").dataset.assigneeId).toBe("user-9");
+    await user.click(screen.getByRole("button", { name: "Pick Agent assignee" }));
+    expect(screen.getByTestId("assignee-picker").dataset.assigneeType).toBe("agent");
+    expect(screen.getByTestId("assignee-picker").dataset.assigneeId).toBe("agent-9");
 
     fireEvent.change(screen.getByPlaceholderText("Issue title"), {
       target: { value: "Manually assigned" },
@@ -779,8 +820,8 @@ describe("CreateIssueModal", () => {
     await waitFor(() => {
       expect(mockCreateIssue).toHaveBeenCalledWith(expect.objectContaining({
         project_id: "prj_squad",
-        assignee_type: "member",
-        assignee_id: "user-9",
+        assignee_type: "agent",
+        assignee_id: "agent-9",
       }));
     });
   });

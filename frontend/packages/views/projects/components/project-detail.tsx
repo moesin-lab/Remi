@@ -1,14 +1,15 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
-import { AlertCircle, Archive, Link2, ListTodo, MoreHorizontal, PanelRight, Pin, PinOff, Plus, RotateCcw, UserMinus } from "lucide-react";
+import { AlertCircle, Archive, Link2, ListTodo, MoreHorizontal, PanelRight, Pin, PinOff, Plus, RotateCcw } from "lucide-react";
 import { useQuery, type QueryKey } from "@tanstack/react-query";
 import { cn } from "@multiremi/ui/lib/utils";
 import { copyText } from "@multiremi/ui/lib/clipboard";
 import { toast } from "sonner";
 import type { Issue, IssueAssigneeGroup, UpdateIssueRequest } from "@multiremi/core/types";
-import { useAuthStore } from "@multiremi/core/auth";
 import { projectDetailOptions } from "@multiremi/core/projects/queries";
 import { useArchiveProject, useRestoreProject, useUpdateProject } from "@multiremi/core/projects/mutations";
 import { pinListOptions } from "@multiremi/core/pins";
@@ -24,9 +25,10 @@ import {
 } from "@multiremi/core/issues/queries";
 import { useUpdateIssue } from "@multiremi/core/issues/mutations";
 import { useModalStore } from "@multiremi/core/modals";
-import { memberListOptions } from "@multiremi/core/workspace/queries";
 import { agentTaskSnapshotOptions } from "@multiremi/core/agents";
+import { useAfterFirstScreen } from "@multiremi/core/platform/use-after-first-screen";
 import { useWorkspaceId } from "@multiremi/core/hooks";
+import { useNavigation } from "../../navigation";
 import { useRecentContextStore } from "@multiremi/core/chat";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { useActorName } from "@multiremi/core/workspace/hooks";
@@ -38,12 +40,6 @@ import { getProjectIssueMetrics } from "./project-issue-metrics";
 import { filterRunningAssigneeGroups } from "./project-issue-filters";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { TitleEditor, ContentEditor, ReadonlyContent, type ContentEditorRef } from "../../editor";
-import {
-  PickerEmpty,
-  PickerItem,
-  PickerSection,
-  PropertyPicker,
-} from "../../issues/components/pickers/property-picker";
 import { AssigneePicker } from "../../issues/components/pickers/assignee-picker";
 import { ProjectResourcesSection } from "./project-resources-section";
 import { ProjectRunLocationSection } from "./project-run-location-section";
@@ -81,7 +77,6 @@ import { EmojiPicker } from "@multiremi/ui/components/common/emoji-picker";
 import { BreadcrumbHeader } from "../../layout/breadcrumb-header";
 import { PropRow } from "../../common/prop-row";
 import { useT } from "../../i18n";
-import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
 // ---------------------------------------------------------------------------
 // Project Issues — reuses the existing issues list/board components
@@ -133,15 +128,22 @@ function ProjectIssuesContent({
   const creatorFilters = useViewStore((s) => s.creatorFilters);
   const labelFilters = useViewStore((s) => s.labelFilters);
   const agentRunningFilter = useViewStore((s) => s.agentRunningFilter);
+  const { pathname } = useNavigation();
 
-  const { data: snapshot = [] } = useQuery(agentTaskSnapshotOptions(wsId));
+  // MUL-472 b: page scope — this page's own snapshot waits for this page. It is
+  // also the row set when the running-agent filter is on, so it stays ungated
+  // in that state (see issues-page.tsx).
+  const afterFirstScreen = useAfterFirstScreen({ routeKey: pathname });
+  const snapshotQuery = useQuery(
+    agentTaskSnapshotOptions(wsId, { enabled: afterFirstScreen || agentRunningFilter }),
+  );
   const runningIssueIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const task of snapshot) {
+    for (const task of snapshotQuery.data ?? []) {
       if (task.status === "running" && task.issue_id) ids.add(task.issue_id);
     }
     return ids;
-  }, [snapshot]);
+  }, [snapshotQuery.data]);
 
   const issues = useMemo(
     () => filterIssues(projectIssues, { statusFilters, priorityFilters, assigneeFilters, includeNoAssignee, creatorFilters, projectFilters: [], includeNoProject: false, labelFilters, agentRunningFilter, runningIssueIds }),
@@ -167,7 +169,9 @@ function ProjectIssuesContent({
     [assigneeGroups, agentRunningFilter, runningIssueIds],
   );
 
-  const { data: childProgressMap = new Map() } = useQuery(childIssueProgressOptions(wsId));
+  const { data: childProgressMap = new Map() } = useQuery(
+    childIssueProgressOptions(wsId, { enabled: afterFirstScreen }),
+  );
 
   const visibleStatuses = useMemo(() => {
     if (statusFilters.length > 0)
@@ -203,7 +207,7 @@ function ProjectIssuesContent({
   // an unresolved (or failed) fetch is indistinguishable from an empty
   // project, and a project with hundreds of issues opens on a confident
   // "No issues linked — create one" CTA.
-  if (isPending) {
+  if (isPending || (agentRunningFilter && snapshotQuery.isPending)) {
     return (
       <div className="flex flex-1 min-h-0 flex-col gap-2 p-4">
         {Array.from({ length: 6 }).map((_, index) => (
@@ -334,8 +338,13 @@ function ProjectIssuesSurface({
   const includeNoAssignee = useViewStore((s) => s.includeNoAssignee);
   const creatorFilters = useViewStore((s) => s.creatorFilters);
   const labelFilters = useViewStore((s) => s.labelFilters);
+  const showSubIssues = useViewStore((s) => s.showSubIssues);
   const usesAssigneeBoard = viewMode === "board" && grouping === "assignee";
   const usesGantt = viewMode === "gantt";
+  const visibleFilter = useMemo<MyIssuesFilter>(
+    () => ({ ...filter, top_level_only: !showSubIssues }),
+    [filter, showSubIssues],
+  );
 
   const sort = useMemo(
     () => ({
@@ -347,7 +356,7 @@ function ProjectIssuesSurface({
 
   const assigneeGroupFilter = useMemo<AssigneeGroupedIssuesFilter>(
     () => ({
-      ...filter,
+      ...visibleFilter,
       statuses: statusFilters.length > 0 ? statusFilters : [...BOARD_STATUSES],
       priorities: priorityFilters,
       assignee_filters: assigneeFilters,
@@ -355,7 +364,7 @@ function ProjectIssuesSurface({
       creator_filters: creatorFilters,
       label_ids: labelFilters,
     }),
-    [assigneeFilters, creatorFilters, filter, includeNoAssignee, labelFilters, priorityFilters, statusFilters],
+    [assigneeFilters, creatorFilters, visibleFilter, includeNoAssignee, labelFilters, priorityFilters, statusFilters],
   );
   const assigneeGroupsOptions = myIssueAssigneeGroupsOptions(
     wsId,
@@ -370,7 +379,7 @@ function ProjectIssuesSurface({
   // the current view so switching to Gantt doesn't re-trigger the full
   // per-status fetch in the background.
   const statusIssuesQuery = useQuery({
-    ...myIssueListOptions(wsId, scope, filter, undefined, sort),
+    ...myIssueListOptions(wsId, scope, visibleFilter, undefined, sort),
     enabled: !usesAssigneeBoard && !usesGantt,
   });
   const assigneeGroupsQuery = useQuery({
@@ -414,7 +423,7 @@ function ProjectIssuesSurface({
         assigneeGroupQueryKey={usesAssigneeBoard ? assigneeGroupsOptions.queryKey : undefined}
         assigneeGroupFilter={usesAssigneeBoard ? assigneeGroupFilter : undefined}
         scope={scope}
-        filter={filter}
+        filter={visibleFilter}
         sort={sort}
         ganttIssues={ganttIssues}
         isPending={activeQuery.isLoading}
@@ -443,7 +452,9 @@ export function ProjectDetail({
   const { t } = useT("projects");
   const wsId = useWorkspaceId();
   const wsPaths = useWorkspacePaths();
-  const userId = useAuthStore((s) => s.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
+  const { pathname } = useNavigation();
+  const afterFirstScreen = useAfterFirstScreen({ routeKey: pathname });
   const { data: project, isLoading } = useQuery(projectDetailOptions(wsId, projectId));
   const recordRecentContext = useRecentContextStore((s) => s.recordVisit);
   useEffect(() => {
@@ -462,14 +473,13 @@ export function ProjectDetail({
     () => ({ project_id: projectId }),
     [projectId],
   );
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { getActorName } = useActorName();
   const updateProject = useUpdateProject();
   const archiveProject = useArchiveProject();
   const restoreProject = useRestoreProject();
   const { data: pinnedItems = [] } = useQuery({
-    ...pinListOptions(wsId, userId ?? ""),
-    enabled: !!userId,
+    ...pinListOptions(wsId, userId ?? "", { enabled: afterFirstScreen }),
+    enabled: !!userId && afterFirstScreen,
   });
   const isPinned = pinnedItems.some((p) => p.item_type === "project" && p.item_id === projectId);
   const createPin = useCreatePin();
@@ -499,10 +509,6 @@ export function ProjectDetail({
   }, [isMobile]);
 
   // Lead popover
-  const [leadOpen, setLeadOpen] = useState(false);
-  const [leadFilter, setLeadFilter] = useState("");
-  const leadQuery = leadFilter.toLowerCase();
-  const filteredMembers = members.filter((m) => m.name.toLowerCase().includes(leadQuery) || matchesPinyin(m.name, leadQuery));
 
   const handleUpdateField = useCallback(
     (data: Parameters<typeof updateProject.mutate>[0] extends { id: string } & infer R ? R : never) => {
@@ -521,12 +527,11 @@ export function ProjectDetail({
   }, [archiveProject, project, t]);
 
   const handleSaveInstructions = useCallback(
-    async (instructions: string, deltaInstructions: string, expectedRevision: number) => {
+    async (instructions: string, expectedRevision: number) => {
       if (!project) return;
       await updateProject.mutateAsync({
         id: project.id,
         instructions,
-        delta_instructions: deltaInstructions,
         expected_instructions_revision: expectedRevision,
       });
     },
@@ -609,68 +614,8 @@ export function ProjectDetail({
       </div>
 
       <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
-        <PropRow label={t(($) => $.table.lead)}>
-          {isArchived ? (
-            <span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-              {project.lead_type && project.lead_id ? (
-                <>
-                  <ActorAvatar actorType={project.lead_type} actorId={project.lead_id} size={16} enableHoverCard />
-                  <span className="truncate">{getActorName(project.lead_type, project.lead_id)}</span>
-                </>
-              ) : t(($) => $.lead.no_lead)}
-            </span>
-          ) : <PropertyPicker
-              open={leadOpen}
-              onOpenChange={setLeadOpen}
-              width="w-52"
-              align="start"
-              searchable
-              searchPlaceholder={t(($) => $.lead.assign_placeholder)}
-              onSearchChange={setLeadFilter}
-              triggerRender={
-                <button type="button" className="inline-flex items-center gap-1.5 text-xs hover:text-foreground transition-colors" />
-              }
-              trigger={
-                project.lead_type && project.lead_id ? (
-                  <>
-                    <ActorAvatar actorType={project.lead_type} actorId={project.lead_id} size={16} enableHoverCard showStatusDot />
-                    <span className="cursor-pointer">{getActorName(project.lead_type, project.lead_id)}</span>
-                  </>
-                ) : (
-                  <span className="text-muted-foreground">{t(($) => $.lead.no_lead)}</span>
-                )
-              }
-            >
-              <PickerItem
-                selected={!project.lead_type || !project.lead_id}
-                onClick={() => { handleUpdateField({ lead_type: null, lead_id: null }); setLeadOpen(false); }}
-              >
-                <UserMinus className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="text-muted-foreground">{t(($) => $.lead.no_lead)}</span>
-              </PickerItem>
-              {filteredMembers.length > 0 && (
-                <PickerSection label={t(($) => $.lead.members_group)}>
-                  {filteredMembers.map((m) => (
-                    <PickerItem
-                      key={m.user_id}
-                      selected={project.lead_type === "member" && project.lead_id === m.user_id}
-                      onClick={() => { handleUpdateField({ lead_type: "member", lead_id: m.user_id }); setLeadOpen(false); }}
-                    >
-                      <ActorAvatar actorType="member" actorId={m.user_id} size={16} />
-                      <span className="truncate">{m.name}</span>
-                    </PickerItem>
-                  ))}
-                </PickerSection>
-              )}
-              {filteredMembers.length === 0 && leadFilter && (
-                <PickerEmpty />
-              )}
-          </PropertyPicker>}
-        </PropRow>
-
-        {/* Default assignee — prefilled on issues created under this project.
-            Reuses the issue AssigneePicker so squads/agents/members show the
-            same way they do on an issue. */}
+        {/* Default Agent/Squad execution assignment; historical member values
+            stay visible until explicitly cleared or replaced. */}
         <PropRow label={t(($) => $.default_assignee.label)}>
           {isArchived ? (
             <span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
@@ -678,6 +623,9 @@ export function ProjectDetail({
                 <>
                   <ActorAvatar actorType={project.default_assignee_type} actorId={project.default_assignee_id} size={16} enableHoverCard />
                   <span className="truncate">{getActorName(project.default_assignee_type, project.default_assignee_id)}</span>
+                  {project.default_assignee_type === "member" && (
+                    <span className="text-destructive">{t(($) => $.default_assignee.legacy_member)}</span>
+                  )}
                 </>
               ) : t(($) => $.default_assignee.none)}
             </span>
@@ -700,6 +648,9 @@ export function ProjectDetail({
                   <>
                     <ActorAvatar actorType={project.default_assignee_type} actorId={project.default_assignee_id} size={16} enableHoverCard showStatusDot />
                     <span className="cursor-pointer">{getActorName(project.default_assignee_type, project.default_assignee_id)}</span>
+                    {project.default_assignee_type === "member" && (
+                      <span className="text-destructive">{t(($) => $.default_assignee.legacy_member)}</span>
+                    )}
                   </>
                 ) : (
                   <span className="text-muted-foreground">{t(($) => $.default_assignee.none)}</span>
@@ -760,7 +711,6 @@ export function ProjectDetail({
 
       <ProjectInstructionsSection
         instructions={project.instructions}
-        deltaInstructions={project.delta_instructions}
         revision={project.instructions_revision}
         updatedAt={project.instructions_updated_at}
         updatedByName={

@@ -6,17 +6,37 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 
 # 性能热路径与基线采集
 
-本页是 2026-09-05 对当前工作树的静态核查，不是历史架构决议。**本轮基线未测**：本次文档核对没有采集延迟、吞吐、CPU、内存或浏览器性能数据。下文区分已经存在的优化与待测成本；已有报告必须结合其生成时间、提交和环境判断，不能作为当前版本的实测结果。
+本页记录性能相关实现、需要保留的语义和基线采集入口。实现说明不代表当前版本的延迟、吞吐、CPU、内存或浏览器性能实测结果。下文区分已经存在的优化与待测成本；已有报告必须结合其生成时间、提交和环境判断，不能作为当前版本的实测结果。
 
 ## 三条优先关注的热路径
 
 ### 1. 任务列表：页面请求展开 → 列表与计数 → PostgreSQL 同步桥
 
-- **实现事实：** [issues/queries.ts](../../frontend/packages/core/issues/queries.ts) 的 `fetchFirstPages` 对 `PAGINATED_STATUSES` 逐状态并行请求，每页 50 条；当前 [BOARD_STATUSES](../../frontend/packages/core/issues/config/status.ts) 有 6 个状态。
-- **实现事实：** `fetchAllMyFirstPages` 合并 assignee、creator、involves 三种人员关系并按 issue ID 去重。因此“我的全部任务”的状态列表首次执行会展开为 **6 × 3 = 18 个列表请求**。这是代码推导，不是页面总请求实测；缓存命中、重试和其他查询会改变网络记录。[MyIssuesPage](../../frontend/packages/views/my-issues/components/my-issues-page.tsx) 的负责人看板使用另一条 grouped 查询分支，不能套用 18。
+- **实现事实：** [issues/queries.ts](../../frontend/packages/core/issues/queries.ts) 的 `fetchFirstPages` 用一次 `GET /api/issues/status-pages` 请求当前 [BOARD_STATUSES](../../frontend/packages/core/issues/config/status.ts) 的 6 个状态，每状态各 50 条、各自 total。各桶来自同一服务端读快照，第二页及以后仍用单状态列表和已加载条数作为 offset。[Store](../../packages/server/src/store/repos/issues-repo.ts) 在 SQLite 下显式使用 deferred 读事务，使其他连接可在 WAL 模式下提交写入；[事务包装](../../packages/server/src/store/request-read-cache.ts)仍为写路径默认使用 immediate，并为读事务保留缓存、提交后回调和回滚处理。PostgreSQL 使用 repeatable-read read-only 事务。列表 query key 与 `{ byStatus }` 缓存形状不变，失效后也使用分组首页。
+- **实现事实：** `fetchAllMyFirstPages` 作为兼容查询工具保留 assignee、creator、involves 三种历史关系的合并与 issue ID 去重，一次调用发出 3 个分组请求。[MyIssuesPage](../../frontend/packages/views/my-issues/components/my-issues-page.tsx) 已跳转到工作区事项页，当前首屏不再执行个人关系页签；这些工具测试用于保持旧调用兼容，不代表当前页面请求数。
+- **实现事实：** 工作区列表显式请求 `include_archived_total=true`，用响应的 `archived_total` 更新原有归档计数缓存；计数订阅本身不发 HTTP。工作区负责人看板在其活跃的 `/api/issues/grouped` 响应中携带同一可选字段，避免订阅隐藏的状态列表。计数是整个工作区的归档总数，不受列表筛选影响；不传参数时服务端不额外 COUNT。API 返回 404 时，一个 API client 会记住不支持 status-pages，使用旧的逐状态请求；新会话重新探测。
 - **实现事实：** [issues router](../../packages/server/src/api/routers/issues.ts) 的列表响应调用 `listIssues` 和 `countIssues`。[PgBridge.request](../../packages/server/src/store/db/postgres.ts) 使用 `Atomics.wait` 等待 worker，worker 以 [Bun.SQL 的 `max: 1`](../../packages/server/src/store/db/pg-worker.ts) 保证事务语句共用连接。该限制是每个桥实例的连接数，不是整个部署只能有一个连接。
+- **同步回包边界：** 唤醒通知不等于当前查询已完成。桥必须循环检查共享状态离开 `pending` 后才解码回包，避免早到或上一轮延迟的通知让新查询读取旧结果；多次唤醒共用原来的 60 秒截止时间。真实 PostgreSQL 的[回归测试](../../tests/unit/multiremi/multiremi-postgres-store.test.ts)让新查询保持等待并注入提前唤醒，验证返回的是新查询结果，同时覆盖跨连接领取和 Chat 队列顺序。
+- **关闭边界：** PG 同步桥关闭后立即拒绝查询，不再向已终止的 worker 发请求。异步调用仍由调用方 await；测试超时不会取消原 Promise，夹具必须在关闭数据库前等待其结束。[MUL-204 诊断](../../reports/performance/MUL-204/decisions-postgres.md)记录历史决策夹具的平方级查询、真实 PG 前后耗时和强制超时后的清理验证。
 - **风险推断：** 并行 HTTP 请求无法自动消除主线程同步数据库等待；额外 SQL 往返和较大的响应序列化可能放大排队，影响同进程其他请求。吞吐拐点与 PostgreSQL 网络延迟的影响尚未测量。
 - **采集重点：** 冷/热页面请求数量、单请求 SQL 数与响应 bytes、列表可操作时间，以及 API 并发升高时的 p50/p95、错误率和事件循环延迟。
+
+### Issue 待人工 decision 计数
+
+`countPendingIssueDecisions` 不再为每条候选调用 `Questions.get()`。空候选为一次读；
+非空原生 Question 使用四次读（候选、会话归属、迁移审计、来源 attempt/head/issue），
+不写库；候选只投影 metadata 和来源身份，不读取正文或卡片字段。
+历史 decision 额外用一次递归查询读取责任链与负责人事实，复用同一个 resolver；
+总共五次读，不随 decision 数量、asker、会话数或祖先层数增长。批量参数使用 JSON rowset，
+不按 ID 数量拆 SQL，也不依赖 SQLite bind 上限。
+
+计数复用原生记录的 read-time upgrade、来源 integrity 与会话迁移审计，保留无效来源、
+跨工作区、退休会话、非 human stage、普通 choice 和已结束记录的排除规则；只省去
+计数不需要的 wait/answer/action 视图展开。
+[查询预算与等价测试](../../tests/unit/multiremi/pending-issue-decisions-budget.test.ts)
+覆盖 2/1202 条原生 Question（四读、零写）、2/102 条混合历史记录（五读、零写），
+并以原逐条 `Questions.get()` 谓词核对结果。测试在 SQLite 和配置了真实服务的 PostgreSQL
+两种后端运行；缺少 PG 时的 skip 不构成 PG 验证。
 
 ### 2. 搜索：候选 issue → 逐 issue 搜评论 → 过滤与分页
 
@@ -24,20 +44,146 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **风险推断：** 工作量随候选 issue 数和评论体积增长，返回 20 条并不意味着只读取 20 条。当前步骤还会处理最终不属于目标 workspace 的候选；不能只看返回条数评估 SQL 与内存成本。
 - **采集重点：** 用无命中词、标题命中词、评论命中词分别测量；固定目标 workspace，再增加其他 workspace 的数据，记录 SQL 次数、结果 bytes、p50/p95。真实用户可见结果与权限语义需保持不变。
 
-### 3. 实时任务：消息缓存 → transcript 派生 → 渲染与重连刷新
+### 3. 实时任务：SessionLog 与 trace → 展示与重连
 
-- **实现事实：** [createTaskHandlers](../../frontend/packages/core/realtime/sync/tasks.ts) 已按 task 缓冲 `task:message`，约每 80 ms 合并一次；卸载时 flush。消息通过 [appendTaskMessagesToHydratedCache](../../frontend/packages/core/chat/queries.ts) 更新已加载缓存，保留排序和去重，不能宣称“每帧都触发整页 refetch”。
-- **实现事实：** [createIssueHandlers](../../frontend/packages/core/realtime/sync/issues.ts) 已做 issue 精确缓存更新；[createPrefixRefresh](../../frontend/packages/core/realtime/sync/prefix-refresh.ts) 排除有专门处理器的事件并对其他刷新去抖；[useRealtimeSync](../../frontend/packages/core/realtime/use-realtime-sync.ts) 在重连时失效相关查询以补漏。
-- **实现事实：** [TasksRepo.listTaskMessages](../../packages/server/src/store/repos/tasks-repo.ts) 支持 `sinceSeq` 增量读取，但没有 page size；初次读取可返回该 task 全部消息。[buildTimeline / buildEntries / nestEntries](../../frontend/packages/views/common/task-transcript/build-timeline.ts) 派生展示数据；[AgentTranscriptDialog](../../frontend/packages/views/common/task-transcript/agent-transcript-dialog.tsx) 用 `entries.map` 渲染事件列表，该弹窗目前没有列表虚拟化。
-- **实现事实：** [TasksRepo.appendTaskMessages](../../packages/server/src/store/repos/tasks-repo.ts) 对同一 `(task_id, seq)` 的相同内容重试跳过更新和通知，内容变化仍覆盖原行；[notifyBrowserTaskMessages](../../packages/server/src/api/realtime.ts) 在每批消息内复用可见性判断，不跨批缓存权限。daemon outbox 在超时后仍会重试，因此这里的幂等处理和私有任务权限过滤都需要保持。
-- **风险推断：** 长 transcript 的载荷、全数组派生与 DOM 成本可能随消息数增长；80 ms 合并已减少频率，但不能证明每次处理足够快。重连时的刷新展开可能与消息追赶叠加。其他视图是否虚拟化需逐处确认。
-- **采集重点：** 固定消息数、平均文本长度、工具/子 agent 比例和每秒事件数；记录首次打开、排序/过滤、滚动、实时追加和断线重连期间的请求数、长任务、React commit 时长与内存。
+- **实现事实：** Chat/Issue 正文由 [SessionReplica](../../frontend/packages/core/replica/browser.ts) 的 `log:` 流同步；运行中的工具摘要由 [use-task-trace.ts](../../frontend/packages/views/common/task-transcript/use-task-trace.ts) 分页读取 trace，并按 seq 合并实时帧。任务结束后不再占用 trace socket。
+- **实现事实：** [createIssueHandlers](../../frontend/packages/core/realtime/sync/issues.ts) 做 issue 精确缓存更新；[createPrefixRefresh](../../frontend/packages/core/realtime/sync/prefix-refresh.ts) 排除已有专门处理器的事件。[TaskTraceDialog](../../frontend/packages/views/common/task-transcript/task-trace-dialog.tsx) 只在打开时读取完整 trace。
+- **风险推断：** 长 trace 的分页、全数组派生与 DOM 成本仍可能随事件数增长；断线补读可能与当前帧追赶叠加。需要用请求数、长任务和 React commit 测量实际成本。
+- **采集重点：** 固定事件数、平均文本长度、工具/子 agent 比例和每秒事件数；记录首次打开、滚动、实时追加与断线重连期间的请求数、长任务、React commit 时长与内存。
+
+## Runtime 目录列表
+
+目录列表按目标 workspace 一次读取 Runtime 身份、可见性、心跳和能力 metadata，
+复用本次响应的权限事实；不为每个目录水合全平台 Runtime 的历史 usage、模型或执行组。
+详情与创建/改名/归档响应同样使用轻量读取。状态仍从当前心跳推导，归档优先于在线；
+没有跨请求缓存。[查询预算与状态回归](../../tests/unit/multiremi/runtime-workspaces-cost.test.ts)
+覆盖同 daemon ID 的跨 workspace 隔离与心跳过期，
+[本地前后测量](../../reports/performance/MUL-279-runtime-workspaces.md)明确区分 SQLite 样本和未测的 stable PG。
+
+## Agent 与 Skill 文件读取边界
+
+普通 `getAgent`、Agent 列表、`getSkill` 和 `listAgentSkills` 不读取关联的
+`multiremi_skill_files`；列表在有界批次中读取关联 Skill 信息。`includeArchived`
+不隐式启用文件。需要完整 bundle 的 Store 调用方必须传 `{ includeFiles: true }`。
+任务执行上下文（`getTaskWithAgent`，用于 claim/offer/workspace）、Skill 详情和 Skill
+创建/更新响应显式保留文件及二进制编码；权限检查不加载关联文件。历史 inline Skills
+仍来自 Agent 行，保留原合并优先级。本次没有增加缓存或改变轮询频率。
+
+[大文件复现与验证](../../reports/performance/MUL-85-skill-files.md)记录操作者 PostgreSQL
+采样与本地 1,277 文件夹具；本地 SQLite 耗时不能代表生产 PG 同步桥或部署后的性能。
+
+## 终态完成的原子校验
+
+turn.complete 的 turn/attempt、输入范围与宿主校验在完成事务内执行，复用该事务取得的
+workspace 互斥，不再先提交一次独立预检。完成重放仍返回已提交的 reply；失败分类、
+unread-input 拒绝以及自动回复失败后的事务回滚重试保持原入口。任务初始定位读取身份列，
+完整终态与用量投影仍由规范任务变更器读取和生成。
+
+## 活跃轮次下行快照
+
+`DaemonTurnBridge.snapshot` 在同一 workspace 生命周期锁下，按确定顺序批量取得 lane
+互斥，再批量读取当前 attempt、宿主、输入回执、会话 head 与日志窗口。输入回执的首次
+初始化和 projection 水位各用一条集合写入；跨宿主、旧 attempt 和终态 turn 仍不产生输入。
+按 lane 投影时复用已锁定的 read 水位，不逐 task 再读 attempt。查询往返数不随同宿主活跃
+轮次数增长；返回行数和序列化成本仍随实际输入量增长。
+共享规模夹具另有 12 个并发活跃 attempt、8 个未答 AUQ/权限请求、20 条待发送飞书记录和
+12 个 runtime；具体测量与未验证项见 MUL-199 的 performance 报告。
+
+## Daemon 保活与事件唤醒边界
+
+保活写入与业务变化通知分开：机器人相同状态报告仍更新 `reported_at`，SSH 相同状态心跳
+仍刷新在线时间，但不会因此重建全工作区下行或空派活。SSH 端点/密钥轮换改变配置 revision
+时继续下发整个 mesh。已知 Runtime 的 pending、模型和插件变化定向唤醒；任务输入仍保留
+任务宿主与 bot 可能不在同机的接收范围。事件入口见
+[workspace-wakeups.ts](../../packages/server/src/api/daemon-protocol/workspace-wakeups.ts)，
+协议边界见 [daemon 协议](../daemon-protocol-v2.md)。
+
+插件心跳只协调当前 Runtime 的 desired 状态；绑定、版本和任务快照等业务变更仍协调工作区。
+心跳仍读取工作区插件绑定和活跃任务的版本需求，不能认为所有工作区读取已消除。
+Daemon 报告的 Runtime 身份校验使用 `getRuntimeLite`，不附带历史用量、模型和执行组。
+`task:usage` 继续向浏览器更新统计，但不唤醒 daemon 下行；账本仅按本帧 unit_id 批量预取修订事实、回执与冲突水位，不读取整个 run 的历史单位；无累计 meter/增量金额 coverage 的多单位快照将事实和接受回执各用一条 JSON 展开 INSERT 写入，避免 10,000 unit 帧触及 bind 上限；单单位增量各用一次参数化 VALUES 写入。provider request 所有权仍逐项校验；累计 meter 与增量 coverage 保持原序列化路径。
+`task.activity` 的子代理计数只在变化时写库，`task:subagents` 同样只推浏览器、不唤醒 daemon 下行。
+PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快照（`lane.background_tasks`）内容不变时只更新 revision、不推事件；
+`chat:background_tasks` 只推 Chat 创建者、不唤醒 daemon 下行或 offer，引起它的快照或停止请求只重算相关 runtime 的下行。
+登记表的下行推导每次运行一条按 `(runtime_id, status)` 走索引的查询，只对驻留会话线逐条再查 Chat、Agent 与最新尝试。
+
+责任 resolver 只读取路由事实列，不水合 Issue 标签或 Agent Skills。活 AUQ 答复复用
+事务锁保护的 Q 投影，卡片更新意图由答案事务写入一次；原回复路径已派生来源 Issue
+时不重复派生。下行只为声明插件协议的宿主读取插件 desired 状态。
+
+派活锁前使用 `getRuntimeLite`，锁后使用 `getRuntimeForDispatch` 保留模型、执行组和协议读取，
+不计算历史用量。CLI 排空、重试时点、任务下发的宿主所有者信息与飞书卡片能力判断也不附带统计；用户侧统计继续使用
+规范化台账的原查询。空派活仍有锁、资格和恢复检查，不能把“没有聚合”理解为“没有 SQL”。
+
+WebSocket 心跳处理共用一次同步范围的读取缓存，返回时关闭并清空缓存；同步 workspace 事件
+创建的 Promise/定时器即使继承 AsyncLocalStorage，也不能复用已关闭缓存，后台 pump 可建立新范围。
+Session hooks 在缓存范围外运行。drain 围栏并入 Runtime 行读取；
+写 drain 表时同时失效 Runtime 缓存，事务和锁仍强制重读。心跳复用本次读取的 maintenance，
+普通 liveness 写入后把新行写回缓存；drain 唤醒定时仅查询 deadline，不水合任务/ack 汇总。
+[心跳预算回归](../../tests/integration/daemon-protocol-v2/heartbeat-plugin-cost.test.ts)保持旧宿主单心跳
+7 次 SELECT / 2 次 UPDATE、mesh 全链路 SELECT ≤30 的预算；这不代表生产 DB 负载已验证下降。
+
+成本检查要计入排队的下行和派活及 `WITH` 查询，不能在同步 heartbeat handler 返回时停止。
+[多 Runtime 回归](../../tests/unit/multiremi/daemon-heartbeat-fanout-cost.test.ts)用 8 个 Runtime、
+初始 0 个任务覆盖相同报告、真实变化、目标范围与活动记录；新增任务用例验证入队立即推送，
+容量释放后在冷却到期前重试且只检查同一 daemon。默认 SQLite，显式
+`MULTIREMI_TEST_POSTGRES_URL` 则创建并清理独立 PostgreSQL 测试库，连接失败不回落。
+这是 SQL 成本与行为检查，不提供生产延迟、吞吐或恢复时间结论。
+
+## 认领候选与 offer 唤醒边界
+
+正常认领与陈旧 dispatch 恢复从 attempts/turns 基表选一次 ID，PG 锁候选时使用
+`SKIP LOCKED`；工作区生命周期锁继续保护并发上限与配置。随后按 ID 进入规范化变更器。
+活跃 attempt ID 集合物化一次供容量/lane/共享目录探针复用，保留当前 turn 的
+awaiting_human 状态覆盖及 unknown offer 保留的共享目录租约。索引、完整谓词对照、查询数范围及隔离 PG 计划见
+[MUL-163 报告](../../reports/performance/MUL-163-claim.md)。生产 offer 默认保留 60 s 兜底扫描，泵忙、等待或冷却时跳过；
+普通 ack/drain 只恢复背压等待；入队、终态、容量/配置变化及已有期限仍立即触发。
+扫描恢复派发时记 warn 和 `offer_sweep_recovered`，用于定位遗漏事件；测试环境默认禁用扫描。
+线上延迟与一小时稳定性仍需部署后测量。
+
+## Daemon 报告和消息接口的历史放大
+
+Daemon turn 输入范围和终态 input-read 校验均直接批量读取消息所需列；Chat retry ancestry 在 attempts 基表中一次回溯，
+历史消息的来源任务只批量读取 queue status。批量 task 水合对整个批次求 usage，
+workspace offer 扇出批量读取 Runtime 和 drain 围栏。会话 messages 的分页和 from/to 范围
+复用当前页的 related-message/source-subject 预取及原权限判定。
+原生 Question 通知先在分页 SQL 中排除失效路由；响应页中的通知复用批量权限事实检查，
+仍在 JavaScript 中执行与单条读取相同的严格 metadata 校验。普通回复间接继承的来源过滤
+仍可能扫描多个候选页，不能把直接 Question 通知的大/小夹具当作所有隐藏来源路径的常数证明。
+飞书入站 POST 的 Runtime 身份读取不水合历史 usage；已有会话的追加路径有单独预算。
+
+workspace 报告只唤醒所属 daemon（含别名对应的 provider）的派活条件；start 派生的 Issue 状态事件定向刷新启动 Runtime，浏览器仍接收状态变化。
+下行批量读取 attempt 身份，终态继续发送取消与保留 ACK/discard 清理，但不再投影轮输入。飞书结果只刷新已验证 bot host 的 pending 队列。
+消息和终态事件刷新活跃任务、bot、后台 lane 与 drain host 的输入，配置和维护事件保留完整扇出。
+同步读取范围退出即关闭，后台异步工作重新读取。
+[预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
+终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
+[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与固定预算；七类帧在真实 PG 与 SQLite 的 small/stable 计数一致，Release 证据见下文。更多现场数据分布与 stable 一小时验收仍待验证。
+
+终态事务复用 workspace/lane 首锁，savepoint/嵌套事务回滚恢复入口锁集合；
+终态轮卡通知在事务内累积，最终一次投影并按原次数累计 revision/log_version。
+Session/owner scope、Issue/标签、Agent/Skills 与 usage 的显式原始读缓存登记所有依赖表，
+任一依赖写入、事务首锁或回滚后重读；跨异步范围不复用。
+下行快照只查询既有 UNION 探测命中的队列，platform maintenance 单例存在时无需重复插入。
+[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录共享 stable 规模夹具的 SQLite/PG complete 227（175 读/52 写）、fail 141（116 读/25 写），两档相同；
+派活工作区唤醒只检查 queued/dispatched 的 runtime（未分配任务保留全宿主 admission）；
+Skill 文件按关联 Skill 批量读取；Chat queue 的浏览器失效通知不唤醒 daemon，释放消息仍走正常任务通知。
+这仍未达到 60/40；真实 PG 与 SQLite 查询数一致，完整 [Release build check 44194827781](https://github.com/moesin-lab/Remi/actions/runs/44194827781) 全绿（含真实 PG 后端分片）。该运行验证的是合并 main 前的 head；后续改动需重新验证。
+
+## Issue 详情首屏的工作区读取
+
+Issue 详情首屏的三个只读 GET 路由（详情、Sessions、timeline）启用请求级读取缓存。
+Issue 查询同时读取所属工作区是否存在，鉴权复用这项事实，不增加独立工作区查询。
+存在性缓存使用工作区表的失效规则：工作区写入、事务边界与锁后的读取不复用旧事实；
+其他 Issue 路由和后台异步工作不因此启用缓存。查询次数、响应和跨工作区/任务凭据边界见
+[首屏回归](../../tests/unit/multiremi/issue-detail-first-screen-query-count.test.ts)。
 
 ## 收件箱已具备的加载边界
 
-- [InboxPage](../../frontend/packages/views/inbox/components/inbox-page.tsx) 通过 [inboxPageOptions](../../frontend/packages/core/inbox/queries.ts) 每页读取 50 条；[listInboxItemsPage](../../packages/server/src/store/repos/issues-repo.ts) 按 `created_at DESC, id DESC` 使用游标，SQL 读取 `limit + 1` 判断后续页，服务端上限 100。`hydrateInboxRows` 已按最多 400 个 issue ID 批量补全关联对象，不能再将收件箱描述为逐行 `getIssue`。
-- 侧栏和页内计数复用 `/api/inbox/summary`，摘要不返回正文、不补全 Issue，仅成功自动运行保留分组所需的 `details`。但服务端仍读取该成员所有未归档精简行，在 JavaScript 中去重和计数；分页并未把这部分成本变成常数。旧 `/api/inbox` 全量接口仍存在，页面已使用分页入口。
-- 测量时分别记录首屏、摘要、追加页、定位较后页通知，以及 mutation/WS 失效后的刷新。来源筛选和展示折叠仅处理已加载项；URL 定位可能连续读取多页，不能把 50 条默认页大小当作每次页面交互的总工作量。当前没有这些场景的延迟或内存基线。
+- [InboxPage](../../frontend/packages/views/inbox/components/inbox-page.tsx)通过统一 `/api/inbox` 读取消息页、`unread_count`、`attention_count` 和 `next_cursor`；HTTP 每页默认 100、最多 500 条。计数覆盖当前读者游标之后的所有可见消息，正文只读取当前页。旧通知 selection/timezone 折叠不参与这两个计数。
+- [listReaderMessageInbox](../../packages/server/src/store/inbox/operations.ts)在 SQL 中应用工作区、会话、私有来源及 Question 通知权限，再聚合计数和按 `created_at DESC, id DESC` 分页。关联权限查询仅从当前读者、工作区及游标之后的未读消息开始；递归仍读取这些消息实际引用的来源。定点通知的授权不会扩大其原私聊或执行轨迹的读取权；关联答复与编辑记录继承同一限制，不能在分页之后才去掉隐藏消息。
+- [Question 通知过滤](../../packages/server/src/store/inbox/question-notification-visibility.ts)用 `CASE` 仅为处理/呈现通知执行关联原 Q 的查询。普通消息跳过该分支，保留 PostgreSQL 对原题、当前路由和实际通知执行范围的校验。功能、查询数及过桥字节边界由 [首屏回归](../../tests/unit/multiremi/first-screen-hotspots-inbox-attachments.test.ts)和 [通知权限回归](../../tests/unit/multiremi/question-notification-access.test.ts)检查；单次诊断耗时不作为生产延迟基线。
+- 测量时分别记录首屏、追加页、较后页原问题定位、已读写入及 mutation/WS 失效后的刷新；默认页大小不代表一次页面交互的总读取量。
 
 ## 请求级观测：Server-Timing 与两类日志（MUL-367）
 
@@ -61,7 +207,7 @@ Server-Timing: total;dur=12.3, db;dur=4.5, dbp;dur=0.2, dbq;desc="7", dbb;desc="
 **慢请求日志**（阈值 `MULTIREMI_SLOW_REQUEST_MS`，默认 500 ms），每行一个 JSON 对象写到 **stdout**：
 
 ```json
-{"event":"api_slow_request","ts":"2026-09-24T11:14:49.392Z","method":"GET","route":"/health","status":200,"total_ms":1.3,"db_ms":0,"db_parse_ms":0,"db_queries":0,"db_bytes":0}
+{"event":"api_slow_request","ts":"2026-09-24T11:14:49.392Z","role":"all","method":"GET","route":"/health","status":200,"total_ms":1.3,"db_ms":0,"db_parse_ms":0,"db_queries":0,"db_bytes":0}
 ```
 
 不含 query、header、body、原始 path、user 或 token。这里用 `console.log(JSON.stringify(...))` 而不是 `createLogger`：后者的 INFO 才走 stdout（WARN/ERROR 走 stderr）、带人读前缀使一行不是一个 JSON 对象，且在 `initLogPersistence()` 之后每条都会 `appendFileSync`，等于在请求路径上做同步磁盘 IO。
@@ -69,24 +215,65 @@ Server-Timing: total;dur=12.3, db;dur=4.5, dbp;dur=0.2, dbq;desc="7", dbb;desc="
 **每分钟汇总**（`api_minute_summary`，同样只写 stdout、不写 DB、不做同步 IO）：
 
 ```json
-{"event":"api_minute_summary","ts":"2026-09-24T11:14:54.369Z","window_ms":5001,"requests":3,"status_5xx":0,"slow":3,"dropped":0,"db_busy_pct":0,"db_queries":0,"event_loop_lag_max_ms":2.7,"routes":[{"method":"GET","route":"/health","count":1,"p50_ms":1.3,"p95_ms":1.3,"sum_ms":1.3}]}
+{"event":"api_minute_summary","ts":"2026-09-24T11:14:54.369Z","window_ms":5001,"requests":3,"status_5xx":0,"slow":3,"dropped":0,"db_busy_pct":0,"db_queries":0,"event_loop_lag_max_ms":2.7,"role":"all","routes":[{"method":"GET","route":"/health","count":1,"p50_ms":1.3,"p95_ms":1.3,"sum_ms":1.3}]}
 ```
 
 - 数据源是固定容量的内存环形缓冲区（typed array，route 字符串 intern 成整数 id）。写满后覆盖最旧样本并把次数记进 `dropped`，缓冲区不随流量增长。
 - `routes` 按 `sum_ms` 取前 N（默认 10）。分位数用最近秩法，与 [bench-task-list-pagination.ts](../../tests/manual/bench-task-list-pagination.ts) 和 API baseline 脚本一致，因此这些数字可以和既有报告对照。
 - `db_busy_pct` = 该窗口内**进程级** DB 阻塞时间 / 窗口时长。进程级计数包含没有请求上下文的调用，所以后台 job 的 DB 时间也算进去，这正是「DB 忙碌占比」需要的分母口径。
 - `event_loop_lag_max_ms` 用 250 ms 间隔的 `setInterval` 漂移测量并取窗口内最大值；同步 PG 桥阻塞主线程时会直接体现为晚 tick。
+- `role`（MUL-461）= 该进程的 API 角色，取值 `all` | `ui` | `runtime`，来自 `MULTIREMI_API_ROLE`（默认 `all`）。两类日志事件都带这个字段，所以两个容器共用一个日志流时仍能分开看：`jq 'select(.event=="api_minute_summary") | {role, ts, event_loop_lag_max_ms, db_busy_pct}'`。同一次拆进程另一条分进程依据是 MUL-405 加的 `pid`；两者互不替代（重建容器后 `pid` 会变，`role` 不会）。字段只描述本进程角色，不是请求属性。
 
-**环境变量**（都在 [api.env.example](../../deploy/docker/api.env.example) 有登记）：`MULTIREMI_REQUEST_METRICS`（默认开，`0/false/off` 整体关闭，关闭后不加响应头也不写任何日志）、`MULTIREMI_SLOW_REQUEST_MS`（默认 500，设 0 可让每个请求都打一行，适合短时冒烟）、`MULTIREMI_METRICS_SUMMARY_INTERVAL_MS`（默认 60000）、`MULTIREMI_METRICS_SUMMARY_TOP_N`（默认 10）、`MULTIREMI_METRICS_BUFFER_SIZE`（默认 4096）。
+**PG 桥回包护栏**（MUL-386 C.1）。同步桥的单次回包体积直接决定主线程被阻塞多久，所以除了慢请求日志之外，桥本身对超体积回包有两条独立规则：
+
+- 单次回包 `len > 1 MiB` 时输出一行 `api_large_db_reply`，不新增事件、不限频；带路由模式、方法、字节数以及配置阈值、例外与拒绝模式：
+
+```json
+{"event":"api_large_db_reply","ts":"2026-09-29T09:12:03.771Z","method":"GET","route":"/api/knowledge/submissions","bytes":12085257,"limit_bytes":8388608,"exempt":true,"enforced":false}
+```
+
+- 只有拒绝模式下，单次回包超过有效上限才在 `TextDecoder`/`JSON.parse` **之前**抛错，并输出 `api_db_reply_rejected`（`event/ts/method/route/bytes/max_bytes`）。消息形如 `postgres reply of N bytes exceeds M bytes bridge limit; paginate or project columns`。64 MiB 物理缓冲限制始终保留，worker 对超物理上限的错误不等于配置阈值拒绝。
+- **阈值默认 8 MiB，拒绝默认关闭**（MUL-398 C-1，2026-09-28 贺华杰授权及 Senior 裁决 B `cmt_q2m2lomd48pm`）：`MULTIREMI_PG_REPLY_MAX_BYTES` 未设置或为空时是 `8388608`；显式 `0` 关闭配置阈值。只接受一个十进制整数（可带前后空格）；带换行、十六进制、科学计数、负数、小数或不安全整数都回落默认，在缓存解析时输出一行告警；除 env 原值外不带可变信息。显式非负整数按字节解释。
+- `MULTIREMI_PG_REPLY_ENFORCE` 未设置、空或 `0` 时只告警；`1` 才拒绝表外超阈值回包。非法值回落到只告警，并输出一行只带原值的告警。C-2 翻转代码默认值需贺华杰当次授权，C-1 不在生产强制任何 HTTP 子集。
+- `bun test` preload（[hermetic-env.ts](../../tests/setup/hermetic-env.ts)）剥离宿主 `MULTIREMI_*` 后设置 `MAX_BYTES=8388608`、`ENFORCE=1`，让无界读在 CI 暴露。阈值默认两边相等，拒绝模式测试显式开启；[hermetic-env-policy.ts](../../tests/setup/hermetic-env-policy.ts) 和架构守卫分别断言这两项，不能删除守卫。
+- 过渡例外集中在 [request-metrics.ts](../../packages/server/src/observability/request-metrics.ts) 的 `DB_REPLY_TRANSITION_EXCEPTIONS`，键为 `METHOD route-pattern`，HEAD 按 Hono 分发使用 GET key，日志仍保留 HEAD。`exempt` 表示命中集中表（含独立 `<background>` 项），`enforced` 表示开关模式，`limit_bytes` 始终是配置阈值。有效上限：`exempt || !enforced || limit_bytes == 0` 时为 64 MiB，否则为 `min(limit_bytes, 64 MiB)`。`postgresReplyMaxBytes()`、桥拒绝和 MUL-462 分页共用该值；生产只告警时每页保持 8 行。配置缓存，每次查询只读一次上下文并查一次 Set；关闭指标仍保留路由上下文。
+- 两条日志与 `api_slow_request` 共用同一套脱敏口径：只有路由模式、方法、字节数，没有 SQL 文本、参数、原始 path 或 query。没有请求上下文的后台任务记为 `<background>`。
+- 硬上限的错误消息会向上冒泡，可能进入 HTTP 响应体，因此 `PgBridge.exec` 不为它拼接 SQL 片段（其它错误仍会追加 SQL 前 400 字符用于排查）。
+- 原来「等待 MUL-402 和一周观测后做 C」已被授权替换。C-1 执行阈值翻转和观测机制，拒绝默认翻转挪到 C-2：读路径投影或写入限界后，生产单次数据至少三天（含工作日高峰）满足 <6 MiB，再申请贺华杰当次授权。D 的 Bun UA shim 不属于 C-1。发布冻结在 v0.2.83，不把代码默认值当作生产现状。
+
+**例外来源与收回**：Explorer 的 MUL-398 `cmt_5ncm70lxe805` 确认 209 为 v0.2.83，没有单次回包埋点。零条事件不能作为安全证据。例外来源是 **18 条慢请求总 DB 字节 ≥6 MiB 的保守超集 ∪ 代码审计 ∪ `<background>` ∪ daemon POST messages / HTTP peer**。慢请求只覆盖 >500ms，`db_bytes` 是所有 SQL 回包的总和，不能当作单次回包；快请求由审计兜住。发布冻结期间合入前以 v0.2.83 慢请求总量再核对，含单次埋点的版本实际部署后再按路由逐条收回。
+
+| 来源 | 例外 / 原因 | C-2 收回条件 |
+| --- | --- | --- |
+| 209 请求总量超集 | GET dashboard 的 usage/by-agent、agent-runtime、runtime/daily、usage/daily；GET knowledge/submissions、knowledge/runs；GET projects/:id/knowledge/recall、projects/:id/docs；GET workspaces/:id/repository-wikis；GET issues/:id、inbox、tasks/:id/inspection、tasks/:taskId/messages、multiremi/tasks；POST autopilots/:id/trigger、daemon/tasks/:taskId/fail、complete、daemon/runtimes/:runtimeId/tasks/claim。完整模式带 `/api/` 前缀，18 条全部保留 | 修复随同包或更早上线；有埋点的单次回包按路由 <6 MiB，至少三天并含一个工作日高峰；Explorer 只读复核，带头大哥派单逐条收回 |
+| 审计 | 全量 task/chat messages、inspection 别名、issue share、session events/results、comments/timeline、task 集合、run payload/result/schedule_prompt、SQL 文档与 revision 正文、迁移/发布、task/project/agent 指令、skill/file 正文及相应 write 回读/actor scope。agent lite 仍整读 agent 行，只跳过文件水合；行数 LIMIT 或 TS 读后分页不等于字节有界。完整键及逐条解析调用方依据见常量和本单报告 | 先做对应投影/有界读（messages 等待 MUL-402），再满足上行单次数据条件 |
+| C-1 续做裁定与 Senior `cmt_tvxpad98uqtz` | 当时的 POST `/api/daemon/tasks/:taskId/messages` 因 MUL-462 回读 8 行列入例外；该路由在 daemon v2 已退役。POST `/internal/peer/events` 仍在使用，其同步消费会继承 HTTP 上下文 | 清理已退役路由的例外；peer 回读改为按实际行宽有界后收回其例外，不必等三天观测 |
+| C-1 后台裁定 | `<background> <background>` 为独立、可一行删除的例外。Scheduler.sync → advanceScheduledTargetRuns 仍无界读 queued run 的 schedule_prompt/payload/result；独立 peer 消费也保留 8 行 | queued run 读取有界之后，且含埋点版本实际上线后后台单次数据 <6 MiB，才收回；本 PR 不修改 autopilots-repo.ts |
+
+repository-wikis 的 A/A2（`d905961b`、`d6714966`）已在 main、晚于 v0.2.84，与 C-1 同包或更早上线；本轮保守保留其例外并复测 209 行数模型，未声称 A/A2 已在取证时的生产版本生效。旧 task messages 的 22.7MB / 28 个任务数据来自 MUL-386 `cmt_cecxmzj19eea` 的行 JSON 估算，与桥 bytes 不混用。dashboard 的 58.42 MiB 是请求总量；单次接近/超过 64 MiB 的情况应单列报告，本 PR 不修。
+
+`advanceScheduledTargetRuns` 也可由 canonical trigger、三个 multiremi run/trigger 别名及 repository wiki build 触发；这些 HTTP 例外的收回也要求 queued 读有界。请求内未等待完成的异步工作会继承该请求的 ALS 上下文，同一函数由 timer 触发时则为 `<background>`；C-2 要按触发方看数据。后台收回清单还包括 SCM/issue-title/messaging scheduler、outbound-dispatcher sweep、task-capability-monitor、repository-wiki storage job、WS 消息处理和启动迁移，不能只修 queued run 就移除整个后台例外。trace 正文在 daemon 本机文件，不进入服务端表。
+
+回滚 C-1 合并用 `git revert -m 1 <merge>`；若有人显式开启拒绝，应急设 `MULTIREMI_PG_REPLY_ENFORCE=0` 或 `MULTIREMI_PG_REPLY_MAX_BYTES=0`。物理上限仍为 64 MiB，209 配置变更由贺华杰决定。
+
+新增路由可能通过鉴权、回读或调用链触及项目/agent 指令、skill 正文等大列，慢请求日志不能覆盖快请求。变更这些路径时运行 `env -u MULTIREMI_TOKEN bun tests/manual/audit-pg-reply-c1-callers.ts --list-missing`；脚本从运行时 Hono 路由和 schema 扫描出保守候选。分类尚未完成，架构测试目前只守卫清单与扫描可执行，候选差异只输出报告；不得把绿灯当作例外完整性证明。真实 PG 全路由 GET/HEAD 对照入口是 `tests/manual/probe-pg-reply-c1-routes.ts`。Hono 的 HEAD 复用 GET handler，例外查找也按 GET key 计算有效上限。静态分析与合成样本都不能代替 C-2 的生产单次回包数据。
+
+MUL-479 的 context-window 写路由会经 `gatewayReasoningLevels` 读取无 SQL 字节上限的 `multiremi_gateway_models.models`。其调用路径和 QA r1 授权的 15 条 messaging/Feishu 已入表；表冻结在 `84101310` 的 418 条 HTTP + 独立 `<background>`。21 条 workspace context、8 条 source allowlist 以及 MUL-487 的 human request card 整行读均不再扩表，作为 C-2 的列级风险。推荐 repo 投影掉不需要的大列或给写入限界。全路由门禁运行两遍：默认只告警与 main GET/HEAD 状态码差异须为 0；`ENFORCE=1` 输出按根因列分组的拦截清单，作为 C-2 种子，不是例外表。脚本、最大单次字节、非成功/跳过原因和写入限制见 [裁决 B 实测报告](../../reports/performance/MUL-398-c1-b.md)。
+
+**环境变量**（都在 [api.env.example](../../deploy/docker/api.env.example) 有登记）：`MULTIREMI_API_ROLE`（`all` | `ui` | `runtime`，**默认 `all`**；未设置、空串和无法识别的值都解析为 `all`。`ui` 服务页面请求，对 `/api/daemon/*` 和 trace 读取返回 421；`runtime` 服务 daemon 协议、trace 读取、`/health*`、`/readyz`、`/healthz`、`/internal/*`，其余返回 421。`/api/daemons/:id` 复数前缀是浏览器路由；实现与守卫表见 [api-role.ts](../../packages/server/src/config/api-role.ts)）、`MULTIREMI_REQUEST_METRICS`（默认开，`0/false/off` 关闭指标采集、指标日志和响应头；PG 回包护栏与其日志仍独立生效）、`MULTIREMI_SLOW_REQUEST_MS`（默认 500，设 0 可让每个请求都打一行，适合短时冒烟）、`MULTIREMI_METRICS_SUMMARY_INTERVAL_MS`（默认 60000）、`MULTIREMI_METRICS_SUMMARY_TOP_N`（默认 10）、`MULTIREMI_METRICS_BUFFER_SIZE`（默认 4096）、`MULTIREMI_PG_REPLY_MAX_BYTES`（**默认 8388608 = 8 MiB**；未设置/空串使用默认，非法值告警后回落；显式 `0` 关闭可配置上限，集中例外保留 64 MiB）。
 
 **观测与验证入口**：
 
+`MULTIREMI_PG_REPLY_ENFORCE` 已在同一 env 示例登记，代码默认 `0`；`MAX_BYTES` 是阈值而不是开启拒绝的开关。C-2 必须先修读/写边界并取得生产单次回包证据，再申请当次翻转授权。
+
 ```bash
-# 生产容器里的两类日志（209 上的 API 容器）
+# 生产容器里的四类日志（209 上的 API 容器）
 docker logs multiremi-platform-app-api-1 | grep api_minute_summary
 docker logs multiremi-platform-app-api-1 | grep api_slow_request
+docker logs multiremi-platform-app-api-1 | grep api_large_db_reply
+docker logs multiremi-platform-app-api-1 | grep api_db_reply_rejected
 
-# 单元测试：并发归属、Server-Timing 格式、慢请求日志脱敏、汇总器
+# 单元测试：并发归属、Server-Timing 格式、慢请求日志脱敏、汇总器、桥回包护栏
 bun test tests/unit/multiremi/request-metrics.test.ts
 
 # 真实 HTTP 冒烟：起一个本地实例，读 Server-Timing + 两类日志
@@ -95,11 +282,147 @@ bun run tests/manual/smoke-request-metrics.ts
 
 冒烟脚本默认用 0 ms 阈值和 5 s 汇总间隔以便一次跑完就同时看到两个事件；`MUL367_SMOKE_PORT` / `MUL367_SMOKE_SUMMARY_MS` 可覆盖。它只连 127.0.0.1 的临时实例和内存 SQLite，不读凭证、不碰生产。上线后需要真实基线数字时，按本文档开头「复现顺序与记录」的模板记录环境、并发和样本数，**不要**把本页的示例行情当作实测结论。
 
+## SQL 来源排行（MUL-85）
+
+`MULTIREMI_METRICS_DB_ROUTES=1` 在现有 `api_minute_summary` 中增加 `db_routes`，默认关闭。
+仓库所有者可通过 API 部署环境启用并重启 API，采集完成后撤销；没有新增业务接口或逐请求日志。
+此项复用已有请求缓冲区与 DB 计数，不增加 SQL。`routes` 仍按累计耗时排序；`db_routes`
+独立按 `db_queries`、`db_ms`、`sum_ms` 排序，防止高频短请求被耗时榜截掉。
+每项包含 method、路由模式、count、db_queries、queries_per_request、db_ms、sum_ms、p50_ms、p95_ms。
+`count × queries_per_request` 是该路由窗口内的 SQL 总数（均值保留两位小数）。
+前 N 项沿用 `MULTIREMI_METRICS_SUMMARY_TOP_N`，定位时至少为 10；保留 pid、role 和 window_ms。
+
+同一开关还增加 `db_sources`（HTTP、daemon WS 帧和后台 job 的统一 SQL 榜）、
+`db_attributed: {http, ws, job}` 与 `db_unattributed`。它们在 **SQL 完成时**计数，与进程总数
+使用同一窗口；`db_unattributed = db_queries - http - ws - job`，相减使用完整分类总数，
+不会因 Top N 截断或请求缓冲溢出而漏算。`db_routes` 仍是已完成请求的口径，不用于此相减。
+`db_sources` 每项为 kind、name、count、db_queries、queries_per_invocation、db_ms；count 是
+本窗启动或在本窗执行 SQL 的 invocation 数，因此跨窗工作可在两窗各计一次，分母不是完成数。
+HTTP 名称仅含 method + route pattern，WS 仅用已识别帧类型（未知归 `<unknown>`），job 名称为
+代码常量；每窗最多 512 个不同名称，另设各 kind 的 `<overflow>` 桶保留计数。没有 SQL 文本、参数、
+原始 URL、凭证、用户或任务 ID。关闭开关时不分配来源上下文或归因表项。
+
+后台入口覆盖 scheduler（sync、failure-monitor、issue-archive、autopilot）、SCM、issue-title、
+messaging、notifications sweep/retry、capability sweep、body-html backfill、repository-wiki storage/lease，
+以及异步 daemon.offer。daemon 端 task-activity / parked-lanes 的周期报告在 API 侧按相应 WS 帧归因，
+不伪装成 API job。未包裹的启动/维护查询仍落在 `db_unattributed`。异步派生工作沿用触发来源，
+显式 job 边界覆盖继承来源，互不重复计数。大回复 guardrail 的 `<background>` 兼容策略保持原定义。
+
+线上代采（由有宿主机权限的仓库所有者执行，按实际容器名替换）：
+
+```sh
+docker logs --since 5m multiremi-platform-app-api-1 2>&1 | grep -E '"event":"(api_minute_summary|ws_minute_summary|api_slow_request)"'
+```
+
+同时记录活跃 daemon/runtime/Agent/lane 数、浏览器标签数及采集 SHA。两版必须保持同等规模和
+请求节奏，比较每分钟进程 db_queries、event_loop_lag_max_ms、turns/inbox 的窗口 p50。
+采样总量超过缓冲容量时 `dropped>0`，路由归因仅覆盖保留样本；进程计数仍覆盖全窗口，不能
+把路由计数总和当作进程总量。请求跨窗时按完成时刻入样；异步派生工作也不能强行归为同窗 HTTP。
+SQLite 不经过 PG bridge，生产指标的 db_queries 在 SQLite 下不能代替驱动级 SQL 计数。
+
+Daemon RPC 使用实际帧 type（如 `turn.*`）和 direction 读取 `ws_minute_summary.types`；
+`db_queries/count` 是近似每方法成本。该旧指标用进程计数差分，异步并发可能重叠，不能与 HTTP
+归因相加或声称是精确互斥分解。心跳的排队下行与派活成本需通过完整 drain 的驱动级测试核对。
+
+隔离 HTTP 来源采样：`bun run test tests/manual/profile-api-load.test.ts`，输出 `MUL85_PROFILE` JSON。
+固定 8 Agent、60 Chat Session、1 Runtime、100 未读消息；12 个真实路由各预热一次、采样十次，
+按执行 SQL 总数排行，同时保留累计耗时、p50 和最频繁 SQL 模板。显式 PostgreSQL 失败不回落。
+该夹具没有运行 daemon，等频 HTTP 请求也不是生产流量；不能由它推出线上前三来源或每分钟负载。
+
+混合负载采样（独立临时 SQLite，不启动模型）：
+
+```sh
+MUL85_RUNTIMES=8 MUL85_POLLERS=10 MUL85_SQL_MS=2.5 MUL85_SECONDS=60 \
+  MUL85_PROFILE_OUT=/tmp/mul85-mixed.json bun test tests/manual/profile-api-mixed-load.test.ts
+```
+
+复用真实 WS daemon harness，一个 socket 广告 N 个已登记 Runtime；以 15 秒发送心跳、启用
+生产 60 秒空派活扫描和后台 scheduler/SCM/title/messaging/notification/capability 入口。
+8 Agent、60 个排队 Chat、100 条收件箱消息；独立客户端进程中的 M 个轮询方每秒并发请求五个真实
+鉴权路由。客户端计时不会随 API 事件循环阻塞；每条 SQLite 执行可注入同步阻塞延迟模拟 PG RTT，
+嵌套驱动入口只计一次。预热后采样，发送窗口结束后等待所有响应，不丢请求、不加超时；
+输出含发送时长、排空后的实际窗口时长、实际分钟 SQL、统一榜、事件循环最大 lag 和客户端 p50/p95。
+零查询延迟也可通过 `MUL85_SQL_MS=0` 运行。N/M 是合成规模，活跃 provider lane 为 0；不代表
+宿主实际规模或真实 PG，通过后仍需用宿主提供的规模和线上日志复核。PG 下此延迟模型明确拒绝运行。
+
+领取成本回归：`bun test tests/unit/multiremi/claim-queued-chat-query-count.test.ts`。
+事务内批量读取候选 Chat/Agent，将插件证据按 Agent 复用，不读取未选任务的 usage/autopilot 投影；
+任务目标筛选只读决策列。批量读取按 500 个 ID 分块；选中的任务仍走完整水合与原锁/鉴权检查。
+它不跨请求或事务保存结果，不改变轮询频率或缓存一致性。已有复杂目录/重试/插件情形仍需行为测试。
+
+列表成本回归：`bun run test tests/unit/multiremi/first-screen-hotspots-inbox-attachments.test.ts`。
+MUL-85 用真实鉴权和 SQLite/显式 PostgreSQL 数据库，校验 turns/inbox 返回 1、10、50 条时
+SQL 数一致；本地夹具通过不代表已复现生产规模、PG 延迟或部署后性能改善。
+
+## WebSocket 帧汇总：`ws_minute_summary`（MUL-417）
+
+daemon 的流量从 HTTP 轮询搬到协议 v2 的 socket 之后，它的 DB 时间不再落在任何 HTTP 路由上，
+逐路由的口径会看不到这一段。`ws_minute_summary` 就是把 daemon 的那份**按帧类型**补回来。
+
+**它不报进程级 DB 总量，两者也不能相加。** 进程级计数器（`db_busy_pct` / `db_ms` /
+`db_queries`）只在 `api_minute_summary` 里出现一次；它统计的是**所有**跨 PG 桥的语句，本来就
+包含 WebSocket 帧处理期间发出的那些。也就是说换通道不会让 `db_busy_pct` 下降——同一份 DB 工作
+只是换了归属。两行相加会把同一批语句算两遍，这正是这一版把 WS 侧总量字段删掉的原因。
+
+- **实现**：[api/daemon-protocol/metrics.ts](../../packages/server/src/api/daemon-protocol/metrics.ts)。
+  固定容量的 typed-array 环形缓冲区，帧类型 intern 成整数 id；写满后覆盖最旧样本并记进
+  `dropped`，缓冲区不随流量增长。
+- **同一个窗**：窗口参数（开关、间隔、前 N、缓冲容量）由 HTTP 那一份配置派生，不在 WS 侧再读一次
+  环境变量。两者独立解析时，只要有一方被显式覆盖（`startMultiremiServer({ requestMetrics })`，
+  测试与冒烟脚本都这么做）就会错位。两行并排读时窗口才能对齐。
+- **归因**：每条帧按**帧类型 + 方向**汇总 `count / db_ms / db_queries`，另带 `violations`
+  （超长帧、未知帧、无法解析的帧）。SQL 完成钩子通过 AsyncLocalStorage 将查询次数和耗时
+  同时记入当前帧与 `db_sources` 来源；不同连接、HTTP 和嵌套独立 job 不会重复归因。
+  帧样本在处理结束时入窗，`db_sources` 在 SQL 完成时入窗，因此跨分钟的帧与帧返回后继续的
+  异步工作可能分布在不同窗口，不能要求单分钟两者相等。帧返回后的来源 SQL 仍计入
+  `db_sources`，不回写已发出的帧样本。前 N 截断及 ring dropped 也需一并核对。
+  A-8 的 DB 阻塞报告用 `api_minute_summary` 的进程级 `db_busy_pct` 做前后对比；
+  WS 是其中一部分，不与进程总量相加。现场采样边界见 [MUL-209 报告](../../reports/performance/MUL-209-attribution.md)。
+- **不写内容**：与 `api_minute_summary` 一样只写 stdout 的一行 JSON，不含 query、header、payload、
+  原始 path、user 或 token；帧类型是唯一的字符串来源。
+
+```json
+{"event":"ws_minute_summary","ts":"2026-09-27T13:02:11.482Z","window_ms":2001,"frames":4,"dropped":0,"types":[{"type":"hb","direction":"uplink","count":3,"violations":0,"db_ms":0,"db_queries":0,"p50_ms":0.3,"p95_ms":2},{"type":"hello","direction":"uplink","count":1,"violations":0,"db_ms":0,"db_queries":0,"p50_ms":1.5,"p95_ms":1.5}]}
+```
+
+`types` 按 `db_ms`、`db_queries`、`count` 排序，取前 N（默认 20，且不低于 HTTP 侧的 N）；分位数用
+与 [bench-task-list-pagination.ts](../../tests/manual/bench-task-list-pagination.ts) 相同的最近秩法。
+空闲窗口同样每分钟一行，`frames: 0`，这样「没有 daemon 流量」和「这条线死了」可以区分。
+
+**观测与验证入口**：
+
+```bash
+# 生产容器里同时看两条汇总线
+docker logs multiremi-platform-app-api-1 | grep -E 'api_minute_summary|ws_minute_summary'
+
+# 单元测试：汇总口径、环形缓冲、计时器、脱敏
+bun test tests/unit/daemon/daemon-protocol-metrics.test.ts
+
+# 真实 socket 冒烟：起一个本地实例，握手 + 3 个 hb，读两条汇总线（两者各自一条，不可相加）
+bun run tests/manual/smoke-ws-minute-summary.ts
+```
+
+与 `api_minute_summary` 一样，上面示例行里的数字是冒烟运行的输出，不是生产基线。
+
 ## 页面测速脚本与基线（MUL-367）
 
 [frontend/scripts/perf/page-speed.ts](../../frontend/scripts/perf/page-speed.ts) 用仓库既有的 `@playwright/test` 打开主要页面，记录每页的就绪时间、API 调用数、API 字节、最慢 API 及 `Server-Timing`。它**不是** e2e 套件，位于 `frontend/e2e` 之外，不会被默认 e2e 扫到；依赖已有 `@playwright/test`，不新增依赖。
 
-**只读保证**：脚本在 `page.route('**/api/**')` 里 abort 所有非 GET/HEAD 请求，并把这些请求按 `method + 脱敏 path` 记进 `blockedWrites`，所以它可以在生产上对着真实账号跑。打开 inbox 页面本身不会写数据（实测 0 个写请求）；点击某一行会触发 `POST /api/inbox/:id/read`，只读探针会把它拦下来并记录尝试次数，**不会**真的标记已读。每次运行还会先做一次护栏自检（对 `/api/inbox/unread-count` 发 POST，必须被拦截），自检结果是报告的一部分——否则“页面从未写数据”和“护栏静默失效”无法区分。
+**只读保证**：所有非 GET/HEAD 的 `/api/**` 请求都在浏览器里被 abort，唯一例外是 `POST /api/inbox/read` 的浏览器本地 stub，仍不发送到服务端。护栏自检对 `/api/messages/__guard__/resolve` 发 POST 并核对它被拦截，不使用真实资源 ID。凭证和数据安全边界保持原样。
+
+### 游标读取的浏览器本地 stub
+
+[stub-writes.ts](../../frontend/scripts/perf/lib/stub-writes.ts) 只接受 `{session_id,to_seq?}` 或 `{all:true}`，返回 `{session_id,cursor_seq}` / `{conversations_read}`。同一对话的 stub 游标只前进；GET `/api/inbox` 的响应移除该游标以前的消息，保留后续消息与原 opaque cursor。没有旧 InboxItem 的 `read` / `archived` 状态或旧业务路由。
+
+单对话 stub 只能知道本 context 已加载的消息，计数减去这些已知条目；它不是服务端全局计数验证。read-all stub 把本地未读/关注计数归零。真实计数和权限验收须由 QA 在隔离环境直接调用真实接口。
+
+深链测量使用 `deeplink-message`，URL 为 `/{slug}/inbox?item=<message_id>`，测 canonical 消息详情的 `[data-inbox-detail]` 滚动容器和 `[data-inbox-message]` 锚点。新 key 避免与旧 `deeplink` 的 Issue 通知详情基线直接配对；旧报告保留原有意义。Issue 首屏和 Issue `?comment=` 的日志窗口协议保持原样。
+
+探测从 GET `/api/inbox?limit=100` 的返回 cursor 续页，候选按 API 顺序以 message ID 去重，不按 Issue 合并。目标来自较后页时，`injectInboxTarget` 仅把它放入浏览器第一页，后页移除同 ID，避免把翻页成本混入详情就绪时间。DOM 行序与页面的 message ID 去重一致；选中消息不会自动写读游标。
+
+`blockedWrites` 与 `stubbedWrites` 分列记录。深链选择轮要求桩写为 0；其他页面每个不同的显式游标读取最多允许一次重试，超出记录 `stub-loop-not-terminated`。Chat 打开可触发自己的读游标写入，由同一允许表在浏览器中接管。URL 断言只检查选中 message ID，不计入 readyMs。
+
+运行中 Issue 的选择使用 GET `/api/turns?status=running&limit=200`，按 opaque cursor 读取所有页，以 canonical `issue_id` 计数，不再调用 `/api/multiremi/tasks`。
 
 **凭证**：token 只从 `MULTIREMI_QA_WEB_TOKEN` 读取，写进目标 origin 的 `localStorage.multimira_token`，不打印、不落盘、不进 argv、不进报告。输出文件里只有 method、脱敏 path、status、耗时和字节。
 
@@ -125,12 +448,216 @@ bun run frontend/scripts/perf/page-speed.ts \
 | 加载方式 | 每轮一个全新 browser context，逐页 `page.goto` 整页加载；每轮第一页（issues）含 app shell 冷启动，同轮后续页面复用该 shell |
 | LCP | 由 `addInitScript` 里预装的 `PerformanceObserver` 采集（不在导航前注册就取不到条目） |
 | 字节 | `encodedBodySize`（压缩后）、`decodedBodySize`（解压后 JSON）、`transferSize`（含响应头） |
-| path 脱敏 | 去掉 query；ID 形状的段换成 `:id`；已知的 workspace id / slug / member id 按值掩码，否则 `local`、`remi` 这种没有形状特征的标识会漏出去 |
+| path 脱敏 | 去掉 query；ID 形状的段换成 `:id`；已知的 workspace id / slug / member id 按值掩码，否则 `local`、`remi` 这种没有形状特征的标识会漏出去。`<前缀>_` 规则接受后缀里的**字母、数字、下划线**（`iss_zerojump_short`、`iss_local_long` 这类手写 fixture id 与生成 id 归一方式一致）；下划线不是静态路由段的字符——`scripts/api-routes.golden.json` 的 307 个静态段无一含下划线，所以宽化后的规则不会吞掉真实路由 |
 | 环境参照 | 运行前后各采 7 次 `/api/config`，记中位耗时。生产是共享环境，复跑对比前先核对这个参照 |
 
 今天的生产基线是 [reports/performance/MUL-367-page-speed-baseline-2026-09-24.json](../../reports/performance/MUL-367-page-speed-baseline-2026-09-24.json)（原始数据）、同名 `.md`（表格）与同名 `.html`（自包含单文件，可直接挂到 Issue 评论）。运行机器、Chromium、API 版本与护栏自检结果都写在报告的 `meta` 里。**明天复跑必须在同一台机器上**，否则机器差异会混进前后对比。
 
-采集当天生产本身处于劣化状态：运行前后各 7 次 `/api/config` 的中位耗时是 1886 ms / 3735 ms（同一窗口里还混着 1.2–2.7 s 的样本，说明不是链路固定延迟，而是服务端在排队）。11 个页面里有 1 次 `issues` 加载在 60 s 就绪等待内没有满足口径，报告把它标出来且不计入中位数。因此这组数字是**劣化态记录**，既不能当稳态性能，也不适合直接拿来定优化目标。改报告格式时用 `--render-only <json>` 重渲染，不必重新采集。
+采集当天生产本身处于劣化状态：运行前后各 7 次 `/api/config` 的中位耗时是 1886 ms / 3735 ms（同一窗口里还混着 1.2–2.7 s 的样本，说明不是链路固定延迟，而是服务端在排队）。11 个页面里有 1 次 `issues` 加载在 60 s 就绪等待内没有满足口径，报告把它标出来且不计入中位数。因此这组数字是**劣化态记录**，既不能当稳态性能，也不适合直接拿来定优化目标。改报告格式时只能重新采集——MUL-384 重写后的脚本不再提供「只重渲染已有 JSON」的开关，JSON/MD/HTML 三份产物是一次运行一起写出的。
+
+### 已定口径（MUL-383 待决项 A1/A2/B4，2026-09-27）
+
+| 项 | 决定 | 落点 |
+| --- | --- | --- |
+| A1 入口页安静 | **默认开启**：warm 轮点击前等入口页 500 ms 内没有新的 `/api/**` 请求开始，上限 5 s，超时照点并记 `entrySettled=false`；同时记录点击时在途数 `entryInflightAtClick`。`--entry-quiet-ms` 保留，默认 500，传 0 关闭；上限是常量 `ENTRY_QUIET_CAP_MS` | `lib/options.ts`、`page-speed.ts`；`meta.entryQuietMs/CapMs` |
+| A2 09-27 基线 warm 行 | **作废**（时基错误），cold 行保留。不改原始报告文件；本 PR 合入后由 QA 低峰重跑 n=5。`--compare` 对 schema 2 的 warm 行**只警告、不配对**：`comparable: false`、数值全 null、表格显示「不可比（schema 2 warm 已作废）」 | 见下节「基线有效性」与「输出与复核方式」 |
+| A3 长样本 | 前后对比固定 MUL-70（`--issue-long` 默认值不变）；「长（≥200）」语义由 MUL-454（`iss_o2skonppbq2u`）承担，新增 `detail-xlong` 场景并把该单加进 running 目标的排除名单 | `lib/options.ts`、`page-speed.ts` |
+| B4 高峰验收窗口 | **只看 13–14 点**，不要求 20–21 点 | 本页与父单验收口径 |
+
+### 基线有效性
+
+2026-09-27 的低峰基线（`reports/performance/` 与 `.mul383-evidence/perf/MUL-383-baseline-offpeak-2026-09-27.json`，`schema: 2`）里 **15 行 warm 数据无效**：`readyMs`、首屏请求数与串行深度都从**入口页文档**开始累计，没有减点击时刻 `navStartMs`，量的是「从一个还在加载的页面切走」。**cold 行有效**，两边都以文档 origin 起算。原始 JSON/MD/HTML 保持原样不改写，读取时按 `meta.schema` 判断。修正后的口径从 `schema: 3` 开始，warm 数字由 QA 低峰重跑 n=5 产出。
+
+S9-0.1（2026-09-28）之前的两处同样按「旧报告照原样保留、读取时按版本判断」处理，**不升 `meta.schema`**：
+
+- **`dbq` 一栏不可用。** 采集器把浏览器解析过的 Server-Timing 拼回字符串时，对只有 `desc` 的指标也写上了浏览器合成的 `dur=0.0`，`dbq`/`dbb` 于是全部读成 0。**`total`/`dbms`/`dbp` 不受影响**（它们本来就走 `dur`）。S9-2 的验收看 `dbq`，所以该修正之前（含 2026-09-28 凌晨那份上线前参照 `cmt_wahkjyxosv33`）的报告里 `dbq`/`dbb` 一律当作缺失，不要与修正后的数字比较。
+- **`page-issues::warm` 一行不作数。** 它从 issues 列表进入再点侧栏的 issues 链接，是同页点击，量的是它已经打开的那一页。修正后该行改为从 inbox 进入；其余十个 `page-*::warm` 行入口不变，可继续配对。
+
+## 内容到最终位置的口径（MUL-384 / MUL-383 S1）
+
+MUL-367 的脚本量的是「H1 出现、骨架归零」，因此它看不见内容先出现、随后被顶开的过程。[frontend/scripts/perf/page-speed.ts](../../frontend/scripts/perf/page-speed.ts) 现在按父单（MUL-383）口径重写：终点是**内容停在最终位置**，跳动单独计数。MUL-367 的 profile（11 个页面）保留为同一脚本里的列表场景。
+
+### DOM 契约：五个属性
+
+应用侧只加属性、不改行为。前四个由 S1 打标，后两个由共享 hook `useAnchoredReveal` 写入：
+
+| 属性 | 宿主 | 取值 | 写入方 |
+| --- | --- | --- | --- |
+| `data-perf-scroll` | 被测量的滚动根：issue 详情、chat；列表页的就绪标记（MUL-472 第 5 项） | `issue-detail` \| `chat` \| `list` | S1 打标；`list` 由 [use-list-perf-marker.ts](../../frontend/packages/views/common/use-list-perf-marker.ts) 在该页自己的列表请求返回后写上 |
+| `data-perf-item` | 真实数据行（timeline 行、chat 消息、issue 行、board card、inbox 行、子单行） | `comment` \| `activity` \| `resolved-bar` \| `message` \| `issue` \| `inbox` \| `sub-issue` | S1 打标 |
+| `data-perf-key` | 同一行 | 行自身的稳定 id | S1 打标 |
+| `data-perf-anchor` | 该页面口径的终点元素 | `latest-comment` \| `agent-stream` \| `target-comment` \| `latest-message` | S1 打标 |
+| `data-perf-state` | `data-tab-scroll-root` | `pending` \| `ready` \| `ready-forced` | `useAnchoredReveal`（[frontend/packages/views/common/use-anchored-reveal.ts](../../frontend/packages/views/common/use-anchored-reveal.ts)），S1 与 `useStickToBottom` 不写 |
+| `data-perf-fresh` | 同上 | `0` \| `1` | 同上；消费方传 `fresh`（`undefined` 时不写并移除该属性） |
+
+`data-perf-state` 是**只读**契约：S1 应用侧不写它（没有 hook 就写死 `ready` 是假数据，会让依赖它的就绪断言空过）。记录器在浏览器内用 `MutationObserver` 抓它的变化时间戳，不从 Node 侧轮询；属性不存在时 `appReadyMs` 为 `null`，且**永远不作为终点**。写入方无权改名、改宿主或改取值。
+
+`data-perf-fresh` 是**新鲜度**位，只有 `useAnchoredReveal` 写它，消费方传 `fresh`；`undefined` 时不写并移除该属性（今天 main 上还没有任何消费方传它）。记录器按「属性在不在」分两套口径：
+
+- **属性存在**时，只有 `data-perf-state = ready` **且** `data-perf-fresh = 1` 的帧才算加载完成；`ready` 但 `fresh = 0` 不算，`ready-forced` 也不算通过，但会在报告里**单独列出**（`appReadyForced`）。
+- **属性不存在**时，维持原逻辑（只看 `data-perf-state`），所以 MUL-443 上线前后同一份清单都可用。
+
+### Snapshot 数据裁剪（MUL-395 S9-6）
+
+两个 agent-task-snapshot 路由把 Chat 创建者/任务凭证可见性下推到 SQL。仍先选每个 Agent 的最新 completed/failed，再过滤权限；无权最新结果不会让较旧结果补位。请求身份版本仅投影公开任务响应需要的列，保留 prompt/result/plugin/usage，省去内部执行配置及委派状态；内部无身份调用仍返回原任务对象。
+
+### 判定口径
+
+| 项 | 口径 |
+| --- | --- |
+| 终点 | 详情/深链：anchor（detail-running 必须 agent-stream，非运行详情为 latest-comment；深链为 target-comment）可见 + 骨架 0 + 之后 500 ms 无移动帧。列表：区域内无骨架且至少 1 个真实行可见 + 500 ms 安静。chat：最新一条消息可见 + 500 ms 安静 |
+| 超高行 | 行高 > 根高时，`covers`（top ≤ 1 且 bottom ≥ 根高 − 1）或 `bottomVisible`（0 ≤ bottom ≤ 根高 + 1）任一成立即算可见；`target-comment` 为 `topVisible \| (tall && covers)`，因为 `scrollIntoView({ block: "center" })` 会把超高目标的顶边推出视口。每轮在就绪帧记原始 `anchorRectAtReady: { top, bottom, height, rootHeight }`（根相对坐标，只记数不下结论） |
+| 列表页滚动根 | 11 个列表页没有自己的滚动根，两种模式都以 `[data-slot="sidebar-inset"]`（MUL-367 的 `READY_SELECTOR`）为根；空 chat 的 legacy heading 规则也用这个回退根（它渲染 `EmptyState`，没有 chat 滚动根）。列表 *根* 不在两种表之间分开，`selectorEquivalence.scrollRoot` 才能继续读 `same` |
+| 列表页就绪标记（MUL-472 第 5 项） | issues / my-issues / inbox / projects / agents / runtimes / skills / autopilots / workbench 的列表容器由 [use-list-perf-marker.ts](../../frontend/packages/views/common/use-list-perf-marker.ts) 在自己那条列表请求 `status === "success"` 且不是 `keepPreviousData` 占位数据时才写 `data-perf-scroll="list"`。`--selectors auto` 从 `[data-perf-scroll]` 判定，所以带标记的列表轮从此记 `contract`（此前 09-28 两轮 32/32 行都是 `legacy`）；标记出现即代表「屏幕上的行是本轮自己那次请求的答案」，事件量是 `mounted && listPerfFresh(query)`，脚本无需再加时钟 |
+| 首屏请求 gate（MUL-472 返工） | [use-after-first-screen.ts](../../frontend/packages/core/platform/use-after-first-screen.ts) 等当前路由主内容就绪，再经下一帧和 `requestIdleCallback({ timeout: 1000 })` 打开。列表由上述同一个标记条件发布，空成功、失败也发布；Issue 详情正常等 timeline reveal，空日志或失败立即发布，日志或会话持续 pending 时由详情自身在 2s 上限发布 ready，列表骨架与 reveal 仍独立。未接入发布者的路由从路由开始等 2s 再进 idle；其他有发布者的慢请求不会被共享兜底抢先打开。默认页面级每次切页关闭，首个 render 即 false；`scope: "shell"` 会话内只等一次。筛选依赖 snapshot 时立即取，数据未到不显示空列表，也不写就绪标记 |
+| 跳动 | 首次出现目标页真实内容之后，相邻帧中同一 `data-perf-key` 且同一 DOM 元素的可见行位移 > 1 px（或 scrollTop 位移 > 1 px）即移动帧；连续移动帧合并为**一次**跳动。`jumps = 0` 才合格。入口页行换成目标页行是导航，不能把两个不同锚点的坐标差计作同一行的位移 |
+| 缺观测（S9-6） | `firstRealMs = null` 时 jumpCount/jumpPx/jumpScrollPx 均为 null，MD/HTML/compare 显示「未观测」；stats 保留 jumpObserved/jumpUnobserved 和 n，不算作零跳动通过。contract 列表用 fresh 的 `[data-perf-scroll="list"] [data-perf-item]`，设置页标真实账号控件。Chat 使用现有 chat/session-log 滚动根、选有消息的会话并等待 latest-message，空 chat 单列跳过 |
+| readyMs | 取 500 ms 安静窗口的**起点**，不是终点 |
+| 超时 | 单轮 20 s；超时轮记 `readyTimeout`，**不进任何分位数** |
+| 分位数 | 最近秩法，与 API baseline / `bench-task-list-pagination.ts` 一致 |
+| 冷启动 | `page.goto` 整页加载，全新 context；时基是文档 origin（`navStartMs = 0`） |
+| 应用内切页 | 先 hover 150 ms，再真实 click；`navStartMs` 取**页面内记录的 click 时间戳**（避免 CDP 往返误差）。warm 轮的帧、跳动、`Server-Timing` 与首屏集合**一律先减 `navStartMs`**，即全部从 click 起算 |
+| 入口页安静（**已定口径**，`--entry-quiet-ms`，默认 500 ms） | warm 轮在点中行出现之后再等「入口页 500 ms 内没有新的 `/api/**` 请求开始」，上限 5 s；超时照点并记 `entrySettled=false`，同时在途请求数记 `entryInflightAtClick`。`--entry-quiet-ms 0` 关闭（回到「行一出现就点」的旧行为）。依据：MUL-383 待决项 A1，2026-09-27 答复；`meta.entryQuietMs` / `meta.entryQuietCapMs` 记录本轮实际用的阈值与上限 |
+| 首屏集合 | `startMs ≥ navStartMs` 且不晚于就绪帧的 `/api/**` 请求；`apiCallsTotal`、chunks 共用同一下界，所以入口页的尾请求不计入目标页 |
+| 串行深度 | `wave = 1 + max(wave(p) \| p.responseEnd ≤ start + 8ms)`；`Server-Timing` 从 resource timing 同源读取。口径未变，只多存 `serialChain` 与逐请求 `wave/after` |
+| gap | `gapMs = 客户端 duration − Server-Timing total`，即请求在 handler 之外等待的部分（连接与排队）。服务端没有 `total` 时为 null |
+| 深链目标 | GET `/api/inbox` 的 canonical message，包含 id / session_id，按服务端顺序选择；删除或缺字段的候选排除 |
+| 深链 URL | `/{slug}/inbox?item=<message_id>`；选中消息不推进读游标 |
+| 深链 warm | 页面 ID 去重后的消息行，点击前按新快照重算行号；URL `item` 必须等于选中 message ID，详情锚点为该 ID |
+| 深链目标读态 | inbox API 只返回未读消息；深链选择不写入，真实游标验收另行执行 |
+| 目标深度 | `targetDepth: { timelineRequests, targetIndexFromLatest }`，从本轮已捕获的 `/comments` 响应计算，不额外预查 |
+
+页面 gate 的发布者在最后一个实例卸载时释放该次访问，取消 idle、兜底 timer；发布者自己的帧回调同时取消。同 pathname 重挂也从关闭开始，缓存内容仍在下一帧与 idle 后放行。无发布者时由最后一个消费者释放 registry；会话级 shell 标志保持打开。异步回调绑定 gate 实例，旧回调不能打开同路径的新实例。
+
+聊天 aggregate pending 的两个 observer 是 ChatFab 和 [SessionDropdown](../../frontend/packages/views/chat/components/session-dropdown.tsx)。后者常驻于隐藏 ChatWindow，条件为 `chatVisible || shellGateOpen`：隐藏时等会话首 gate，用户打开窗口或进入聊天页面时立即查询。共享 key 的去重不能替代每个 observer 的 enabled；[壳层守卫](../../frontend/packages/views/layout/shell-deferred-queries.test.tsx)挂载完整 DashboardLayout、ChatFab 与真实隐藏 ChatWindow，核对门控前请求为 0。
+
+隐藏聊天窗口的缓存子树同样需要门控：ChatMessageList 的 live/assistant 任务消息、HumanRequestDock 表单仅在 `chatVisible` 时 enabled，旧消息分页回调也检查可见性；无缓存会话时挂载的 WorkLocationPicker 项目候选同样继承聊天可见性，其他可见选择器保留默认立即查询。隐藏时包括 degraded task header 在内的 invalidate 只标 stale，重新打开立即正常 refetch；详情主体的执行行不受此可见性门控影响。壳层守卫预置 19 组 key 的缓存后逐 key invalidate，并经过真实 `createTaskHandlers`；虚拟列表提供测试尺寸并断言历史回复实际挂载，防止新 observer 从失效路径绕过门控。
+
+**warmup 也挂护栏**：`--warmup` 与测量轮使用同一套写操作护栏。消息深链为 `?item=<message_id>`；选择消息不自动推进读游标。
+
+参数：`--base-url`、`--rounds`（默认 3）、`--window peak|offpeak`、`--name`、`--out`、`--compare`、`--selectors auto|contract|legacy`、`--only <prefix>`、`--warmup`、`--issue-short`（默认 `iss_in41j1x1dq66`，MUL-67）、`--issue-long`（默认 `iss_enbrunyg86jc`，MUL-70；**MUL-395 前后对比固定用这一条**）、`--issue-xlong`（默认 `iss_o2skonppbq2u`，MUL-454；≥200 条评论的 `detail-xlong`，传空串跳过该场景）、`--issue-running`（默认现场选取，排除 MUL-383 `iss_j67lb0r8djw4` 及其全部子单，以及 MUL-454 `iss_o2skonppbq2u`；选不到则 `skipped: all-running-issues-in-mul383-family`）、`--inbox-item`（默认在探测窗口内自动选取）、`--inbox-probe-pages`（默认 10）、`--hover-lead-ms`（默认 150）、`--entry-quiet-ms`（默认 500，0 关闭）。`targetSelection` 取 `auto | pinned | none`。
+
+`detail-running` 的排除名单分两段：**叶子常量**（MUL-454 这条永不完成的夹具单，故意保持进行中且未指派，否则会被选成 running 目标）与**运行时拉取**的 MUL-383 子单（见 `lib/options.ts` 的 `EXCLUDED_RUNNING_ISSUE_IDS` / `EXCLUDED_RUNNING_ISSUE_PARENTS`）。
+
+**场景矩阵新增 `detail-xlong`（MUL-454，≥200 条评论）**，与 `detail-long` 并列而不是替换它：MUL-395 的前后对比基线锚在 MUL-70，改掉 `--issue-long` 会让所有历史配对失效。已有场景 key 一律不改，`--compare` 的配对依赖它。
+
+**测速数据**：cold 与 warm 用同一 fixture，且必须是**非 archived、非 cancelled** 的 issue，否则默认 `/issues` 列表不渲染 `ListRow`，warm 找不到入口。报告标注实际评论条数（按 timeline 里 `type === "comment"` 计数；`timelineEntries` 另记条目总数，两者不同）。warm 目标行不在首批渲染里时记 `skipped: warm-target-not-in-list`，不改走搜索或 archived 手风琴（那些不是 S3 的验收入口）。参考量级：short ≤ 20 条、long ≥ 41 条（把「首页 40 条 + has_more」的分页路径踩到）；MUL-249 之后打开路径成本与总条数基本无关，≥200 的口径由 S7 的 250 条 fixture 与 S6 深链覆盖。
+
+**fixture 选择约束**：非 archived、非 cancelled，且 `completed_at` 为空或远新于归档 TTL。`issues-repo.ts` 的 `archiveEligibleIssues` 会把 `completed_at` 超过 TTL（约 72h）的 done / cancelled issue **自动归档**——MUL-353 就是这样在选定后几小时被归档的，于是 warm 找不到入口。脚本在跑之前对两个 fixture 各做一次只读预检，状态不对就直接输出 `skipped: fixture-archived` / `fixture-cancelled` / `fixture-unreadable`，**不再等满 20s**。`warm-target-not-in-list` 同样立即以 skipped 结束。
+| 目标深度 | `targetDepth: { timelineRequests, targetIndexFromLatest }`，从本轮已捕获的 `/comments` 响应计算，不额外预查 |
+
+**为什么深链不用固定 `inb_...`**：[inbox-page.tsx](../../frontend/packages/views/inbox/components/inbox-page.tsx) 对不在已加载页里的 `?item=` 会逐页 `fetchNextPage()` 直到找到，页大小 50；固定项在第 769 位左右 ⇒ 冷启动先串行拉约 16 页，测到的是翻页而不是深链落点。
+
+### 选择器回退：contract / legacy
+
+当前前端已经提供 `data-perf-*`；为读取历史基线， [frontend/scripts/perf/lib/selectors.ts](../../frontend/scripts/perf/lib/selectors.ts) 维护两套选择器，`--selectors auto|contract|legacy`（默认 `auto`：页面存在 `[data-perf-scroll]` 即用 contract，否则 legacy；列表页的标记见上表，`CONTRACT.listMarker` 就是它）。**所有选择器都集中在这个模块里**，不散落在脚本各处。每一轮都记 `selectorMode`。
+
+| 用途 | legacy 选择器 / 规则 |
+| --- | --- |
+| 滚动根 | `[data-tab-scroll-root]`；列表页用 `[data-slot="sidebar-inset"]`（见上） |
+| timeline 行 | `[data-tab-scroll-root] [id^="comment-"]` |
+| latest-comment | DOM 顺序中最后一个 `[id^="comment-"]` |
+| target-comment | `#comment-<id>` |
+| 骨架 | `[data-slot="skeleton"]` |
+| issue 列表行 | `[data-slot="sidebar-inset"] a[href$="/issues/<issueId>"]` |
+| inbox 行 | `section[aria-labelledby^="inbox-group-"] div[role="button"][tabindex="0"]`。**不可靠**：QA 在 209 上实测未加作用域的形式匹配到工具栏按钮（`cmt_3d2bb3s7ceeh`）；该表只保留给等价性比对，**不得用它驱动点击**，深链 warm 直接按目标通知 `data-perf-key` 选择行根，不用 API 行号或子链接驱动点击 |
+| agent-stream | `detail-running` 两种采样表均要求现有 `[data-perf-anchor="agent-stream"]`，缺失记 anchor-mismatch；目标预选先核对实际可见运行行，不能降级 latest-comment |
+| chat | 退回 `h1-no-skeleton`，记 `anchor: none` |
+
+**等价性证明**不用比较两次运行的时间（噪声太大），而是比较**同一 DOM 上元素的同一性**：contract 模式的每一轮在就绪时刻同时用 legacy 表求值，记 `selectorEquivalence: { scrollRoot, anchor: same|differs, itemsContractOnly, itemsLegacyOnly }`，元素用 `===` 比较。两个门槛：
+
+1. 本地端到端：详情/深链核对 anchor 对应元素；列表 contract 真实行与 legacy H1 是不同口径，`anchor: absent`、`itemsContractOnly > 0` 是预期，必须独立验证真实行。两种列表采样仍共享滚动根。
+2. 209 上第一次 contract 运行（高峰基线或终验）由 QA 复核同一字段；不通过则对应场景的 legacy 基线标 `invalid` 并重跑。
+
+两版基线按实际 `selectorMode` 如实标注；`--compare` 遇到模式不同**只警告不拒绝**。
+
+**legacy 表的删除条件**：满足两条才删——S2 已合入，且已有一版 contract 模式的基线。删表时同步删掉本节这张表与 `selectors.ts` 里的 `LEGACY`。
+
+### 深链目标：探测可以翻页，测量不翻页
+
+探测按原 opaque next_cursor 分页；测量只使用已准备第一页的 message ID。报告记录 inboxApiPage、inboxInjected、inboxApiIndex 与 inboxDomRowIndex。点击不发已读请求，所以 inboxPageRequestsBeforeStub 在没有桩写时为 null，不能解释为 0 次加载。
+
+原 S7 CI 检查（2026-10-21 已删除，见下文「CI 零跳动检查（已删除）」）的 `detail-deeplink` 通过 `/inbox?item=<messageId>` 打开消息详情，读取 `/api/messages/:id`，以 `[data-inbox-message]` 为锚点。该页面使用工作区事件连接，不订阅 Issue 的 `log:` 流；收尾必须收到真实的 `auth_ack`，其他 Issue 详情场景仍必须收到 `stream.ack`。报告的 `hubAckType` 记录本轮要求的确认帧，`hubAckSeen` 记录是否收到；两类场景均继续要求 API 无在途请求、API/WS 连续静默 500 ms，并保留零跳动、目标锚点、无骨架及 `ready/fresh=1` 检查。
+
+`detail-f398` 的溢出夹具使用 20 个独立 agent 的排队轮，避免同一 agent/session 的请求按单一待处理轮规则合并。该检查当时要求全部 20 行在固定槽内呈现且最后一行可滚动到达。
+
+### 场景矩阵与参数
+
+详情页 `detail-short` / `detail-long` / `detail-running` / `deeplink-message` × {cold, warm}，外加 MUL-367 的 11 个页面 × {cold, warm}。
+
+```bash
+# 本地/生产只读基线（token 只从 MULTIREMI_QA_WEB_TOKEN 读）
+bun run frontend/scripts/perf/page-speed.ts   --base-url http://n37-117-209.byted.org --rounds 5   --window offpeak --out reports/performance --name MUL-383-baseline-offpeak-<日期>
+
+# 与另一份 JSON 对比：按 key + mode 配对（warm 行另按 key::mode::path 比 path）
+bun run frontend/scripts/perf/page-speed.ts   --base-url http://n37-117-209.byted.org --rounds 5   --out reports/performance --name MUL-383-baseline-peak-<日期>   --compare reports/performance/MUL-383-baseline-offpeak-<日期>.json
+```
+
+### 输出与复核方式
+
+JSON 用 `schema: 3`（MUL-395 S9-0 起）。相对 schema 2 的字段变化：
+
+| 位置 | 字段 | 说明 |
+| --- | --- | --- |
+| `meta` | `schema: 3` | 时基与首屏集合口径变了，旧 warm 行不可直接对比 |
+| `meta` | `entryQuietMs` / `entryQuietCapMs` / `entryQuietNote` | 本轮用的入口页安静阈值与上限；关闭时为 `null` |
+| `meta` | `timeBase` | 冷/热各自的起算点（文档 origin / click） |
+| `rounds[]` | `navStartMs` / `clickT` | 该轮的时间原点；cold 为 `0` / `null`，warm 为页面内 click 时间戳 |
+| `rounds[]` | `entryReadyMs` / `entryInflightAtClick` / `entrySettled` | 入口页就绪耗时、点击时在途 `/api` 请求数、是否等到了安静窗口 |
+| `rounds[]` | `serialChain` | 产生 `serialDepth` 的那条链，最深在最后 |
+| `rounds[]` | `apiFirstScreenEntries[]` | 首屏逐请求：`{ path, method, wave, after, startMs, responseEndMs, durationMs, encodedBytes, serverTiming:{total,db,dbp,dbq,dbb}, gapMs }`。`startMs`/`responseEndMs` 是页面绝对时钟，减 `navStartMs` 即本轮相对时间；`after` 是同一张表里前驱的下标 |
+| `stats` | `apiByPath[]` | 场景级按 path 聚合：每轮次数、`total` p50/p95、`db` p95、`dbq` max、`dbb` max、`gap` p50 |
+
+`apiFirstScreen` 计数保留，与 `apiFirstScreenEntries.length` 应相等，可交叉核对。MD 与 HTML 每个场景多一张「首屏 API 表」（按 path 聚合），HTML 另把逐请求表按场景折叠；`--compare` 除原有的按 `key::mode` 配对表外，多一张按 `key::mode::path` 配对的差值表（只在单侧出现的 path 也列出，右列为空——「请求消失了」正是 S9-1 要证明的结果）。
+
+JSON 里的 `compare` 段带 `warnings`：`selectorMode` 不同、`target.identifier` 不同、`targetSelection` 不同、`timelineRequests` 不同都会警告，但都不阻断配对。
+
+**唯一阻断数字的是 warm 时基不匹配。** 基线 `meta.schema < 3` 时，它的 warm 行从入口页文档起算，而 schema 3 从 click 起算：`readyMs`、首屏数、串行深度、逐 path 的 `total`/`gap` 全都不是同一个量。这类配对：
+
+- `compare.rows[]` 里 `comparable: false`，`notComparableReason` 写明原因，**所有数值字段为 null**——不是「渲染时藏起来」，读 JSON 的下游同样拿不到可减的数；
+- `compare.pathRows[]` 里这些 `key::mode` 的每一行同样 `comparable: false`，**数值与 `n` 计数全为 null**——schema 2 的计数含入口页尾部请求（本轮下界正是把它去掉），半修正的数字不能与修正后的数字并排放；
+- MD/HTML 的表格里这类行显示 `不可比（schema 2 warm 已作废）`，**不出现任何数字或差值**；
+- 只保留一条「已作废、不可比」的警告，不再报选择器/目标之类的次级差异（无数字可解释）；
+- 只出现在新一侧的 warm 行（例如 schema 3 才有的 `detail-xlong`）同样 `comparable: false`：基线那一半仍是作废的时基，单独打印新数字会被读成「对比的后一半」。该行自己的数字在场景的 `rounds[]`/`stats` 里（同一轮 schema 3 运行），不受影响；cold 行不在此列。
+
+schema 2 的 **cold** 行两边都以文档 origin 起算，照常配对；两侧都是 schema 3 时 warm 行也照常配对。这条规则由单测固定，并用「临时恢复 warm 配对」的变异验证过会失败。
+
+基线产物放 `reports/performance/`，HTML 用 `remi message send <issue> --attachment` 同时挂到本单和父单。
+
+本地端到端（不需要生产凭证）用 [tests/manual/mul384-perf-harness.ts](../../tests/manual/mul384-perf-harness.ts)：起内存 SQLite 的 API + 本地 web，铸造本地 PAT 注入 `MULTIREMI_QA_WEB_TOKEN`，跑完全部场景并 grep 产物确认 0 个 token 泄漏。**不要把生产凭证用于本地。** 它跑的是 `next dev`：首个访问的路由要现场编译（实测 `/[slug]/inbox` 首次 17.6 s），会撞 20 s 的单轮超时，所以 harness 传 `--warmup`，先对每个场景各访问一次再开始测量。**`--warmup` 只是本地 dev 服务器的让步**：209 跑的是构建产物，没有现场编译，生产基线的数字不含这一步。
+
+## CI 零跳动检查（已删除）
+
+2026-10-21 按用户决定，CI 的 `frontend-zero-jump` job 与它运行的 `tests/integration/zero-jump-check.ts`（MUL-394 / MUL-383 S7）整体删除，没有迁到其他 job。它在内存 SQLite 上起 API，以生产模式构建并启动 Next，再用 Chromium 冷启动或从 Issue 列表、收件箱深链进入 Issue 详情（短/长评论、运行中任务、图片、侧栏宽度等场景），每行跑 3 次，只断言结构量（跳动为 0、锚点完整可见、无骨架、`data-perf-state=ready`），不断言毫秒数。删除时它每次约 9 分钟，是 PR CI 中耗时最长的一项；自 2026-10-09 起最近 200 次运行没有失败过，且不覆盖 Chat。
+
+随它删除的只有它独用的部分：图片用例 `zero-jump-image-cases.ts`、揭示前波次分组 `zero-jump-waves.ts`、详情页几何断言 `issue-detail-layout-assertions.ts`、已知失败清单 `zero-jump-known-failures.json` 与判定模块 `frontend/scripts/perf/lib/zero-jump-verdict.ts`、这两部分的单测和 `tests/manual/zero-jump-wave-mutation.ts`，以及清单棘轮用的冻结基线 `reports/performance/MUL-394-zero-jump-strict-main-2026-09-26.json`。需要时可从版本历史取回。
+
+仍然保留的：
+
+- [ADR 0008](../adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) 的设计规则（先隐藏、一次定位、此后贴底；首个含真实内容的帧就是最终位置，之后到达的内容不能移动视口）继续有效，只是不再由 CI 强制。改详情页、日志列表、揭示门禁或图片占位时，用本页的 S1 测速和下面的会话日志检查手动复核。
+- 共用夹具 [zero-jump-fixture.ts](../../tests/integration/zero-jump-fixture.ts)：`chat-log-check.ts`、`issue-log-check.ts`、`task-trace-dialog-check.ts`、`durable-trace-browser-check.ts` 与若干 `tests/manual/mul395-*` 脚本仍在使用，单测也保留。
+- 浏览器侧记录器、选择器和 `data-perf-*` 契约：S1 [page-speed.ts](../../frontend/scripts/perf/page-speed.ts)、会话日志检查与 `perf-jump-recorder` 单测仍使用它们；`useAnchoredReveal` 写入的 `data-perf-state` / `data-perf-fresh` 不变。
+- `reports/performance/` 下 MUL-390、MUL-395、MUL-444 等历史报告原样保留，例如 MUL-390 合入后 9 行 × 3 轮全部 0 违例的 strict 实测 [MUL-390-zero-jump-strict-2026-09-27.json](../../reports/performance/MUL-390-zero-jump-strict-2026-09-27.json)。报告里出现的 `zero-jump-check.ts` 命令只是当时的记录，现在已不能直接运行。
+
+## 会话日志列表的零跳动检查（MUL-443，手动运行）
+
+[tests/integration/zero-jump-session-log-check.ts](../../tests/integration/zero-jump-session-log-check.ts) 测的是新的平铺会话日志列表（`frontend/packages/views/common/session-log/`），不是详情页。它对应用例里点名的三种扰动各跑 3 轮：
+
+| 场景 | 读者状态 | 扰动 | 断言 |
+|---|---|---|---|
+| `append-20` | `released`（停在末尾上方 300px） | 尾部追加 20 行 | 读者行与 `scrollTop` 都不动 |
+| `row-height-change` | `released` | 视口下方的一行变高 | 同上，且 `contentGrowthPx > 0` |
+| `width-change` | 揭示窗口内（尚未 `ready`） | 容器 800 → 640px | 揭示只定位一次，`jumps = 0` |
+
+另外每轮都断言 `data-perf-state=ready` 且 `data-perf-fresh=1`：只报 `jumps = 0` 而不看应用自己的判定，一个「从未揭示、内容直接可见」的页面同样会全绿。检查末尾另跑一条**阳性对照**（帧内故意滚动 200px，探针必须报出），对照不成立时整个检查失败——否则「全绿」只证明没测到东西。
+
+页面的构成：`Bun.build` 打包夹具（真实 `SessionLogList` + 内存副本端口），本地 HTTP 服务同时提供**应用自己的 `globals.css`**（PostCSS 编译；Tailwind 的 `@source` 不扫 `tests/`，少了它夹具的滚动根高度会是内容高度，等于没有可观测的滚动范围），Playwright + Chromium 装同一个记录器。
+
+```text
+bun run tests/integration/zero-jump-session-log-check.ts
+```
+
+报告写在 `reports/performance/MUL-443-session-log-zero-jump.json`。三条踩过的坑写在检查文件头注释里：合成 `WheelEvent` 只触发监听、不产生滚动；Chrome 自身的 scroll anchoring 会冒充应用的同帧补偿（夹具显式 `overflow-anchor:none`）；在两次 `page.evaluate` 之间做的扰动落在下一帧采样之前，记录器永远看不到变化（扰动改为在 rAF 回调里做）。还有一个探测能力边界：`jump-recorder` 把任何 >1px 的 `scrollTop` 变化都记为跳动，因此它无法区分「补偿式贴底」与「真跳动」；贴底补偿由 MUL-450 的 hook 单测覆盖，本检查不去断言它。
 
 ## 优化不能破坏的约束
 
@@ -139,7 +666,7 @@ bun run frontend/scripts/perf/page-speed.ts \
 - 搜索要保留 workspace/权限边界、关闭和归档筛选、评论片段、排序及分页语义；下推 SQL 时应以现有结果契约验证，而不是只比较速度。
 - 实时消息保留 task/seq 身份、去重、顺序、卸载尾部 flush、未加载缓存保护和重连补漏；不可用扩大 `staleTime` 或删除失效逻辑掩盖请求量。
 - transcript 保留工具调用与结果配对、子 agent 分组、seq 定位、脱敏、终态及用户主动滚动的位置。虚拟化只能减少 DOM，不能代替数据派生和加载边界优化。
-- 收件箱保留游标的稳定排序、成员隔离、摘要跨所有未归档记录计数，以及自动运行分组、读/归档操作和链接定位语义；摘要数不能改成已加载页的局部计数。
+- 收件箱保留稳定排序、成员隔离、全局未读/关注计数、人的读游标和 message ID 深链；真实摘要不能改成已加载页的局部计数。
 - 新增用户侧批量 API 或查询能力时，按根 [AGENTS.md](../../AGENTS.md) 同批对齐 CLI；本页维护不新增用户能力。
 
 ## 已有验证和测量入口
@@ -155,18 +682,27 @@ bun run frontend/scripts/perf/page-speed.ts \
 | 仓库根 | `bun run tests/manual/bench-pg-bridge-overhead.ts` | 用 echo worker 隔离桥开销，产出微基准 p50/p95；没有访问 PostgreSQL，脚本末尾的固定 SQL 数外推不代表当前实现。 |
 | 仓库根 | `MUL357_TASKS=6000 bun run tests/manual/bench-task-list-pagination.ts --out <path>` | `GET /api/multiremi/tasks` 的 `limit` / 无 limit / 带 status / 普通成员四类请求在 6000 条种子数据下的 p50/p95、响应字节、SQL 条数与序列化耗时。内存 SQLite + `app.request()`，不含真实 HTTP 与 PostgreSQL；改前数字用同一文件在父提交上运行。 |
 | 仓库根 | `MULTIREMI_TEST_POSTGRES_URL=postgres://… MUL357_TASKS=6000 bun run tests/manual/bench-task-list-pagination-pg.ts --out <path>` | 同一接口在**真实 PostgreSQL** 上的对照：混合分布与两个尾部最坏分布（可见集中在最新 / 最旧）各跑一遍，输出 p50/p95、响应字节、SQL 条数、以及**过桥字节**（worker 序列化回主线程的 JSON 体积，`SELECT *` 与窄投影的差别就体现在这里）。改前数字用同一文件在父提交上运行；需要可创建临时库的 PG 实例。 |
+| 仓库根 | `bun run tests/manual/bench-issue-detail-first-screen.ts --out <path>` | MUL-385 的 Issue 详情首屏三路由（`/api/issues/:id`、`/sessions`、`/timeline?issue_session_id=@default&limit=40`，外加只留档的 `/comments`）：每个路由的 `dbq`、db 耗时、**过桥字节**（按 worker 的 `JSON.stringify({ rows, count })` 口径模拟）、响应字节与 p50/p95，并附带 1/5/20 个 session 的查询数规模扫描和鉴权链查询数。fixture 是 MUL-307 规模（173 条评论 / 多个 session / 50+ task，见 `tests/fixtures/multiremi/issue-detail-first-screen-fixture.ts`）。默认内存 SQLite + `app.request()`；设置 `MULTIREMI_TEST_POSTGRES_URL` 指向可一次性创建的测试 PG 时改用真实桥，不可达时回落 SQLite 并在报告里注明。响应形状由 `tests/unit/multiremi/issue-detail-first-screen-query-count.test.ts` 对 golden 比对。改前数字用同一文件在父提交上运行。 |
+| 仓库根 | `bun run tests/manual/session-log-window-query-count.ts --verbose` | `GET /api/sessions/:sessionId/log` 的 Chat/Issue 窗口、head、task 凭证与成员变体逐探针的语句数和按 SQL 分组明细；内存 SQLite + `app.request()`，只计语句数，不测延迟或 PG 桥。改前数字把 `packages/` 换成父提交后运行同一脚本，结果见下文“会话日志窗口”。 |
 | 仓库根 | `bun test tests/unit/multiremi/multiremi-store-issues.test.ts tests/unit/multiremi/multiremi-api-issues.test.ts` | 列表、搜索及 API 行为；功能测试不是性能基线。 |
 | 仓库根 | `bun test tests/unit/multiremi/multiremi-api-search-inbox.test.ts` | 收件箱游标、摘要和原有读/归档契约；不产出性能数据。 |
+| 仓库根 | `bun run tests/manual/bench-first-screen-hotspots-pr2.ts --out <path>` | 在已隔离的临时 HOME/state/config 环境运行；该独立 harness 不加载含 `bun:test` 生命周期 hook 的测试 preload。采集 inbox 摘要、附件内容（完整响应与条件请求）、workspace Runtime 列表的同口径 dbq、db、过桥字节及响应字节。显式 `MULTIREMI_TEST_POSTGRES_URL` 启用真实 PG，否则使用 SQLite；PG 失败不回落。摘要按全部未归档 selection 聚合，附件 `/content` 在鉴权后比较 id ETag；三条上传路径统一排他创建，使用完整 UUID id，碰撞最多重试三次，失败只清理本次创建的文件。Runtime usage/group/model 各一次批量读，两条列表查询固定按 `updated_at DESC, id DESC` 排序。基线与 golden 复现见 `reports/performance/MUL-473-pr2-first-screen-hotspots.md`。 |
+| 仓库根 | `env -u MULTIREMI_TOKEN bun run tests/manual/bench-mul395-s9-5.ts --out <path>` | S9-5 Chat 列表、Runtime/执行组/模型列表和 updater heartbeat；必须显式配置一次性 PG，失败不回落 SQLite。250 Chats、10 runtimes，`MUL395_TASKS` 控制历史任务规模；实际桥计数、最大单回复字节和连续 timer 的不可让出区间逐轮留样。sample 0 是各路由首读，随后预热 5 次、正式 20 次；当前 Runtime 统计走规范化台账 SQL 聚合，旧缓存版本的数据按生成提交解释。 |
 | 仓库根 | `bun test tests/unit/multiremi/multiremi-postgres-store.test.ts` | SQL 翻译和真实 PG store 契约；`MULTIREMI_TEST_POSTGRES_URL` 指向可创建临时数据库的测试实例，**本地/Agent 会话必须显式设置，否则集成部分整片静默 skip**（CI 在 `release-build-check.yml` 的 backend suite 步骤显式声明），不可达时跳过并打印原因，须记录 skipped。 |
 | 仓库根 | `MULTIREMI_TEST_POSTGRES_URL=postgres://… bun test tests/unit/multiremi/multiremi-task-list-postgres.test.ts` | MUL-357 的 PG 侧证据：迁移的两个分页索引真的建出且 `indexdef` 与 `ORDER BY created_at DESC, id DESC` 匹配、`EXPLAIN (ANALYZE)` 不出现 Seq Scan/全量 Sort、`?`→`$n` 的 status/游标/limit 绑定顺序、分页走遍后与未分页集合一致。UNSET 时默认落到 `postgres://multimira:multimira@localhost:5432/postgres`（即 CI service container），不可达时跳过并打印原因，须记录 skipped。 |
 | `frontend/packages/core` | `bun run test issues/queries.test.ts issues/ws-updaters.test.ts realtime/sync/tasks.test.ts realtime/use-realtime-sync.test.ts` | 查询、精确缓存更新、实时排序/去重与刷新语义。 |
-| `frontend/packages/views` | `bun run test common/task-transcript/build-timeline.test.ts common/task-transcript/agent-transcript-dialog.test.tsx` | 工具配对、子 agent 展示、终态和弹窗交互。 |
+
+S9-5 的 Chat API 列表在 SQL 排除 transport 会话，批量读取 agent 的权限所需字段；不改变 store 列表的默认选择或用户侧响应。Runtime 列表和单条读取均从规范化用量标量表执行 SQL 聚合，不读取旧 task usage JSON，不维护其 id/xmin 派生缓存。workspace 列表只返回每个 Runtime 的汇总列，过桥回包随 Runtime 数而非单位数增长；任务状态与持久化单位修订在下一次读取立即可见，事务内可读自己的写入。单位按执行时固化的 Runtime 归属，任务重派不会移动旧消费；任务状态计数按当前任务绑定独立聚合。SQLite 与 PostgreSQL 使用同一统计口径。原始非法数值仅在旧客户端输入边界规范化，原生单位验证安全非负整数，不能保留按旧 JSON/JS 加法顺序产生的溢出误差。真实 PG 一致快照、事务回滚、数量安全与列表回包边界见 runtime usage 专项测试；旧热缓存测量不能作为新事实源的性能结论。
+
+Updater heartbeat 保留每次状态写入与活动发版检查；未到检查时点时跳过重复的自动更新检查。CLI 对齐使用 app 内的成功指纹，包含当前版本、daemon 身份/有效在线状态/CLI 版本/launch owner 和 CLI 请求记录；相同版本下新 daemon 或请求状态变化仍会执行对齐，发版活动期间不执行。对齐只读这些字段，不再附带 runtime usage、models、groups。首读、到点检查和创建 CLI 请求的费用独立报告，见 `reports/performance/MUL-395-s9-5-{A,B,C}.md`。未结束任务热缓存回包与首次版本对齐环境差异的追加证据见 `MUL-395-s9-5-r2-{B,C}.md`；复跑工具为 `tests/manual/bench-mul395-s9-5-open-cache.ts` 和 `tests/manual/bench-mul395-s9-5-bridge-pairs.ts`，只使用本地隔离 PG。
+| `frontend/packages/views` | `bun run test common/task-transcript/agent-transcript-dialog.test.tsx common/task-transcript/agent-transcript-dialog-scale.test.tsx` | 条目嵌套、子 agent 展示、终态、弹窗交互，以及 2000 条记录的单次脱敏与按行重渲染。 |
 | `frontend/packages/core` / `frontend/packages/views` | 分别运行 `bun run test inbox/mutations.test.tsx` / `bun run test inbox/components/inbox-page.test.tsx` | 分页缓存 mutation、追加页、选择与折叠条目操作。 |
 
 测量源码：[API baseline](../../scripts/bench-api-route-baseline.ts)、[报告渲染](../../scripts/render-api-route-audit-report.ts)、[搜索规模基准](../../tests/manual/bench-store-n-plus-one.ts)、[桥微基准](../../tests/manual/bench-pg-bridge-overhead.ts)。
 
 ## 复现顺序与记录
 
+0. **高峰窗口（B4，2026-09-27 裁定）：只看北京时间 13–14 点这一个窗口**，不再要求 20–21 点；两个窗口的数字不可混在一张表里比较。低峰窗口沿用原定义。
 1. 记录 `git rev-parse HEAD`、`git status --short`、Bun/OS/CPU/内存、进程数量和数据库版本/位置。dirty 工作树另存差异摘要，不能只记 SHA。数据只用测试 fixture 或脱敏副本。
 2. 先复用 API baseline，不新造同类采集器。脚本覆盖固定的 `reports/performance/MUL-176-api-route-baseline.json`，renderer 覆盖同目录 HTML；每次运行后复制为带时间与 SHA 的独立产物，连同 console 输出和环境记录保存。
 3. API baseline 使用固定 `/tmp` 工作目录且会清理，顺序运行于支持 Bun 的隔离测试 checkout（优先 Linux/WSL），不与其他实例共用这些临时目录。保存输出中的实际 seed、状态码和 probe 数；脚本报错属于采集失败，不能当零延迟。
@@ -192,3 +728,147 @@ HTTP 或 app.request p50/p95（ms） / 错误率 / SQL数 / 响应 bytes：
 ```
 
 与基线比较时先证明结果、权限和事件语义一致，再报告相同环境下的差值；没有数据时只能提出待验证假设。
+
+### S9-6：活跃 Issue 任务读
+
+`GET /api/issues/:id/active-task` 先按活跃状态及 Chat creator/task capability 在 SQL 中筛选，再只读取完整公开任务字段；公开 prompt/result/usage/plugin 与 queue blocker、顺序保持原形状。Issue workspace 已授权且一致的行无需逐行重复权限读取，历史 workspace 不一致的行保留旧权限守卫。终态任务和私有执行 profile 不跨桥。正式测试 `first-screen-hotspots-s96-active.test.ts` 对双方言、状态、空/不存在/无权 Issue、Chat/非 Chat、任务凭证逐字段对拍。
+
+### S9-6：Agent 列表批量水合
+
+`GET /api/agents` 按 workspace/归档条件取未水合候选，先过滤可见 Agent，再批量读取技能关联（有界 IN 批次，不读 Skill files）；结构化技能优先、关联创建时间/名称排序和 inline fallback 去重不变。MCP 配置的 workspace 设置/角色每 workspace 只查一次，保留 X-Agent-ID、owner/admin、Agent owner 与 always_redact_env 规则；custom_env 仍只输出键数量。native 列表和单 Agent 详情保留原路径。双方言正式对拍覆盖角色、私有/其他 workspace、两种归档参数和脱敏。
+
+### S9-6：Project 列表投影
+
+`GET /api/projects` 使用专用摘要投影，保持原 issue/done/resource 聚合、排序、null/归档及权限行为；instructions、delta_instructions 和修订元数据不跨桥。详情、native 列表及搜索仍用完整 Project。正式双方言用例逐字段对拍，增大两条说明至各64KiB后摘要内容和回包字节不变，详情仍返回完整说明。
+
+### 会话日志窗口：批量轮卡片与来源可见性
+
+`GET /api/sessions/:sessionId/log` 是 Chat 每次切换会话、Issue 会话打开时的读取。原实现每张轮卡片 3 条语句（turn+当前 attempt、回复正文、usage），每个受保护来源再读 turn、attempt 回退、task 行、usage 与 autopilot run，Issue 回复另逐条读被回复消息。
+
+- **实现事实：** 多行读取（window、listShown、listAll、range 页、按 task 列出）经 [projectTurnCards](../../packages/server/src/store/turn-attempts.ts) 每批各一条语句读取 turn+attempt、Chat 回复正文（仅 Chat 卡片使用）与 usage。turn+attempt 与回复正文每批 50 个 id：这些行带 legacy prompt、进度摘要和 trace/usage JSON，PG 下整条结果作为一次桥回复返回，小批次避免触发 1 MiB 日志与回复上限，窗口最多约 34 张卡片，仍是一条语句；卡片由与单行 `projectTurnCard` 相同的函数构造，缺失 turn 仍抛同一错误，单行读取不变。
+- **实现事实：** 路由把窗口交给 [conversationEntryVisibility](../../packages/server/src/api/helpers/conversations.ts) 的 `prefetch`：被回复消息按层用 `getMessages` 批量读取（与 `getMessage` 同一 SQL 条件与转换，整行消息每批 50 条），来源 subject 用 `getConversationSourceSubjects` 每 400 个 id 一条 UNION 语句读取（只返回 id 类窄列），按 `getTurn(id) ?? getTurnForAttempt(id)` 的优先级取 turn 的当前 attempt，并与 `getTask` 读同一执行记录视图，字段为 id/workspace/agent/Chat/Issue 会话，覆盖访问判定读取的全部字段。判定仍逐来源调用 `canAccessConversationTask`；批量未覆盖的来源（`target_seq` 标记等）走原逐条读取。守卫已读的 Chat 行写入本请求 memo；Chat 内容遵循工作区共享人类访问规则，Task 凭据仍只访问自身绑定的任务，不按登录账号的历史创建者限制人类读取。Issue 会话分支与 `with_activity` 复用守卫读到的会话行。
+- **未改变的逐条读取：** 问题通知、决策与 `target_seq` 关联；Agent 的 `/messages?from&to` 范围读只批量卡片，可见性仍逐条。Task 凭据的执行事实守卫保留，本次 Chat 窗口实测固定读取 3 次，不随窗口扩大而增加。
+
+2026-10-19 合并上游后，在 Bun 1.3.14、内存 SQLite 上复核的**本地语句数**（不是生产延迟，不含 PG 桥耗时）。数据为 [session-log-window fixture](../../tests/fixtures/multiremi/session-log-window-fixture.ts)：40 个已完成 Chat 轮（1 个重试、部分带 usage/附件）与 12 轮 Issue 评论、公开/私有 Agent 轮、反应、附件、活动；人类 PAT 与 Task 凭据分别读取，`last_used_at` 写入先预热。
+
+| 读取 | 可见行数 | 语句数 |
+| --- | --- | --- |
+| 人类 Chat `?before=30` / `?before=90` | 30 / 90 | 均为 18 |
+| 人类 Chat `?anchor=0&before=1`（head） | 1 | 11 |
+| Chat Task 凭据 `?before=30` / `?before=90` | 20 / 60 | 均为 35 |
+| 人类 Issue `?before=30&with_activity=1` / `?before=45&with_activity=1` | 30 / 45 | 均为 23 |
+| 另一人类账号 Issue `?before=30&with_activity=1` | 30 | 23 |
+
+复现：`bun run test tests/unit/multiremi/session-log-window-query-count.test.ts`。[回归测试](../../tests/unit/multiremi/session-log-window-query-count.test.ts)固定上述 Chat、head、Task 与 Issue 语句数，窗口扩大到 90/45 行时不变，并要求探针的响应字节与[当前 golden](../../tests/fixtures/multiremi/session-log-window-golden.json)一致。另一人类账号共享 Chat 内容和 Issue 中的私有 Agent 轮；Task 凭据仍只见自身轮卡片，不能借共享人类身份扩大读取范围。本次 SQLite 复跑通过；`MULTIREMI_TEST_POSTGRES_URL` 未设置，PostgreSQL 本轮未验证，不能用上游历史结果作为此次通过证据。
+
+
+## S9-6 本地详情复核
+
+S1 的 `--ssr-cookie` 默认开启，仅在目标 origin 的浏览器内存 context 设置 HttpOnly `multimira_auth`；`--no-ssr-cookie` 用于 CSR 对照。开关不代表播种成功，逐轮以实际日志 DOM 的 seed 标记报告 SSR/CSR。`renderMs` 只量目标 Session 的窗口 `responseEnd` 到首次正常 fresh 揭示，warm 沿用 click 原点；SSR seed 没有浏览器窗口 responseEnd，缺观测或 forced 揭示记 null 并说明原因。各来源单列分位数；compare 不对不同 Cookie/实际来源或混合来源做差。
+
+以下 S7 口径记录的是 2026-10-21 删除前的 CI 检查。S7 整轮等待延后 API 与真实 Hub `stream.ack` 处理安静后才统计回读、附件和跳动。CI 的揭示前波次由当时的 `zero-jump-waves.ts` 按在飞区间分组：请求直接或经其他请求重叠时为同一波，上一波全部结束后发出的请求才开下一波，结束与开始同一时刻视为不重叠；链路用每波最后结束的请求连接。S1 测速的 `computeWaves` 与 8ms 容差保持原样，历史数字仍可对比，S7 的新波次不能与旧口径直接做差。SSR 普通详情 warm 的揭示前波次 ≤2 为阻塞项；日志提前与去重后的 CSR warm 以 ≤2 为目标，未达到时逐波保留链路与原因，10/9 生产 S1 决定最终达标。cold、运行中 warm 和收件箱未读通知深链 warm 的波次只记录，保留逐请求及逐波链路；这些场景的回读=0、同附件 content≤1、跳动=0 和非强制揭示仍严格检查。`detail-locate` 验证独立详情 `?comment`，`detail-child` 验证带父 Issue 的详情，均可分别跑 SSR/CSR。150ms 渲染目标仅记录，剩余同步布局/面板注册热点不在本批改动范围内。
+
+
+## Chat 切换
+
+**本地模型，不是生产数据。** [chat-switch-harness.ts](../../tests/manual/chat-switch-harness.ts) 启动真实 API，用内存 SQLite 播种 6 个 Chat（每个 40 轮，回复含列表、表格和代码块），`CHAT_SWITCH_SQL_MS` 让每条已执行语句同步等待，模拟 PostgreSQL 桥往返；它打印 `chats=` 和本地夹具 PAT `token=`，token 不进入提交或报告。[chat-switch-measure.ts](../../tests/manual/chat-switch-measure.ts) 在 headless Chromium 中点击侧栏会话行，CDP 给每个请求加 `CHAT_SWITCH_LATENCY` 毫秒延迟，从点击起记录行出现（`rowsMs`）、揭示（`visibleMs`），以及该次切换发起的日志读取、揭示前已完成的读取和 seq 0 head 读取。每轮切到其他各会话再回到打开的会话；样本按本页是否显示过分为首次（`first`）和再次（`again`）。
+
+```bash
+CHAT_SWITCH_API_PORT=16401 CHAT_SWITCH_SQL_MS=1 bun run tests/manual/chat-switch-harness.ts
+# 另一个终端，在 frontend/apps/web：
+REMOTE_API_URL=http://127.0.0.1:16401 NEXT_TELEMETRY_DISABLED=1 bun run build
+../../../node_modules/.bin/next start -p 3301
+# 仓库根，填入 harness 打印的值：
+CHAT_SWITCH_WEB=http://localhost:3301 CHAT_SWITCH_TOKEN=<token> CHAT_SWITCH_CHATS=<chats> \
+  CHAT_SWITCH_LATENCY=50 CHAT_SWITCH_ROUNDS=2 bun run tests/manual/chat-switch-measure.ts
+```
+
+2026-10-18，Apple M3 Pro、macOS 26.2、Bun 1.3.14、Next.js 生产构建、1440×900，`SQL_MS=1`、延迟 50ms、2 轮；每次运行 5 个首次和 7 个再次样本，单位 ms，p50 / max：
+
+| 版本 | 运行 | 首次 rowsMs | 首次 visibleMs | 再次 rowsMs | 再次 visibleMs | 再次的阻塞读取 | head 读取（12 次合计） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 改动前（f4a2161a5） | 1 | 250 / 346 | 278 / 370 | 249 / 269 | 265 / 287 | 未记录 | 未记录 |
+| 改动前（f4a2161a5） | 2 | 271 / 294 | 301 / 324 | 266 / 283 | 284 / 304 | 14 / 15 | 12 |
+| Chat 日志池 | 1 | 319 / 339 | 348 / 372 | 54 / 60 | 72 / 79 | 0 / 7 | 0 |
+| Chat 日志池 | 2 | 223 / 247 | 248 / 277 | 53 / 61 | 71 / 84 | 0 / 7 | 0 |
+| Chat 日志池 | 3 | 223 / 232 | 249 / 258 | 52 / 59 | 71 / 77 | 0 / 7 | 0 |
+
+「阻塞读取」是揭示前已完成的日志读取数 / 该组发起的日志读取数；改动前的运行 1 用的是尚未统计读取的脚本版本。改动前后各新启动一次 API 和 Web，同一版本的各次运行依次共用该实例（日志池运行 1 与 2 之间另跑过一次 CPU 采样）；首次访问在运行之间波动较大。之后重启 API 和 Web，用当前脚本又测两次日志池（共享机器，测时 load average 1 分钟 3.9、5 分钟 7.0；前面各次未记录负载）：再次 visibleMs p50 90 和 92，rowsMs 74 和 73，阻塞读取仍为 0；首次 visibleMs p50 284 和 272。同一负载下没有重测改动前，这两次不与上表做差。再次访问不再等待网络：留存的行同步画出，每次切换在后台读取一次尾部。再次访问的 visibleMs 仍约 71ms，未达到 50ms：同条件下 CPU 采样显示从点击到揭示约 69ms 的主线程非空闲 CPU 时间，其中约 27ms 落在 Markdown 解析（micromark）所在的构建块，ChatMessageList 每次挂载都重新解析各行；其余是 React 渲染、布局与 GC，不是网络。
+
+Markdown 解析缓存（[markdown-tree.ts](../../frontend/packages/ui/markdown/markdown-tree.ts)）在日志池之上再测：同一脚本与条件、CPU 1x，两个构建交替各跑 3 次（A1 B1 A2 B2 B3 A3），期间 1 分钟负载 2.7–5.5，单位 ms，p50 / max：
+
+| 版本 | 再次 visibleMs | 首次 visibleMs |
+| --- | --- | --- |
+| Chat 日志池 | 91 / 96、92 / 97、89 / 94 | 288 / 294、292 / 295、282 / 288 |
+| 日志池 + Markdown 缓存 | 57 / 60、57 / 59、57 / 63 | 269 / 275、265 / 274、231 / 268 |
+
+这组日志池数字高于上表，是机器负载不同所致，只在同一组内比较。再次访问的主线程工作从约 60ms 降到约 34ms，其中 Markdown 解析从约 23ms 降到 1ms 以下；剩余主要是输入框编辑器切换、揭示时的布局读取、代码块的 `useTranslation` 和 React 工作。
+
+## Chat 回复交接
+
+**本地模型，不是生产数据。** [chat-reply-handoff-probe.ts](../../tests/manual/chat-reply-handoff-probe.ts) 对着带 `CHAT_SWITCH_AGENT_MS` 的 [chat-switch-harness.ts](../../tests/manual/chat-switch-harness.ts)（假 Agent 隔这么久用 Markdown 回复结束每一轮）发消息，逐帧记录这一轮的回复是否在屏幕上：实时视图里的回复（`[data-chat-live-final]`）和发出的消息之后的持久化回复行。假 Agent 不写 trace，探针自己应答页面的实时 trace 读取（一条命令加最终回复，与持久化回复含同一段标记文字），trace socket 仍是真的。每轮报告两者之间都不在屏幕上的帧（`blank`）、同时在的帧（`dup`）和回复行出现后又消失的帧（`drop`）；`CHAT_PROBE_STOP_AT_MS` 改为停止这一轮、看取消提示，`CHAT_PROBE_QUEUE_AT_MS` 加一条排队消息、看两轮。`CHAT_PROBE_HOST_MAP` 把一个非 localhost 主机名解析到本机，页面是非安全上下文（`isSecureContext` 为 false），日志副本与纯 HTTP 的生产部署一样走每个标签页的内存实现。
+
+```bash
+CHAT_SWITCH_API_PORT=16491 CHAT_SWITCH_AGENT_MS=4000 CHAT_SWITCH_SQL_MS=1 bun run tests/manual/chat-switch-harness.ts
+# frontend/apps/web 中以 REMOTE_API_URL=http://127.0.0.1:16491 构建，再 next start -p 3391
+CHAT_PROBE_TOKEN=<token> CHAT_PROBE_HOST_MAP=chathandoff.test CHAT_PROBE_WEB=http://chathandoff.test:3391 \
+  CHAT_PROBE_LATENCY=50 CHAT_PROBE_RUNS=3 bun run tests/manual/chat-reply-handoff-probe.ts
+```
+
+2026-10-20，Apple M3 Pro、macOS 26.2、Bun 1.3.14、Next.js 生产构建、headless Chromium、1440×900，`SQL_MS=1`，共享机器（测时 1 分钟负载 10–23）。改动前为交接之前的 main（aa99f71fa），改动后为本次交接在 21e18ce08 之上的构建；除最后一行外都是非安全来源。`blank` 单位 ms（帧数），每格是各次运行的范围：
+
+| 场景 | 运行 | 改动前 blank | 改动后 blank |
+| --- | --- | --- | --- |
+| 新会话，Agent 4s，延迟 50ms | 3 / 3 | 284–324（32–37 帧） | 0 |
+| 已有会话，Agent 4s，延迟 50ms | 3 / 3 | 343–379（40–45 帧） | 0 |
+| 新会话，Agent 4s，延迟 150ms | 3 / 3 | 471–484（54–56 帧） | 0 |
+| 新会话，Agent 1s，延迟 50ms | 3 / 3 | 238–354（27–40 帧） | 0 |
+| 已有会话，Agent 1s，延迟 50ms | 3 / 3 | 240–529（28–63 帧） | 0 |
+| 排队一条后续，第一轮 / 第二轮 | 2 / 2 | 441–643 / 251–267 | 0 / 0 |
+| 运行 2 秒时停止，取消提示 | 2 / 2 | 214–234（25–28 帧） | 0 |
+| localhost（安全来源），Agent 1s | 2 / 2 | 225–330（26–36 帧） | 0 |
+
+所有运行改动前后 `dup` 与 `drop` 都是 0。改动前实时视图在结算事件（`chat:done` 或 `task:cancelled`）后的下一帧消失，回复行在 230–660ms 后才到；改动后实时视图保留到回复行出现的那一帧。排队场景里第一轮的行到达时，第二轮的实时视图仍在 DOM 中，但有一帧被新行挤到视口下方，贴底滚动下一帧追上；改动前同一时刻也有一帧看不到第二轮的实时视图，与交接无关。
+
+## Chat 侧面板开合
+
+**本地模型，不是生产数据。** [chat-switch-harness.ts](../../tests/manual/chat-switch-harness.ts) 加 `CHAT_SWITCH_SUBAGENTS=1` 时，第一个 Chat 最后三轮的轮卡带 daemon 上报的完成事实（`type_histogram` 里的子代理与后台任务、`late_subagents`），会话的后台任务登记有一个运行中、一个已结束的任务。[chat-side-panel-measure.ts](../../tests/manual/chat-side-panel-measure.ts) 在 headless Chromium 1440×900 中点会话头的「查看子代理与后台任务」开合面板，逐帧记录并排时面板外框的宽度、浮窗里覆盖层的偏移、会话离底距离、聊天栏宽度、贴底状态和「回到底部」按钮，另记 long task 与 long animation frame；harness 不写 trace，脚本自己应答面板的 trace 读取（一轮跑过三个子代理）。离底距离在该帧的 `requestAnimationFrame` 排入的任务里读，即那一帧渲染之后。
+
+```bash
+CHAT_SWITCH_API_PORT=16521 CHAT_SWITCH_CHATS=3 CHAT_SWITCH_TURNS=20 CHAT_SWITCH_SQL_MS=1 CHAT_SWITCH_SUBAGENTS=1 \
+  bun run tests/manual/chat-switch-harness.ts
+# frontend/apps/web 中以 REMOTE_API_URL=http://127.0.0.1:16521 构建，再 next start -p 3421
+CHAT_PANEL_TOKEN=<token> CHAT_PANEL_CHAT=<第一个 chat> CHAT_PANEL_ROUNDS=5 bun run tests/manual/chat-side-panel-measure.ts
+```
+
+2026-10-20，Apple M3 Pro、macOS 26.2、Bun 1.3.14、Next.js 生产构建，共享机器（1 分钟负载 5.9–6.9）。headless Chromium 以约 120Hz 出帧。会话页宽：应用导航与 300px 会话列表之外约 880px，面板 400px 时会话面板约 480px。每格是各轮的范围，帧间隔单位 ms：
+
+| 场景 | CPU | 轮 | 稳定用时 | 帧间隔 p50 / p95 | > 25ms 的帧 | long task / LoAF | 离底（过程中最大 / 结束） | 「回到底部」出现 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 并排打开 | 1× | 5 | 366ms | 8.3 / 8.4–9.3 | 0 | 0 / 0 | 22–34px / 0 | 0 帧 |
+| 并排关闭 | 1× | 5 | 516–517ms | 8.3 / 8.6–9.2 | 0 | 0 / 0 | 0 / 0 | 0 帧 |
+| 并排打开 | 4× | 3 | 367–377ms | 16.5–24.5 / 25.0–33.8 | 1–3 | 0 / 0 | 0–46px / 0 | 0 帧 |
+| 并排关闭 | 4× | 3 | 516–517ms | 8.4 / 24.8–25.0 | 1–2 | 0 / 0 | 46–68px / 0 | 0 帧 |
+| 减少动态效果，开 / 关 | 1× | 5 | 7–17ms | 8.3 / 8.5–9.4 | 0 | 0 / 0 | 0 / 0 | 0 帧 |
+| 浮窗覆盖，开 / 关 | 1× | 5 | 196–217ms | 8.3–8.4 / 8.8–9.4 | 0 | 0 / 0 | 0 / 0 | 0 帧 |
+| 浮窗覆盖，开 / 关 | 4× | 3 | 201–217ms | 8.2–8.4 / 9.0–24.9 | 0 | 0 / 1 次 55ms | 0 / 0 | 0 帧 |
+
+稳定用时是从点击到面板宽度（覆盖层位置）不再变化；弹簧在约 370ms 时已到宽度的 99.8%，关闭在 0.5s 时到 0 并卸载。并排开合时会话列随会话面板逐帧变宽或变窄（打开 768→476px 经过 34–35 个宽度，关闭 17–18 个），这是逐帧重排而不是一次跳变：1× 时帧间隔与覆盖层相同，4× 降速时打开的帧间隔升到 16–34ms，覆盖层不重排、保持 ~9ms，没有 long task。会话始终贴底，贴底状态没有离开 `pinned`，「回到底部」按钮一帧也没出现；过程中读到的离底距离是帧后读数，结束时为 0。
+
+没有 `usePinnedThroughWidthChange` 的构建（3 轮，离底在 `requestAnimationFrame` 里读）：并排关闭有 2/3 轮贴底状态变为 `released`，其中 1 轮结束时离底 23px；减少动态效果时第一次关闭就解除贴底并停在离底 336px，之后各轮都是 `released`、离底 225–336px。只用 ResizeObserver 的第一版保护（3 轮，帧后读）：减少动态效果的关闭仍每轮有一帧 `released`，2 轮里「回到底部」按钮各闪 1 帧；加上会话面板上捕获阶段的 scroll 监听后为上表。原因是会话面板变宽时浏览器收紧 `scrollTop`，或列表在两帧之间挂载、重量行，紧接着的 scroll 事件读到超过 24px 的离底距离，列表把它当成读者滚离。拖动面板边缘改宽度时不启用这层保护，没有测量。
+
+## CI 测试成本
+
+后端文件耗时与分片归属由 [ci-backend.ts](../../scripts/ci-backend.ts)报告，发现范围、权重来源、分片数、报告 artifact 和更新命令见 [CI 覆盖](../../TESTING.md#ci-覆盖)。历史文件时间只用于调度估算，不含每片 runner 准备与安装开销；每文件时间总和不等于整条工作流墙钟时间或计费时间。比较同一范围与环境时，分别记录分片关键路径、所有 job 的总 runner 时间、安装/服务启动与构建开销。
+
+[路由矩阵夹具](../../tests/helpers/routing-matrix-database.ts)输出创建、初始化、迁移、重置、连接计数及 setup/reset 实采时间；只代表该夹具使用范围。矩阵恢复已改变初始化方式；定向数据库验证保留两后端各304组合且通过，实采每后端一次Store初始化、304次重置。尚无同条件完整CI前后对照，不能据构造次数宣称总体耗时改善已验证，也不能把测试setup时间当作产品延迟。长期去重要求与隔离限制见 [测试说明](../../TESTING.md)。
+
+
+普通测试工作量另有两种显式治理：[SQLite snapshot](../../tests/helpers/sqlite-store-snapshot.ts)在18个接入文件中减少重复冷bootstrap，但每例仍建独立连接和新Store；[pending-turn committed baseline](../../tests/unit/multiremi/pending-turn-test-backends.ts)在七个同步套件中保留96个双方言场景，定向验证96个场景全部通过、实采14次Store初始化；按原每例fresh策略，同一96场景需96次初始化（原96次为源码推导，未实测）；helper自身的隔离回归另计，不把这项毛减少当作全仓净收益。snapshot迁移种子元数据共享，fresh默认和敏感用例限制见[测试说明](../../TESTING.md)。snapshot统计由文件afterAll输出窗口增量；pending-turn统计按suite输出，均只覆盖该helper，不能混作全仓成本。
+
+[PR2夹具](../../tests/fixtures/multiremi/first-screen-hotspots-pr2-fixture.ts)的附件功能专用选项减少无关播种，默认规模、golden和查询计数回归不变。上述范围已有定向验证：数据库helper三个契约文件18个用例、七个committed-baseline文件96个场景，以及两后端各304组合的路由矩阵均通过；不代表全部消费者或完整CI验证。PG八次重置的小型profile显示TRUNCATE和schema检查占主要成本；将schema五查询合并为单次SQL虽然减少往返，但schema耗时未改善，已回退。尚无同条件完整CI前后对照，不能宣称总体提速或未经实测的时间达标。
+
+本次定位、同规模对照、N/M 敏感性及未完成的生产验收见
+[MUL-85 混合负载报告](../../reports/performance/MUL-85-mixed-load.md)。
+
+MUL-191 的 daemon 终态测量与逐语句边界见[剩余 SQL 审计](../../reports/performance/MUL-191-terminal-remaining.md)。共享执行读取在单个同步帧内复用 turn/attempt 行；事务入口、取得新锁、依赖表写入和回滚仍使缓存失效。异步下行快照每个同步段使用独立缓存，不借用上一帧或 yield 前的行。规模夹具在计数前通过真实 Hub 对齐批量 SQL 历史的 head，避免准备阶段跳过通知产生的日志补洞分页混入当前帧；ACK 后的下行和派活仍计到 layer.drain()。报告中的 SQLite 数字不能作为 PG 或线上 lag 验收。

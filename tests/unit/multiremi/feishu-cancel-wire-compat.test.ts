@@ -26,7 +26,7 @@ import { jsonResponse } from "./helpers.js";
  * handler rather than installing a second stub.
  */
 let currentBody: unknown = {};
-let handler: ((url: string, init?: RequestInit) => Response) | null = null;
+let handler: ((url: string, init?: RequestInit) => Response | Promise<Response>) | null = null;
 let realFetch: typeof globalThis.fetch | null = null;
 
 beforeEach(() => {
@@ -74,7 +74,10 @@ async function renderStopCard(body: unknown): Promise<string> {
     "oc_group:thread:omt_click",
     async (stream) => {
       for await (const event of stream as AsyncIterable<TaskStreamEvent>) {
-        if (event.kind === "message" && event.message.content) text.push(event.message.content);
+        // A command reply is one final agent message.
+        if (event.kind === "message" && event.message.type === "item.completed" && event.message.item.type === "agent_message") {
+          text.push(event.message.item.text);
+        }
       }
     },
   );
@@ -174,8 +177,8 @@ describe("Feishu cancel wire compatibility", () => {
 
   it("sends the optional disambiguation fields only when present", async () => {
     const bodies: Array<Record<string, unknown>> = [];
-    handler = (url, init) => {
-      if (url.endsWith(PATH)) bodies.push(JSON.parse(String(init?.body)));
+    handler = async (url, init) => {
+      if (url.endsWith(PATH)) bodies.push(await new Request(url, init).json());
       return jsonResponse({ outcome: "none" });
     };
     const client = new MultiremiDaemonClient("https://remi.example", "tok_test");

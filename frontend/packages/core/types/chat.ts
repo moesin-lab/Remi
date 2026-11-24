@@ -1,3 +1,14 @@
+import type { MultiremiBackgroundTask } from "@multiremi/contracts/unified-model";
+
+/** Which chats a list shows: the user's own, those opened by automation runs, or both. */
+export type ChatOriginFilter = "user" | "automation" | "all";
+
+/** The automation run that opened a chat. */
+export interface ChatOrigin {
+  autopilot_id: string;
+  run_id: string;
+}
+
 export interface ChatSession {
   runtime_workspace_id?: string | null;
   id: string;
@@ -10,13 +21,28 @@ export interface ChatSession {
   /** True when the session has any unread assistant replies. List-only. */
   has_unread: boolean;
   pinned: boolean;
+  /** Set for chats opened by an automation run; null for the user's own. */
+  origin: ChatOrigin | null;
   unread_count: number;
   last_message: { content: string; role: "user" | "assistant"; created_at: string } | null;
+  /**
+   * Background tasks still running in this chat (PR 6), from the session
+   * registry, whether or not a turn runs. List-only; absent when the server
+   * does not report it (older servers), which hides every background-task
+   * surface that would need it.
+   */
+  running_background_tasks?: number;
   created_at: string;
   updated_at: string;
 }
 
 export interface CreateChatSessionInput {
+  /**
+   * A client-made id (`createChatSessionId`), so the chat can be shown before
+   * the server answers. The server refuses a malformed id (400) and one that
+   * has ever been used (409).
+   */
+  id?: string;
   runtime_workspace_id?: string | null;
   agent_id: string;
   title?: string;
@@ -29,22 +55,24 @@ export interface UpdateChatSessionInput {
   pinned?: boolean;
 }
 
-export interface ChatQueuedTask {
-  task_id: string;
-  content: string;
-  attachment_ids: string[];
-  created_at: string;
-}
-
-export interface PrioritizeChatQueuedTaskResponse {
-  task_id: string;
-  active_task_id: string | null;
-}
-
 export interface PendingChatTaskItem {
   task_id: string;
+  /** The turn the attempt belongs to; cancel addresses the turn. */
+  turn_id?: string;
   status: string;
   chat_session_id: string;
+  /**
+   * Subagents the turn's current attempt has running (PR 5), from the
+   * daemon's best-effort `task.activity` report through `/api/turns`. Absent
+   * when the server does not report it (older servers, never reported).
+   */
+  running_subagents?: number;
+  /**
+   * Background tasks the turn's current attempt has running (PR 6), from the
+   * same report. The session's own count (`ChatSession.running_background_tasks`)
+   * also covers tasks parked after their attempt.
+   */
+  running_background_tasks?: number;
 }
 
 export interface PendingChatTasksResponse {
@@ -52,6 +80,7 @@ export interface PendingChatTasksResponse {
 }
 
 export interface ChatMessage {
+  turn_id?: string;
   id: string;
   chat_session_id: string;
   role: "user" | "assistant";
@@ -97,22 +126,19 @@ export interface ChatMessagesPage {
   next_cursor?: ChatMessagesCursor | null;
 }
 
+/**
+ * The server accepted the message. The turn it started or joined is read
+ * afterwards (`getChatTurnPendingTask`), never as part of the send.
+ */
 export interface SendChatMessageResponse {
   message_id: string;
-  task_id: string;
-  supports_queue: true;
-  queued: boolean;
-  /**
-   * Server-authoritative task creation time. Optimistic StatusPill seed
-   * uses this as its anchor so the timer starts from the real `0s` —
-   * without it the front-end falls back to its local clock and the
-   * timer "snaps backwards" later when WS events update the cache.
-   */
+  turn_id?: string;
+  /** Server time of the message. */
   created_at: string;
 }
 
 /**
- * Response from GET /api/chat/sessions/{id}/pending-task.
+ * View model derived from active turns.
  * Head fields are absent when the session has no in-flight task.
  *
  * `created_at` is the server-authoritative anchor for the chat StatusPill's
@@ -121,6 +147,7 @@ export interface SendChatMessageResponse {
  * so the timer survives refresh / reopen without "resetting to 0s".
  */
 export interface ChatPendingTask {
+  turn_id?: string;
   task_id?: string;
   status?: string;
   created_at?: string;
@@ -130,6 +157,37 @@ export interface ChatPendingTask {
   progress_summary?: string | null;
   /** Absent only in the short-lived optimistic cache seed. */
   supports_queue?: true;
-  /** Follow-up messages only; the current head is represented by task_id. */
-  queued_tasks?: ChatQueuedTask[];
 }
+
+/**
+ * One background task of a chat (PR 6 §5.1), as the session registry reports
+ * it: `GET /api/chat/sessions/:id/background-tasks` and the
+ * `chat:background_tasks` realtime event carry the same rows.
+ *
+ * Fields the contract row does not have yet are optional here, and each one
+ * only adds to the UI when the server sends it:
+ * - `origin_turn_seq`: the number of the turn that started it (「来自第 n 轮」);
+ * - `output_unreadable`: the daemon could not read its output (「无法读取输出」).
+ */
+export type ChatBackgroundTask = MultiremiBackgroundTask & {
+  origin_turn_seq?: number | null;
+  output_unreadable?: boolean;
+};
+
+/**
+ * A chat's background tasks: the running rows plus the last ended ones. The
+ * read endpoint and the realtime event share this shape; `running` is the
+ * count the session list reports as `running_background_tasks`.
+ */
+export interface ChatBackgroundTasksSnapshot {
+  session_id: string;
+  running: number;
+  rows: ChatBackgroundTask[];
+}
+
+/**
+ * What a stop asks for (`POST /api/chat/sessions/:id/background-tasks/stop`):
+ * one task, by the row's `task_id` (the bridge's task id), or every running
+ * task of the chat.
+ */
+export type ChatBackgroundStopTarget = { task_id: string } | { all: true };

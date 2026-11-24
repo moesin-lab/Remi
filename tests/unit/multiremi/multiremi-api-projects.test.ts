@@ -1,3 +1,5 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
 // Workspace object updates/archival, project resource endpoints, and the original
 // project/squad/autopilot compatibility routes.
 import { afterEach, describe, expect, it } from "bun:test";
@@ -13,7 +15,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     const agent = store.createAgent({ name: "Claude", provider: "claude" });
     const project = store.createProject({ title: "Ops" });
     const squad = store.createSquad({ name: "Ops squad", leaderId: agent.id });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Ops auto",
       projectId: project.id,
       assigneeType: "squad",
@@ -236,23 +238,24 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     });
     expect(created.status).toBe(201);
     const createdBody = await created.json();
+    // ADR 0023: one instructions field; a delta half from an older client is appended after a blank line.
     expect(createdBody.project).toMatchObject({
       description: "Visible summary",
-      instructions: "Use Bun.\nRun focused tests.",
-      deltaInstructions: "Review new comments.\nKeep context compact.",
+      instructions: "Use Bun.\nRun focused tests.\n\nReview new comments.\nKeep context compact.",
+      deltaInstructions: "",
       instructionsRevision: 1,
-      instructionsUpdatedBy: userId,
+      instructionsUpdatedBy: "local",
     });
     expect(createdBody.project.instructionsUpdatedAt).toBeString();
 
     const compatibilityDetail = await app.request(`/api/projects/${createdBody.project.id}`, { headers });
     expect(compatibilityDetail.status).toBe(200);
     expect(await compatibilityDetail.json()).toMatchObject({
-      instructions: "Use Bun.\nRun focused tests.",
-      delta_instructions: "Review new comments.\nKeep context compact.",
+      instructions: "Use Bun.\nRun focused tests.\n\nReview new comments.\nKeep context compact.",
+      delta_instructions: "",
       instructions_revision: 1,
       instructions_updated_at: createdBody.project.instructionsUpdatedAt,
-      instructions_updated_by: userId,
+      instructions_updated_by: "local",
     });
 
     const missingExpectedRevision = await app.request(`/api/multiremi/projects/${createdBody.project.id}`, {
@@ -318,10 +321,10 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     expect(nativeUpdated.status).toBe(200);
     const nativeUpdatedBody = await nativeUpdated.json();
     expect(nativeUpdatedBody.project).toMatchObject({
-      instructions: "Prefer focused tests.",
-      deltaInstructions: "Read only the latest delta.",
+      instructions: "Prefer focused tests.\n\nRead only the latest delta.",
+      deltaInstructions: "",
       instructionsRevision: 2,
-      instructionsUpdatedBy: userId,
+      instructionsUpdatedBy: "local",
     });
 
     const expectedConflict = {
@@ -357,7 +360,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     const unchanged = await app.request(`/api/projects/${createdBody.project.id}`, {
       method: "PUT",
       headers,
-      body: JSON.stringify({ instructions: "Prefer focused tests.", expected_instructions_revision: 2 }),
+      body: JSON.stringify({ instructions: "Prefer focused tests.\n\nRead only the latest delta.", expected_instructions_revision: 2 }),
     });
     expect(unchanged.status).toBe(200);
     expect((await unchanged.json()).instructions_revision).toBe(2);
@@ -370,14 +373,15 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     expect(unrelatedUpdate.status).toBe(200);
     expect(await unrelatedUpdate.json()).toMatchObject({
       title: "Directed project renamed",
-      instructions: "Prefer focused tests.",
+      instructions: "Prefer focused tests.\n\nRead only the latest delta.",
+      delta_instructions: "",
       instructions_revision: 2,
     });
 
     const maxLengthUpdate = await app.request(`/api/multiremi/projects/${createdBody.project.id}`, {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ instructions: "\u{20000}".repeat(4_000), expectedInstructionsRevision: 2 }),
+      body: JSON.stringify({ instructions: "\u{20000}".repeat(8_002), expectedInstructionsRevision: 2 }),
     });
     expect(maxLengthUpdate.status).toBe(200);
     expect((await maxLengthUpdate.json()).project.instructionsRevision).toBe(3);
@@ -385,10 +389,10 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     const tooLongUpdate = await app.request(`/api/projects/${createdBody.project.id}`, {
       method: "PUT",
       headers,
-      body: JSON.stringify({ instructions: "\u{20000}".repeat(4_001), expected_instructions_revision: 3 }),
+      body: JSON.stringify({ instructions: "\u{20000}".repeat(8_003), expected_instructions_revision: 3 }),
     });
     expect(tooLongUpdate.status).toBe(400);
-    expect(await tooLongUpdate.json()).toEqual({ error: "instructions must be 4000 characters or fewer" });
+    expect(await tooLongUpdate.json()).toEqual({ error: "instructions must be 8002 characters or fewer" });
 
     const compatibilityCreated = await app.request("/api/projects", {
       method: "POST",
@@ -400,16 +404,33 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       instructions: "Ship carefully.",
       instructions_revision: 1,
       instructions_updated_at: expect.any(String),
-      instructions_updated_by: userId,
+      instructions_updated_by: "local",
     });
 
     const tooLongCreate = await app.request("/api/multiremi/projects", {
       method: "POST",
       headers,
-      body: JSON.stringify({ title: "Too long", instructions: "x".repeat(4_001) }),
+      body: JSON.stringify({ title: "Too long", instructions: "x".repeat(8_003) }),
     });
     expect(tooLongCreate.status).toBe(400);
-    expect(await tooLongCreate.json()).toEqual({ error: "instructions must be 4000 characters or fewer" });
+    expect(await tooLongCreate.json()).toEqual({ error: "instructions must be 8002 characters or fewer" });
+
+    // A client from before sends two halves within their own limits that together exceed the one field's.
+    const halvesError = { error: "instructions and delta_instructions together must be 8002 characters or fewer" };
+    const tooLongHalves = await app.request("/api/multiremi/projects", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Too long halves", instructions: "x".repeat(5_000), delta_instructions: "y".repeat(5_000) }),
+    });
+    expect(tooLongHalves.status).toBe(400);
+    expect(await tooLongHalves.json()).toEqual(halvesError);
+    const tooLongDelta = await app.request(`/api/projects/${createdBody.project.id}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ delta_instructions: "y".repeat(10), expected_instructions_revision: 3 }),
+    });
+    expect(tooLongDelta.status).toBe(400);
+    expect(await tooLongDelta.json()).toEqual(halvesError);
   });
 
   it("scopes instruction access to the workspace and gives Task tokens owner parity", async () => {
@@ -446,7 +467,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       provider: "claude",
       workspaceId: workspace.id,
     });
-    const issue = store.createIssue({
+    const issue = createResponsibleTestIssue(store, {
       title: "Scoped task",
       workspaceId: workspace.id,
       projectId: project.id,
@@ -461,8 +482,11 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     });
     const taskToken = await store.createTaskAccessToken(task, "local");
     const app = createMultiremiApp({ store, authToken: "root-secret" });
+    const workspaceToken = await store.createAccessToken({
+      name: "Local workspace credential", type: "pat", workspaceId: "local", userId: "local",
+    });
     const outsiderHeaders = {
-      Authorization: `Bearer ${outsiderToken.token}`,
+      Authorization: `Bearer ${workspaceToken.token}`,
       "Content-Type": "application/json",
     };
     const taskHeaders = {
@@ -474,6 +498,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       `/api/multiremi/projects/${project.id}`,
       `/api/projects/${project.id}`,
     ]) {
+      expect((await app.request(path, { headers: { Authorization: `Bearer ${outsiderToken.token}` } })).status).toBe(200);
       expect((await app.request(path, { headers: outsiderHeaders })).status).toBe(404);
     }
     expect((await app.request(`/api/multiremi/projects/${project.id}`, {
@@ -597,6 +622,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       payload: { project: { id: projectBody.id, workspace_id: "local", lead_type: "agent", lead_id: agent.id } },
     });
 
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const remoteProject = store.createProject({ title: "Remote Compatibility Project", workspaceId: "remote" });
     const projectListBody = await (await app.request("/api/projects")).json();
     expect(projectListBody.projects[0].id).toBe(projectBody.id);
@@ -804,7 +830,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     expect(autopilotBody.execution_mode).toBe("create_issue");
     expect(autopilotBody.projectId).toBeUndefined();
 
-    const remoteAutopilot = store.createAutopilot({
+    const remoteAutopilot = createResponsibleTestAutopilot(store, {
       title: "Remote Autopilot",
       workspaceId: "remote",
       assigneeId: remoteAgent.id,

@@ -62,6 +62,7 @@ import {
   createProjectMutationSubmission,
   linkSeededProjectSchema,
   knowledgePolicyErrorResponse,
+  openVikingTimeoutResponse,
   rawSubmissionResponse,
   resolveKnowledgeWriteActor,
 } from "../helpers/knowledge.js";
@@ -125,7 +126,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     const projects = store
-      .listProjects(workspaceId)
+      .listProjectSummaries(workspaceId)
       .map(projectCompatibilitySummaryResponse);
     return c.json({ projects, total: projects.length });
   });
@@ -183,11 +184,17 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
       body.resources,
     );
     if (repositoryError) return c.json({ error: repositoryError }, 400);
-    return c.json({
-      project: store.createProject(projectCreateInputWithDefaultLead(c, { ...body, workspaceId }), {
-        instructionsUpdatedBy: currentRequestUserId(c),
-      }),
-    }, 201);
+    try {
+      return c.json({
+        project: store.createProject(projectCreateInputWithDefaultLead(c, { ...body, workspaceId }), {
+          instructionsUpdatedBy: currentRequestUserId(c),
+        }),
+      }, 201);
+    } catch (err) {
+      const response = projectErrorResponse(c, err);
+      if (response) return response;
+      throw err;
+    }
   });
   app.get("/api/multiremi/projects/:id", (c) => {
     const project = loadProjectForDocs(c, store, c.req.param("id"));
@@ -476,9 +483,10 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const query = cleanString(c.req.query("q"));
     const kind = cleanString(c.req.query("kind"));
     try {
+      const knowledge = projectKnowledge.withRequestDeadline();
       const docs = query
-        ? await projectKnowledge.searchProjectDocs(project.id, query, { kind, limit: parseOptionalInt(c.req.query("limit")) })
-        : await projectKnowledge.listProjectDocs(project.id, { kind });
+        ? await knowledge.searchProjectDocs(project.id, query, { kind, limit: parseOptionalInt(c.req.query("limit")) })
+        : await knowledge.listProjectDocs(project.id, { kind });
       return c.json({ docs: docs.map(projectDocCompatibilityResponse) });
     } catch (err) {
       const response = projectKnowledgeErrorResponse(c, err) ?? projectDocErrorResponse(c, err);
@@ -508,7 +516,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
         store, actor, workspaceId: project.workspaceId, projectId: project.id, scope,
       });
       runId = run.id;
-      const written = await projectKnowledge.createProjectDoc(project.id, input);
+      const written = await projectKnowledge.withRequestDeadline().createProjectDoc(project.id, input);
       store.linkKnowledgeFormalVersion({
         runId: run.id,
         artifactScope: written.kind === "memory" ? "memory" : "project_wiki",
@@ -535,7 +543,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const project = loadProjectForDocs(c, store, c.req.param("id"));
     if (project instanceof Response) return project;
     try {
-      const doc = await projectKnowledge.getProjectDocByRef(project.id, c.req.param("ref"));
+      const doc = await projectKnowledge.withRequestDeadline().getProjectDocByRef(project.id, c.req.param("ref"));
       if (!doc) return c.json({ error: "project doc not found" }, 404);
       return c.json({ doc: projectDocCompatibilityResponse(doc) });
     } catch (err) {
@@ -570,7 +578,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
         scope: current.kind === "memory" ? "memory" : "project_wiki",
       });
       runId = run.id;
-      const written = await projectKnowledge.updateProjectDoc(project.id, c.req.param("ref"), input);
+      const written = await projectKnowledge.withRequestDeadline().updateProjectDoc(project.id, c.req.param("ref"), input);
       store.linkKnowledgeFormalVersion({
         runId: run.id,
         artifactScope: written.kind === "memory" ? "memory" : "project_wiki",
@@ -618,7 +626,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
         scope: current.kind === "memory" ? "memory" : "project_wiki",
       });
       runId = run.id;
-      const doc = await projectKnowledge.deleteProjectDoc(project.id, c.req.param("ref"), input);
+      const doc = await projectKnowledge.withRequestDeadline().deleteProjectDoc(project.id, c.req.param("ref"), input);
       store.recordKnowledgeCompilationOutput({
         runId: run.id,
         artifactScope: doc.kind === "memory" ? "memory" : "project_wiki",
@@ -642,7 +650,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const project = loadProjectForDocs(c, store, c.req.param("id"));
     if (project instanceof Response) return project;
     try {
-      const revisions = await projectKnowledge.listProjectDocRevisions(project.id, c.req.param("ref"));
+      const revisions = await projectKnowledge.withRequestDeadline().listProjectDocRevisions(project.id, c.req.param("ref"));
       return c.json({ revisions: revisions.map(projectDocRevisionCompatibilityResponse) });
     } catch (err) {
       const response = projectKnowledgeErrorResponse(c, err) ?? projectDocErrorResponse(c, err);
@@ -654,7 +662,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const project = loadProjectForDocs(c, store, c.req.param("id"));
     if (project instanceof Response) return project;
     try {
-      const docs = await projectKnowledge.backlinks(project.id, c.req.param("ref"));
+      const docs = await projectKnowledge.withRequestDeadline().backlinks(project.id, c.req.param("ref"));
       return c.json({ docs: docs.map(projectDocCompatibilityResponse) });
     } catch (err) {
       const response = projectKnowledgeErrorResponse(c, err) ?? projectDocErrorResponse(c, err);
@@ -668,7 +676,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const query = cleanString(c.req.query("q"));
     if (!query) return c.json({ error: "q is required" }, 400);
     try {
-      const hits = await projectKnowledge.recallProjectDocs(project.id, query, {
+      const hits = await projectKnowledge.withRequestDeadline().recallProjectDocs(project.id, query, {
         kind: cleanString(c.req.query("kind")),
         limit: parseOptionalInt(c.req.query("limit")),
       });
@@ -687,7 +695,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     try {
-      const docs = await projectKnowledge.listWorkspaceDocs(workspaceId, {
+      const docs = await projectKnowledge.withRequestDeadline().listWorkspaceDocs(workspaceId, {
         kind: cleanString(c.req.query("kind")),
         q: cleanString(c.req.query("q")),
         limit: parseOptionalInt(c.req.query("limit")),
@@ -708,7 +716,7 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    return c.json(await projectKnowledge.migrationStatus(workspaceId));
+    return c.json(await projectKnowledge.withRequestDeadline().migrationStatus(workspaceId));
   });
   app.post("/api/project-knowledge/migration/backfill", async (c) => {
     const body = await readJsonStrict<{ workspace_id?: string; project_id?: string | null; dry_run?: boolean; resume?: boolean }>(c);
@@ -777,6 +785,8 @@ function projectKnowledgeRecallResponse(hit: {
 
 function projectKnowledgeErrorResponse(c: any, err: unknown): Response | null {
   if (err instanceof ProjectKnowledgeUnavailableError) return c.json({ error: err.message }, 503);
+  const timeout = openVikingTimeoutResponse(c, err);
+  if (timeout) return timeout;
   if (err instanceof OpenVikingClientError) {
     if (err.status === 409 || err.status === 412) return c.json({ error: "project doc version conflict" }, 409);
     return c.json({ error: "OpenViking is unavailable", code: err.code }, err.retryable ? 503 : 502);

@@ -41,13 +41,244 @@ on:
       - "scripts/**"
       - "tests/**"
       - "tsconfig.json"
+  # Full run on demand, e.g. `gh workflow run release-build-check.yml --ref main`
+  # after the workflow was disabled and re-enabled: a main push only triggers
+  # it when a later commit lands, and the release gate needs a run on the exact
+  # SHA it tags. Runs the backend suite like a main push (MUL-516).
+  workflow_dispatch:
+    inputs:
+      release_candidate:
+        description: "Produce exact-version CLI and OCI candidates after full main validation"
+        required: false
+        type: boolean
+        default: false
+      retry_backend_run_id:
+        description: "Completed full main run with only backend failures; retry those files after verifying unchanged source"
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
+
+# MUL-516: a new push to a pull request cancels that pull request's run still in
+# progress — only the latest head is worth checking. Runs on main never cancel
+# one another: each gets a group of its own, because the release gate needs a
+# successful run for the exact main SHA it tags. A group shared by main pushes is
+# not enough even without cancel-in-progress — GitHub keeps one pending run per
+# group and cancels the older pending one when a third arrives.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  session-archive-platform:
+  schema-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 12
+    env:
+      MULTIREMI_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - name: Enforce expand discipline and real PostgreSQL guards
+        env:
+          SCHEMA_DDL_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: >-
+          bun run test tests/arch/startup-schema-ddl.test.ts
+          tests/arch/data-schema-inputs.test.ts
+          tests/unit/multiremi/schema-levels.test.ts
+          tests/unit/multiremi/schema-levels-postgres.test.ts
+          tests/unit/multiremi/schema-ddl.test.ts
+          tests/unit/multiremi/schema-catalog.test.ts
+          tests/unit/multiremi/schema-catalog-postgres.test.ts
+          tests/unit/multiremi/store-migrations.test.ts
+          tests/unit/multiremi/unified-model-migration.test.ts
+          tests/unit/multiremi/usage-startup-postgres.test.ts
+          tests/unit/multiremi/usage-startup-migration.test.ts
+      - name: Verify level fingerprints and rollback evidence validation
+        run: node --test scripts/schema-fingerprint.test.mjs scripts/platform-rollback-policy.test.mjs scripts/package-platform-application.test.mjs
+      - name: Resolve previous published platform release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/prepare-schema-rollback.ts ci-schema
+      - name: Restore previous release Bun package downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('ci-schema/previous/bun.lock') }}
+      - name: Install previous release dependencies
+        working-directory: ci-schema/previous
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - name: Previous release core tests on candidate expanded schema
+        run: bun scripts/check-schema-rollback.ts ci-schema/previous ci-schema/previous-release.json ci-schema/rollback-evidence.json
+      - name: Preserve SHA-bound rollback evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-rollback-${{ github.sha }}
+          path: ci-schema/rollback-evidence.json
+          if-no-files-found: error
+
+  im-platform-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - name: Install the repository's Chromium version
+        run: node node_modules/playwright-core/cli.js install chromium --with-deps
+      - name: Verify IM platform user flows with an isolated API and database
+        env:
+          IM_SMOKE_ARTIFACTS: ${{ runner.temp }}/im-smoke
+        run: bun run smoke:im
+      - name: Upload IM smoke report and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-platform-smoke
+          path: ${{ runner.temp }}/im-smoke
+          if-no-files-found: ignore
+
+  execution-configuration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      # Keep configuration, credentials, model selection and real daemon
+      # dispatch covered early on PRs as well as in the full backend shards.
+      - name: Capability group contracts and daemon execution
+        run: >-
+          bun run test
+          tests/unit/multiremi/execution-group-configuration.test.ts
+          tests/unit/multiremi/central-execution-profiles.test.ts
+          tests/unit/multiremi/central-profile-task-routing.test.ts
+          tests/unit/multiremi/execution-groups.test.ts
+          tests/unit/multiremi/runtime-execution-bindings.test.ts
+          tests/unit/multiremi/runtime-connection-models.test.ts
+          tests/unit/agent-execution-groups-api.test.ts
+          tests/unit/remi/cli-operations.test.ts
+          tests/integration/central-profile-daemon-sync.test.ts
+          tests/integration/execution-group-daemon.test.ts
+      - name: Install Chromium
+        run: bunx playwright-core install chromium --with-deps
+      - name: Capability group browser E2E
+        env:
+          EXECUTION_CONFIG_ARTIFACTS: ${{ runner.temp }}/execution-configuration
+        run: bun run tests/integration/smoke-execution-configuration.ts
+      - name: Upload capability configuration screenshots and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-configuration
+          path: ${{ runner.temp }}/execution-configuration
+          if-no-files-found: ignore
+
+  platform-updater:
     strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - name: Verify updater safety and lifecycle
+        run: bun run test tests/unit/platform-updater tests/unit/multiremi/multiremi-platform-lifecycle.test.ts tests/unit/multiremi/multiremi-platform-drain.test.ts tests/unit/multiremi/multiremi-platform-safety.test.ts tests/unit/daemon/task-report-outbox.test.ts
+      - name: Verify runtime installation and launch portability
+        run: bun run test tests/unit/acp/runtime-bundle.test.ts tests/unit/acp/launch.test.ts
+      - name: Verify pinned ACP bridges and bundled runtimes on Windows
+        if: runner.os == 'Windows'
+        env:
+          REMI_HOME: ${{ runner.temp }}/remi-pinned-runtimes
+          REMI_CLAUDE_AGENT_ACP_EXECUTABLE: ${{ github.workspace }}/bin/remi-claude-agent-acp
+        run: bun run apps/remi/main.ts runtime prepare --provider claude --provider codex
+      - name: Verify host update and rollback fault recovery
+        run: node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs scripts/platform-rollback-policy.test.mjs scripts/package-platform-application.test.mjs
+      - name: Compile the Windows host updater
+        if: runner.os == 'Windows'
+        run: bun run platform-updater:compile:windows
+      - name: Pull pinned PostgreSQL recovery test images
+        if: runner.os == 'Linux'
+        run: |
+          docker pull pgvector/pgvector:pg17
+          docker pull oven/bun:1.3.14
+          docker pull node:22-bookworm-slim
+          docker pull oven/bun:1.3.13
+          docker pull node:22.13.1-bookworm-slim
+      - name: Verify real PostgreSQL restore and receipt reconciliation
+        if: runner.os == 'Linux'
+        env:
+          MULTIREMI_TEST_DOCKER_RECOVERY: "1"
+        run: bun run test tests/integration/platform-recovery-postgres.test.ts
+      - name: Verify application updates without replacing base images
+        if: runner.os == 'Linux'
+        run: bun run tests/integration/platform-application-smoke.ts
+      - name: Verify socket-free internal updates with changed Bun and Node runtimes
+        if: runner.os == 'Linux'
+        run: bun run tests/integration/platform-application-smoke.ts --internal
+
+  runtime-platform:
+    strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -59,11 +290,20 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
       - name: Install dependencies from the public registry
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
-
-      - name: Verify native Issue session archive traversal
-        run: bun test tests/unit/daemon/session-archive.test.ts
+      - name: Save trusted Bun package downloads
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.bun-download-cache.outputs.cache-hit != 'true' && matrix.os == 'macos-latest'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
 
       - name: Verify pinned ACP bridges and bundled agent runtimes
         env:
@@ -79,9 +319,377 @@ jobs:
           ln -s "$runtime_fixture/real-home" "$runtime_fixture/linked-home"
           REMI_HOME="$runtime_fixture/linked-home/.remi" bun run apps/remi/main.ts runtime prepare --provider claude --provider codex
 
-  build:
+  guards:
     runs-on: ubuntu-latest
+    outputs:
+      candidate: ${{ steps.candidate.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - name: Save trusted Bun package downloads
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.bun-download-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Require refreshed dependencies for a new release version
+        id: release
+        env:
+          RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bun run release:check --base-ref "${RELEASE_BASE_SHA:-$(git rev-parse HEAD^)}"
+      - name: Reject invalid candidate requests
+        if: inputs.release_candidate
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RETRY: ${{ inputs.retry_backend_run_id }}
+        run: test "$EVENT" = workflow_dispatch && test "$REF" = refs/heads/main && test -z "$RETRY"
+      - name: Select formal release candidate
+        id: candidate
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RETRY: ${{ inputs.retry_backend_run_id }}
+          REQUESTED: ${{ inputs.release_candidate }}
+          VERSION_CHANGED: ${{ steps.release.outputs.version_changed }}
+        run: |
+          candidate=false
+          if [ "$REF" = refs/heads/main ] && [ -z "$RETRY" ]; then
+            if { [ "$EVENT" = push ] && [ "$VERSION_CHANGED" = true ]; } || { [ "$EVENT" = workflow_dispatch ] && [ "$REQUESTED" = true ]; }; then
+              candidate=true
+            fi
+          fi
+          echo "enabled=$candidate" >> "$GITHUB_OUTPUT"
+      - name: Verify CLI capability coverage
+        run: bun run cli:capabilities:check
+      - name: CI orchestration regression tests
+        env:
+          CI: "true"
+          GITHUB_ACTIONS: "true"
+        run: >-
+          bun run test tests/unit/scripts/ci-backend.test.ts tests/unit/scripts/ci-backend-required.test.ts
+          tests/unit/scripts/run-tests.test.ts tests/unit/scripts/run-tests-signals.test.ts
+          tests/unit/scripts/retry-failed-backend-tests.test.ts tests/unit/scripts/release-candidate.test.ts
+      # Intentionally repeated in full backend discovery: early structural feedback.
+      - name: Architecture guard tests
+        run: bun run test tests/arch/
 
+      - name: Runtime capability and API response contracts
+        run: >-
+          bun run test
+          tests/integration/daemon-protocol-v2/runtime-capabilities.test.ts
+          tests/unit/multiremi/api-route-snapshot.test.ts
+
+      - name: Shared workspace identity and historical data contracts
+        run: >-
+          bun run test
+          tests/unit/multiremi/shared-workspace-operator.test.ts
+          tests/unit/multiremi/shared-workspace-data.test.ts
+          tests/unit/multiremi/workspace-operator-preferences.test.ts
+          tests/unit/multiremi/workspace-member-identity.test.ts
+          tests/unit/multiremi/multiremi-notification-channels.test.ts
+          tests/unit/multiremi/question-notification-access.test.ts
+          tests/unit/multiremi/password-auth.test.ts
+          tests/unit/multiremi/multiremi-multiuser-auth.test.ts
+          tests/unit/remi/cli-resources.test.ts
+
+
+  frontend-types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - run: bun run typecheck:frontend
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - run: bun run test:frontend
+
+  cli-build:
+    needs: guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - name: Build CLI archives
+        env:
+          CANDIDATE: ${{ needs.guards.outputs.candidate }}
+        run: |
+          version=v0.0.0-ci
+          if [ "$CANDIDATE" = true ]; then
+            version="v$(bun -p 'require("./package.json").version')"
+            bun run release:check --tag "$version"
+          fi
+          MULTIREMI_VERSION="$version" bun run build:multiremi
+          if [ "$CANDIDATE" = true ]; then
+            mkdir -p candidate
+            cp dist/*.tar.gz scripts/install-remi.sh candidate/
+          fi
+      - uses: actions/upload-artifact@v4
+        if: needs.guards.outputs.candidate == 'true'
+        with:
+          name: candidate-cli
+          path: candidate
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  api-build:
+    needs: guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select image version
+        id: version
+        env:
+          CANDIDATE: ${{ needs.guards.outputs.candidate }}
+        run: |
+          version=0.0.0-ci
+          if [ "$CANDIDATE" = true ]; then
+            version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+            mkdir -p candidate
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build platform api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.api
+          push: false
+          platforms: linux/amd64
+          provenance: false
+          outputs: ${{ needs.guards.outputs.candidate == 'true' && 'type=oci,dest=candidate/api.oci.tar,oci-mediatypes=true' || '' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=platform-api
+          # Pull requests read main's layer cache but do not export their own:
+          # the export re-uploads the per-commit source and build layers (about
+          # 1.5 min of this job), and a pull request's cache scope is readable
+          # only by later runs of that same pull request.
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,scope=platform-api,mode=max' || '' }}
+          build-args: MULTIREMI_VERSION=v${{ steps.version.outputs.value }}
+      - uses: actions/upload-artifact@v4
+        if: needs.guards.outputs.candidate == 'true'
+        with:
+          name: candidate-api
+          path: candidate/api.oci.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  web-build:
+    needs: guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select image version
+        id: version
+        env:
+          CANDIDATE: ${{ needs.guards.outputs.candidate }}
+        run: |
+          version=0.0.0-ci
+          if [ "$CANDIDATE" = true ]; then
+            version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+            mkdir -p candidate
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build platform web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.web
+          push: false
+          platforms: linux/amd64
+          provenance: false
+          outputs: ${{ needs.guards.outputs.candidate == 'true' && 'type=oci,dest=candidate/web.oci.tar,oci-mediatypes=true' || '' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=platform-web
+          # Same as api-build: no per-pull-request export (about 2 min here).
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,scope=platform-web,mode=max' || '' }}
+          build-args: |
+            REMI_APP_VERSION=${{ steps.version.outputs.value }}
+            NEXT_PUBLIC_APP_VERSION=${{ steps.version.outputs.value }}
+      - uses: actions/upload-artifact@v4
+        if: needs.guards.outputs.candidate == 'true'
+        with:
+          name: candidate-web
+          path: candidate/web.oci.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  daemon-n-minus-one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        direction: [previous-daemon, previous-server]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Select latest stable CLI release
+        id: previous
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100
+            });
+            const stable = releases.filter(r => !r.draft && !r.prerelease && /^v\d+\.\d+\.\d+$/.test(r.tag_name))
+              .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
+            if (!stable.length) throw new Error('No stable CLI release available for N-1 smoke');
+            core.setOutput('tag', stable[0].tag_name);
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Prepare release checkout and dependencies
+        env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/previous" "$PREVIOUS_TAG"
+          bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+          (cd "$RUNNER_TEMP/previous" && bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts)
+      - name: Enforce contract-only minimum CLI changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA="$PREVIOUS_TAG"
+          fi
+          bun run scripts/check-daemon-contract.ts "$BASE_SHA"
+      - name: Named capability and peer compatibility guards
+        run: bun run test tests/arch/daemon-n-minus-one.test.ts tests/unit/daemon/daemon-compatibility.test.ts tests/unit/daemon/daemon-protocol-client.test.ts tests/unit/multiremi/peer-channel.test.ts tests/unit/multiremi/hub-peer-transport.test.ts
+      - name: Real mixed release smoke
+        env:
+          DIRECTION: ${{ matrix.direction }}
+        run: |
+          set -o pipefail
+          if [ "$DIRECTION" = previous-daemon ]; then
+            bun run tests/integration/daemon-n-minus-one/run.ts "$PWD" "$RUNNER_TEMP/previous" 2>&1 | tee mixed-version.log
+          else
+            bun run tests/integration/daemon-n-minus-one/run.ts "$RUNNER_TEMP/previous" "$PWD" 2>&1 | tee mixed-version.log
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daemon-n-minus-one-${{ matrix.direction }}
+          path: mixed-version.log
+          if-no-files-found: warn
+
+  backend-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      required: ${{ steps.scope.outputs.required }}
+    env:
+      # The only place the backend shard count is set. The `backend` matrix is
+      # read back from the plan's own shard indices, and `verify` requires one
+      # complete report per planned shard, so the three cannot disagree.
+      BACKEND_SHARDS: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Detect backend inputs
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: bun run scripts/ci-backend-required.ts >> "$GITHUB_OUTPUT"
+      - name: Plan backend shards
+        if: steps.scope.outputs.required == 'true'
+        id: plan
+        run: |
+          bun run scripts/ci-backend.ts plan --sha "$GITHUB_SHA" --shards "$BACKEND_SHARDS" --out ci-backend/plan.json
+          shards="$(jq -c '[.shards[].index]' ci-backend/plan.json)"
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.scope.outputs.required == 'true'
+        with:
+          name: backend-plan
+          path: ci-backend/plan.json
+          if-no-files-found: error
+
+  backend:
+    needs: backend-plan
+    if: needs.backend-plan.outputs.required == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.backend-plan.outputs.shards) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -96,84 +704,267 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-
-      - name: Require refreshed dependencies for a new release version
-        env:
-          RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: bun run release:check --base-ref "$RELEASE_BASE_SHA"
-
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
       - name: Install dependencies from the public registry
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
-
-      - name: Build Multiremi daemon CLI release archives
-        run: MULTIREMI_VERSION=v0.0.0-ci bun run build:multiremi
-
-      - name: Verify CLI capability coverage
-        run: bun run cli:capabilities:check
-
-      # Fast structural gates, kept ahead of the full suite so a boundary or
-      # lockfile break fails in seconds: package boundaries, contracts purity,
-      # and the lockfile-registry guard (a mirror-polluted bun.lock passes the
-      # frozen install above and only fails later at cold-cache download — this
-      # test is the first gate that catches it). These files run again as part
-      # of the full suite below; the duplication buys the fast failure.
-      - name: Architecture guard tests
-        run: bun test tests/arch/
-
-      # This step used to enumerate ~20 test files by hand, so anything outside
-      # the list never ran in CI — tests/unit/multiremi/multiremi-api-auth.test.ts
-      # failed on main from 5e8ee09f onward while this workflow stayed green
-      # (MUL-128/MUL-129). Run the whole backend suite instead: `bunfig.toml`
-      # scopes `bun test` to `tests/`, so this is every `tests/**/*.test.ts`
-      # (~1.7k tests, ~2min). Harnesses needing real providers/browsers/Postgres
-      # are named `*.ts` without `.test` and stay out of discovery — see
-      # TESTING.md.
-      - name: Backend test suite
-        # The Postgres service container above is only reachable if the suite is
-        # told where it is. Without this the PG integration tests fall back to a
-        # default URL, which happens to match the service container here -- but a
-        # developer or agent session with no local Postgres got a silent skip of
-        # the entire PG bridge layer (MUL-357 QA). Declare it explicitly so the
-        # intended target is in the workflow, not in a coincidence.
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-plan
+          path: ci-backend
+      - name: Backend test shard
         env:
           MULTIREMI_TEST_POSTGRES_URL: postgres://multimira:multimira@localhost:5432/postgres
-        run: bun test
-
-      # This workflow path-filters on `frontend/**` but used to build only the
-      # server/CLI, so a broken web app went green. These two steps are the
-      # gate for everything under frontend/.
-      - name: Typecheck frontend packages and apps
-        run: bun run typecheck:frontend
-
-      - name: Test frontend packages and apps
-        run: bun run test:frontend
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build platform API image
-        uses: docker/build-push-action@v6
+          MULTIREMI_TEST_LOCK_ORDER_SENTINEL: "1"
+        run: bun run scripts/ci-backend.ts run --plan ci-backend/plan.json --shard ${{ matrix.shard }} --out ci-backend/shard-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          context: .
-          file: deploy/docker/Dockerfile.api
-          build-args: MULTIREMI_VERSION=v0.0.0-ci
-          push: false
-          cache-from: type=gha,scope=platform-api-check
-          cache-to: type=gha,scope=platform-api-check,mode=max
+          name: backend-shard-${{ matrix.shard }}
+          path: ci-backend/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
 
-      - name: Build platform Web image
-        uses: docker/build-push-action@v6
+  backend-evidence:
+    needs: [backend-plan, backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          context: .
-          file: deploy/docker/Dockerfile.web
-          push: false
-          cache-from: type=gha,scope=platform-web-check
-          cache-to: type=gha,scope=platform-web-check,mode=max
+          bun-version: 1.3.14
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: backend-*
+          path: ci-backend
+          merge-multiple: true
+      - run: bun run scripts/ci-backend.ts verify --plan ci-backend/plan.json --reports ci-backend --out ci-backend/coverage.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: ci-backend/coverage.json
+          if-no-files-found: error
+
+  backend-retry:
+    if: github.event_name == 'workflow_dispatch' && inputs.retry_backend_run_id != ''
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: multimira
+          POSTGRES_PASSWORD: multimira
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U multimira -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      # Retry is additional diagnostic evidence; the full shards still run.
+      # Both old full-suite logs and complete sharded artifacts are verified.
+      # Partial runs, infrastructure failures and previous retries are rejected.
+      - name: Verify baseline and retry failed backend files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RETRY_BACKEND_RUN_ID: ${{ inputs.retry_backend_run_id }}
+          MULTIREMI_TEST_POSTGRES_URL: postgres://multimira:multimira@localhost:5432/postgres
+          MULTIREMI_TEST_LOCK_ORDER_SENTINEL: "1"
+        run: bun run scripts/retry-failed-backend-tests.ts "$RETRY_BACKEND_RUN_ID"
+      - name: Record verified retry mode
+        run: |
+          mkdir -p ci-backend
+          printf '{"mode":"verified-retry","sha":"%s","baselineRunId":"%s","fullSuite":false}\n' "$GITHUB_SHA" "${{ inputs.retry_backend_run_id }}" > ci-backend/retry.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-verified-retry
+          path: |
+            ci-backend/retry.json
+            ci-backend/retry-evidence.json
+          if-no-files-found: error
+
+  # Preserve the branch-protection check. No failed/cancelled/unexpected skipped
+  # dependency can become a green full-run release gate.
+  build:
+    if: always()
+    needs: [schema-compatibility, daemon-n-minus-one, im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every applicable check
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          BACKEND_REQUIRED: ${{ needs.backend-plan.outputs.required }}
+          EVENT: ${{ github.event_name }}
+          RETRY: ${{ inputs.retry_backend_run_id }}
+          REF: ${{ github.ref }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          results = {k: v['result'] for k,v in json.loads(os.environ['RESULTS']).items()}
+          required = os.environ['BACKEND_REQUIRED']
+          assert required in ('true', 'false'), 'missing backend scope'
+          skipped = {'backend-retry'}
+          if os.environ['EVENT'] == 'pull_request' and required == 'false':
+              mode = 'pr-fast'
+              skipped |= {'backend', 'backend-evidence'}
+          else:
+              mode = 'full'
+              skipped = {'backend-retry'}
+              if os.environ['RETRY']:
+                  assert os.environ['EVENT'] == 'workflow_dispatch' and os.environ['REF'] == 'refs/heads/main'
+                  mode = 'full-with-retry'
+                  skipped = set()
+          for job, result in results.items():
+              expected = 'skipped' if job in skipped else 'success'
+              assert result == expected, f'{job}: {result}, expected {expected}'
+          print(json.dumps({'mode': mode, 'sha': os.environ['GITHUB_SHA'], 'results': results}))
+          PYCODE
+
+  candidate-package:
+    needs: [build, guards]
+    if: needs.guards.outputs.candidate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: candidate-*
+          path: candidate
+          merge-multiple: true
+      - run: bun run scripts/release-candidate.ts create --dir candidate --base-ref "$RELEASE_BASE_SHA"
+        env:
+          RELEASE_BASE_SHA: ${{ github.event.before }}
+          RELEASE_CANDIDATE_REQUEST: ${{ inputs.release_candidate }}
+          RETRY_BACKEND_RUN_ID: ${{ inputs.retry_backend_run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: candidate/release-candidate.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  # MUL-442 (MUL-403 C7): the browser replica, in a real browser. Three tabs of
+  # one context must produce one subscription, a killed leader must be replaced
+  # within a second with a continuous head, an offline tab must catch up without
+  # re-reading the log, and the same suite must pass with OPFS switched off.
+  #
+  # Its own job, not a step in `build`: it needs a Chromium download and a
+  # browser run, and a failure should name it in the Actions list. The checks
+  # themselves are in `tests/integration/replica-fixture/run.ts`, which serves
+  # its own origin and mocks C3's socket from C0's contract — no server or
+  # database to arrange.
+  #
+  # Path filter: the workflow's trigger-level filter is repo-wide by design, so
+  # this job skips its steps explicitly unless the replica or its check moved.
+  # `always()` is deliberately not used on the step conditions: a skipped
+  # dependency must not run them.
+  #
+  # The frontend zero-jump job (MUL-394, `tests/integration/zero-jump-check.ts`)
+  # that used to sit beside this one was removed on 2026-10-21 by user decision.
+  frontend-replica:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # `fetch-depth: 0` is what makes the change detector below real: the
+      # default shallow clone does not contain the base commit, so the diff
+      # against it fails and the step would fall back to "run" on every pull
+      # request.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect whether this job has anything to check
+        id: relevant
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # What can change the replica's behaviour: the replica itself, the
+          # check that drives it, the C0 contract whose frames it speaks, the
+          # sqlite-wasm dependency, and this workflow. Scoped to the replica so a
+          # daemon-only change does not pay for a Chromium download.
+          relevant='^(\.github/workflows/release-build-check\.yml|frontend/packages/core/replica/|frontend/packages/core/package\.json|packages/contracts/src/live-hub\.ts|tests/integration/replica-fixture/|reports/performance/MUL-442-replica|bun\.lock|package\.json)'
+          if [ "$EVENT_NAME" != "pull_request" ] && [ "$EVENT_NAME" != "push" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${BASE_SHA:-}" ] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || true)"
+          echo "$changed" | sed 's/^/  changed: /'
+          if echo "$changed" | grep -qE "$relevant"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "no replica change; skipping the replica check"
+          fi
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.relevant.outputs.run == 'true'
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore Bun package downloads
+        if: steps.relevant.outputs.run == 'true'
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies from the public registry
+        if: steps.relevant.outputs.run == 'true'
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+
+      - name: Install Chromium for Playwright
+        if: steps.relevant.outputs.run == 'true'
+        run: bunx playwright install chromium --with-deps
+
+      - name: Replica check
+        if: steps.relevant.outputs.run == 'true'
+        run: bun run tests/integration/replica-fixture/run.ts --out reports/performance/MUL-442-replica-ci.json
+
+      # Uploaded on success and failure alike: the report is the evidence a
+      # reviewer reads, and it names which criterion failed when one does.
+      - name: Upload the replica report
+        if: always() && steps.relevant.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: replica-report
+          path: reports/performance/MUL-442-replica-ci.json
+          if-no-files-found: warn

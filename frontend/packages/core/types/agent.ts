@@ -1,3 +1,5 @@
+import type { RuntimeProtocolStatus } from "@multiremi/contracts/runtime-protocol";
+
 export type AgentStatus = "idle" | "working" | "blocked" | "error" | "offline";
 
 export type AgentRuntimeMode = "local" | "cloud";
@@ -30,6 +32,7 @@ export interface RuntimeDevice {
   status: "online" | "offline";
   device_info: string;
   metadata: Record<string, unknown>;
+  protocol?: RuntimeProtocolStatus | null;
   owner_id: string | null;
   /** Defaults to "private" when the backend predates the visibility flag. */
   visibility: RuntimeVisibility;
@@ -72,6 +75,7 @@ export interface AgentRunCount {
 }
 
 export interface AgentTask {
+  turn_id?: string;
   id: string;
   /** Delegated instruction. Older backends may omit it from list responses. */
   prompt?: string;
@@ -81,7 +85,7 @@ export interface AgentTask {
   // autopilot-spawned. Check chat_session_id / autopilot_run_id to tell
   // which source produced it.
   issue_id: string;
-  /** Product Session under the Issue. Empty/missing for legacy tasks. */
+  /** Product Session owned by a Chat or Issue. Empty/missing for legacy tasks. */
   issue_session_id?: string;
   /** Immutable snapshot of whether this task owns the shared Issue workspace. */
   holds_workspace?: boolean;
@@ -657,6 +661,9 @@ export interface DashboardRunTimeDaily {
 }
 
 export type RuntimeUpdateStatus =
+  | "restarting"
+  | "verifying"
+  | "rolled_back"
   | "pending"
   | "running"
   | "completed"
@@ -745,6 +752,7 @@ export interface RuntimeModelsResult {
  * no capacity at the moment (tasks would queue).
  */
 export interface FleetProviderModels {
+  blocked_models?: string[];
   provider: string;
   /** A ready Codex catalog is the authoritative set of selectable models. */
   model_catalog_status?: "ready" | "error" | "unknown";

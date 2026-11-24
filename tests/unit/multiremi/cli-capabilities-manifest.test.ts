@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cliCommandHelp, cliCommandInventory } from "../../../apps/remi/cli/index.js";
+import { collaborationCommandSpecs } from "../../../apps/remi/cli/commands/collaboration.js";
+import { CommandRegistry } from "../../../apps/remi/cli/core/index.js";
 import { CLI_CAPABILITIES_RUNTIME } from "../../../packages/server/src/api/cli-capabilities-generated.js";
+import { RETIRED_CLI_COMMANDS } from "../../../apps/remi/cli/core/retired-commands.js";
+import { RETIRED_CLI_ROUTES, WORKSPACE_OPERATOR_RETIRED_ROUTES } from "../../../packages/server/src/api/retired-cli-routes.js";
 import {
   cliCoverageReport,
   cliRuntimeCapabilities,
@@ -16,6 +20,35 @@ const manifest = JSON.parse(readFileSync(resolve(root, "cli-capabilities.json"),
 const migrationDoc = readFileSync(resolve(root, "docs/cli-command-migration.md"), "utf8");
 
 describe("CLI capabilities manifest", () => {
+  it("retires the designated-human, delivery, transfer and parent-done-grant routes and commands", () => {
+    // The routes stay registered (410 route_retired) and so stay in the golden snapshot;
+    // the commands are hidden retired entries with no capability.
+    for (const [route, path] of [
+      ["GET /api/workspaces/:workspaceId/issue-responsibility-migration", "issue responsibility-unassigned list"],
+      ["POST /api/workspaces/:workspaceId/issue-responsibility-migration/map", "issue responsibility-unassigned map"],
+      ["GET /api/issues/:id/deliveries", "issue delivery list"],
+      ["POST /api/issues/:id/deliveries", "issue delivery submit"],
+      ["POST /api/issues/:id/deliveries/:deliveryId/respond", "issue delivery accept"],
+      ["POST /api/issues/:id/deliveries/:deliveryId/authorize", "issue delivery authorize"],
+      ["POST /api/messages/:id/question/transfer", "message question transfer"],
+      ["POST /api/issues/:id/parent-done-grant", "issue done-grant add"],
+      ["POST /api/multiremi/issues/:id/parent-done-grant", "issue done-grant add"],
+      ["DELETE /api/issues/:id/parent-done-grant", "issue done-grant remove"],
+      ["DELETE /api/multiremi/issues/:id/parent-done-grant", "issue done-grant remove"],
+    ] as const) {
+      expect(golden.routes).toContain(route);
+      expect(manifest.routes[route]).toEqual({ cli_exempt: true, category: "retired_route", reason: `已移除：改用 ${RETIRED_CLI_ROUTES[route]}` });
+      const retired = manifest.retired[`remi ${path}`]!;
+      expect(retired.replacement).toBe(RETIRED_CLI_COMMANDS[path]);
+      expect(manifest.commands[retired.command]).toMatchObject({ capability: null, aliases: [], hidden: true });
+    }
+    for (const path of ["issue delivery return", "issue responsible set", "autopilot responsible set", "issue responsible clear", "autopilot responsible clear"])
+      expect(manifest.retired[`remi ${path}`]?.replacement).toBe(RETIRED_CLI_COMMANDS[path]);
+    for (const capability of ["issue.delivery.submit", "issue.delivery.accept", "issue.delivery.return", "issue.delivery.authorize",
+      "issue.delivery.list", "issue.done-grant.add", "issue.done-grant.remove", "issue.responsible.set", "autopilot.responsible.set", "issue.responsible.clear", "autopilot.responsible.clear",
+      "issue.responsibility-unassigned.list", "issue.responsibility-unassigned.map", "message.question.transfer"])
+      expect(manifest.commands[capability]).toBeUndefined();
+  });
   it("matches golden routes in both directions and Registry commands in both directions", () => {
     expect(validateCliCapabilities(golden.routes, manifest, cliCommandInventory())).toEqual([]);
     expect(new Set(Object.keys(manifest.routes))).toEqual(new Set(golden.routes));
@@ -156,7 +189,15 @@ describe("CLI capabilities manifest", () => {
         expect(options.has(name), `${entry.id} --${name}`).toBe(true);
       }
       if (entry.mutation === "read") {
-        for (const name of ["limit", "cursor", "query"]) {
+        const externalParameters: Record<string, string[]> = {
+          "chat.external.sources": [],
+          "chat.external.models": ["limit", "cursor"],
+          "chat.external.list": ["limit", "cursor"],
+          "chat.external.get": ["limit", "cursor"],
+          "chat.external.receipt": [],
+        };
+        // Native catalogs and receipts accept only their real protocol parameters.
+        for (const name of externalParameters[entry.id] ?? ["limit", "cursor", "query"]) {
           expect(options.has(name), `${entry.id} --${name}`).toBe(true);
         }
       }
@@ -166,14 +207,133 @@ describe("CLI capabilities manifest", () => {
     }
   });
 
+  it("retains former Issue Session alias paths as native commands with their Issue arguments", () => {
+    const registry = new CommandRegistry();
+    for (const spec of collaborationCommandSpecs()) registry.register(spec);
+    const cases = [
+      {
+        id: "issue.session.list",
+        argv: ["issue", "session", "list", "MUL-1"],
+        route: "GET /api/issues/:id/sessions",
+      },
+      {
+        id: "issue.session.result.list",
+        argv: ["issue", "session", "result", "list", "MUL-1", "--session", "ises_1"],
+        route: "GET /api/issues/:id/session-results",
+      },
+      {
+        id: "issue.session.result.publish",
+        argv: ["issue", "session", "result", "publish", "MUL-1", "--session", "ises_1", "--content", "Done"],
+        route: "POST /api/issues/:id/sessions/:sessionId/results",
+      },
+    ];
+    for (const { id, argv, route } of cases) {
+      const invocation = registry.resolve(argv);
+      expect(invocation, id).not.toBeNull();
+      expect(invocation!.spec.id, id).toBe(id);
+      expect(invocation!.alias, id).toBeNull();
+      expect(invocation!.positionals, id).toEqual(["MUL-1"]);
+      expect(invocation!.spec.positionals?.[0]?.name, id).toBe("issue");
+      if (id !== "issue.session.list") expect(invocation!.options.session, id).toBe("ises_1");
+
+      const commandPath = `remi ${invocation!.spec.path.join(" ")}`;
+      expect(manifest.commands[id], id).toMatchObject({
+        command: commandPath,
+        aliases: [],
+        capability: id,
+        auth: ["human", "task"],
+        migration_status: "native",
+      });
+      expect(manifest.aliases[commandPath], id).toBeUndefined();
+      expect(manifest.routes[route], id).toEqual({ command: id });
+      expect(cliCommandHelp(invocation!.spec.path), id).toContain("<issue>");
+      expect(cliCommandHelp(invocation!.spec.path), id).not.toContain("<chat>");
+    }
+  });
+
+  it("maps daemon drain mutations as human-only and status as task-readable", () => {
+    for (const [method, id] of [["POST", "daemon.drain"], ["DELETE", "daemon.undrain"], ["GET", "daemon.drain.status"]] as const) {
+      expect(manifest.routes[`${method} /api/daemons/:daemonId/drain`]).toEqual({ command: id });
+      expect(manifest.commands[id]?.auth).toEqual(method === "GET" ? ["human", "task"] : ["human"]);
+    }
+  });
+
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 668,
-      exempt: 91,
+      mapped: 658,
+      exempt: 184,
       missing: 0,
-      total: 759,
+      total: 842,
     });
+    // PR #97 (MUL-168): these four loopback-only, dedicated-token endpoints are
+    // the supervisor's slot lifecycle protocol, not user-facing CLI capabilities.
+    for (const route of ["GET /internal/slot/status", "POST /internal/slot/activate",
+      "POST /internal/slot/release", "POST /internal/slot/exit"]) {
+      expect(manifest.routes[route]).toEqual({
+        cli_exempt: true,
+        category: "platform_updater_internal",
+        reason: "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token.",
+      });
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "platform_updater_internal" });
+    }
+    // ADR 0025: the Chat composer's slash-command menu is Web state; a CLI sender types the command.
+    expect(manifest.routes["GET /api/chat/slash-commands"]).toMatchObject({ cli_exempt: true, category: "pure_ui" });
+    // PR 6: the session background-task panel and its stop are creator-only Web state with no CLI.
+    for (const route of ["GET /api/chat/sessions/:sessionId/background-tasks",
+      "POST /api/chat/sessions/:sessionId/background-tasks/stop"]) {
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "pure_ui" });
+    }
+    // ADR 0020: the Chat follow-up queue is member-only composer state with no CLI.
+    for (const route of ["GET /api/sessions/:sessionId/queue", "POST /api/sessions/:sessionId/queue",
+      "PATCH /api/sessions/:sessionId/queue/:qid", "DELETE /api/sessions/:sessionId/queue/:qid",
+      "POST /api/sessions/:sessionId/queue/:qid/steer", "POST /api/sessions/:sessionId/queue/resume"]) {
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "pure_ui" });
+    }
+    for (const [route, command] of Object.entries({
+      "GET /api/workspaces/:id/feishu-bots": "workspace.feishu-bot.list",
+      "POST /api/workspaces/:id/feishu-bots": "workspace.feishu-bot.create",
+      "POST /api/sessions/:sessionId/messages": "message.send",
+      "GET /api/messages/:id": "message.get",
+      "PATCH /api/messages/:id": "message.edit",
+      "DELETE /api/messages/:id": "message.delete",
+      "POST /api/messages/:id/resolve": "message.resolve",
+      "POST /api/messages/:id/reactions": "message.react",
+      "GET /api/inbox": "inbox",
+      "POST /api/inbox/read": "inbox.read",
+      "GET /api/turns": "turn.list",
+      "GET /api/turns/:id": "turn.get",
+      "POST /api/turns/:id/cancel": "turn.cancel",
+      "POST /api/turns/:id/wrap-up": "turn.wrap-up",
+      "POST /api/turns/:id/retry": "turn.retry",
+      "GET /api/turns/:id/trace": "turn.trace.read",
+    })) expect(manifest.routes[route]).toEqual({ command });
+    expect(manifest.routes["GET /api/sessions/:sessionId/messages"]).toEqual({ command: "message.list" });
+    for (const path of ["chat message list", "issue run-messages", "task message list"]) {
+      expect(manifest.aliases[`remi ${path}`]).toBeUndefined();
+      expect(manifest.retired[`remi ${path}`]?.replacement).toBe(RETIRED_CLI_COMMANDS[path]);
+    }
+    expect(manifest.routes["POST /api/daemon/tasks/:id/messages"]).toBeUndefined();
+    expect(manifest.routes["GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards"])
+      .toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
+    expect(manifest.routes["GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired"])
+      .toMatchObject({
+        cli_exempt: true,
+        category: "daemon_internal_protocol",
+        reason: "Read-only v1 daemon upgrade bridge for plugin desired state is machine-to-server traffic, not a user CLI command.",
+      });
+    expect(manifest.routes["POST /api/daemon/tasks/:taskId/human-requests/:requestId/card"]).toBeUndefined();
+    expect(manifest.routes["POST /api/daemon/messages/:id/card"])
+      .toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
     expect(manifest.max_planned_routes).toBe(0);
+    expect(manifest.routes["POST /api/issues/:id/workspace/abandon"])
+      .toEqual({ command: "issue.workspace.abandon" });
+    for (const [route, command] of [
+      ["GET /api/issues/:id/decisions", "issue.decision.list"],
+      ["POST /api/issues/:id/decisions", "issue.decision.request"],
+      ["POST /api/issues/:id/decisions/:decisionId/answer", "issue.decision.answer"],
+      ["POST /api/issues/:id/decisions/:decisionId/escalate", "issue.decision.escalate"],
+      ["POST /api/issues/:id/decisions/:decisionId/withdraw", "issue.decision.withdraw"],
+    ]) expect(manifest.routes[route!]).toMatchObject({ cli_exempt: true, category: "retired_route" });
     expect(manifest.routes["POST /api/workspaces/:id/relay-config/:engine/probe"])
       .toEqual({ command: "workspace.relay.probe" });
     expect(manifest.commands["workspace.relay.probe"]).toMatchObject({
@@ -185,6 +345,8 @@ describe("CLI capabilities manifest", () => {
       .toEqual({ command: "workspace.relay.reasoning-levels.get" });
     expect(manifest.routes["PUT /api/workspaces/:id/relay-config/:engine/reasoning-levels"])
       .toEqual({ command: "workspace.relay.reasoning-levels.update" });
+    expect(manifest.routes["PUT /api/workspaces/:id/relay-config/:engine/context-window"])
+      .toEqual({ command: "workspace.relay.context-window.update" });
     expect(manifest.commands["workspace.relay.reasoning-levels.update"]).toMatchObject({
       command: "remi workspace relay reasoning-levels update",
       mutation: "write",
@@ -204,8 +366,8 @@ describe("CLI capabilities manifest", () => {
       mutation: "read",
       output: ["table", "json", "jsonl"],
     });
-    expect(manifest.routes["POST /api/chat/attachments/send"]).toEqual({ command: "chat.attachment.send" });
-    expect(manifest.commands["chat.attachment.send"]?.auth).toEqual(["task"]);
+    expect(manifest.routes["POST /api/chat/attachments/send"]).toMatchObject({ cli_exempt: true, category: "retired_route" });
+    expect(manifest.commands["message.send"]?.auth).toEqual(["human", "task"]);
     expect(manifest.routes["POST /api/daemon/runtimes/:runtimeId/feishu-bot/attachments"])
       .toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
     expect(cliCoverageReport(manifest).missing).toBeLessThanOrEqual(manifest.max_planned_routes);
@@ -259,7 +421,7 @@ describe("CLI capabilities manifest", () => {
       deprecated_since: "0.3.0",
     });
     expect(Object.values(manifest.routes).filter((route) => "planned_command" in route)).toEqual([]);
-    expect(Object.keys(manifest.aliases)).toHaveLength(47);
+    expect(Object.keys(manifest.aliases)).toHaveLength(41);
     for (const [legacy, alias] of Object.entries(manifest.aliases)) {
       expect(migrationDoc, legacy).toContain(`| \`${legacy}\` | \`${alias.replacement}\` |`);
     }
@@ -271,5 +433,34 @@ describe("CLI capabilities manifest", () => {
     expect(validateCliCapabilities(golden.routes, overBudget, cliCommandInventory())).toContain(
       "planned route count 1 exceeds ratchet 0",
     );
+  });
+
+  it("records every retired path without executable capability or alias", () => {
+    for (const suffix of ["", "/entry", "/locate"]) {
+      expect(manifest.routes[`GET /api/sessions/:sessionId/log${suffix}`]).toMatchObject({ cli_exempt: true, category: "pure_ui" });
+    }
+    for (const [path, replacement] of Object.entries(RETIRED_CLI_COMMANDS)) {
+      const entry = manifest.retired[`remi ${path}`]!;
+      expect(entry.replacement).toBe(replacement);
+      expect(manifest.commands[entry.command]).toMatchObject({ capability: null, aliases: [], hidden: true });
+    }
+    for (const route of Object.keys({ ...RETIRED_CLI_ROUTES, ...WORKSPACE_OPERATOR_RETIRED_ROUTES })) {
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "retired_route" });
+    }
+  });
+  it("rejects missing replacements, missing retired entries and retired exemptions on live routes", () => {
+    const inventory = cliCommandInventory();
+    const blank = structuredClone(manifest);
+    blank.retired["remi task create"]!.replacement = "";
+    expect(validateCliCapabilities(golden.routes, blank, inventory)).toContain("remi task create retired replacement is required");
+    const missing = structuredClone(manifest);
+    delete missing.retired["remi task create"];
+    expect(validateCliCapabilities(golden.routes, missing, inventory)).toContain("remi task create retired entry differs from Registry");
+    const alias = structuredClone(manifest);
+    alias.commands[alias.retired["remi task create"]!.command]!.capability = "task.create";
+    expect(validateCliCapabilities(golden.routes, alias, inventory)).toContain("remi task create retired command must be registered without capability or aliases");
+    const exempt = structuredClone(manifest);
+    exempt.routes["GET /api/turns"] = { cli_exempt: true, category: "retired_route", reason: "wrong" };
+    expect(validateCliCapabilities([...golden.routes, "GET /api/turns"], exempt, inventory)).toContain("GET /api/turns retired_route classification differs from the retired HTTP inventory");
   });
 });

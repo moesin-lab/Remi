@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 /**
  * MUL-338 item 4 — an administrator's explicit reasoning-level declaration.
  *
@@ -552,12 +554,13 @@ describe("MUL-338 gateway reasoning declarations: the group-scoped catalog", () 
       sourceRevision: revision, models: GATEWAY_MODELS.map(id => ({ id, label: id })),
     });
     const runtimes = reports.map((thinking, index) => store.registerRuntime({
-      name: `member-${index}`, provider: "claude", workspaceId: "local", executionGroupId: "reasoning-group",
+      name: `member-${index}`, provider: "claude", workspaceId: "local",
       models: [...claudeRuntimeModels(), {
         id: "deepseek-v4-flash", label: "deepseek-v4-flash", provider: "anthropic", default: false,
         ...(thinking ? { thinking } : {}),
       }],
     }));
+    store.saveExecutionGroup("local", { name: "Reasoning", provider: "claude", profile_id: null, runtime_ids: runtimes.map(runtime => runtime.id) }, "reasoning-group");
     return { store, runtimes, app: createMultiremiApp({ store }) };
   }
 
@@ -802,7 +805,25 @@ describe("MUL-338 gateway reasoning declarations: the write endpoint", () => {
     expect(badEngine.status).toBe(400);
   });
 
-  it("requires a workspace administrator", async () => {
+  it("refuses declarations for the Antigravity engine, whose gateway path has no reasoning selector", async () => {
+    const { store, app } = setupClaude();
+    store.upsertRelayConfig("local", "antigravity", {
+      fragment: JSON.stringify({ base_url: "https://ai.openremi.fun/antigravity" }), tokenOp: "set", authToken: "test-key",
+    });
+
+    const read = await app.request("/api/workspaces/local/relay-config/antigravity/reasoning-levels");
+    expect(read.status).toBe(400);
+    expect(await read.json()).toEqual({ error: "reasoning levels are not supported for antigravity" });
+    for (const levels of [["high"], []]) {
+      const write = await app.request("/api/workspaces/local/relay-config/antigravity/reasoning-levels", {
+        method: "PUT", headers, body: JSON.stringify({ model: "gemini-3.7-flash", levels }),
+      });
+      expect(write.status).toBe(400);
+    }
+    expect(store.listGatewayModelReasoning("local", "antigravity")).toEqual([]);
+  });
+
+  it("shares gateway reasoning configuration across human accounts", async () => {
     const store = createLocalStore();
     store.createWorkspaceMember({ id: "mem_local_bob", workspaceId: "local", userId: "bob", name: "Bob", email: "bob@example.com", role: "member" });
     const member = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "bob", userId: "bob" });
@@ -813,12 +834,12 @@ describe("MUL-338 gateway reasoning declarations: the write endpoint", () => {
       headers: { Authorization: `Bearer ${member.token}`, ...headers },
       body: JSON.stringify({ model: "deepseek-v4-flash", levels: ["low"] }),
     });
-    expect(asMember.status).toBe(403);
+    expect(asMember.status).toBe(200);
 
     const readAsMember = await app.request("/api/workspaces/local/relay-config/claude/reasoning-levels", {
       headers: { Authorization: `Bearer ${member.token}` },
     });
-    expect(readAsMember.status).toBe(403);
+    expect(readAsMember.status).toBe(200);
 
     const asAdmin = await app.request("/api/workspaces/local/relay-config/claude/reasoning-levels", {
       method: "PUT",
@@ -826,7 +847,7 @@ describe("MUL-338 gateway reasoning declarations: the write endpoint", () => {
       body: JSON.stringify({ model: "deepseek-v4-flash", levels: ["low"] }),
     });
     expect(asAdmin.status).toBe(200);
-    // A refused request must not have written anything on its way out.
+    // Both accounts operate on the same stored declaration.
     expect(store.getGatewayModelReasoning("local", "claude", "deepseek-v4-flash")?.levels).toEqual(["low"]);
   });
 });

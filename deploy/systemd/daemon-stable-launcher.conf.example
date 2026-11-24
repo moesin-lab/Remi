@@ -1,0 +1,9 @@
+# One-time adoption only. Read docs/deploy/self-hosted-update-adoption.md first.
+# Replace the foreground arguments with those from the saved effective unit.
+# Preserve its Environment/EnvironmentFile, WorkingDirectory and provider settings.
+# Remove/archive historical ExecStart overrides before installing this drop-in.
+[Service]
+ExecStart=
+ExecStart=%h/.local/bin/remi daemon start --foreground
+Environment="MULTIREMI_BIN_DIR=%h/.local/bin"
+Environment="MULTIREMI_INSTALL_ROOT=%h/.local/lib/remi"

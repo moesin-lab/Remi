@@ -13,9 +13,16 @@ summary: 说明任务到 Codex ACP 的当前执行链、配置来源、会话隔
 - 在工作区 Agent 上设置 `provider: codex`，由符合路由条件的 Codex runtime 领取任务。[CLI Registry](../../apps/remi/cli/commands/agent-extensions.ts)提供 `remi agent create`、`remi agent update` 的 `--provider`、`--model` 和 `--thinking-level` 参数；先用对应命令的 `--help` 核对当前参数与身份要求。
 - [daemon 启动入口](../../apps/remi/cli/multiremi.ts)调用 [ensureAcpBridges](../../packages/acp/src/provision.ts)，使用源码固定的 `@agentclientprotocol/codex-acp` 版本及 Remi usage 补丁。版本以 [runtime-versions.json](../../packages/acp/src/runtime-versions.json) 为准；它同时固定 bridge、配套 Codex SDK 和实际执行文件版本。发版准备与安装校验见[配套升级说明](../daemon-runtime-upgrades.md)。系统或 Homebrew 的 Codex 升级不会替换 Remi 托管依赖。
 - ACP 执行文件按显式 `executable`、`REMI_CODEX_AGENT_ACP_EXECUTABLE`、Remi 管理目录与 PATH 解析，具体顺序见 `resolveAcpExecutableForAgent`。Windows 的扩展名解析也在该函数所在文件中。
+- Codex 隔离 Home 的认证链接在 POSIX 上要求私有普通文件；Windows 使用 NTFS ACL，不把模拟的 POSIX mode 当作访问权限。缺少符号链接权限时，使用保留源 ACL 的同卷文件硬链接；重入时核对文件身份，拒绝覆盖不相关文件。源文件被原子替换后，旧硬链接会被拒绝，需重新准备该 Home 的认证链接。回归入口为 `tests/unit/daemon/codex-auth-link.test.ts`。
 - 当前 Codex 健康检查只确认执行文件可解析，不启动模型进程。检查通过不等于登录、网络、模型或真实任务已可用。
 
 ## 协议与隔离
+
+客户端在 initialize 声明 AIR `sessionFailure`，从响应顶层 `InitializeResult._meta.jetbrains.air.capabilities` 读取支持情况；`agentCapabilities._meta` 只作兼容读取。provider 将通知或 prompt 结果中的 error severity 统一抛为失败；`end_turn` 本身不代表任务成功。只对未回报此能力的旧 bridge，daemon 才检查末条已输出的短错误文本；已协商的 bridge 正常引用错误示例不会触发文本兜底。Codex 压缩请求失败按其 AIR 错误处理；Claude 的原生压缩工具失败是独立 metadata 出口，共用 provider 也会记录。模型不可用、5xx 与能力排队满 5 分钟可使用配置的备用模型，每条恢复链只切一次；429/529 继续同模型有界重试，`invalid_request_error`（如 image input 不支持）不切备用。RPC 错误只追加脱敏的白名单字符串字段，不序列化原始 data。分类、恢复及兼容取舍见 [ADR 0010](../adr/0010-turn-failure-from-bridge-typed-session-failure.md)。
+
+RPC、typed 失败对象及其 cause、原生失败压缩工具和旧 bridge 的终止错误文本共用 ACP 脱敏函数；daemon 在失败报告、日志和终结进度写入前再调用一次。原始分类 hint 不可枚举，typed failure 保存脱敏副本。脱敏只保证已配置凭据按值替换、已知凭据格式和敏感键后的值三类，裸值终止符之后没有标签的文本不在范围内；完整范围见 [ADR 0010](../adr/0010-turn-failure-from-bridge-typed-session-failure.md) 第 2 条。
+
+同步提问工具 `request_user_input` 在 Codex 0.157.1 的 Default 模式下也会暴露给模型，但默认调用即返回 "unavailable in Default mode"。Remi 在 `mergeCodexSessionConfig` 中为每个会话 Home 补齐 `[features] default_mode_request_user_input = true`，工具才可在 Default 模式下调用；该开关仍标为 "under development"，升级检查见[配套升级说明](../daemon-runtime-upgrades.md)。表单经 ACP 的 `elicitation/create`（form）到 Remi 问题卡，字段映射与版本判定见 [acp-elicitation.ts](../../packages/contracts/src/acp-elicitation.ts)。
 
 [CodexAdapter](../../packages/acp/src/adapters/codex/index.ts)已经实现工具名、输入、结果预览及权限模式映射。[AcpProvider](../../packages/acp/src/provider.ts)根据 ACP 返回的能力协商 model/effort/mode；不能用未被桥接器读取的会话 `_meta` 代替协商。适配器对不支持的 `allowedTools` 和会话 `systemPrompt` 发出警告，不保证这些字段生效。
 
@@ -23,41 +30,59 @@ summary: 说明任务到 Codex ACP 的当前执行链、配置来源、会话隔
 
 这类隔离针对配置、插件与原生会话记录，不意味着每个 Home 都拥有独立付费账号。原生 OAuth 可以连接基础 Home 的认证文件，Relay 凭据使用另一条注入路径；更改认证或切换 Relay 时需要同时检查目录与凭据状态。
 
+## 原生子代理
+
+daemon 默认请求原生子会话（[ADR 0021](../adr/0021-subagent-sessions-and-autonomous-rounds.md)）：[AcpClient](../../packages/acp/src/client.ts) 在 initialize 声明 `clientCapabilities.subagents: {}`，并因 [CodexAdapter](../../packages/acp/src/adapters/codex/index.ts) 的 `nativeSubagents.airCapability` 在 AIR 能力列表里追加 `nativeSubagentSessions`。codex-acp 2.2.2 只收到 `subagents: {}` 时不生效，它的 schema 还会去掉这个字段；AIR 能力才打开子会话。桥在 initialize 回报两者，`nativeSubagentsEnabled` 据此为真。`REMI_ACP_NATIVE_SUBAGENTS=0` 不声明两者，子代理的工作重新不可见。
+
+- **帧。** 桥在发起子代理的会话上发 `subagent_spawned`（`subagentSessionId`、名称和任务）与 `subagent_state_update`，子代理的消息、工具、最终回复和用量走子会话。provider 只接受已登记的子会话，给它们的帧加 `_meta.remiSessionId`，子会话帧不改根会话的模型、配置、失败状态、流式文本与上下文；桥为每个新线程发的配置警告（`notice`，如 "Under-development features enabled"）在子会话上，记在该子代理下，不进根会话的步骤。桥把子代理的启动与活动调用并入原生会话，`spawnAgent` 不再单独成行。桥读不到提示词时给出的占位任务（「Delegated task」「Delegated task for X」）在 trace 里记为没有提示词，面板不画任务气泡。
+- **协作工具。** `wait`、`sendInput`、`sendMessage`、`followupTask`、`resumeAgent`、`closeAgent`、`interruptAgent`、`listAgents` 仍是根会话的工具调用，成为普通工具条目，`tool` 为工具名；Chat 与飞书按 shared 的 `agentControl` 显示成控制动作行，`wait` 隐藏。根会话自己等子代理，最多 10 分钟；超过时子代理在轮结束时记为已停止。
+- **用量。** 子会话上的 `usage_update` 是子代理自己的上下文占用，以 `context: false` 累加，不改根会话的上下文环。子线程的计费由 `codex-usage-v7` 把 `rawResponse/completed` 转给根会话，或由 rollout 读取（子线程以根线程为 `session_id`），与此前相同，见[统一用量与价格](../usage-accounting.md#子代理与自主轮)。
+- **没有自主轮。** Codex adapter 不声明 `autonomousRounds`：prompt 之间桥自开的一轮仍按 ADR 0020 D3 取消，provider 只缓存它的用量。
+- **权限。** 子代理的 `session/request_permission` 与 `elicitation/create` 按子会话登记的 chat 路由，卡片标出「来自子代理 X」。
+
+回归见 [原生子会话](../../tests/unit/acp/native-subagents.test.ts)、[翻译器](../../tests/unit/daemon/trace-translator-native-subagents.test.ts) 与 2.2.2 的重录夹具 `tests/fixtures/acp/codex-222-*.json`。
+
+## 后台任务
+
+daemon 默认在 AIR 能力列表里加 `asyncTasks`（`REMI_ACP_ASYNC_TASKS=0` 不加），codex-acp 2.2.2 回报它后 `asyncTasksEnabled` 为真。规则与取舍见 [ADR 0022](../adr/0022-background-tasks-keep-alive-on-demand.md)。
+
+- **发布什么。** 只有后台终端：unified-exec 里带 `processId`、仍出现在 `thread/backgroundTerminals/list` 里的 `commandExecution`。桥先发带 `asyncTasks.backgrounded: true` 的 `tool_call_update`，再发 `async_task_spawned`（类型 `shell`，名称取命令标题或命令，`canStop`，`toolCallId`；子线程的 id 是 `<threadId>:<itemId>`），结束时发 `async_task_state_update`（`completed` / `failed` 来自 `item/completed`，`stopped` 来自停止或列表里不再有它），不带摘要。没有进度帧，也没有输出文件。
+- **晚宣布。** 宣布终端的列表同步在 `turn/completed` 与 `item/started` 时运行且不被等待，所以最后一步留下的终端在 prompt 结束**之后**才宣布。attempt 结束时 daemon 因此先排空最多 2 s（`settleAsyncTasks`），再决定是否驻留。空闲时 provider 也保留 `async_task_*` 帧，不再随 Codex 的空闲规则丢掉。
+- **停止。** 与 Claude 相同的方法与参数，按根会话处理，调用 `thread/backgroundTerminals/terminate`。
+- **不会自己醒来（U2）。** 两轮之间终端在 app-server 持有线程时一直保留；没有发现 Codex 自开一轮。adapter 声明 `asyncTasks: { wakesModel: false }`：会话线照样驻留，让下一轮复用同一个进程、继续读取或轮询它启动的服务器，但从不响门铃。驻留时终端结束若被桥报告，登记表随之更新；否则一直显示运行中，直到下一轮的列表同步或保活上限。prompt 之间桥自开的一轮仍按 ADR 0020 D3 取消。
+- **关闭。** `session/close` 清空任务登记表但不发布结束，所以 daemon 在关闭驻留进程前显式停止仍在运行的终端；进程崩溃时桥把每个任务报为 `failed`，provider 重启时报为 `stopped`。
+
+回归见 [provider 登记表与驻留](../../tests/unit/acp/async-tasks.test.ts) 与 [daemon 集成](../../tests/integration/multiremi-daemon-background-tasks.test.ts) 的 Codex 用例。
+
 ## Runtime 自定义连接
 
-Runtime 详情的「Codex 连接」页支持一个自定义 Responses provider：Profile 名称、API 基础地址、模型 ID，以及直接填写 API Key 或引用 Runtime 本机 `REMI_CODEX_*` 环境变量。需先更新并重启 daemon，使注册元数据包含 `codex_profiles: 1`。未启用时沿用工作区 Relay / 原生登录路径；启用后优先于工作区 Relay。接口地址由 Runtime 连接，允许 HTTP(S) 的 loopback / LAN 地址；服务端不会对它做模型发现请求，也不放宽工作区 Relay 的 URL 校验。
+统一配置入口保存工作区级 Codex Profile，再由能力组选定 Profile 和承载 Runtime；同一 Runtime 可承载多份连接。填写连接名称、API 基础地址，以及 API Key 或 Runtime 本机 `REMI_CODEX_*` 环境变量；模型目录由组成员自动获取，默认模型 ID 可以省略。创建、权限、下发确认与旧配置迁移见[执行配置](../dev/execution-configuration.md)。受管组不使用 Profile 时沿用工作区 Relay / 原生登录；启用后优先于工作区 Relay。接口地址由 Runtime 连接，允许 HTTP(S) 的 loopback / LAN 地址；服务端不会对它做模型发现请求，也不放宽工作区 Relay 的 URL 校验。
 
-- [配置契约](../../packages/contracts/src/codex-profile.ts)只接受结构化路由字段，不接受任意 TOML、命令、URL 内联凭据或查询参数。每个 Runtime 配置一个默认模型；云友可选择此连接的其他模型，不指定时使用默认模型。
+- [配置契约](../../packages/contracts/src/execution-profile.ts)只接受结构化路由字段，不接受任意 TOML、命令、URL 内联凭据或查询参数。中央 Profile 可省略默认模型，或保留手动默认值及 `models` 白名单；白名单必须包含已指定的默认值。未配置白名单时使用组连接的发现目录。旧单 Runtime 连接仍要求非空默认模型。
 - [注入器](../../packages/daemon/src/agent-runtime/codex-profile.ts)将配置展开为隔离 `CODEX_HOME/config.toml` 的 `model`、`model_provider` 和 `model_providers.remi_custom`；密钥只进入进程环境 `OPENAI_API_KEY`，不写入 config/auth 文件。本机基础 Home 不变。ACP 的 `MODEL_PROVIDER`、`CODEX_CONFIG`、`DEFAULT_AUTH_REQUEST` 环境覆盖也会被明确设置，避免旧机器配置改变路由。
 - 这里的 Profile 是 Remi 的命名连接，不是直接复制本机 `--profile` 配置。Remi 展开有效配置，不依赖本机 profile 文件的布局。
 - [任务快照](../../packages/server/src/store/repos/tasks-repo.ts)在 claim 时冻结连接、所选模型和凭据版本，并把连接纳入执行指纹。修改配置只影响新任务；运行中任务使用原快照，自动重试在原 Runtime 仍兼容当前 Agent 时保留快照。连接或所选模型变化后从产品会话记录重新启动原生会话，不把旧 provider 会话 ID 传给新接口。若 Agent 切换 provider 或原 Runtime 不再兼容，重试清除旧快照，由兼容 Runtime 重新领取。
-- [模型发现](../../packages/server/src/worker/runtime-profile-models.ts)由所属 daemon 使用连接凭据请求基础地址下的 `/models`（遵循 [Models API](https://platform.openai.com/docs/api-reference/models/list)），例如 `/v2` 对应 `/v2/models`。成功后保存完整目录，并保留配置默认模型；失败保留上次目录，首次失败仍可使用配置模型。目录不证明模型推理成功；thinking 能力仅按准确模型 ID 合并 ACP 实测结果。未在 Codex 内置目录中的模型可由启动配置使用；兼容性取决于实际 Responses 服务。
+- 中央连接由每个成员 daemon 独立异步探测，结果按组、Runtime、绑定 generation 与 Profile revision 保存。组目录和任务匹配共用成员目录交集；自动模型也从该交集确定，并在 claim 时固定实际模型。切换连接或成员后，旧探测不能恢复当前目录；无目录的自动连接等待发现。显式默认模型和白名单保留手动配置语义，不借另一连接的原生目录补充能力。不同组的目录、能力和探测错误互不覆盖。
+- 中央探测读取 `/models` 中的原生 `models` 元数据时，先使用实际 Codex decoder 离线验证，成功后按准确 slug 保留推理级别；普通 `data` 列表只提供 ID 和标签。目录通过 `runtime.binding_state` 独立上报，不写入旧 Runtime 全局模型表。部署自动发现需同时更新平台与 daemon。
+- 旧 Runtime 连接的[模型发现](../../packages/server/src/worker/runtime-profile-models.ts)由所属 daemon 使用连接凭据请求基础地址下的 `/models`（遵循 [Models API](https://platform.openai.com/docs/api-reference/models/list)），例如 `/v2` 对应 `/v2/models`。成功后保存完整目录，并保留配置默认模型；失败保留上次目录，首次失败仍可使用配置模型。目录不证明模型推理成功；thinking 能力仅按准确模型 ID 合并 ACP 实测结果。未在 Codex 内置目录中的模型可由启动配置使用；兼容性取决于实际 Responses 服务。
 - 若自定义 `/models` 还提供 Codex 格式的完整 `models` 元数据，daemon 在任务启动前用同一 ACP bridge 对应的 Codex 执行离线 `debug models` 校验，通过后原子写入隔离 Home，并通过 `model_catalog_json` 交给 Codex，保留供应商声明的上下文窗口、工具及推理能力。只有普通 `data` 模型列表时不推断这些能力；元数据加载失败会记录诊断并保留 Codex 原有行为。此修复只需更新 daemon。
 - 供应商目录不可用但 ACP 探测成功时，保留已有目录（首次使用配置默认模型）并更新已知模型的能力，日志明确记录目录探测失败；不会把 ACP 的官方模型列表当作 custom 供应商目录。
 - 模型上报携带本次探测的 `model_profile`，服务端只接受与当前连接匹配的目录；旧 daemon 的无标识上报不能覆盖 custom 目录。部署此能力需同时更新平台和 daemon。
 - 可选的 LLM 进度摘要使用 Chat Completions 协议，因此不自动复用自定义 Responses 连接的密钥；需单独配置 `MULTIREMI_PROGRESS_SUMMARY_OPENAI_BASE_URL` 与 `MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY` 才启用该摘要。任务状态与执行消息照常上报。
 
-直接填写的 API Key 使用 [AES-256-GCM 存储](../../packages/server/src/runtime-provider-credentials.ts)，认证数据绑定工作区、Runtime 和不可变凭据版本。服务端需配置 `MULTIREMI_PROVIDER_ENCRYPTION_KEY`（base64 编码的 32 字节密钥），也可使用部署的 `MULTIREMI_TOKEN` 派生密钥；没有加密密钥时保存失败，不回退明文。轮换时用逗号分隔的 `MULTIREMI_PROVIDER_ENCRYPTION_PREVIOUS_KEYS` 保留旧密钥；更换 master token 前需保留旧派生密钥或迁移数据。历史凭据随 Runtime 保留以支持冻结任务重试，删除 Runtime 时清理；合并 Runtime 身份时重绑定加密认证数据。
+旧 Runtime 连接直接填写的 API Key 使用 [AES-256-GCM 存储](../../packages/server/src/runtime-provider-credentials.ts)，认证数据绑定工作区、Runtime 和不可变凭据版本。服务端需配置 `MULTIREMI_PROVIDER_ENCRYPTION_KEY`（base64 编码的 32 字节密钥），也可使用部署的 `MULTIREMI_TOKEN` 派生密钥；没有加密密钥时保存失败，不回退明文。轮换时用逗号分隔的 `MULTIREMI_PROVIDER_ENCRYPTION_PREVIOUS_KEYS` 保留旧密钥；更换 master token 前需保留旧派生密钥或迁移数据。历史凭据随 Runtime 保留以支持冻结任务重试，删除 Runtime 时清理；合并 Runtime 身份时重绑定加密认证数据。
 
-浏览器 GET/PUT `/api/runtimes/:id/codex-profile` 只返回配置与不透明凭据引用，PUT 仅 Runtime owner / 工作区 admin 可用。`api_key` 省略表示保留现有密钥，`profile: null` 恢复继承。密钥只经 daemon 专用 `/api/daemon/runtimes/:id/codex-profile-key` 下发，必须使用绑定该 Runtime 机器身份的 daemon token；human/task token 和其他机器均不能读取。daemon 只在内存缓存不可变凭据版本。环境变量模式不经过服务端存储密钥，配置变量后需重启 Runtime。
+保留兼容的 GET/PUT `/api/runtimes/:id/codex-profile` 只返回配置与不透明凭据引用，PUT 仅 Runtime owner / 工作区 admin 可用。`api_key` 省略表示保留现有密钥，`profile: null` 恢复继承。密钥只经 daemon 专用 `/api/daemon/runtimes/:id/codex-profile-key` 下发，必须使用绑定该 Runtime 机器身份的 daemon token；human/task token 和其他机器均不能读取。daemon 只在内存缓存不可变凭据版本。环境变量模式不经过服务端存储密钥，配置变量后需重启 Runtime。
 
-CLI 对应命令：
+新连接使用 `remi runtime profile create|update`，再以 `remi runtime group create|update` 绑定；完整示例见[执行配置](../dev/execution-configuration.md)。旧 `remi runtime codex-profile get|set` 命令只管理保留的单 Runtime 连接，`{"profile":null}` 恢复该旧路径的继承，不修改中央 Profile。
+
+Runtime 级模型目录可通过以下命令刷新和检查；能力组的可选目录使用 `remi runtime model catalog --execution-group <group-id>` 查询：
 
 ```bash
-remi runtime codex-profile get <runtime>
-remi runtime codex-profile set <runtime> --file profile.json
 remi runtime model refresh <runtime> --json
 remi runtime model status <runtime> <request-id> --json
 remi runtime model list <runtime> --json
 ```
-
-`profile.json` 示例（文件内不要提交真实密钥到 Git；可省略 `api_key` 保留已保存的密钥）：
-
-```json
-{"profile":{"name":"private","base_url":"https://example.com/v1","model":"custom-model","auth_mode":"api_key","env_key":""},"api_key":"REPLACE_WITH_API_KEY"}
-```
-
-环境变量模式使用 `"auth_mode":"env","env_key":"REMI_CODEX_API_KEY"`，不传 `api_key`。恢复继承使用 `{"profile":null}`。
 
 ## 验证入口
 
@@ -66,6 +91,7 @@ remi runtime model list <runtime> --json
 | 执行文件、健康检查与显示适配 | [providers.test.ts](../../tests/unit/acp/providers.test.ts) |
 | 桥接器版本与 provision | [provision.test.ts](../../tests/unit/acp/provision.test.ts) |
 | npm 发布包、配套 Codex、usage 补丁和真实 ACP 协商 | [verify-codex-bridge.ts](../../tests/integration/verify-codex-bridge.ts) |
+| 逐请求用量：补丁开关、rollout 读取、app-server 协议检查 | [usage-bridge-patches.test.ts](../../tests/unit/acp/usage-bridge-patches.test.ts)、[codex-rollout-usage.test.ts](../../tests/unit/acp/codex-rollout-usage.test.ts)、[codex-usage-protocol.test.ts](../../tests/unit/acp/codex-usage-protocol.test.ts) |
 | 模型/effort/权限协商与隔离 Home | [acp-session-negotiation.test.ts](../../tests/unit/acp/acp-session-negotiation.test.ts)、[session-home.test.ts](../../tests/unit/daemon/session-home.test.ts) |
 | 真实 API → daemon → ACP 任务 | [smoke-multiremi-acp.ts](../../tests/integration/smoke-multiremi-acp.ts) |
 | 自定义连接、密钥权限/加密与会话快照 | [runtime-codex-profile.test.ts](../../tests/unit/multiremi/runtime-codex-profile.test.ts)、[codex-profile.test.ts](../../tests/unit/daemon/codex-profile.test.ts) |
@@ -87,8 +113,15 @@ bun run tests/integration/smoke-multiremi-acp.ts --provider=codex --check-only
 
 ```bash
 bun run tests/integration/verify-codex-bridge.ts --package-dir=<bundle>/node_modules/@agentclientprotocol/codex-acp
+bun run tests/integration/verify-codex-bridge.ts --package-dir=<bundle>/node_modules/@agentclientprotocol/codex-acp --usage-only
 ```
 
-检查器核对发布包的依赖声明和实际 CLI 版本，应用 usage 补丁并执行发布包中的 token 转换，随后验证 ACP 初始化、会话创建、model/effort/权限协商和关闭。它从当前 `CODEX_HOME`（默认 `~/.codex`）复制 `auth.json` 到临时 Home，真实会话需要有效登录；不复制本机配置。加 `--prompt` 会调用模型并校验回复及实际 usage 事件。不加该参数时不会发送 prompt，也不能视为真实模型调用通过。
+检查器核对发布包身份及实际解析的 SDK/CLI 固定版本；bundle 可以通过已准备的 override 安装 SDK，npm manifest 的依赖范围不要求等于 override 版本。检查器应用 usage 补丁，并执行实际发布包的请求用量转换和子线程订阅转发；`--usage-only` 到此结束，不读取认证或启动真实会话。默认模式继续验证 ACP 初始化、会话创建、model/effort/权限协商和关闭，从当前 `CODEX_HOME`（默认 `~/.codex`）复制 `auth.json` 到临时 Home，真实会话需要有效登录；不复制本机配置。加 `--prompt` 会调用两次模型。新会话必须收到 `remiTokenUsage`，且请求身份和计数与 rollout 记录一致；随后在新 bridge 进程中恢复同一会话，必须从 rollout 读到该次请求。不加该参数时不会发送 prompt，也不能视为真实模型调用通过。
 
-检查器应核对发行快照中的配套 Codex 基线；usage 补丁仍用于逐请求累加，不能用只包含最后一次模型请求的 prompt 结算替代。协议回归夹具使用 Node shebang，Windows 可在 WSL 中运行 `acp-session-negotiation.test.ts`；发布包检查器直接通过 Node 启动 bridge，可在原生 Windows 运行。
+检查器核对发行快照中的配套 Codex 基线。`codex-usage-v7` 补丁读取 app-server 的 `rawResponse/completed`，以真实 thread/session 与 response ID 记录每次模型调用。该事件覆盖普通生成和上下文压缩，不需要从旧会话的累计计数猜测本次消费。app-server 只向 `thread/start` 声明 `experimentalRawEvents` 的线程及其原生子线程发送该事件，所以补丁为 codex-acp 的新会话加上该参数。该开关会同时推送每个原始响应条目，bridge 并不使用，因此补丁在 initialize 时以 `optOutNotificationMethods` 退订 `rawResponseItem/completed`。补丁的插入段以 `/*remi-usage:begin*/…/*remi-usage:end*/` 包围，后续版本可以先还原上游锚点再重打，已打 v6 的 bundle 原地升级为与全新打补丁相同的内容。
+
+`thread/resume` 与 `thread/fork` 没有该参数，恢复和 fork 后的线程收不到该事件（Codex 0.161.0、0.162.1 实测）。[provider](../../packages/acp/src/provider.ts) 在发送 prompt 前记录显式 `CODEX_HOME` 中的 rollout 文件位置（daemon 为每个任务设置独立 Home；未显式设置时不扫描用户的 `~/.codex`）；结算时由 [codex-rollout-usage.ts](../../packages/acp/src/codex-rollout-usage.ts) 读取本次追加的 `token_usage_record` 与 `compacted.latest_token_usage_record`。子线程的记录在自己的 rollout 中，以根线程为 `session_id`，同一 `CODEX_HOME` 中其他会话的记录不计入。读取前最多等待 1 秒，直到根 rollout 的最后一行是本轮的 `task_complete` 或 `turn_aborted`；本次 prompt 没有改动根 rollout 时不等待。两个来源的请求身份相同，同一请求合并而不相加；rollout 只在结算时读取，所以恢复会话的用量不会逐请求实时上报。读取位置随池中的会话保留，每次结算后前移：两次 prompt 之间由 bridge 开始的轮次（ADR 0020），在下一次结算时读取，和期间收到的 usage 帧一样计入下一个 prompt；每条记录只读一次。turn ID 不充当请求 ID，相同 response 的重放不会另加一份消费。缺失或无效的请求计数保留未知证据，不从最后请求或上下文占用补数。
+
+旧 `thread/tokenUsage/updated` 的 `used/size` 只保留为上下文诊断，不再与逐请求消费相加；Codex 的 PromptResult 最后请求用量也不作为额外消费。缓存和输出的换算由[共用请求计数校验](../../packages/acp/src/codex-request-usage.ts)处理：input 中的缓存分量单列，output 已包含 reasoning，不重复相加。模型实际 SKU 未由上游上报时保持 `model:null`，会话确认的请求模型单列 `requestedModel`。失败、取消和异常退出保留已观察到的用量，worker 在计量事件时写入 durable outbox，并在终态前以有界分块补齐快照。协议回归夹具使用 Node shebang，Windows 可在 WSL 中运行 `acp-session-negotiation.test.ts`；发布包检查器直接通过 Node 启动 bridge，可在原生 Windows 运行。
+
+历史数据使用 [reconcile-task-usage.ts](../../scripts/reconcile-task-usage.ts) 生成只读证据计划；共享 native 会话必须按任务时间边界唯一归属。旧 `backfill-codex-task-usage.ts` 仅保留只读命令别名，不再累加 `used` 或覆写旧任务用量。`codex-usage-v6` 期间缺失的请求从 daemon 的原生 rollout 补录，见 [Codex 原生用量补录](../usage-accounting.md#codex-原生用量补录)。显式 schema/legacy 迁移入口为 [migrate-usage-accounting.ts](../../scripts/migrate-usage-accounting.ts)，不会在正常 server startup 扫描历史消息。采集失败、replay 和真实 daemon 协议验证入口见 [usage-failure.test.ts](../../tests/unit/acp/usage-failure.test.ts)、[daemon-usage-accounting.test.ts](../../tests/integration/daemon-usage-accounting.test.ts)；这些回归使用 provider fixture，不代表本次调用了付费模型服务。

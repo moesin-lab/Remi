@@ -6,6 +6,7 @@ export const workspaceKeys = {
   all: (wsId: string) => ["workspaces", wsId] as const,
   list: () => ["workspaces", "list"] as const,
   members: (wsId: string) => ["workspaces", wsId, "members"] as const,
+  historicalActors: (wsId: string) => ["workspaces", wsId, "members", "history"] as const,
   invitations: (wsId: string) => ["workspaces", wsId, "invitations"] as const,
   myInvitations: () => ["invitations", "mine"] as const,
   agents: (wsId: string) => ["workspaces", wsId, "agents"] as const,
@@ -17,7 +18,7 @@ export const workspaceKeys = {
     ["workspaces", wsId, "squads", squadId, "members-status"] as const,
   skills: (wsId: string) => ["workspaces", wsId, "skills"] as const,
   assigneeFrequency: (wsId: string) => ["workspaces", wsId, "assignee-frequency"] as const,
-  botMenu: (wsId: string) => ["workspaces", wsId, "bot-menu"] as const,
+  botMenu: (wsId: string, botId = "default") => ["workspaces", wsId, "bot-menu", botId] as const,
 };
 
 export function workspaceListOptions() {
@@ -27,10 +28,10 @@ export function workspaceListOptions() {
   });
 }
 
-export function botMenuOptions(wsId: string) {
+export function botMenuOptions(wsId: string, botId = "default") {
   return queryOptions({
-    queryKey: workspaceKeys.botMenu(wsId),
-    queryFn: () => api.getBotMenu(wsId),
+    queryKey: workspaceKeys.botMenu(wsId, botId),
+    queryFn: () => api.getBotMenu(wsId, botId),
     enabled: !!wsId,
   });
 }
@@ -50,19 +51,37 @@ export function memberListOptions(wsId: string) {
   });
 }
 
-export function agentListOptions(wsId: string) {
+/** Historical attribution only. Never use this list for permissions or pickers. */
+export function historicalActorListOptions(wsId: string) {
+  return queryOptions({
+    queryKey: workspaceKeys.historicalActors(wsId),
+    queryFn: () => api.listMembers(wsId, true),
+    enabled: !!wsId,
+  });
+}
+
+export function agentListOptions(
+  wsId: string,
+  /** `false` keeps cached agents readable without issuing the request (MUL-472 b). */
+  options: { enabled?: boolean } = {},
+) {
   return queryOptions({
     queryKey: workspaceKeys.agents(wsId),
     queryFn: () =>
       api.listAgents({ workspace_id: wsId, include_archived: true }),
+    enabled: options.enabled ?? true,
   });
 }
 
-export function squadListOptions(wsId: string) {
+export function squadListOptions(
+  wsId: string,
+  /** `false` defers the fetch without dropping a cached list (MUL-472 b). */
+  options: { enabled?: boolean } = {},
+) {
   return queryOptions<Squad[]>({
     queryKey: workspaceKeys.squads(wsId),
     queryFn: () => api.listSquads(),
-    enabled: !!wsId,
+    enabled: !!wsId && (options.enabled ?? true),
   });
 }
 
@@ -123,17 +142,22 @@ export function selectSkillAssignments(
   return map;
 }
 
-export function invitationListOptions(wsId: string) {
+export function invitationListOptions(
+  wsId: string,
+  options: { enabled?: boolean } = {},
+) {
   return queryOptions({
     queryKey: workspaceKeys.invitations(wsId),
     queryFn: () => api.listWorkspaceInvitations(wsId),
+    enabled: options.enabled ?? true,
   });
 }
 
-export function myInvitationListOptions() {
+export function myInvitationListOptions(options: { enabled?: boolean } = {}) {
   return queryOptions({
     queryKey: workspaceKeys.myInvitations(),
     queryFn: () => api.listMyInvitations(),
+    enabled: options.enabled ?? true,
   });
 }
 
@@ -141,5 +165,12 @@ export function assigneeFrequencyOptions(wsId: string) {
   return queryOptions({
     queryKey: workspaceKeys.assigneeFrequency(wsId),
     queryFn: () => api.getAssigneeFrequency(),
+  });
+}
+
+export function magpieServiceOptions(wsId: string) {
+  return queryOptions({
+    queryKey: [...workspaceKeys.all(wsId), "services", "magpie"],
+    queryFn: () => api.getMagpieService(wsId),
   });
 }

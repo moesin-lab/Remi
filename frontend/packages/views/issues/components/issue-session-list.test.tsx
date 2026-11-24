@@ -11,14 +11,17 @@ const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 // by every row, so `isPending` alone can't say *which* row is in flight.
 const addParticipantState = vi.hoisted(() => ({
   mutate: vi.fn(),
+  createIssueSession: vi.fn(),
+  createChatWorkSession: vi.fn(),
   isPending: false,
   variables: undefined as { participantType: string; participantId: string } | undefined,
 }));
-const createSession = vi.hoisted(() => vi.fn());
-
 vi.mock("@multiremi/core/issues", () => ({
   useAddSessionParticipant: () => addParticipantState,
-  useCreateIssueSession: () => ({ mutateAsync: createSession, isPending: false }),
+  useCreateIssueSession: (issueId: string) => ({ isPending: false, mutateAsync: (input: unknown) => addParticipantState.createIssueSession(issueId, input) }),
+}));
+vi.mock("@multiremi/core/chat/work-sessions", () => ({
+  useCreateChatWorkSession: (chatId: string) => ({ isPending: false, mutateAsync: (input: unknown) => addParticipantState.createChatWorkSession(chatId, input) }),
 }));
 
 vi.mock("../../common/actor-avatar", () => ({
@@ -52,6 +55,8 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 function makeSession(overrides: Partial<IssueSession> = {}): IssueSession {
   return {
     id: "session-main",
+    owner_type: "issue",
+    owner_id: "issue-1",
     issue_id: "issue-1",
     workspace_id: "ws-1",
     title: "Main",
@@ -105,19 +110,57 @@ beforeEach(() => {
 });
 
 describe("IssueSessionList rail", () => {
+  it("distinguishes associated Chat Main from the Issue Main", () => {
+    renderRail([
+      makeSession({ id: "chat-main", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1" }), makeSession(),
+    ]);
+    expect(screen.getByRole("button", { name: "Main (Chat)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Main (Issue)" })).toBeInTheDocument();
+  });
+
+  it.each(["issue", "chat"] as const)("creates side chat through its %s parent owner", async ownerType => {
+    const parent = makeSession({
+      owner_type: ownerType, owner_id: ownerType === "chat" ? "chat-1" : "issue-1",
+      chat_id: ownerType === "chat" ? "chat-1" : null,
+    });
+    const onSelect = vi.fn();
+    const mutation = ownerType === "chat" ? addParticipantState.createChatWorkSession : addParticipantState.createIssueSession;
+    mutation.mockResolvedValue(makeSession({ ...parent, id: "side-1", title: "Review", parent_session_id: parent.id }));
+    renderRail([parent], [], { onSelectSession: onSelect });
+    fireEvent.click(screen.getByRole("button", { name: "Session actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Side chat" }));
+    fireEvent.change(await screen.findByLabelText("Session name"), { target: { value: "Review" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(mutation).toHaveBeenCalledWith(parent.owner_id, {
+      title: "Review", holds_workspace: false, parent_session_id: parent.id,
+    }));
+    expect(ownerType === "chat" ? addParticipantState.createIssueSession : addParticipantState.createChatWorkSession).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith("side-1");
+  });
+
+  it("preserves the selected Session and side-chat input when creation fails", async () => {
+    const onSelect = vi.fn();
+    addParticipantState.createIssueSession.mockRejectedValue(new Error("Creation failed"));
+    renderRail(SESSIONS, [], { onSelectSession: onSelect });
+    fireEvent.click(screen.getAllByRole("button", { name: "Session actions" })[0]!);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Side chat" }));
+    fireEvent.change(await screen.findByLabelText("Session name"), { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith("Creation failed"));
+    expect(screen.getByLabelText("Session name")).toHaveValue("Keep this draft");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
   it("renders a single session as one highlighted row, header included", () => {
     renderRail([makeSession()]);
 
     // The rail is not conditional on having something to switch to.
     expect(screen.getByText("Sessions")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
-    // Exactly one create-session control, in the header.
-    const newSession = screen.getAllByRole("button", { name: "New session" });
-    expect(newSession).toHaveLength(1);
-    expect(screen.getByText("Sessions").parentElement).toContainElement(newSession[0]!);
+    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
   });
 
-  it("offers participants and side chat in a regular session's row menu", async () => {
+  it("offers participants and side chat for root Sessions", async () => {
     // Publishing a result and delegating a task used to sit here too. Both are
     // agent-side actions driven from the CLI — members never used the buttons,
     // so the page no longer shows them (MUL-204).
@@ -126,29 +169,6 @@ describe("IssueSessionList rail", () => {
 
     const items = await screen.findAllByRole("menuitem");
     expect(items.map((item) => item.textContent)).toEqual(["Session participants", "Side chat"]);
-  });
-
-  it("opens a discussion prefilled with the chosen parent and selects the created side chat", async () => {
-    createSession.mockResolvedValue({ id: "session-side" });
-    const onSelectSession = vi.fn();
-    renderRail(SESSIONS, [], { onSelectSession });
-    fireEvent.click(screen.getAllByRole("button", { name: "Session actions" })[1]!);
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Side chat" }));
-
-    expect(await screen.findByRole("combobox")).toHaveValue("session-2");
-    expect(screen.getByRole("button", { name: "Discussion" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Work" })).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Session name"), {
-      target: { value: "Review side chat" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
-
-    await waitFor(() => expect(createSession).toHaveBeenCalledWith({
-      title: "Review side chat",
-      holds_workspace: false,
-      parent_session_id: "session-2",
-    }));
-    expect(onSelectSession).toHaveBeenCalledWith("session-side");
   });
 
   it("does not offer side chat from an existing side session", async () => {
@@ -224,7 +244,7 @@ describe("IssueSessionList rail", () => {
 
     expect(screen.getByText("Sessions")).toHaveAttribute(
       "title",
-      "Sessions on this issue",
+      "Sessions owned by or associated with this Issue",
     );
   });
 

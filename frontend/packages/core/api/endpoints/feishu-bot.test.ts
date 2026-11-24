@@ -22,6 +22,14 @@ describe("FeishuBotEndpoints.getFeishuBot (role-polymorphic GET)", () => {
     if (view.role !== "admin") throw new Error("expected the admin branch");
     expect(view.config.app_id).toBe("cli_abc");
     expect(view.config.app_secret_hint).toBe("cli_••••••");
+    expect(view.config.responsible_member_id).toBeNull();
+  });
+
+  it("keeps the bot's Chat question handler on the admin config", async () => {
+    const { api } = endpoints({ configured: true, workspace_id: "ws_1", responsible_member_id: "member_1" });
+    const view = await api.getFeishuBot("ws_1");
+    if (view.role !== "admin") throw new Error("expected the admin branch");
+    expect(view.config.responsible_member_id).toBe("member_1");
   });
 
   it("reads the member projection through the availability branch", async () => {
@@ -114,6 +122,18 @@ describe("FeishuBotEndpoints control routes", () => {
       config: { enabled: false, chat_id: "", project_ids: null },
     });
   });
+
+  it.each([undefined, null, { code: "issue_topic_config_invalid", message: "Invalid stored recipient" }])(
+    "parses the optional Issue topic validation warning (%j)", async (invalid) => {
+      const response = {
+        workspace_id: "ws_1",
+        config: { enabled: true, chat_id: "oc_topics", project_ids: null, notify_mode: "person", notify_open_id: null },
+        ...(invalid === undefined ? {} : { invalid }),
+      };
+      const { api } = endpoints(response);
+      await expect(api.getIssueTopicConfig("ws_1")).resolves.toEqual(response);
+    },
+  );
 
   it("sends the Issue topic project filter without changing null semantics", async () => {
     const { api, fetchMock } = endpoints({

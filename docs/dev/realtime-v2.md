@@ -1,0 +1,135 @@
+---
+title: 浏览器实时 v2（stream 订阅与 trace 端点）
+status: active
+summary: 浏览器 WebSocket 的 v2 帧、两条流的端点与鉴权、断线续传与退避重连、resync 的触发与客户端动作。
+---
+
+# 浏览器实时 v2
+
+本页记录 C0 契约（MUL-435）、C3（MUL-438）落地后的浏览器实时协议。Hub 本体、环形缓冲与背压在 C1（MUL-436）；多进程的角色锁与 peer 通道在 MUL-461/462。ADR 0007 是这些取舍的决策记录。
+
+## 两条流、两个端点
+
+| 流键 | 内容 | 序号来源 | 浏览器端点 |
+|---|---|---|---|
+| `log:<session_id>` | 会话日志（展示单元与隐藏标记） | MUL-402 行自身的 `seq` | `/ws` |
+| `trace:<task_id>` | 执行过程 trace | daemon 分配的 `trace_seq` | `/api/trace/ws` |
+
+两个端点各自**只**承载一种流：`/ws` 收到 `stream.subscribe{stream:"trace"}` 回 `stream.error{code:"wrong_endpoint"}`，`/api/trace/ws` 收到 `stream:"log"` 同样处理。这条规则让「订阅发错进程」变成显式错误，而不是一个永远收不到帧的订阅。
+
+trace 流的家在 runtime 进程（ADR 0007 决策一），因此 [api-role.ts](../../packages/server/src/config/api-role.ts) 把 `/api/trace/ws` 放进 runtime 放行清单：nginx 把该路径交给 runtime（MUL-464），ui 进程收到它是 421，不是 426。
+B5 的 `GET /api/tasks/:id/trace` 和 `GET /api/shares/:token/tasks/:task_id/trace` 也由 runtime 服务；UI 收到这两条读取路由返回 421。执行过程按「轮 + 条目」读取（[ADR 0019](../adr/0019-turn-and-item-traces.md)）：默认 `view=turn` 按 `item_cursor` 分页，运行中返回 daemon 的内存 fold，已结束返回持久化快照；客户端用共享 fold（[turn-trace.ts](../../packages/shared/src/turn-trace.ts)）合并分页，再从页面的 `head + 1` 订阅 trace socket 应用直播事件，`stream.gap` 时重新取页替换本地状态。`view=events` 按 `after_seq` 返回原始事件行，供 CLI `--raw` 与 v1 文件使用；v1 文件的 `view=turn` 是没有条目的 `format: "legacy"` 页。
+
+## 帧
+
+客户端 → 服务端：
+
+| 帧 | 载荷 |
+|---|---|
+| `auth` | `{token}`，握手第一帧（cookie 模式省略） |
+| `stream.subscribe` | `{stream, id, from_seq}`，`from_seq` 为**包含**起点（下一条想要的序号） |
+| `stream.unsubscribe` | `{stream, id}` |
+| `ping` | 无 |
+
+服务端 → 客户端：
+
+| 帧 | 载荷 |
+|---|---|
+| `auth_ack` | 无 |
+| `stream.ack` | `{stream, id, first_seq, head_seq, log_version, gap, closed?}`；trace 带完整性状态 |
+| `stream.data` | `{stream, id, frames:[{seq, kind, payload}]}`，按 `seq` 升序 |
+| `stream.gap` | `{stream, id, from, to}`，订阅期间掉队，需自行补读 |
+| `stream.error` | `{stream, id, code}` |
+| `stream.closed` | `{stream, id, head_seq}`；本订阅可投递的 trace 帧已发送，执行记录结束 |
+| `resync` | 无 |
+| `pong` | 无 |
+
+`stream.error` 的 code 集在 [contracts/live-hub.ts](../../packages/contracts/src/live-hub.ts) 冻结：`invalid_payload`、`forbidden`、`wrong_endpoint`、`unavailable`。`forbidden` 同时用于「不存在」与「无权限」，订阅者无法据此枚举 id；`unavailable` 表示鉴权查询本身失败（只读池饱和/超时），或订阅中某批 `log:` 帧的投影失败，可重试。`stream.error` 之后服务端已退订，这条订阅不再有帧。浏览器（[use-issue-log.ts](../../frontend/packages/core/session-log/use-issue-log.ts) 的 `useLiveLog`）收到 `unavailable` 时按退避重新订阅（0.5s 起每次加倍、最长 8s、带抖动，每条流每分钟最多 6 次），经 `IssueLogReplica.resubscribe` 让副本从已持有的 head 续订，正在显示的会话同时读一次尾部，补上断开期间写入的行；该页为其他会话做 leader 时同样续订，缺口由续订的 ack 补读。其他 code 是拒绝，不重试，显示的会话进入日志错误状态；超过每分钟次数也一样。
+
+`stream.ack.gap` 与 `stream.gap` 不是同一件事：前者是订阅建立时环尾已追不回，后者是订阅期间掉队。
+
+浏览器 handler 通过 `subscribeWithSink` 接入真实 Hub，读取 socket 的 `getBufferedAmount()`，
+将运行中的缺口（含晚到 revision）发送为 `stream.gap`。Bun 的 `drain` 回调恢复该 socket 的订阅；
+ack 发送前的 data 和 gap 按到达顺序缓冲，ack 后才发给客户端。
+
+trace 结束时，Hub 在最后一批数据之后发 `stream.closed`；零事件、结束后才订阅和背压恢复也走同一规则。带历史数据的 `ack.closed` 不替代后续数据和结束帧，客户端不能在 ack 时提前退订丢掉回放。缺失区间仍通过 HTTP 分页补齐；closed 表示生产端结束，不代表浏览器已经加载全部历史。旧客户端可忽略新增帧，继续使用 HTTP 的 `closed`。
+
+keyed Hub 与 `subscribeWithSink` 同样回放 `[fromSeq, head]`，低于流起点的请求被截断（log 为 0，trace 为 1）。
+Issue 日志首开先接受 SSR `initialLog` 或等待 CSR/locate 窗口，再以 `max(本地续传游标, window.head_seq + 1)` 订阅；窗口 head 是全流 head，不是定位窗口末行。窗口读取与订阅之间的缺口仍由 `onGap` 补读。message/turn 帧按 session、seq、id 和 revision 复用本会话当前/已知窗口的完整读侧元数据；未命中行在单窗容量内合并为范围读取；每次日志写入都会递增 `log_version`，范围读取通常比已加载窗口新，不因版本不同拒绝，行 revision 低于帧时才报错。ack 中的 `log_version` 只是新鲜度令牌，版本变化不清空副本、不重置续传游标；断开后丢弃旧异步水合结果。
+副本 leader 的 socket 同时承载其他标签页和同页其他日志（如 Issue 详情上的浮动 Chat）声明的会话，这些会话的帧也交给 leader 页的 `IssueLogReplica` 水合：一律经读取路由回读，不复用、也不登记为本会话窗口；其 `stream.gap` 只把该区间补读进共享副本，本会话的缺口才刷新本页窗口。
+`log:` 流中 seq 不超过 head 的 `entry` 若 revision 更高（Chat 轮卡片在轮次开始时即占位并隐藏，每次状态变化以完整 entry 重发），Hub 不再当作重放丢弃：替换 ring 中未失效的保留副本，并作为实时变更发给已越过该位置且未持有该 revision 的订阅；revision 相同或更低仍计为重放丢弃，背压暂停中的订阅改收 `stream.gap`。缺口后等待中的同 seq entry 以更高 revision 替换。
+跨进程时 peer 只收到带 `changed_seq` 的 head 指针，按本地同一规则处理（[hub-core.ts](../../packages/server/src/api/hub/hub-core.ts) 的 `applyRemoteChange`）：整行重发的指针另带 `changed_entry`，接收进程有订阅越过该位置时从共享数据库读回该行，发给已越过该位置且未持有该 revision 的订阅，包括先经 HTTP 读窗口、从窗口 head 之后订阅而从未经本 Hub 收到该行的浏览器（Chat 的隐藏轮卡片正是如此）；patch 指针，或读不到该行时，所有已越过该位置的订阅收到 `stream.gap` 重读。是否越过以订阅游标判断，不以本 Hub 的投递记录判断：经 HTTP 读到的行和重读得到的基底都不在投递记录里。
+A-0 的裸 task id 与 daemon `trace.subscribe` 保持排他游标，Hub 内部以 `fromSeq + 1` 适配。
+真实 Hub 的空 log 使用 `head=-1`、`first_seq=0`；实际接收 seq 0 后 head 才为 0。
+
+## 订阅鉴权
+
+`startMultiremiServer` 的两个 socket handler 与健康路由使用同一个真实 `HubImpl`。
+调用方可通过 `liveHub`（兼容别名 `hub`）注入共享实例；默认不会构造空 Hub。
+`apiRole` 同时决定路由守卫、健康响应和 Hub 角色，具体接入见
+[Live Hub 对接说明](live-hub-a6-integration.md)。
+
+服务端自建 Hub 默认使用 [会话日志 fill reader](../../packages/server/src/api/hub/conversation-log-fill-reader.ts)：冷流订阅和 peer head 补齐均读取 `log:` 的 B1 head 与有界范围页，包含隐藏标记以保留 seq 连续性；Postgres 走异步 read pool，SQLite 走 store。`trace:` 的 head 返回 `null`，不从数据库补帧。关停时先解除日志 listener、关闭 Hub，再关闭读池，避免进行中的 fill 访问已关闭的连接。
+独立调用 `createMultiremiApp` 没有关停句柄，默认不启用这个异步 fill；需要它的调用方可显式传入 `hubFill` 并负责自身生命周期。
+
+实现在 [hub/stream-auth.ts](../../packages/server/src/api/hub/stream-auth.ts)，规则只写一次，两种后端各自提供事实：
+
+- `log:` 按会话归属。Chat 及其工作 Session 只允许 Chat 的 `creatorId` 本人，并检查关联 Agent 的可见性；仅无 Chat 所有者的历史 Issue Session 按工作区成员身份授权。关联 Issue 不扩大私有 Chat 的访问范围，工作区管理员也不能借此读取他人的 Session。socket 的 workspace 绑定仍然生效，跨工作区一律拒绝。
+- `trace:` 按 `canUserViewTaskMessages`。携带 Chat 身份的普通任务和 Session 任务都只允许 Chat 创建者；无 Chat 身份的私有 Agent 任务只允许其 owner 与工作区 owner/admin；其余任务工作区成员可读。
+
+HTTP 日志窗口、定位和单条展开通过 `getConversationLogAccessScope` 一次读取 Session、所属 Chat 和 Agent 可见性，再复用工作区、创建者和 Agent 权限规则，避免鉴权时完整加载 Agent 的配置。收件箱单条展开的查询预算及 SQLite/PostgreSQL 验证入口见 [MUL-491 回归](../../tests/unit/multiremi/mul491-inbox-receipt-query.test.ts)；私有 Session 边界见 [HTTP/订阅回归](../../tests/unit/multiremi/chat-session-log-access.test.ts)。
+
+会话订阅通过后，浏览器发送出口仍逐批执行与三个 HTTP log GET 共用的来源可见性规则。
+冷回放、ring 续传、peer 补洞、实时 entry 和 patch 都经过
+[browser-log-projection.ts](../../packages/server/src/api/hub/browser-log-projection.ts)。patch 先查当前 canonical 行，
+避免部分字段遗漏来源；提问、答复、轮卡片及引用它们的编辑/生命周期标记沿来源任务/agent 鉴权。
+无权行只发送 `{session_id,seq,revision,visibility:"hidden"}`，供本地副本记录连续覆盖范围；查不到行时同样以它失败关闭，所以浏览器（[issue-log.ts](../../frontend/packages/core/session-log/issue-log.ts) 的 `hydratedFrames`）在它可能删去页面已有的行、落在尚未读到的 seq，或是副本只知其隐藏的 seq 的更新 revision 时（占位符代表一次写入，例如 Chat 轮卡片在轮结束时由隐藏变为显示），先经读取接口核对：读取接口仍以不低于该 revision 返回的行保留，否则按隐藏处理，并记下这个 revision，同一 seq 不高于它的占位符不再读取；
+有权帧递归脱除 `card_token_*`。权限只缓存到当前批次，保留的 ring 不按用户改写。
+Postgres 的行与来源事实通过异步 read pool 读取。一批帧的投影失败（查询失败或超时，或另一个进程刚写入的行还读不到）时，[browser-stream.ts](../../packages/server/src/api/hub/browser-stream.ts) 等 250ms 重新投影这一批一次，投递链等它完成，顺序不变；只发送投影成功的帧，所以重试不会放出未经检查的行。仍失败才停止该订阅并返回 `unavailable`。每次失败记一条 warn：流 key（`log:<session_id>`）、帧数、第几次、错误名和截断到 200 字符的消息，不含帧内容或凭证。
+
+`task:*` 状态、结果和进度事件也按来源任务权限选择工作区成员，local 与 peer 使用同一个发送函数。
+`inbox:new/read/batch-read` 仅发送 `{index_only:true}`，由客户端重新读取带权限的 inbox API；
+human-request feed 仅供内部卡片宿主消费，不向浏览器发送消息对象。
+
+Postgres 下每条订阅走 C4 只读池一条 `SELECT`（`LOG_STREAM_FACTS_SQL` / `TRACE_STREAM_FACTS_SQL`），不使用同步 bridge；SQLite 与测试退回 store 同步读取。`userId === null`（主令牌/开放模式）保留本地管理员语义。
+
+鉴权等待期间，退订、连接关闭和同一流的新订阅都会使旧请求失效；旧结果不再登记 Hub 订阅，也不发送迟到的 ack 或错误。
+
+## 断线续传、退避与 resync
+
+[ws-client.ts](../../frontend/packages/core/api/ws-client.ts)：
+
+- 重连为 1s→30s 抖动指数退避（`reconnectDelayMs`），失败计数在认证成功后归零。
+- 每 25s 发一次 `ping`（Bun `idleTimeout` 为 120s）。
+- OPEN 只表示传输已打开；当前连接收到 `auth_ack` 后才发送流订阅。重连重新等待认证，已关闭或被替换连接的事件不影响当前连接。
+- 显式 `fromSeq`（包括 0）保留到真正收到数据；成功发送和 `stream.ack` 都不消费锚点，旧 ACK 也不会抹掉替换订阅的锚点。内部区分「尚无数据」和「已收到 seq 0」，后者从 1 续传。
+- 认证成功后对每条活动流重发 `stream.subscribe`：有本地帧则 `from_seq = 本地 head + 1`，否则沿用调用方原始锚点。
+- 收到 `resync` 与收到重连走同一恢复动作：重订阅所有流，再跑一次非流式缓存的失效（[use-realtime-sync.ts](../../frontend/packages/core/realtime/use-realtime-sync.ts)）。
+
+`resync` 的发送方是服务端一个进程级入口 `server.broadcastResync()`（[server.ts](../../packages/server/src/api/server.ts)、[hub/browser-stream.ts](../../packages/server/src/api/hub/browser-stream.ts)）：给本进程所有已认证浏览器连接发 `{type:"resync"}`，每连接 0–2s 抖动，避免整片客户端同一刻重取。Hub 的 peer 适配器在序号跳号或对端重启时改为查库补齐，不广播 `resync`；链路静默 15 秒只在 `/health.hub.peer_link` 标记 `stale`。
+
+## 客户端订阅入口
+
+- [realtime/streams.ts](../../frontend/packages/core/realtime/streams.ts) 提供 `useLogStreamSubscription` / `useTraceStreamSubscription`，按 `(stream,id)` 共用一条订阅，每个消费者独立登记回调。卸载只移除自己的回调，最后一个消费者卸载才退订。
+- `TraceSocket`（[api/trace-socket.ts](../../frontend/packages/core/api/trace-socket.ts)）懒建：第一次 `subscribeTrace` 才建连接，最后一个退订时关闭。`deriveTraceWsUrl` 把 `/ws` 映射到 `/api/trace/ws`。
+
+## 兼容
+
+旧 `task`/`chat` scope、消息帧与 v1 `subscribe`/`unsubscribe` 系列帧已移除。SessionLog 内容由 `log:` 流送达，执行事件由 `trace:` 流送达；`chat:done | queue_updated | session_*` 投递到会话创建者的 user 注册表（[realtime.ts](../../packages/server/src/api/realtime.ts)）。
+
+## 验证入口
+
+- 服务端协议与鉴权：`bun test tests/unit/multiremi/multiremi-browser-stream-protocol.test.ts`（假 Hub，覆盖三种 log 归属、trace 四种可见性、ack/gap、续传、`wrong_endpoint`、resync）。
+- 服务端端点接线与 chat 归属：`bun test tests/unit/multiremi/multiremi-browser-stream-socket.test.ts`。
+- 冷流、真实 PG peer 补帧与关停顺序：`bun test tests/unit/multiremi/conversation-log-server-wiring.test.ts`。
+- 浏览器来源权限与字段脱除：`bun test tests/unit/multiremi/unified-browser-log-visibility.test.ts`，真实 loopback `/ws`，SQLite 与设置 `MULTIREMI_TEST_POSTGRES_URL` 后的真实 PG。
+- 客户端：`cd frontend/packages/core && bunx vitest run api/ws-client-streams.test.ts api/trace-socket.test.ts`。
+- 路由清单：`bun run scripts/snapshot-api-routes.ts --check`；角色守卫计数：`bun test tests/unit/multiremi/api-role-guard.test.ts`。
+
+runtime/all 角色默认启动时，HTTP trace 读取委托给 daemon socket reader，
+trace append/close 写入进程自己持有的 Live Hub。注入 EmptyLiveHub 的测试仍使用
+内存 sink；ui 角色不持有 trace 路由或 daemon socket，trace WS 继续返回 421。
+裸 task id 的 TraceSink 订阅同步回放保留窗口，供协议消费者读取快照；后续事件
+与浏览器的 keyed 订阅仍由 Hub flush 推送。
+`tests/integration/daemon-protocol-v2/default-trace-wiring.test.ts` 在 SQLite/PG 上
+验证默认启动、HTTP 读取、浏览器推送、协议回放及 closed，不注入 reader 或 sink。

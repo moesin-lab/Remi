@@ -23,6 +23,7 @@ function createMockWs(): WSClient {
     on: vi.fn(() => () => {}),
     onAny: vi.fn(() => () => {}),
     onReconnect: vi.fn(() => () => {}),
+    onResync: vi.fn(() => () => {}),
   } as unknown as WSClient;
 }
 
@@ -54,6 +55,62 @@ describe("useRealtimeSync — ws instance change", () => {
     qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     stores = createStores();
     invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+  });
+
+  it("re-runs the reconnect invalidation when the server broadcasts resync (MUL-438)", () => {
+    const ws = createMockWs();
+    const resyncCallbacks = new Set<() => void>();
+    (ws.onResync as unknown as ReturnType<typeof vi.fn>).mockImplementation((cb: () => void) => {
+      resyncCallbacks.add(cb);
+      return () => resyncCallbacks.delete(cb);
+    });
+    renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+
+    expect(resyncCallbacks.size).toBe(1);
+    invalidateSpy.mockClear();
+    for (const cb of resyncCallbacks) cb();
+
+    // The same workspace-scoped invalidation a reconnect runs — the two paths
+    // share one implementation, so a `resync` cannot recover less than a drop.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["issues", "ws-1"] });
+  });
+
+  it("keeps Chat's cursor-backed rows during a same-instance reconnect", () => {
+    const ws = createMockWs();
+    let reconnect: (() => void) | undefined;
+    (ws.onReconnect as unknown as ReturnType<typeof vi.fn>).mockImplementation((cb: () => void) => {
+      reconnect = cb;
+      return () => { reconnect = undefined; };
+    });
+    renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+    invalidateSpy.mockClear();
+    reconnect?.();
+    const keys = invalidateSpy.mock.calls.map((call: [{ queryKey?: unknown }, ...unknown[]]) => call[0].queryKey);
+    expect(keys).toContainEqual(["issues", "ws-1"]);
+    expect(keys).not.toContainEqual(["chat", "ws-1"]);
+    // What no stream resumes is refreshed: session lists and details, the
+    // pending roll-up, the background-task registry (PR 6 review #7).
+    expect(keys).toEqual(expect.arrayContaining([
+      ["chat", "ws-1", "sessions"], ["chat", "ws-1", "session"], ["chat", "ws-1", "pending-tasks"], ["chat", "ws-1", "background-tasks"],
+    ]));
+    expect(keys).not.toContainEqual(["chat", "ws-1", "queue"]);
+  });
+
+  it("refreshes a cached background-task list and the session count on resync, keeping the queue", async () => {
+    const ws = createMockWs();
+    let resync: (() => void) | undefined;
+    (ws.onResync as unknown as ReturnType<typeof vi.fn>).mockImplementation((cb: () => void) => {
+      resync = cb;
+      return () => { resync = undefined; };
+    });
+    qc.setQueryData(["chat", "ws-1", "background-tasks", "chat_1"], { session_id: "chat_1", running: 1, rows: [] });
+    qc.setQueryData(["chat", "ws-1", "sessions"], []);
+    qc.setQueryData(["chat", "ws-1", "queue", "chat_1"], { items: [], paused: null });
+    renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+    resync?.();
+    expect(qc.getQueryState(["chat", "ws-1", "background-tasks", "chat_1"])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["chat", "ws-1", "sessions"])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(["chat", "ws-1", "queue", "chat_1"])?.isInvalidated).toBe(false);
   });
 
   it("skips invalidation on first non-null ws instance", () => {
@@ -102,26 +159,6 @@ describe("useRealtimeSync — ws instance change", () => {
     expect(invalidateSpy).not.toHaveBeenCalled();
   });
 
-  it("invalidates exactly once when a new ws instance appears after null gap", () => {
-    const ws1 = createMockWs();
-    const { rerender } = renderHook(
-      ({ ws }) => useRealtimeSync(ws, stores),
-      { initialProps: { ws: ws1 as WSClient | null }, wrapper: createWrapper(qc) },
-    );
-
-    // Simulate workspace switch: ws -> null -> new ws
-    invalidateSpy.mockClear();
-    rerender({ ws: null });
-    expect(invalidateSpy).not.toHaveBeenCalled();
-
-    const ws2 = createMockWs();
-    rerender({ ws: ws2 });
-
-    // Should have called invalidateQueries for all workspace-scoped keys,
-    // including task and Product Session caches affected by daemon retirement.
-    expect(invalidateSpy).toHaveBeenCalledTimes(25);
-  });
-
   it("does not re-invalidate when rerendered with the same ws instance", () => {
     const ws1 = createMockWs();
     const { rerender } = renderHook(
@@ -136,7 +173,7 @@ describe("useRealtimeSync — ws instance change", () => {
     expect(invalidateSpy).not.toHaveBeenCalled();
   });
 
-  it("invalidates chat, plugins, pins, labels, and invitations queries on ws instance change", () => {
+  it("invalidates all workspace query families exactly once after a null gap", () => {
     const ws1 = createMockWs();
     const { rerender } = renderHook(
       ({ ws }) => useRealtimeSync(ws, stores),
@@ -145,10 +182,12 @@ describe("useRealtimeSync — ws instance change", () => {
 
     invalidateSpy.mockClear();
     rerender({ ws: null });
+    expect(invalidateSpy).not.toHaveBeenCalled();
 
     const ws2 = createMockWs();
     rerender({ ws: ws2 });
 
+    expect(invalidateSpy).toHaveBeenCalledTimes(25);
     const calls = invalidateSpy.mock.calls.map((call: [{ queryKey?: unknown }, ...unknown[]]) => call[0].queryKey);
     expect(calls).toContainEqual(["chat", "ws-1"]);
     expect(calls).toContainEqual(["repository-activity", "ws-1"]);

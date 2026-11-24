@@ -15,34 +15,130 @@ bun run release:prepare --version <下一版本>
 
 Claude ACP 使用 @anthropic-ai/claude-agent-sdk 内的 CC 执行文件，Codex ACP 使用 @openai/codex；这条链路没有独立的 @openai/codex-sdk。通过 npm overrides 固定实际 SDK，包括桥接包的嵌套依赖。若最新 Claude SDK 携带的 CC 尚未跟上独立 CC 的 latest，真实版本验证会失败，阻止发布不一致的组合。
 
-候选校验包含 ACP 包版本、SDK 包版本、实际执行文件 --version、Codex usage 补丁、Claude wrapper 健康检查及 ACP initialize 协商。任何步骤失败都不改发版文件；此时应处理兼容性问题或等待上游版本对齐，再重新准备。准备命令不创建提交、tag 或 Release，也不重启机器上的 daemon，不创建 Task、不向模型发 prompt。
+候选校验包含 ACP 包版本、SDK 包版本、实际执行文件 --version、Codex usage 补丁与其依赖的 app-server 协议（见下方 Codex 升级检查项）、Claude 的 usage 补丁与子代理补丁（见下方 Claude 升级检查项）、Claude wrapper 健康检查及 ACP initialize 协商。任何步骤失败都不改发版文件；此时应处理兼容性问题或等待上游版本对齐，再重新准备。准备命令不创建提交、tag 或 Release，也不重启机器上的 daemon，不创建 Task、不向模型发 prompt。
 
-依赖与版本号同批提交，完整 Release build check 通过后才打 tag。CI 对版本号变更检查对应依赖快照，并在 Linux/macOS 安装固定组合、验证初始化。tag 工作流在发布 CLI 前检查版本一致性、快照和同一 main 提交的完整 CI 成功记录。构建时不再解析 latest，所以检查后上游继续发新版本也不会改变本次发行内容。
+依赖与版本号同批提交，完整 Release build check 通过后才打 tag。CI 对版本号变更检查对应依赖快照，并在 Windows/Linux/macOS 安装固定组合、验证初始化。Windows 使用 Node 启动 JavaScript ACP 入口，安装过程保持在独立候选目录中。tag 工作流在发布 CLI 前检查版本一致性、快照和同一 main 提交的完整 CI 成功记录。构建时不再解析 latest，所以检查后上游继续发新版本也不会改变本次发行内容。
 
 依赖升级不新增发版定时器；夜间发版任务使用同一准备入口。上线机器的依赖更新频率跟随 daemon 发版和升级频率。
 
+## Antigravity 固定与升级检查项
+
+Antigravity 不是 npm 包，`release:prepare` 只原样沿用 `antigravity` 块，`release:check` 在每个提交上校验它的结构（稳定版本号、`dl.google.com` 的 https 地址、64 位十六进制 sha256、正数字节数、已知平台）。升级时由维护者手动执行：
+
+```bash
+bun run release:pin-antigravity --version <server 版本> --dry-run   # 只计算，不写文件
+bun run release:pin-antigravity --version <server 版本>
+```
+
+命令读取公共 ACP registry（`cdn.agentclientprotocol.com/registry/v1/latest/registry.json`，只列最新版本、不带校验和），下载四个支持平台的压缩包计算 sha256 与大小（不保存压缩包），只改写 `antigravity` 块，拒绝降级。1.4.0 的四个值已于 2026-10-15 用 `--dry-run` 对真实 registry 复核一致。
+
+每次升级 server 版本，用新版本实际运行（假上游或真实网关）逐条确认以下行为仍然成立，再提交 pin。这些是对专有 server 可观察行为的记录，不引用、不复制其源码：
+
+- 环境开关仍是 `AGY_ACP_ENABLE_GATEWAY_AUTH=1`，`antigravity-acp/settings.json` 的 `auth.type = "gateway"` 仍选中网关认证（`runtime prepare` 的契约检查覆盖）；
+- 网关 URL 规则不变：server 自己在 `AGY_LLM_GATEWAY_URL` 后追加 `/v1beta/...`，base URL 不带 `/v1beta`；listing 仍同时带 Bearer 与占位 `x-goog-api-key`，由垫片剥掉；
+- 网关模式仍不提供 `thought_level` 选项，`session/set_config_option` 仍能严格切换模型；
+- server 自报的 `usage_update.used` 仍等于 total + cached，因此 native `used` 继续不能计费（实测对账见 [Antigravity Runtime](antigravity.md#validation)）；
+- `ask_user` 仍以 `interaction_<hex>` 工具调用加 `session/request_permission` 发出，工作区信任提示的选项 id 仍是 `{trust, deny}`；
+- 网关错误仍以 `Agent execution error:` 或 `Agent connection was lost and could not be re-established:` 开头的整段文本流出；
+- rawInput 的键名与 `trace-vendor.ts` 的别名表一致（用手动探测重新导出 fixture 对照）；
+- `remi runtime prepare --provider antigravity --accept-antigravity-terms` 的完整校验（含真实垫片前的契约检查）在 Linux x64 与 macOS 上通过，并跑一次[手动探测](antigravity.md#validation)。
+
+CI 不在 runner 上代为同意 Google 条款，所以按 `antigravity` 块变化触发的 Linux/macOS 校验作业没有加入（PR 4 后续：需要先确定由谁、以什么身份同意条款）；在此之前由维护者在两类机器上手动执行上面最后一项。
+
+## Claude 升级检查项
+
+Claude 桥 bundle 带两个补丁，都改 `dist/acp-agent.js`：`claude-usage-v4`（逐请求用量，见 [Claude 接入](design/acp-claude-via-claude-agent-acp.md#验证入口)）与 `claude-subagents-v1`（原生子代理的后台与类型事实，[ADR 0021](adr/0021-subagent-sessions-and-autonomous-rounds.md) 决策 6）。`release:prepare` 的候选校验（`scripts/verify-runtime-candidate.ts`）与 `remi runtime prepare` 都调用 `patchClaudeUsageBridge`：先打用量补丁再打子代理补丁，任一锚点不是恰好出现一次就失败，依赖准备不改发版文件。daemon 的 `bridgeSatisfied` 要求文件同时含 `const CLAUDE_USAGE_PATCH = "claude-usage-v4";` 与 `const REMI_SUBAGENT_PATCH = "claude-subagents-v1";`，缺任一标记的已安装 bundle 视为不满足并重新准备。子代理补丁的插入段由 `/*remi-subagents:begin*/…/*remi-subagents:end*/` 包围，可剥离后重打。
+
+锚点匹配只说明补丁装上了。每次升级 claude-agent-acp（`runtime-versions.json` 的 `claude.acp`）后，在固定 bundle 上用真实会话逐条确认：
+
+- 客户端声明 `subagents: {}` 时，`subagent_spawned` / `subagent_state_update` 仍是 AIR 形式，子代理的帧走子会话，宣布带 `_meta.remi`：前台子代理 `backgrounded: false`，后台启动为 `true`，恢复的一代（`<id>:generation:N`）为 `true`，`subagentType` 为 SDK 的类型。
+- 每个结果仍以带 `_meta["_claude/origin"]` 的 `usage_update` 结束；人的一轮为 `{kind:"human"}`，后台子代理的后续轮为 `{kind:"task-notification"}`，其余自主来源与 [ClaudeAdapter](../packages/acp/src/adapters/claude-code/index.ts) 的 `autonomousRounds.resultOrigins`（对照桥的 `AUTONOMOUS_RESULT_ORIGINS`）一致。
+- 后台子代理在根会话结果之前结束时，后续轮仍在 `session/prompt` 返回后开始，daemon 在同一轮里收到它的回答；子代理的权限请求仍以子会话 id 发出。
+- 重录 `tests/fixtures/acp/claude-090-native-subagent-*.json`（脱敏）并跑 `tests/unit/acp/native-subagents.test.ts`、`tests/unit/acp/autonomous-turn.test.ts`、`tests/unit/daemon/trace-translator-native-subagents.test.ts` 与 `tests/integration/multiremi-daemon-subagents.test.ts`。
+
+任何一项不成立时，可在 daemon 环境里设 `REMI_ACP_NATIVE_SUBAGENTS=0` 或 `REMI_ACP_AUTONOMOUS_ROUNDS=0` 恢复此前的行为（见 [daemon 环境](deploy/66-8-remi-environment.md)），再修补丁或 adapter 后发版。claude-agent-acp 0.90.0 上的实测（2026-10-16，经 Remi 安装路径打补丁的真实 bridge 与本分支的 daemon）：前台子代理 `backgrounded: false`、后台启动为 `true`，`subagentType` 为 `general-purpose`；后台子代理在根会话结果之前结束时，后续轮的回答作为自主轮在同一轮里收到，等待期间的引导结束等待并在同一轮里得到回答；子代理的写权限请求以子会话 id 发出，批准后子代理继续。恢复一代（`<id>:generation:N`）的标记未实测。
+
+## Codex 升级检查项
+
+每次升级 Codex（`runtime-versions.json` 的 `codex.sdk` / `codex.executable`）后，逐条确认下列事实。开关仍存在但路径或默认值改变时，先修 `mergeCodexSessionConfig` 再发版：
+
+- `[features] default_mode_request_user_input = true` 仍能打开 Default 模式下的同步 `request_user_input`。该开关在 Codex 里标记为 "under development"、默认关闭，Remi 在 `packages/daemon/src/agent-runtime/relay-sync.ts` 的 `mergeCodexSessionConfig` 里为每个会话 Home 补齐；`remi runtime prepare` 安装 bundle 后用真实执行文件确认（先只写一个含开关的临时 Home，再读开关状态）：
+
+  ```bash
+  # 在仓库根目录执行；bundle 目录名由 runtime-versions.json 的 codex 三段版本组成。
+  CODEX_VERSIONS=$(bun -p 'const c=require("./packages/acp/src/runtime-versions.json").codex; `${c.acp}-${c.sdk}-${c.executable}`')
+  CODEX_BIN="${REMI_HOME:-$HOME/.remi}/acp/bundles/codex-$CODEX_VERSIONS/node_modules/.bin/codex"
+  TMP_CODEX_HOME=$(mktemp -d)
+  printf '[features]\ndefault_mode_request_user_input = true\n' > "$TMP_CODEX_HOME/config.toml"
+  CODEX_HOME="$TMP_CODEX_HOME" "$CODEX_BIN" features list | grep default_mode_request_user_input
+  # 期望：default_mode_request_user_input          under development  true
+  ```
+
+  删掉临时 Home 里的 config.toml 后，同一命令输出 `false`，据此确认开关由 Remi 写入，而非 Codex 默认开启。本项在 codex-acp 1.13.1 + Codex 0.157.1 上实测通过（2026-09-27）。
+- 逐请求用量仍被采集（升级 Codex 或 codex-acp 都要确认）。补丁锚点能匹配只说明补丁已安装，不说明钩子会被调用：`codex-usage-v6` 在 codex-acp 2.1.1、2.2.2 上锚点全部匹配，但两版 bridge 的 `thread/start` 都没有声明 `experimentalRawEvents`，Codex 0.161.0、0.162.1 的 app-server 因而从不发送 `rawResponse/completed`。结果是 Codex 任务只留下无 token 的 `context_snapshot` 单位，报表全部计入 `unknown_task_count`。`codex-usage-v7` 依赖下面三点：
+  - `thread/start` 声明 `experimentalRawEvents: true` 后，该线程及其原生子线程才会收到 `rawResponse/completed`；
+  - `thread/resume` 与 `thread/fork` 没有该参数，这类线程的请求只能从原生 rollout 的 `token_usage_record` 读取（[codex-rollout-usage.ts](../packages/acp/src/codex-rollout-usage.ts)）；
+  - initialize 的 `optOutNotificationMethods` 仍可退订随开关出现的 `rawResponseItem/completed`。
+
+  `release:prepare` 与 `remi runtime prepare` 会用候选 Codex 执行文件生成 app-server schema（`app-server generate-json-schema --experimental`），上述字段或 `rawResponse/completed` 的 thread/turn/response 身份缺失时失败（`verifyCodexRequestUsageProtocol`）。这一步不调用模型，不能证明事件真的会发出，也不检查 rollout 格式。因此依赖准备之后，还要在固定 bundle 上运行真实检查（调用两次模型）：
+
+  ```bash
+  # CODEX_VERSIONS 的取法同上一项。
+  bun run tests/integration/verify-codex-bridge.ts --prompt \
+    --package-dir="${REMI_HOME:-$HOME/.remi}/acp/bundles/codex-$CODEX_VERSIONS/node_modules/@agentclientprotocol/codex-acp"
+  # 期望 status 为 passed，requestUsage.newThread.streamed > 0，requestUsage.resumedThread.rollout > 0
+  ```
+
+  新会话的流式请求必须在 rollout 中找到身份与计数相同的记录，否则检查器失败；恢复会话在新 bridge 进程中运行，`resumedThread.streamed` 为 0 是 app-server 的现状。`token_usage_record` 字段改名时，需要同时修改 [normalizeCodexRequestUsage](../packages/acp/src/codex-request-usage.ts) 与 rollout 读取。本项在 codex-acp 2.2.2 + Codex 0.162.1 上实测通过（2026-10-15）：新会话 1 条流式请求、1 条 rollout 记录，恢复会话 1 条 rollout 记录。
+- Default 模式下提问仍能走到 form elicitation：codex agent 调用同步 `request_user_input` 后，客户端应收到 `elicitation/create`（`mode: "form"`）而不是 "unavailable in Default mode" 错误。`packages/acp/src/client.ts` 声明 `elicitation: { form: {} }`；表单字段布局见 `packages/contracts/src/acp-elicitation.ts`。
+- 表单布局版本判定仍然成立：codex-acp 1.11 用 `<id>__other` + `_meta.codex.isOtherAnswer`，1.12 起改为 `<id>_note` + `_meta.codex.role = "user_note"`，并把问题正文放在 `title`、短标题放在 `description`。`buildUserInputRequest` / `convertUserInputResponse` 的行号注释需要一起更新。
+
 ## 安装与启用
 
-平台的 CLI 升级请求沿用现有排空/暂停接单流程。`remi update` 从
-`MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，默认
-`Grassgod/Remi`）读取 GitHub Release。它按当前 OS/架构精确选择
-`remi-<version>-<os>-<arch>.tar.gz`，核对 GitHub 资产的 SHA-256 digest、
-归档路径和新二进制 `--version`，再由新包的 `remi runtime prepare` 安装并
-验证该版本的固定依赖。任一步失败都不会改写现有 executable。
+平台的 CLI 升级请求沿用现有排空/暂停接单流程。daemon 与已配置 server 的
+`remi update` 默认按 `MULTIREMI_UPDATE_SOURCES=platform,github` 选择来源。
+平台使用已有凭据读取 `/api/remi/releases/daemon/current`；显式 `target_commit`
+只读取平台对应提交，并要求清单同时满足请求的版本与提交。未指定提交时，若平台
+current 清单版本不符合 `target_version`，视为该来源没有请求版本，可后备到 GitHub
+对应 tag；平台 404、未配置或网络不可达也可后备。清单非法、其它 HTTP 状态以及
+制品 size、SHA-256、版本或提交校验失败均硬失败，不切换来源。
+
+GitHub 来源从 `MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，默认
+`moesin-lab/Remi`）读取 Release，并在自身环境配置 `GITHUB_TOKEN` 时鉴权查询。
+两种来源都按当前 OS/架构选择制品，核对 size、SHA-256、归档路径和新二进制
+`--version`；平台来源额外要求 `--build-info` 的版本与提交匹配清单。然后由新包的
+`remi runtime prepare` 安装并验证固定依赖。任一步失败都不会改写现有 executable。
+未指定目标的更新遇到较旧版本直接返回 current；平台制品比较版本先后时，保留
+major.minor.patch 和预发布标签，忽略 `+` 构建元数据；仅当末尾段匹配对应 commit
+前缀时才忽略该构建哈希（如 `-stable.ab12cd34` 中的 `ab12cd34`）。
+提交未知或后缀不匹配时保留该段，数字预发布序号仍按版本比较。同版本不同提交仍可安装，不按哈希字典顺序判断新旧；
+显式指定较旧目标也仍可安装。完整版本和提交仍用于制品身份校验。
 
 验证成功后，新包进入 `~/.local/lib/remi/versions/<digest-prefix>/`，旧快照
 保留。稳定 launcher 仅原子替换其中的版本目标，并将原内容保存为新快照的
 `previous-launcher`；已有自定义参数改写仍保留。macOS launchd 如果直接指向
 旧快照，会改为指向稳定 launcher，同时保存 `previous-launchd.plist`。
+`remi daemon service install` 在当前 executable 位于安装根目录的
+`versions/<id>/remi` 下时，会检查 `MULTIREMI_BIN_DIR` 和 PATH 中的 shell
+launcher；仅当 launcher 的 `exec` 目标与当前 executable 一致时，生成的
+systemd `ExecStart` / launchd `ProgramArguments` 才使用该稳定路径。
+支持 updater 写出的单引号目标及保留自定义参数的 sh/Bash launcher；只读解析绝对字面目标，
+不执行脚本探测。安装布局和目标身份通过 realpath 比较，支持符号链接；PATH 空项按当前目录查找。
+安装根目录默认是 `~/.local/lib/remi`，可由 `MULTIREMI_INSTALL_ROOT` 指定。
+直接二进制安装和 Bun 源码运行保持原有启动方式。
 updater 不停止或重启 daemon；维护者仍需在已排空且明确批准的维护窗口中执行
 `remi restart`。安装脚本的首次安装路径同样先运行 runtime prepare，再替换
 `remi` 与配套 Claude wrapper。
 
-daemon 由 systemd 托管时，重启交给 `systemctl --user restart --no-block <unit>`，由 systemd 重建整个 unit cgroup，只留一个新进程；launchd 托管时使用 `launchctl kickstart -k`。unit 名只从 /proc/self/cgroup 的 `0::` 或 `name=systemd` 行取，cgroup v1 主机上其它控制器行只到 `user@<uid>.service`（见 [apps/remi/cli/multiremi/service.ts](../apps/remi/cli/multiremi/service.ts)）。管理器调用失败或进程不受管理器托管时才退回 spawn 后继进程。修复前的版本在 cgroup v1 主机上总是退回 spawn，旧进程留在 unit 里；这样启动的新进程在接管工作区和接单前自检，以下条件全部满足时请求一次 unit 重启：自己不是 unit 的 MainPID；MainPID 是前台 daemon；从自己往上直到 MainPID 的每一级父进程都是前台 daemon，也就是由 spawn 回退逐代拉起；同一 HOME 下没有其它 daemon 持有工作区 supervisor 租约。任务进程同样在 unit 里并继承 INVOCATION_ID，任务里起的 daemon 与 unit 的 daemon 之间隔着 shell 或 agent 运行时，因此无论它换了 HOME、状态目录还是端口，都只记日志、不重启。租约仍被占用说明有 daemon 可能在跑任务，同样只记日志。
+daemon 由 systemd 托管时，重启交给 `systemctl --user restart --no-block <unit>`，由 systemd 重建整个 unit cgroup，只留一个新进程；launchd 托管时使用 `launchctl kickstart -k`。unit 名只从 /proc/self/cgroup 的 `0::` 或 `name=systemd` 行取，cgroup v1 主机上其它控制器行只到 `user@<uid>.service`（见 [apps/remi/cli/multiremi/service.ts](../apps/remi/cli/multiremi/service.ts)）。`systemctl` 与 daemon 在同一 cgroup，`--no-block` 返回前可能已被 stop job 的 SIGTERM 终止；此时记录交由 systemd 继续处理并退出，不报重启失败、不 spawn 后继。其它管理器调用失败或进程不受管理器托管时才退回 spawn 后继进程。修复前的版本在 cgroup v1 主机上总是退回 spawn，旧进程留在 unit 里；这样启动的新进程在接管工作区和接单前自检，以下条件全部满足时请求一次 unit 重启：自己不是 unit 的 MainPID；MainPID 是前台 daemon；从自己往上直到 MainPID 的每一级父进程都是前台 daemon，也就是由 spawn 回退逐代拉起；同一 HOME 下没有其它 daemon 持有工作区 supervisor 租约。任务进程同样在 unit 里并继承 INVOCATION_ID，任务里起的 daemon 与 unit 的 daemon 之间隔着 shell 或 agent 运行时，因此无论它换了 HOME、状态目录还是端口，都只记日志、不重启。租约仍被占用说明有 daemon 可能在跑任务，同样只记日志。
 
 每个 provider 安装到 ${REMI_HOME:-~/.remi}/acp/bundles/<provider>-<bridge>-<sdk>-<executable>/，先在同级临时目录安装。预检直接运行新 bundle，不切换旧 daemon 使用的 Codex 启动链接；新 daemon 启动时才启用。旧的 ~/.remi/acp/node_modules 和全局安装保留为兼容入口。修复同一 bundle 时旧目录保留为 .previous-<timestamp>-<pid>，可人工回收。
 
 全局 claude、codex 命令与用户登录配置不被覆盖。显式配置的自定义执行文件仍由用户管理；发行版校验针对 Remi 托管依赖。启动和 ACP 重装入口使用相同的版本与安装逻辑。仅 bridge 版本正确不代表 SDK 与实际执行文件正确。
+
+网页 Runtime 详情展示实际 Agent/ACP 版本，Claude、Codex 和 Antigravity 的升级入口统一指向机器页面的 CLI 更新；不再调用 PATH 中的 `claude update` / `codex update`，因为它们可能更新另一套全局安装。ACP 操作标为“重装 ACP”，完成提示明确它修复的是当前 Remi 配套版本。服务端拒绝这三个 provider 的 `scope=agent` 请求，避免旧页面或 CLI 将更新错对象报告为成功。Grok 仍支持独立 Agent 更新。
+
+CLI 使用 `remi runtime release start <runtime> --file <request.json>`：`{"scope":"cli","target_version":"<已发布版本>"}` 升级该机器 Remi CLI 及配套依赖；`{"scope":"acp"}` 重装当前配套 ACP；`{"scope":"agent"}` 仅用于 Grok。ACP 请求中的历史 `latest` 哨兵为协议兼容保留，不代表查询 npm 最新版本。
 
 原有 daemon 启动健康检查继续执行；安装校验不等同于登录授权、真实模型调用或重启后服务注册成功的端到端验收。旧发布包不含 runtime-bundle.json，安装脚本仍兼容旧版本安装；旧 daemon 需要升级到包含本改动的版本才会使用新依赖。
 
@@ -128,12 +224,112 @@ release tarball 时返回 404 `release_catalog_empty`，错误会明确提示配
 GitHub installer。要启用管理式镜像，发布流程必须把同一版本的各架构 tarball 放入
 该目录并持久挂载；这与修复客户端 GitHub 来源是两个独立动作。
 
+## 后台任务与驻留进程
+
+Chat 会话线的桥进程可以在还有后台任务时驻留（[ADR 0022](adr/0022-background-tasks-keep-alive-on-demand.md)）。驻留进程不计为活跃任务，不阻挡 `tryPauseClaimsForUpdate`，所以升级不必等它们结束：
+
+- **停止、重启与 CLI 更新。** daemon 退出前（计划停止、CLI 更新后的重启）不再驻留新的会话线，停止所有驻留会话线的任务（每条至多 3 s），发 `closed` 快照后关闭进程；登记表里这些任务记为「电脑上的 Remi 已重启」（`daemon_restart`）。
+- **平台排空。** 排空期间不驻留新的会话线，已驻留的同样以 `daemon_restart` 停止；排空解除后恢复驻留。
+- **崩溃或 `kill -9`。** 桥在自己的进程组里，可能留在机器上。daemon 状态目录的 `parked-bridges-<provider>-<身份>.json` 记着每个驻留进程组和它的启动时间，下次启动、领取任务之前杀掉启动时间仍然吻合的进程组；随后 `hello` 的 `parked_lanes` 为空，服务端把这台 runtime 未结束的登记行写成 `daemon_restart`。
+- **`acp` 与 `agent` 范围的更新。** 它们重装桥或更新 Agent CLI 但不重启 daemon，也不动驻留进程：驻留进程继续用启动时的桥与 CLI，直到它关闭，或下一轮因启动指纹变化把它释放（`config_changed`）后用新版本启动。需要立即切换时，先在 Chat 里「全部停止」，或重启 daemon。
+- **混合版本。** 新 daemon 只在服务端的 `welcome.caps` 回显 `lane.background` 时驻留；连到旧服务端时，后台任务在 attempt 结束时停止，与驻留关闭（`REMI_MAX_PARKED_LANES=0`）相同。开关见 [daemon 环境](deploy/66-8-remi-environment.md)。
+
+## Trace 持久化升级边界
+
+本版本 daemon 将规范化过程记录写入 `<workspacesRoot>/traces/<主体>/<task_id>.jsonl`。
+保留同一工作区根与 Runtime 身份重启时，恢复文件的 head、closed 和读取归属；已关闭历史按需读取，
+未结束任务按 Hub head 续传。这只保证本版本已写入文件的记录，活跃追加未逐条 fsync，不承诺断电尾部保留。
+
+旧版本只有进程内存中的 trace，新进程不能自动找回；原始 provider 日志也不能可靠重建全部 Remi 事件。
+旧 daemon 停止前，需通过现有 `trace.read` 分页保存仍需保留的记录后再交接。
+保存的导出只是人工备份：本 PR 不提供导入命令，也不保证把它自动恢复到新 daemon 的热指针。
+已停止且没有备份的旧内存记录不可恢复，不能把升级后的空或不可达历史解释为本版本恢复成功。
+
+新文件头保存 `runtime_id`；缺少该字段的旧文件不猜测热读权限，文件保留在磁盘上。
+服务端不再保存 trace 副本，Runtime 下线或删除后指向它的指针标 `lost`。
+
+## 存储布局升级边界
+
+本版本改变 daemon 根目录布局（见[存储与保留](dev/storage-retention.md)）。升级后首次启动、领取任务之前，daemon 执行一次旧布局清扫：
+有未保存工作的旧 worktree 先打快照 ref，`.repos` 与 `.snapshots` 改名为 `shared/repos` 与 `shared/code-views`，其余旧条目整体移入
+`legacy-<日期>/`，保留 `MULTIREMI_LEGACY_KEEP_DAYS`（默认 7）天后由回收轮次删除，期间不删除任何用户数据。
+历史 Issue 与 Chat 在 daemon 上的原生会话和 trace 作废，不迁移；服务端迁移同时把所有会话线置为新一代，
+重开历史主体时从分支新建工作区、从对话日志重建上下文。旧 daemon 在升级窗口内调用已删除的 RPC 得到 404，按既有逻辑跳过清理。
+此前用 systemd 覆盖文件设置 `MULTIREMI_GC_ENABLED=false` 的 daemon，在预演清单核对无误后删除该覆盖文件并重启，周期回收才会开启。
+清扫会把 v0.2.89 的 `.runtime/`（含 Codex 原生 rollout）一并移入 `legacy-<日期>/` 并按期删除；需要补录 `codex-usage-v6` 期间的 Codex 用量时，先在该 daemon 上导出，或在期限内从 `legacy-<日期>/` 导出，步骤见 [Codex 原生用量补录](usage-accounting.md#codex-原生用量补录)。
+实现及读页上限见 [daemon 协议 v2](daemon-protocol-v2.md)。
+
 ## 本地准备与验证
 
 ```bash
 remi runtime prepare                         # 已安装/配置的 provider
 remi runtime prepare --provider claude
 remi runtime prepare --provider claude --provider codex
+remi runtime prepare --provider antigravity --accept-antigravity-terms
 ```
 
+不带 `--provider` 时（安装脚本即如此调用），准备配置或检测到的 provider 中带 ACP bundle 的 claude、codex；antigravity 只在本机已有任一版本安装时才准备，这样新 CLI 替换前就能预取新 pin，但绝不会成为一台机器的首次下载。全部跳过时输出空的 `runtimes` 并成功退出，不阻塞 CLI 升级。显式 `--provider` 接受 claude、codex、antigravity，传入其它值直接报错；任何准备失败都按失败退出。
+
+Antigravity 的 ACP server 是 Google 的专有软件，不随 Remi 发布包分发：每台机器自己从 `dl.google.com` 下载 `runtime-versions.json` 里固定的压缩包（macOS 约 110 MB、解压约 400 MB；Linux 约 330 MB、解压约 1.1 GB），流式校验大小与 sha256，在同级 stage 目录解压后原子改名到 `${REMI_HOME:-~/.remi}/acp/antigravity/<版本>-<平台>/`，保留一份旧副本。首次下载必须显式同意 Google 条款（`--accept-antigravity-terms` 或 `REMI_ACCEPT_ANTIGRAVITY_TERMS=1`），同意时间写入 `install.json`，之后的 pin 升级沿用。准备后运行完整校验：只做 `initialize`（版本与 `loadSession`），再对假上游做无凭据的网关契约检查（`session/new` 必须列出上游的唯一模型并带 Bearer 认证），不发 prompt。不支持 Windows。详见 [Antigravity Runtime](antigravity.md)。
+
 命令无服务端鉴权要求，只操作当前用户的本地 Remi 依赖。隔离验证时给 REMI_HOME 指定新临时目录；源码运行可通过 REMI_CLAUDE_AGENT_ACP_EXECUTABLE 显式选择仓库内 bin/remi-claude-agent-acp。
+
+## 平台 CLI 更新的确认与回滚
+
+平台 `scope=cli` 与交互式 `remi update` 共用
+[`cli-update.ts`](../packages/shared/src/cli-update.ts)：按 GitHub 发布资产的 SHA-256
+校验归档与目标版本，先准备配套 runtime，再写入 `versions/<digest 前 8 位>/`，
+保留 `previous-launcher` 和原有 wrapper，以原子 rename 切换稳定 launcher。
+平台请求固定 `target_version`，不再下载 `install-remi.sh`。交互式安装仍不自动重启。
+
+平台更新在查询发布信息、下载或写入任何安装文件前，先确认服务实际执行入口就是
+将被替换的稳定 launcher（`MULTIREMI_BIN_DIR/remi`，否则为 PATH 上第一个
+`remi`，再回退 `/usr/local/bin/remi`）。systemd 使用
+`systemctl --user show -p ExecStart --value -- <unit>` 读取所有 drop-in 合并后的
+有效配置；launchd 通过 `launchctl print gui/<uid>/<label>` 确认已加载的
+program 与 plist 路径，再读取该 plist 的 `ProgramArguments[0]`，若有 `Program`
+则以其为准。已加载 program 与磁盘 plist 必须同时通过检查。查询失败、格式无法确认，或入口直接指向版本二进制时，
+请求以 `failed` 结束，不安装、不改写 launcher/plist、不启动回滚看门、不重启。
+错误包含实际入口、期望 launcher 和修复指引。
+
+维护者应在授权维护窗口运行 `remi daemon service install`，检查并移除冲突的
+systemd drop-in，再确认有效 `ExecStart` / plist 已指向同一稳定 launcher 后重试。
+安装器不会替你清理自定义 drop-in；平台更新也不会自动迁移服务配置。
+launchd 没有 systemd 式多层 drop-in；其覆盖语义由选定 plist 与 `Program` 决定。
+服务托管的平台更新不再改写任何 plist；交互式 `remi update` 的安装与 plist
+迁移行为保持不变，不自动重启 daemon。
+
+CLI 请求状态依次为 `pending → running → restarting → verifying → completed`。
+安装完成仅进入 `restarting`；服务端收到同一 Runtime、同一 daemon 身份、目标
+`cli_version` 的协议 hello 后才进入 `verifying`。新 daemon 完成工作区归属、崩溃
+bridge 清扫、注册、仓库初始化、孤儿恢复及所有 provider 的启动 readiness 屏障，
+收到 welcome 后提交自检结果，才能完成请求。安装检查不能代替这项确认。
+ACP 重装和 Grok Agent 更新不替换 daemon，仍在操作完成后上报成功并恢复接单。
+自动回滚要求更新前运行的 daemon 也包含本交接协议。首次从旧版迁入时，维护者需先
+用交互式 `remi update` 安装本版本并安排重启；旧 daemon 的更新报告不满足新的完成门槛，
+不能把这次引导安装当作自动回滚验收。
+CLI `remi runtime release status <runtime> <update>` 与 Web 展示全部状态；
+`rolled_back` 是带原因的终态，晚到或重放的报告不能覆盖终态。
+
+[`daemon-update.ts`](../packages/shared/src/daemon-update.ts) 在 launcher 激活前将交接
+记录写入 `${MULTIREMI_STATE_DIR:-~/.multiremi}/cli-updates/<runtime>.<request>/`，先启动独立
+POSIX shell 看门，再切换入口。systemd 使用独立的 `systemd-run --user` transient
+unit；launchd 使用独立 `launchctl submit` job，避免 daemon 服务重启杀死看门。
+无法启动独立看门时拒绝激活。没有 service manager 时看门脱离父进程，并保留稳定
+launcher 与完整前台参数作为重启入口；后继进程不再重新选择旧 `process.execPath`。
+
+默认 120 秒内未完成 hello 和启动自检（含启动即退出），看门通过原子 symlink
+争取唯一结果，恢复 `previous-launcher` 与旧 wrapper，再重启服务。无管理器时先停止
+候选 PID，45 秒后仍存活则强制结束，再运行旧 launcher。恢复的旧 daemon 注册并
+通过启动屏障后上报 `rolled_back`，原因保存在交接目录 `reason`。成功确认同样以
+原子 symlink 决定，防止晚到的看门覆盖成功；未送达的平台结果在重连时重试。
+确认结果被服务端接收后，目录追加 `.settled` 留作证据。
+手动删除记录会丢失恢复依据，不应在更新过程中清理。
+
+systemd 模板明确 `TimeoutStopSec=45`、`KillMode=control-group`；launchd 模板对应
+`ExitTimeOut=45`、`AbandonProcessGroup=false`。daemon 的优雅停止预算为 30 秒，
+超时中止任务、SIGKILL 所有已跟踪 bridge 进程组；共进程的 provider 由 supervisor
+在任一超时回调退出前同步清理全部 lane 的进程组，然后以非零状态退出，留下 15 秒
+供管理器清理。该契约适用于新生成的 unit/plist；既有服务需由维护者重新安装模板
+才会取得模板参数。本改动不会自动写用户的 drop-in 或重启线上服务。
+停止截止定时器覆盖整个 `start()` 调用；启动扫描中收到停止而提前返回时，也必须清除定时器并释放运行标记。

@@ -1,6 +1,6 @@
 {
   "name": "remi",
-  "version": "0.2.81",
+  "version": "0.2.95",
   "packageManager": "bun@1.3.14",
   "description": "Remi - Multiremi agent runtime with multi-connector messaging and ACP provider integration.",
   "type": "module",
@@ -33,11 +33,13 @@
   },
   "scripts": {
     "platform-updater": "bun run apps/platform-updater/main.ts",
+    "platform-updater:compile:windows": "bun build --compile --target=bun-windows-x64 apps/platform-updater/main.ts --outfile dist/remi-platform-updater.exe",
     "build:multiremi": "bun run scripts/build-multiremi.ts",
     "release:prepare": "bun run scripts/release-runtime.ts prepare",
     "release:check": "bun run scripts/release-runtime.ts check",
+    "release:pin-antigravity": "bun run scripts/release-runtime.ts pin-antigravity",
     "lock:clean": "bun run scripts/clean-lockfile.ts",
-    "test": "bun test",
+    "test": "bun run scripts/run-tests.ts",
     "docs:check": "node scripts/check-dev-context.mjs",
     "docs:test": "node --test scripts/check-dev-context.test.mjs",
     "cli:capabilities:generate": "bun run scripts/generate-cli-capabilities.ts",
@@ -52,19 +54,21 @@
     "e2e:acp": "bun run tests/integration/acp-e2e.ts",
     "e2e:acp:full": "bun run tests/integration/acp-e2e-full.ts",
     "probe:feishu": "bun run tests/integration/feishu-streaming-probe.ts",
-    "replay:coverage": "bun run tests/integration/replay-coverage.ts"
+    "replay:coverage": "bun run tests/integration/replay-coverage.ts",
+    "smoke:im": "bun run tests/integration/smoke-im-platforms.ts"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "croner": "^10.0.1",
     "gray-matter": "^4.0.3",
     "hono": "^4.12.21",
-    "isomorphic-git": "1.41.4",
     "sharp": "^0.34.5",
     "smol-toml": "^1.6.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "hast-util-from-html": "^2.0.3",
+    "hast-util-to-html": "^9.0.5",
     "playwright-core": "^1.61.0"
   },
   "overrides": {

@@ -49,10 +49,6 @@ Commands:
   issue session result list <id> List explicitly published cross-Session results
   issue session result publish <id> Publish a reusable result from one Session
                          [--type mr|report|deploy|decision|doc|other] [--ref <type>:<value>]
-  issue archive status <id> Show archive readiness for an issue
-  issue archive list <id> List provider-native session archives
-  issue archive verify <id> [archive-id] Verify an archive (defaults to latest ready)
-  issue archive retry <id> [archive-id] Retry a failed archive
   issue subscriber list <id>
   issue subscriber add <id> [--user-id <member-id>]
   issue subscriber remove <id> [--user-id <member-id>]
@@ -89,7 +85,7 @@ Commands:
   wiki diff              Show local Wiki changes against the base snapshot
   wiki push              Three-way merge and write local Wiki changes back
   project knowledge status|backfill|verify|retry-failed [project-id]
-  seed                   Create the default agent (--provider claude|codex|antigravity)
+  seed                   Create the default agent (--provider claude|codex|grok|antigravity)
   version                Print Multiremi version
   help                   Show this help
 
@@ -110,8 +106,10 @@ Options:
   --output-dir <dir>     Directory for attachment download
   --ref <branch-or-sha>  Branch or commit for repo checkout (memory/wiki commands
                          use --ref <type>:<value> as a citation; see below)
-  --provider <name>      Limit daemon to one provider: claude, codex or antigravity (default: auto-detect)
+  --provider <name>      Limit daemon to one provider: claude, codex, grok, or antigravity (default: auto-detect)
+  --accept-antigravity-terms  Accept Google's Antigravity terms for its first download (setup/daemon start)
   --workspace <id>       Workspace id (default: local)
+  --responsible-member <id>  Deprecated no-op on issue create/update: Issues no longer designate a human
   --runtime-id <id>      Reuse a fixed runtime id
   --daemon-id <id>       Stable daemon id for local directory resources
   --device-name <name>   Device display name (defaults to hostname-user)
@@ -122,7 +120,7 @@ Options:
   --name <name>          Runtime display name
   --start                Start daemon in the background after setup
   --foreground           Run daemon in the current terminal
-  --once                 Daemon exits after one poll/claimed task
+  --once                 跑完一个任务后退出；等不到派活也退出
   --lines <number>       Log lines for daemon logs (default: 50)
   --follow               Follow daemon logs
   --platform <name>      Service platform: launchd or systemd
@@ -150,7 +148,7 @@ Agent edit options:
   --description <text>   Change or clear the description
   --instructions <text>  Change or clear instructions
   --avatar-url <url>     Change or clear the avatar URL
-  --provider <name>      Change engine: claude, codex or antigravity
+  --provider <name>      Change engine: claude, codex, grok, or antigravity
   --model <model>        Change or clear the model override
   --thinking-level <v>   Change or clear the reasoning override
   --visibility <value>   Set private or workspace visibility

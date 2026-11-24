@@ -44,13 +44,15 @@ export class PlatformEndpoints {
   }
 
   async updatePlatformSettings(autoUpdate: {
-    enabled: boolean;
-    time: string;
-    timezone: string;
+    enabled?: boolean;
+    time?: string;
+    timezone?: string;
+    releaseFeedUrl?: string | null;
   }): Promise<PlatformAutoUpdateSchedule> {
+    const { releaseFeedUrl, ...schedule } = autoUpdate;
     const raw = await this.http.fetch<unknown>("/api/multiremi/platform/settings", {
       method: "PATCH",
-      body: JSON.stringify({ autoUpdate }),
+      body: JSON.stringify({ autoUpdate: schedule, releaseFeedUrl }),
     });
     return parseStrictResponse<{ state: { autoUpdate: PlatformAutoUpdateSchedule } }>(raw, PlatformSettingsResponseSchema, {
       endpoint: "PATCH /api/multiremi/platform/settings",

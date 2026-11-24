@@ -6,6 +6,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { paths } from "@multiremi/core/paths";
 import { api } from "@multiremi/core/api";
 import { NavigationProvider } from "../navigation";
+import { traceTurn, turnPage } from "../test/trace-fixtures";
 import { renderWithI18n } from "../test/i18n";
 import { RepositoryActivityPage } from "./repository-activity-page";
 
@@ -15,13 +16,13 @@ vi.mock("@multiremi/core/paths", async (load) => {
   return { ...actual, useWorkspacePaths: () => actual.paths.workspace("test") };
 });
 vi.mock("@multiremi/core/api", () => ({ api: {
-  listRepositoryActivity: vi.fn(), listAgents: vi.fn(), listWorkspaceRepositories: vi.fn(), listTaskMessages: vi.fn(),
+  listRepositoryActivity: vi.fn(), listAgents: vi.fn(), listWorkspaceRepositories: vi.fn(), getTaskTrace: vi.fn(),
 } }));
-vi.mock("@multiremi/core/realtime", () => ({ useTaskScopeSubscription: vi.fn() }));
-vi.mock("../common/task-transcript/agent-transcript-dialog", () => ({ AgentTranscriptDialog: ({ task }: { task: { id: string } }) => <div role="dialog">{task.id}</div> }));
+vi.mock("@multiremi/core/realtime", () => ({ useTraceStreamSubscription: vi.fn() }));
+vi.mock("../common/task-transcript/agent-transcript-dialog", () => ({ AgentTranscriptDialog: ({ task, onOpenChange }: { task: { id: string }; onOpenChange: (open: boolean) => void }) => <div role="dialog">{task.id}<button onClick={() => onOpenChange(false)}>Close</button></div> }));
 
 const row = {
-  task_id: "task-1", status: "failed", relation: "project_context", created_at: null, started_at: null, ended_at: null,
+  task_id: "task-1", turn_id: "turn-1", status: "failed", relation: "project_context", created_at: null, started_at: null, ended_at: null,
   issue: { id: "issue", key: "QA-1", title: "Build" }, issue_session: { id: "session", title: "Review" },
   failure_reason: "build failed", error_summary: null, progress_summary: null, wait_reason: null, attempt: 2,
   change_requests: [{ id: "pr1", number: 1, state: "open", url: "https://example.invalid/pull/1" }], change_request_count: 1,
@@ -47,7 +48,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.listRepositoryActivity).mockResolvedValue(page);
   vi.mocked(api.listAgents).mockResolvedValue([]);
-  vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+  vi.mocked(api.getTaskTrace).mockResolvedValue(turnPage(traceTurn({ id: "turn-1" }), []));
   vi.mocked(api.listWorkspaceRepositories).mockResolvedValue({ repositories: [], total: 0 });
 });
 
@@ -88,13 +89,15 @@ it("preserves row and focus while refreshing, shows current associations and fet
   expect(search).toHaveFocus();
   expect(screen.queryByText("Loading tasks…")).toBeNull();
   await act(async () => finish(page));
-  expect(api.listTaskMessages).not.toHaveBeenCalled();
-  const logQuery = client.getQueryCache().find({ queryKey: ["task-messages", "task-1"] });
-  expect(logQuery?.getObserversCount()).toBe(0);
+  expect(api.getTaskTrace).not.toHaveBeenCalled();
+  const observers = () => client.getQueryCache().find({ queryKey: ["task-trace", "task-1"] })?.getObserversCount() ?? 0;
+  expect(observers()).toBe(0);
   await user.click(screen.getByLabelText("Open task log"));
-  await waitFor(() => expect(api.listTaskMessages).toHaveBeenCalledWith("task-1"));
+  await waitFor(() => expect(api.getTaskTrace).toHaveBeenCalledWith("task-1", {itemCursor: 0, turnId: "turn-1"}));
   expect(screen.getByRole("dialog")).toHaveTextContent("task-1");
-  expect(logQuery?.getObserversCount()).toBe(1);
+  expect(observers()).toBe(1);
+  await user.click(screen.getByText("Close"));
+  expect(observers()).toBe(0);
 });
 
 it("distinguishes request failure, empty page and missing relations", async () => {

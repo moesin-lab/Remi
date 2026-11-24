@@ -37,9 +37,8 @@ interface IssueSessionListProps {
 }
 
 // Narrow session switcher rail on the far left of the issue detail panel.
-// Mounted for every issue at every width, including the single-session case:
-// the rail is where sessions are read *and* created, so hiding it made the
-// concept appear only after someone had already found it somewhere else.
+// Mounted for every issue at every width, so creation is also reachable
+// before the issue has its first Session.
 // One session renders as one highlighted row.
 //
 // It is a sibling of the issue's scroll container, not a child: the rail
@@ -56,6 +55,7 @@ export function IssueSessionList({
 }: IssueSessionListProps) {
   const { t } = useT("issues");
   const [sideChatParentId, setSideChatParentId] = useState<string | null>(null);
+  const sideChatParent = sessions.find(session => session.id === sideChatParentId);
   const sessionRows = useMemo<Array<{ session: IssueSession; parentSession?: IssueSession }>>(() => {
     // Only regular sessions can be parents. Preserve the original order of
     // parents and siblings, and leave children with missing parents flat.
@@ -87,9 +87,6 @@ export function IssueSessionList({
       )}
     >
       <div className="flex items-center gap-1 pl-2">
-        {/* The header stays the bare word "Sessions" — the column is too
-            narrow for "Sessions on this issue" — so the scope rides along
-            as the native tooltip / accessible description instead. */}
         <span
           className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground"
           title={t(($) => $.detail.sessions_scope_hint)}
@@ -107,6 +104,7 @@ export function IssueSessionList({
             session={session}
             parentSession={parentSession}
             agents={agents}
+            showOwner={sessions.some(item => item.owner_type === "chat")}
             isSelected={session.id === selectedSessionId}
             onSelect={onSelectSession}
             onSideChat={setSideChatParentId}
@@ -114,12 +112,11 @@ export function IssueSessionList({
         ))}
       </div>
       <NewSessionDialog
-        issueId={issueId}
+        issueId={sideChatParent?.owner_type === "chat" ? undefined : issueId}
+        chatId={sideChatParent?.owner_type === "chat" ? sideChatParent.owner_id : undefined}
         sessions={sessions}
         open={sideChatParentId !== null}
-        onOpenChange={(open) => {
-          if (!open) setSideChatParentId(null);
-        }}
+        onOpenChange={open => { if (!open) setSideChatParentId(null); }}
         parentSessionId={sideChatParentId ?? undefined}
         onCreated={onSelectSession}
       />
@@ -142,6 +139,7 @@ function SessionRow({
   session,
   parentSession,
   agents,
+  showOwner,
   isSelected,
   onSelect,
   onSideChat,
@@ -150,12 +148,14 @@ function SessionRow({
   session: IssueSession;
   parentSession?: IssueSession;
   agents: Agent[];
+  showOwner: boolean;
   isSelected: boolean;
   onSelect: (sessionId: string) => void;
   onSideChat: (sessionId: string) => void;
 }) {
   const { t } = useT("issues");
   const timeAgo = useTimeAgo();
+  const ownerLabel = session.owner_type === "chat" ? t(($) => $.detail.session_owner_chat) : t(($) => $.detail.session_owner_issue);
   const [participantsOpen, setParticipantsOpen] = useState(false);
   const inheritedRange = parentSession && session.inherited_event_count > 0
     ? t(($) => $.detail.session_inherited_range, {
@@ -174,6 +174,7 @@ function SessionRow({
     >
       <button
         type="button"
+        aria-label={showOwner ? `${getSessionDisplayName(t, session)} (${ownerLabel})` : undefined}
         onClick={() => onSelect(session.id)}
         className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
       >
@@ -184,11 +185,14 @@ function SessionRow({
         <span className="min-w-0 flex-1">
           <span
             className={cn(
-              "block truncate text-xs",
+              "flex items-center gap-1 text-xs",
               isSelected ? "font-medium text-foreground" : "text-muted-foreground",
             )}
           >
-            {getSessionDisplayName(t, session)}
+            <span className="truncate">{getSessionDisplayName(t, session)}</span>
+            {showOwner && <span className="shrink-0 rounded bg-muted px-1 text-[10px] font-normal text-muted-foreground">
+              {ownerLabel}
+            </span>}
           </span>
           <span className="block truncate text-[11px] text-muted-foreground" title={inheritedRange}>
             {inheritedRange ?? timeAgo(session.updated_at)}
@@ -214,7 +218,7 @@ function SessionRow({
           <DropdownMenuItem onClick={() => setParticipantsOpen(true)}>
             {t(($) => $.detail.session_participants)}
           </DropdownMenuItem>
-          {session.parent_session_id == null && (
+          {session.parent_session_id == null && session.status !== "archived" && (
             <DropdownMenuItem onClick={() => onSideChat(session.id)}>
               {t(($) => $.detail.session_side_chat)}
             </DropdownMenuItem>

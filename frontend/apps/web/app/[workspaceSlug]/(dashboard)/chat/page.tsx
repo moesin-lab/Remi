@@ -1,3 +1,14 @@
-"use client";
+import { ChatPage } from "@multiremi/views/chat";
+import { readChatLogBootstrap } from "../../../../features/chat/server-log";
 
-export { ChatPage as default } from "@multiremi/views/chat";
+export default async function ChatRoute({ params, searchParams }: {
+  params: Promise<{ workspaceSlug: string }>;
+  searchParams: Promise<{ session?: string | string[]; kind?: string | string[] }>;
+}) {
+  const { workspaceSlug } = await params;
+  const query = await searchParams;
+  const kind = Array.isArray(query.kind) ? query.kind[0] : query.kind;
+  const sessionId = kind !== "external" && typeof query.session === "string" ? query.session : undefined;
+  const initialLog = sessionId ? await readChatLogBootstrap(workspaceSlug, sessionId) : null;
+  return <ChatPage initialSessionId={sessionId} initialLog={initialLog ?? undefined} />;
+}

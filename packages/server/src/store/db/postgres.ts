@@ -1,3 +1,4 @@
+import { DatabaseUnavailableError, databaseTimeoutMs } from "@shared/db/recovery.js";
 /**
  * Storage abstraction for MultiremiStore.
  *
@@ -10,7 +11,22 @@
  * otherwise the shared bun:sqlite database (core Remi's ~/.remi/remi.db) is used.
  */
 import { getDb } from "@shared/db/index.js";
-import { recordDbParse, recordDbQuery } from "../../observability/request-metrics.js";
+import { markSqliteDialect } from "./sqlite.js";
+import {
+  currentDbReplyPolicy,
+  emitDbReplyRejected,
+  emitLargeDbReply,
+  recordDbParse,
+  recordDbQuery,
+  resetDbReplyPolicyForTest,
+  type DbReplyPolicy,
+} from "../../observability/request-metrics.js";
+import {
+  lockOrderSentinelNoteNumberLock,
+  lockOrderSentinelNoteStatement,
+  lockOrderSentinelTransactionBegin,
+  lockOrderSentinelTransactionEnd,
+} from "@multiremi/store/lock-order-sentinel.js";
 
 export interface SqlStatement {
   get(...params: unknown[]): any;
@@ -19,13 +35,182 @@ export interface SqlStatement {
   values(...params: unknown[]): any[][];
 }
 
+/** The two SQL dialects the store bridges between. */
+export type SqlDatabaseDialect = "sqlite" | "postgres";
+
 export interface SqlDatabase {
+  /**
+   * Which SQL this handle actually speaks (MUL-407).
+   *
+   * Migrations must not infer the backend by running a statement that only one
+   * of them can answer: a failing probe leaves an ERROR in the Postgres log on
+   * every startup, aborts the surrounding transaction if one is ever open, and
+   * misreads SQLite as Postgres whenever that probe fails for an unrelated
+   * reason (a lock, a busy database). Every wrapper that implements this
+   * interface forwards the marker of the handle it wraps.
+   *
+   * `undefined` means "unknown" — a thin test double that has not declared it.
+   * Callers must then fall back to an explicit argument or the configured
+   * backend rather than probing.
+   */
+  readonly dialect?: SqlDatabaseDialect;
+  readonly connectionUnavailable?: boolean;
   query(sql: string): SqlStatement;
   prepare(sql: string): SqlStatement;
   run(sql: string, ...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
   exec(sql: string): void;
-  transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T;
+  transaction<T>(fn: (...args: any[]) => T): ((...args: any[]) => T) & {
+    /** SQLite read snapshots can opt out of the default immediate writer lock. */
+    deferred?: (...args: any[]) => T;
+  };
+  /** Isolate an optional operation inside the current transaction without owning a new transaction. */
+  savepoint?<T>(fn: () => T): T;
+  /**
+   * Cross-process mutex keyed by `key`, held for the duration of `fn` and
+   * released on every exit path, including a thrown callback.
+   *
+   * OPTIONAL on purpose. `bun:sqlite`'s `Database` satisfies this interface
+   * structurally, and the whole store is written against that — every repo test
+   * and benchmark hands a raw `Database` to a repo constructor. Demanding the
+   * method here would ripple a mechanical type error through ~80 files for no
+   * behavioral gain, so the interface states what a database *may* provide and
+   * the two call patterns below are the only way the store uses it:
+   *
+   *   advisoryLock(db, key, fn)      — see `advisoryLock`
+   *   advisoryXactLock(db, key)      — see `advisoryXactLock`
+   *
+   * Both fall back to a no-op, which is the documented SQLite behavior. A
+   * database that implements them (Postgres) gets real locks.
+   */
+  advisoryLock?<T>(key: string, fn: () => T): T;
+  /**
+   * Same idea, but scoped to the caller's open transaction instead of a
+   * callback: the lock is held until the transaction commits or rolls back.
+   * The caller must already be inside `transaction()`. Optional for the reason
+   * above; go through `advisoryXactLock(db, key)` rather than calling it here.
+   */
+  advisoryXactLock?(key: string): void;
+  /**
+   * Run `fn` after the transaction that is currently open commits, and drop it
+   * if that transaction rolls back (MUL-405).
+   *
+   * A writer inside a nested `transaction()` has no way to know whether the
+   * outermost caller will commit: on Postgres the inner call only released a
+   * SAVEPOINT, so an event published there can still be invalidated by an outer
+   * ROLLBACK. Handing the event to the outermost transaction's queue is what
+   * makes "publish after COMMIT" true at every nesting depth.
+   *
+   * The original transaction has ended when the callback runs. SQL issued by
+   * the callback, including through this connection, belongs to a separate
+   * commit unit. A callback failure cannot roll back already committed data:
+   * this is best-effort work, not a way to guarantee database consistency or
+   * delivery. Outside any transaction the callback runs immediately.
+   *
+   * Optional for the same structural-typing reason as the advisory locks: a raw
+   * bun:sqlite handle does not implement it, and the helper below falls back to
+   * running the callback immediately.
+   */
+  afterCommit?(fn: () => void): void;
+  /**
+   * True while a `transaction()` callback is open. `BEGIN` cannot nest on
+   * either backend (a nested `transaction()` runs as a SAVEPOINT on both), so a
+   * helper that may run inside or outside a transaction checks this instead of
+   * guessing from its call site.
+   */
+  readonly inTransaction?: boolean;
+  /**
+   * Deepest `transaction()` nesting seen by this handle. Nested PostgreSQL
+   * calls use SAVEPOINTs; paths with an explicit transaction owner still
+   * assert this is 1 so their helpers cannot silently add transaction frames.
+   */
+  readonly maxTransactionDepth?: number;
+
   close(): void;
+}
+
+/**
+ * Run `fn` while holding the cross-process mutex named `key`.
+ *
+ * SQLite has no cross-process advisory lock, and it does not need one: a writer
+ * takes the database file lock for its whole transaction (guaranteed by the
+ * outermost `BEGIN IMMEDIATE`), so two processes
+ * cannot interleave the read-then-write these locks protect. It is therefore a
+ * documented no-op there, and the same call site expresses "only one process may
+ * be here at a time" for both backends with no dialect branch. Use it for work a
+ * whole process must serialize, such as the startup migration run.
+ */
+export function advisoryLock<T>(db: SqlDatabase, key: string, fn: () => T): T {
+  // Bound explicitly: reading the method off the optional property loses the
+  // receiver, and calling it through `Function.prototype.call` erases `T`.
+  const lock = db.advisoryLock?.bind(db);
+  if (!lock) return fn();
+  return lock(key, fn);
+}
+
+/**
+ * Take the transaction-scoped form of the lock named `key`. The caller must
+ * already be inside `db.transaction()`; it is released by that COMMIT or
+ * ROLLBACK rather than by a callback.
+ *
+ * Use this for a read-then-write that must not interleave with a peer, such as
+ * reading `MAX(issue_number) + 1` and inserting the row that uses it: a
+ * callback-scoped lock would be released before the insert commits. No-op on
+ * SQLite, for the reason on `advisoryLock`.
+ */
+export function advisoryXactLock(db: SqlDatabase, key: string): void {
+  db.advisoryXactLock?.call(db, key);
+}
+
+export function withSavepoint<T>(db: SqlDatabase, fn: () => T): T {
+  if (!db.inTransaction) return fn();
+  if (db.savepoint) return db.savepoint(fn);
+  return db.transaction(fn)();
+}
+
+/**
+ * Run \`fn\` after the transaction that is currently open commits (MUL-405).
+ *
+ * A writer nested inside a caller-owned transaction cannot know whether that
+ * caller will commit — on Postgres the inner \`transaction()\` only released a
+ * SAVEPOINT — so publishing a realtime event there can still be invalidated by an
+ * outer ROLLBACK. Handing the event to the outermost transaction's queue is what
+ * makes "publish only after COMMIT" true at every nesting depth. A database that
+ * cannot queue (a raw \`bun:sqlite\` handle passed straight to a repo by a test)
+ * runs the callback immediately: outside a transaction the two are the same.
+ *
+ * The original transaction is over when a queued callback runs. SQL may use
+ * the same connection, but its writes are separate from that committed unit.
+ * Callback failure cannot undo the original commit; use this for best-effort
+ * work, never to guarantee consistency across the two units.
+ *
+ * Error semantics differ by when the callback runs, and that is intentional:
+ *
+ *   - outside a transaction it runs inline, so a throw propagates to the caller.
+ *     Nothing is pending at that point - the writes already autocommitted - so
+ *     the caller has to hear about the failure;
+ *   - inside a transaction it is queued, and the queue is drained best-effort
+ *     after COMMIT: a throwing callback is swallowed (see
+ *     `runAfterCommitCallbacks`) so one bad listener cannot roll back a
+ *     committed write or suppress the callbacks behind it.
+ *
+ * Realtime publication and optional post-commit writes are best-effort by
+ * contract. `afterCommit` orders them after the commit; it does not promise
+ * delivery or atomicity with the original mutation.
+ */
+export function afterCommit(db: SqlDatabase, fn: () => void): void {
+  if (typeof db.afterCommit === "function") db.afterCommit(fn);
+  else fn();
+}
+
+/** Best-effort drain: a failing listener must not fail the caller's commit. */
+function runAfterCommitCallbacks(queue: Array<() => void>): void {
+  for (const callback of queue) {
+    try {
+      callback();
+    } catch {
+      // Realtime publication is best-effort by contract; the write is committed.
+    }
+  }
 }
 
 // ────────────────────────────── sqlite → postgres ──────────────────────────────
@@ -102,10 +287,9 @@ export function translateSqliteToPg(sql: string): string {
   // `ON CONFLICT(col)` → `ON CONFLICT (col)`.
   s = s.replace(/ON\s+CONFLICT\(/gi, "ON CONFLICT (");
 
-  // Strip FOREIGN KEY clauses. sqlite runs with foreign_keys OFF (they are not
-  // enforced), so they are decorative; Postgres would reject them at CREATE time
-  // for forward-referenced tables. Removing them keeps behavior identical.
-  if (/FOREIGN\s+KEY/i.test(s)) {
+  // Historical bootstrap tables can reference tables created later. Only
+  // strip those CREATE clauses; explicit ALTER constraints must be enforced.
+  if (/^\s*CREATE\s+TABLE/i.test(s) && /FOREIGN\s+KEY/i.test(s)) {
     s = s.replace(
       /FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[A-Za-z0-9_]+\s*\([^)]*\)(\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|RESTRICT|NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT))*/gi,
       "",
@@ -159,30 +343,103 @@ const STATUS_PENDING = 0;
 const STATUS_ERROR = 2;
 const RESULT_BUFFER_BYTES = 64 * 1024 * 1024;
 const QUERY_TIMEOUT_MS = 60_000;
+const SQL_IDENTIFIER = '(?:[a-z_][a-z_0-9$]*|"(?:[^"]|"")+")';
+const TRANSACTION_CLEANUP = new RegExp(
+  `^\\s*(?:ROLLBACK(?:\\s+TO(?:\\s+SAVEPOINT)?\\s+${SQL_IDENTIFIER})?|RELEASE(?:\\s+SAVEPOINT)?\\s+${SQL_IDENTIFIER})\\s*;?\\s*$`, "i",
+);
+
+/**
+ * Raised when a single statement's reply exceeds the bridge limit (MUL-386 C.1).
+ *
+ * Its message is deliberately self-contained: `PgBridge.exec` must NOT append the
+ * SQL text it adds to every other failure, because this error can surface through
+ * a route handler's `c.json({ error: message })` and would then leak SQL into an
+ * HTTP response body.
+ */
+export class PostgresReplyTooLargeError extends Error {
+  constructor(readonly bytes: number, readonly maxBytes: number) {
+    super(
+      `postgres reply of ${bytes} bytes exceeds ${maxBytes} bytes bridge limit; `
+      + "paginate or project columns",
+    );
+    this.name = "PostgresReplyTooLargeError";
+  }
+}
+
+class PgBridgeFailure extends Error {
+  constructor(message: string, readonly abortsTransaction: boolean) {
+    super(message);
+  }
+}
+
+/**
+ * Resolved lazily and cached: the check runs on every SQL round trip, and
+ * `process.env` lookups are not free on that path. Tests that change the limit
+ * call `resetDbReplyLimitForTest`.
+ */
+function effectiveReplyMaxBytes(policy: DbReplyPolicy): number {
+  if (policy.exempt || !policy.enforced || policy.limitBytes === 0) return RESULT_BUFFER_BYTES;
+  return Math.min(policy.limitBytes, RESULT_BUFFER_BYTES);
+}
+
+/** The effective ceiling shared by the bridge and bounded-read callers. */
+export function postgresReplyMaxBytes(): number {
+  return effectiveReplyMaxBytes(currentDbReplyPolicy());
+}
+
+/** Test seam: drop the cached limit so the next query re-reads the environment. */
+export function resetDbReplyLimitForTest(): void {
+  resetDbReplyPolicyForTest();
+}
 
 class PgBridge {
+  private closed = false;
   private readonly control = new SharedArrayBuffer(16);
-  private readonly data = new SharedArrayBuffer(RESULT_BUFFER_BYTES);
+  private readonly data: SharedArrayBuffer;
   private readonly ctl = new Int32Array(this.control);
-  private readonly buf = new Uint8Array(this.data);
+  private readonly buf: Uint8Array;
   private readonly worker: Worker;
+  private unavailableUntil = 0;
 
-  constructor(url: string) {
+  constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES) {
+    this.data = new SharedArrayBuffer(resultBufferBytes);
+    this.buf = new Uint8Array(this.data);
     this.worker = new Worker(new URL("./pg-worker.ts", import.meta.url).href);
-    this.request({ init: url });
+    try { this.request({ init: url }); }
+    catch (error) { this.worker.terminate(); throw error; }
   }
 
-  private request(msg: { init?: string; sql?: string; params?: unknown[] }): any {
+  private request(msg: { init?: string; sql?: string; params?: unknown[]; timeoutMs?: number }): any {
+    if (this.closed) throw new Error("postgres bridge is closed");
+    const cleanup = msg.sql !== undefined && TRANSACTION_CLEANUP.test(msg.sql);
+    // A healthy bridge has no cooldown to check. Avoid reading the wall clock
+    // for every SQL statement (including when fixtures pin a ticking clock).
+    if (msg.sql && this.unavailableUntil > 0 && Date.now() < this.unavailableUntil && !cleanup) {
+      throw new DatabaseUnavailableError();
+    }
+    const timeoutMs = databaseTimeoutMs({ cleanup });
     Atomics.store(this.ctl, 0, STATUS_PENDING);
-    this.worker.postMessage({ control: this.control, data: this.data, ...msg });
+    try {
+      this.worker.postMessage({ control: this.control, data: this.data, timeoutMs, ...msg });
+    } catch (error) {
+      throw new PgBridgeFailure(`postgres bridge send failed: ${String(error)}`, false);
+    }
     // MUL-367: measure only real SQL. `init` opens the connection, so counting it
     // would invent one query per process and inflate the first request's numbers.
     const measured = msg.sql !== undefined;
     const startedAt = measured ? performance.now() : 0;
     let waitRecorded = false;
     try {
-      const waited = Atomics.wait(this.ctl, 0, STATUS_PENDING, QUERY_TIMEOUT_MS);
-      if (waited === "timed-out") throw new Error("postgres bridge timed out");
+      const deadline = performance.now() + QUERY_TIMEOUT_MS;
+      // A wakeup alone does not publish a reply. Recheck the worker's status
+      // before reading the buffer, and retain one deadline across early wakes.
+      // A prior reply can set DONE before its notify arrives. If the next
+      // request is already waiting, that late notify must not expose old bytes.
+      while (Atomics.load(this.ctl, 0) === STATUS_PENDING) {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw new Error("postgres bridge timed out");
+        Atomics.wait(this.ctl, 0, STATUS_PENDING, remaining);
+      }
       const status = Atomics.load(this.ctl, 0);
       const len = Atomics.load(this.ctl, 1);
       // The reply is on the shared buffer by now, so its size is what crossed the
@@ -191,10 +448,35 @@ class PgBridge {
         recordDbQuery(performance.now() - startedAt, len);
         waitRecorded = true;
       }
+      // MUL-386 C.1 guardrails. Both run BEFORE decode/parse: the point of the
+      // hard limit is to refuse the payload before the main thread pays the
+      // TextDecoder + JSON.parse cost, and the warning line exists so the size is
+      // visible in logs without turning the request into a failure.
+      if (measured) {
+        const policy = currentDbReplyPolicy();
+        const limit = effectiveReplyMaxBytes(policy);
+        if (len > limit) {
+          if (policy.enforced) emitDbReplyRejected(len, limit);
+          throw new PostgresReplyTooLargeError(len, limit);
+        }
+        emitLargeDbReply(len, policy);
+      }
       const parseStartedAt = performance.now();
       try {
-        const obj = JSON.parse(new TextDecoder().decode(this.buf.slice(0, len)));
-        if (status === STATUS_ERROR || obj.error) throw new Error(`postgres: ${obj.error}`);
+        let obj: { error?: string; source?: string; connectionError?: boolean; rows?: any[]; count?: number; command?: string };
+        try {
+          obj = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(this.buf.slice(0, len)));
+        } catch (error) {
+          throw new PgBridgeFailure(`postgres bridge reply decode failed: ${String(error)}`, false);
+        }
+        if (status === STATUS_ERROR || obj.error) {
+          if (obj.source === "connection" || obj.connectionError) {
+            this.unavailableUntil = Date.now() + 1_000;
+            throw new DatabaseUnavailableError(obj.source === "connection"
+              ? "connection lost during transaction; the server rolled the transaction back" : undefined);
+          }
+          throw new PgBridgeFailure(`postgres: ${obj.error}`, obj.source !== "reply");
+        }
         return obj;
       } finally {
         // Main-thread decode + parse is a separate cost from waiting on Postgres;
@@ -209,80 +491,308 @@ class PgBridge {
     }
   }
 
-  exec(sql: string, params: unknown[]): { rows: any[]; count: number } {
+  exec(sql: string, params: unknown[]): { rows: any[]; count: number; command?: string } {
     try {
       const r = this.request({ sql, params });
-      return { rows: r.rows ?? [], count: r.count ?? 0 };
+      return { rows: r.rows ?? [], count: r.count ?? 0, command: r.command };
     } catch (err) {
+      // The size guardrail's message is user-facing: route handlers answer with
+      // `c.json({ error: message })`, so appending SQL here would leak schema
+      // details into an HTTP response body.
+      if (err instanceof PostgresReplyTooLargeError || err instanceof DatabaseUnavailableError) throw err;
+      if (err instanceof PgBridgeFailure) {
+        throw new PgBridgeFailure(`${err.message}\n  SQL: ${sql.slice(0, 400)}`, err.abortsTransaction);
+      }
       throw new Error(`${(err as Error).message}\n  SQL: ${sql.slice(0, 400)}`);
     }
   }
 
+  get connectionUnavailable(): boolean { return this.unavailableUntil > 0 && Date.now() < this.unavailableUntil; }
+
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.worker.terminate();
   }
 }
 
 class PgStatement implements SqlStatement {
-  constructor(private readonly bridge: PgBridge, private readonly sql: string) {}
+  constructor(
+    private readonly execute: (sql: string, params: unknown[]) => { rows: any[]; count: number },
+    private readonly sql: string,
+  ) {}
   get(...params: unknown[]): any {
-    return this.bridge.exec(this.sql, normalizeParams(params)).rows[0] ?? null;
+    return this.execute(this.sql, normalizeParams(params)).rows[0] ?? null;
   }
   all(...params: unknown[]): any[] {
-    return this.bridge.exec(this.sql, normalizeParams(params)).rows;
+    return this.execute(this.sql, normalizeParams(params)).rows;
   }
   run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint } {
-    return { changes: this.bridge.exec(this.sql, normalizeParams(params)).count, lastInsertRowid: 0 };
+    return { changes: this.execute(this.sql, normalizeParams(params)).count, lastInsertRowid: 0 };
   }
   values(...params: unknown[]): any[][] {
-    return this.bridge.exec(this.sql, normalizeParams(params)).rows.map((r) => Object.values(r));
+    return this.execute(this.sql, normalizeParams(params)).rows.map((r) => Object.values(r));
+  }
+}
+
+/**
+ * `PgStatement` that feeds the MUL-405 whole-suite sentinel on every execution.
+ *
+ * Classification happens here, not at construction: a statement prepared
+ * outside a transaction can be executed inside one.
+ */
+class SentinelPgStatement extends PgStatement {
+  constructor(
+    execute: (sql: string, params: unknown[]) => { rows: any[]; count: number },
+    sql: string,
+    private readonly sourceSql: string,
+  ) {
+    super(execute, sql);
+  }
+  get(...params: unknown[]): any {
+    lockOrderSentinelNoteStatement(this.sourceSql);
+    return super.get(...params);
+  }
+  all(...params: unknown[]): any[] {
+    lockOrderSentinelNoteStatement(this.sourceSql);
+    return super.all(...params);
+  }
+  run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint } {
+    lockOrderSentinelNoteStatement(this.sourceSql);
+    return super.run(...params);
+  }
+  values(...params: unknown[]): any[][] {
+    lockOrderSentinelNoteStatement(this.sourceSql);
+    return super.values(...params);
   }
 }
 
 export class PostgresSyncDatabase implements SqlDatabase {
+  /**
+   * Explicit dialect marker. Migrations must not infer the backend from a
+   * method that happens to exist on both handles: Bun's `Database` also has
+   * `inTransaction`, so probing for it misidentifies SQLite as Postgres and the
+   * rebuild path silently never runs (MUL-407).
+   */
+  readonly dialect = "postgres" as const;
   private readonly bridge: PgBridge;
   private transactionDepth = 0;
-  constructor(url: string) {
-    this.bridge = new PgBridge(url);
+  private failedAtDepth: number | null = null;
+  /**
+   * One frame per open \`transaction()\` call, innermost last (MUL-405).
+   *
+   * An inner frame's callbacks must not run when that frame only released a
+   * SAVEPOINT: the outer transaction can still roll back. On a clean inner exit
+   * the frame is merged into its parent; on an inner ROLLBACK TO SAVEPOINT the
+   * frame is dropped, because the rows it would publish were undone. Only the
+   * outermost frame, after a real COMMIT, runs the merged queue.
+   */
+  private afterCommitFrames: Array<Array<() => void>> = [];
+  private peakTransactionDepth = 0;
+  private savepointSequence = 0;
+  constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES) {
+    this.bridge = new PgBridge(url, resultBufferBytes);
   }
+  get connectionUnavailable(): boolean { return this.bridge.connectionUnavailable; }
+
   /** True while a `transaction()` callback runs; its writes are not committed yet. */
   get inTransaction(): boolean {
     return this.transactionDepth > 0;
   }
+  private execute(sql: string, params: unknown[]): { rows: any[]; count: number; command?: string } {
+    try {
+      return this.bridge.exec(sql, params);
+    } catch (error) {
+      if (this.inTransaction && !(error instanceof PostgresReplyTooLargeError)
+        && !(error instanceof PgBridgeFailure && !error.abortsTransaction)) {
+        this.failedAtDepth = this.failedAtDepth == null
+          ? this.transactionDepth
+          : Math.min(this.failedAtDepth, this.transactionDepth);
+      }
+      throw error;
+    }
+  }
+  /**
+   * Session-level `pg_advisory_lock` held for the duration of `fn`.
+   *
+   * The lock is taken and released on this object's single bridge connection,
+   * which is the same connection every statement of a transaction uses, so a
+   * caller's open transaction stays on one session. Both statements are sent as
+   * plain SQL (never `exec`, which would translate/rewrite them) and the unlock
+   * runs in `finally` so a throwing callback cannot leak the lock.
+   *
+   * The hash key is computed by Postgres (`hashtext`) rather than in JS: the
+   * lock identity only has to agree between processes, and letting the server
+   * derive it keeps the key a stable 32-bit integer for both the session and the
+   * transaction forms.
+   */
+  advisoryLock<T>(key: string, fn: () => T): T {
+    this.execute("SELECT pg_advisory_lock(hashtext($1))", [key]);
+    try {
+      return fn();
+    } finally {
+      try {
+        this.execute("SELECT pg_advisory_unlock(hashtext($1))", [key]);
+      } catch {
+        // The connection is gone, which already released the lock with it.
+      }
+    }
+  }
+  /**
+   * Deepest nesting reached so far. A caller that must stay a single atomic
+   * unit (issue creation, for example) opens its transaction only when it does
+   * not already own one and then checks this is 1. MUL-405 added SAVEPOINTs for
+   * nested `transaction()` calls, so a nested frame is now independently
+   * rollback-able; this counter still reports the deepest nesting observed.
+   */
+  get maxTransactionDepth(): number {
+    return this.peakTransactionDepth;
+  }
+  /** Drop the observed peak, e.g. before asserting on one operation. */
+  resetTransactionDepthStats(): void {
+    this.peakTransactionDepth = this.transactionDepth;
+  }
   query(sql: string): SqlStatement {
-    return new PgStatement(this.bridge, translateSqliteToPg(sql));
+    // MUL-405 whole-suite sentinel: a statement runs later, so classify at each
+    // execution rather than at construction.
+    return new SentinelPgStatement((statement, params) => this.execute(statement, params), translateSqliteToPg(sql), sql);
   }
   prepare(sql: string): SqlStatement {
     return this.query(sql);
   }
   run(sql: string, ...params: unknown[]): { changes: number; lastInsertRowid: number | bigint } {
-    return { changes: this.bridge.exec(translateSqliteToPg(sql), normalizeParams(params)).count, lastInsertRowid: 0 };
+    lockOrderSentinelNoteStatement(sql);
+    return { changes: this.execute(translateSqliteToPg(sql), normalizeParams(params)).count, lastInsertRowid: 0 };
   }
   exec(sql: string): void {
     for (const stmt of splitStatements(sql)) {
       const translated = translateSqliteToPg(stmt);
-      if (translated.trim()) this.bridge.exec(translated, []);
+      if (!translated.trim()) continue;
+      lockOrderSentinelNoteStatement(stmt);
+      this.execute(translated, []);
     }
   }
+  /**
+   * Run `fn` in a transaction, joining the caller's transaction when one is
+   * already open.
+   *
+   * Postgres has no nested `BEGIN`: a second one on an open transaction is
+   * ignored with a warning, and the matching `COMMIT` then commits the OUTER
+   * transaction. Issuing them verbatim turns any nested use into a partial
+   * commit — and the store does nest, e.g. `createIssue` is called by
+   * `FeishuBotRepo.submitMessage` and `MessagingOutcomeService.createIssue`
+   * from inside their own transactions. A savepoint is the correct primitive:
+   * a failing inner block rolls back to the savepoint and leaves the outer
+   * transaction usable, which is the same semantics bun:sqlite gives a nested
+   * `transaction()`. The lock is what callers actually need from the nesting,
+   * and it already covers the outer commit.
+   */
   transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T {
     return (...args: any[]): T => {
-      this.bridge.exec("BEGIN", []);
+      const outermost = this.transactionDepth === 0;
+      const savepointDepth = this.transactionDepth;
+      const savepoint = outermost ? null : `multiremi_sp_${savepointDepth}`;
+      if (outermost) this.execute("BEGIN", []);
+      else this.execute(`SAVEPOINT ${savepoint}`, []);
       this.transactionDepth += 1;
+      if (outermost) this.failedAtDepth = null;
+      if (outermost) lockOrderSentinelTransactionBegin();
+      this.afterCommitFrames.push([]);
+      let committed = false;
+      this.peakTransactionDepth = Math.max(this.peakTransactionDepth, this.transactionDepth);
       try {
         const result = fn(...args);
-        this.bridge.exec("COMMIT", []);
+        if (outermost) {
+          if (this.failedAtDepth != null) {
+            if (this.bridge.connectionUnavailable) throw new DatabaseUnavailableError();
+            throw new Error(`Postgres transaction contains an unrecovered statement failure at depth ${this.failedAtDepth}`);
+          }
+          const reply = this.execute("COMMIT", []);
+          if (reply.command?.toUpperCase() === "ROLLBACK") {
+            throw new Error("Postgres rolled back an aborted transaction at COMMIT");
+          }
+        } else this.execute(`RELEASE SAVEPOINT ${savepoint}`, []);
+        committed = true;
         return result;
       } catch (err) {
         try {
-          this.bridge.exec("ROLLBACK", []);
+          if (outermost) this.execute("ROLLBACK", []);
+          else {
+            this.execute(`ROLLBACK TO SAVEPOINT ${savepoint}`, []);
+            if (this.failedAtDepth != null && this.failedAtDepth > savepointDepth) this.failedAtDepth = null;
+          }
         } catch {
-          // connection already aborted the transaction
+          // connection already aborted the transaction; an outer frame sees the remaining failure flag
         }
         throw err;
       } finally {
         this.transactionDepth -= 1;
+        if (outermost) this.failedAtDepth = null;
+        const frame = this.afterCommitFrames.pop()!;
+        if (committed) {
+          if (outermost) runAfterCommitCallbacks(frame);
+          else this.afterCommitFrames[this.afterCommitFrames.length - 1]!.push(...frame);
+        }
+        if (outermost) lockOrderSentinelTransactionEnd();
       }
     };
+  }
+  savepoint<T>(fn: () => T): T {
+    if (!this.inTransaction) throw new Error("savepoint requires an open transaction");
+    const name = `multiremi_optional_${++this.savepointSequence}`;
+    const previousFailure = this.failedAtDepth;
+    this.execute(`SAVEPOINT ${name}`, []);
+    this.afterCommitFrames.push([]);
+    let released = false;
+    try {
+      const result = fn();
+      if (this.failedAtDepth != null) throw new Error("Postgres savepoint contains an unrecovered statement failure");
+      this.execute(`RELEASE SAVEPOINT ${name}`, []);
+      released = true;
+      return result;
+    } catch (error) {
+      this.execute(`ROLLBACK TO SAVEPOINT ${name}`, []);
+      this.failedAtDepth = previousFailure;
+      this.execute(`RELEASE SAVEPOINT ${name}`, []);
+      throw error;
+    } finally {
+      const frame = this.afterCommitFrames.pop()!;
+      if (released) this.afterCommitFrames[this.afterCommitFrames.length - 1]!.push(...frame);
+    }
+  }
+  /**
+   * Queue \`fn\` until the OUTERMOST transaction on this connection commits, and
+   * drop it when that transaction rolls back (MUL-405).
+   *
+   * A writer that runs inside a nested \`transaction()\` cannot tell whether the
+   * caller above it will commit: the inner call only released a SAVEPOINT, so a
+   * realtime event published there can still be invalidated by an outer
+   * ROLLBACK. Queueing on the outermost depth is what makes "publish after
+   * COMMIT" true at every nesting level. Outside a transaction the callback runs
+   * immediately, so autocommit callers keep the old behavior.
+   */
+  afterCommit(fn: () => void): void {
+    if (this.transactionDepth === 0) {
+      fn();
+      return;
+    }
+    this.afterCommitFrames[this.afterCommitFrames.length - 1]!.push(fn);
+  }
+
+  /**
+   * Transaction-scoped lock on this bridge's single connection, so it is
+   * released by the caller's COMMIT or ROLLBACK rather than by a callback.
+   *
+   * Refusing to run outside a transaction is deliberate: in autocommit the
+   * lock would be taken and released by the same statement, which reads like a
+   * lock and behaves like nothing at all.
+   */
+  advisoryXactLock(key: string): void {
+    if (this.transactionDepth === 0) {
+      throw new Error("advisoryXactLock must be called inside a transaction");
+    }
+    lockOrderSentinelNoteNumberLock(key);
+    this.execute("SELECT pg_advisory_xact_lock(hashtext($1))", [key]);
   }
   close(): void {
     this.bridge.close();
@@ -298,5 +808,7 @@ export function isPostgresConfigured(): boolean {
 export function openMultiremiDatabase(): SqlDatabase {
   const url = process.env.MULTIREMI_DATABASE_URL?.trim();
   if (url && isPostgresConfigured()) return new PostgresSyncDatabase(url);
-  return getDb() as unknown as SqlDatabase;
+  // Bun's SQLite handle satisfies the interface structurally, so the marker is
+  // attached here rather than by wrapping every statement.
+  return markSqliteDialect(getDb()) as unknown as SqlDatabase;
 }

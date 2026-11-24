@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createStore, jsonResponse, metricValue, mockFetch, resetMultiremiTestEnv } from "./helpers.js";
+import { receiveTaskOffer } from "../../fixtures/task-offer.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -111,7 +112,7 @@ describe("Multiremi API — skills and agent templates", () => {
 
     const agentDetail = await app.request(`/api/multiremi/agents/${agent.id}`);
     const agentBody = await agentDetail.json();
-    expect(agentBody.agent.skills[0].files[0].path).toBe("notes/guide.md");
+    expect(agentBody.agent.skills[0].files).toEqual([]);
 
     const deleted = await app.request("/api/skills/skl_api", { method: "DELETE" });
     expect(deleted.status).toBe(204);
@@ -119,7 +120,57 @@ describe("Multiremi API — skills and agent templates", () => {
     expect((await afterDelete.json()).skills).toHaveLength(0);
   });
 
-  it("gates Go-compatible skill mutations by creator/admin and emits workspace events", async () => {
+  it("makes PUT /api/agents/:id/skills replace the inline skills the daemon also reads", async () => {
+    const store = createStore();
+    const runtime = store.registerRuntime({ name: "Skills runtime", provider: "claude" });
+    const agent = store.createAgent({ name: "Skill holder", provider: "claude", runtimeId: runtime.id });
+    const first = store.createSkill({ id: "skl_first", workspaceId: "local", name: "First", content: "# First" });
+    const second = store.createSkill({ id: "skl_second", workspaceId: "local", name: "Second", content: "# Second" });
+    const app = createMultiremiApp({ store });
+    const send = (method: string, path: string, body: unknown) => app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const names = async (response: Response) => {
+      expect(response.status).toBe(200);
+      return ((await response.json()) as Array<{ name: string }>).map((skill) => skill.name);
+    };
+    const putSkills = (skillIds: string[]) => send("PUT", `/api/agents/${agent.id}/skills`, { skill_ids: skillIds });
+    const inlineColumn = () => store.getAgentLite(agent.id)!.skills.map((skill) => skill.name);
+    // Inline entries as the old agent update wrote them: a copy of an attached skill, plus one
+    // that only ever lived on the agent.
+    const writeInlineSkills = () => store.updateAgent(agent.id, {
+      skills: [store.getSkill(first.id!)!, { name: "Inline only", content: "# Inline" }],
+    });
+
+    expect(await names(await putSkills([first.id!]))).toEqual(["First"]);
+    expect((await send("PUT", `/api/agents/${agent.id}`, { name: "Renamed holder" })).status).toBe(200);
+    expect((await send("PUT", `/api/agents/${agent.id}/env`, { custom_env: { MODE: "test" } })).status).toBe(200);
+    expect(inlineColumn()).toEqual([]);
+
+    writeInlineSkills();
+    expect(await names(await send("POST", `/api/agents/${agent.id}/skills/add`, { skill_ids: [second.id] })))
+      .toEqual(["First", "Second", "Inline only"]);
+    expect(inlineColumn()).toEqual(["First", "Inline only"]);
+
+    expect(await names(await putSkills([second.id!]))).toEqual(["Second"]);
+    expect(inlineColumn()).toEqual([]);
+    expect(await names(await app.request(`/api/agents/${agent.id}/skills`))).toEqual(["Second"]);
+
+    writeInlineSkills();
+    expect(await names(await putSkills([]))).toEqual([]);
+    expect(inlineColumn()).toEqual([]);
+    expect(await names(await app.request(`/api/agents/${agent.id}/skills`))).toEqual([]);
+    expect((await (await app.request(`/api/agents/${agent.id}`)).json()).skills).toEqual([]);
+
+    const task = store.createTask({ agentId: agent.id, prompt: "Run without skills" });
+    const offer = await receiveTaskOffer(store, runtime.id);
+    expect(offer?.attempt_id).toBe(task.id);
+    expect(offer?.agent.skills).toEqual([]);
+  });
+
+  it("shares skill management across human accounts and emits canonical workspace events", async () => {
     const store = createStore();
     const workspace = store.createWorkspace({ id: "ws_skill_guard", name: "Skill Guard", slug: "skill-guard" });
     store.createWorkspaceMember({
@@ -161,7 +212,7 @@ describe("Multiremi API — skills and agent templates", () => {
     const events: Array<{ type: string; workspaceId: string; payload: Record<string, unknown>; actorId?: string | null; actorType?: string }> = [];
     store.onWorkspaceEvent((event) => events.push(event));
     const jsonHeaders = (token: string) => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` });
-    const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
+    const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, "X-Workspace-ID": workspace.id });
 
     const created = await app.request("/api/skills", {
       method: "POST",
@@ -176,14 +227,14 @@ describe("Multiremi API — skills and agent templates", () => {
     expect(created.status).toBe(201);
     const createdBody = await created.json();
     expect(createdBody.workspace_id).toBe(workspace.id);
-    expect(createdBody.created_by).toBe(creator.id);
+    expect(createdBody.created_by).toBe("local");
 
     const createdEvent = events.find((event) => event.type === "skill:created");
     expect(createdEvent).toMatchObject({
       workspaceId: workspace.id,
-      actorId: creator.id,
+      actorId: "local",
       actorType: "member",
-      payload: { skill: { id: createdBody.id, workspace_id: workspace.id, created_by: creator.id } },
+      payload: { skill: { id: createdBody.id, workspace_id: workspace.id, created_by: "local" } },
     });
 
     const memberRead = await app.request(`/api/skills/${createdBody.id}`, { headers: authHeaders(memberToken.token) });
@@ -194,8 +245,7 @@ describe("Multiremi API — skills and agent templates", () => {
       headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ description: "Nope" }),
     });
-    expect(memberUpdate.status).toBe(403);
-    expect(await memberUpdate.json()).toEqual({ error: "only the skill creator can manage this skill" });
+    expect(memberUpdate.status).toBe(200);
 
     const creatorUpdate = await app.request(`/api/skills/${createdBody.id}`, {
       method: "PATCH",
@@ -205,11 +255,11 @@ describe("Multiremi API — skills and agent templates", () => {
     expect(creatorUpdate.status).toBe(200);
     const updatedBody = await creatorUpdate.json();
     expect(updatedBody.workspace_id).toBe(workspace.id);
-    expect(updatedBody.created_by).toBe(creator.id);
+    expect(updatedBody.created_by).toBe("local");
     expect(updatedBody.description).toBe("Updated");
     expect(events.some((event) =>
       event.type === "skill:updated" &&
-      event.actorId === creator.id &&
+      event.actorId === "local" &&
       (event.payload.skill as any)?.id === createdBody.id
     )).toBe(true);
 
@@ -218,8 +268,7 @@ describe("Multiremi API — skills and agent templates", () => {
       headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ path: "notes/nope.md", content: "Nope" }),
     });
-    expect(memberFilePut.status).toBe(403);
-    expect(await memberFilePut.json()).toEqual({ error: "only the skill creator can manage this skill" });
+    expect(memberFilePut.status).toBe(200);
 
     const adminFilePut = await app.request(`/api/skills/${createdBody.id}/files`, {
       method: "PUT",
@@ -234,21 +283,20 @@ describe("Multiremi API — skills and agent templates", () => {
       method: "DELETE",
       headers: authHeaders(memberToken.token),
     });
-    expect(memberFileDelete.status).toBe(403);
+    expect(memberFileDelete.status).toBe(204);
 
     const adminFileDelete = await app.request(`/api/skills/${createdBody.id}/files/${fileBody.id}`, {
       method: "DELETE",
       headers: authHeaders(adminToken.token),
     });
-    expect(adminFileDelete.status).toBe(204);
+    expect(adminFileDelete.status).toBe(404);
 
     const memberBind = await app.request(`/api/agents/${agent.id}/skills`, {
       method: "PUT",
       headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ skill_ids: [createdBody.id] }),
     });
-    expect(memberBind.status).toBe(403);
-    expect(await memberBind.json()).toEqual({ error: "only the agent owner can manage this agent" });
+    expect(memberBind.status).toBe(200);
 
     const creatorBind = await app.request(`/api/agents/${agent.id}/skills`, {
       method: "PUT",
@@ -259,7 +307,7 @@ describe("Multiremi API — skills and agent templates", () => {
     expect((await creatorBind.json())[0].id).toBe(createdBody.id);
     expect(events.some((event) =>
       event.type === "agent:status" &&
-      event.actorId === creator.id &&
+      event.actorId === "local" &&
       event.workspaceId === workspace.id &&
       (event.payload.skills as any[])?.[0]?.id === createdBody.id
     )).toBe(true);
@@ -268,13 +316,13 @@ describe("Multiremi API — skills and agent templates", () => {
       method: "DELETE",
       headers: authHeaders(memberToken.token),
     });
-    expect(memberDelete.status).toBe(403);
+    expect(memberDelete.status).toBe(204);
 
     const ownerDelete = await app.request(`/api/skills/${createdBody.id}`, {
       method: "DELETE",
       headers: authHeaders(ownerToken.token),
     });
-    expect(ownerDelete.status).toBe(204);
+    expect(ownerDelete.status).toBe(404);
     expect(events.some((event) =>
       event.type === "skill:deleted" &&
       event.actorId === "local" &&
@@ -320,7 +368,7 @@ describe("Multiremi API — skills and agent templates", () => {
     const events: Array<{ type: string; workspaceId: string; payload: Record<string, unknown>; actorId?: string | null; actorType?: string }> = [];
     store.onWorkspaceEvent((event) => events.push(event));
     const jsonHeaders = (token: string) => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` });
-    const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
+    const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, "X-Workspace-ID": workspace.id });
 
     const created = await app.request("/api/multiremi/skills", {
       method: "POST",
@@ -336,11 +384,11 @@ describe("Multiremi API — skills and agent templates", () => {
     expect(created.status).toBe(201);
     const createdBody = await created.json();
     expect(createdBody.skill.workspaceId).toBe(workspace.id);
-    expect(createdBody.skill.createdBy).toBe(creator.id);
+    expect(createdBody.skill.createdBy).toBe("local");
     expect(createdBody.skill.files[0].path).toBe("docs/native.md");
     expect(events.some((event) =>
       event.type === "skill:created" &&
-      event.actorId === creator.id &&
+      event.actorId === "local" &&
       (event.payload.skill as any)?.workspace_id === workspace.id
     )).toBe(true);
 
@@ -364,8 +412,7 @@ describe("Multiremi API — skills and agent templates", () => {
       headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ description: "Nope" }),
     });
-    expect(memberUpdate.status).toBe(403);
-    expect(await memberUpdate.json()).toEqual({ error: "only the skill creator can manage this skill" });
+    expect(memberUpdate.status).toBe(200);
 
     const adminUpdate = await app.request(`/api/multiremi/skills/${createdBody.skill.id}`, {
       method: "PATCH",
@@ -375,11 +422,11 @@ describe("Multiremi API — skills and agent templates", () => {
     expect(adminUpdate.status).toBe(200);
     const updatedBody = await adminUpdate.json();
     expect(updatedBody.skill.workspaceId).toBe(workspace.id);
-    expect(updatedBody.skill.createdBy).toBe(creator.id);
+    expect(updatedBody.skill.createdBy).toBe("local");
     expect(updatedBody.skill.description).toBe("Native updated");
     expect(events.some((event) =>
       event.type === "skill:updated" &&
-      event.actorId === "native-skill-admin" &&
+      event.actorId === "local" &&
       (event.payload.skill as any)?.id === createdBody.skill.id
     )).toBe(true);
 
@@ -391,7 +438,7 @@ describe("Multiremi API — skills and agent templates", () => {
     expect((await deleted.json()).skill.archivedAt).toBeString();
     expect(events.some((event) =>
       event.type === "skill:deleted" &&
-      event.actorId === "native-skill-admin" &&
+      event.actorId === "local" &&
       event.payload.skill_id === createdBody.skill.id
     )).toBe(true);
   });
@@ -642,11 +689,8 @@ describe("Multiremi API — skills and agent templates", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: "https://skills.sh/example/skills/review-helper", workspaceId: "local", name: "Imported Review" }),
     });
-    expect(duplicateSkillsShImport.status).toBe(409);
-    expect(await duplicateSkillsShImport.json()).toEqual({
-      error: "a skill with this name already exists",
-      existing_skill: { id: skillsShBody.id, name: "Imported Review" },
-    });
+    expect(duplicateSkillsShImport.status).toBe(200);
+    expect((await duplicateSkillsShImport.json()).id).toBe(skillsShBody.id);
     expect(requestedUrls).toContain("https://api.github.com/repos/example/skills/contents/skills/review-helper?ref=main");
   });
 

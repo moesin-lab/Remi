@@ -25,6 +25,7 @@ import { setLoggedInCookie } from "@/features/auth/auth-cookie";
 import { allowsLocalTokenLogin, allowsPasswordLogin } from "@/features/auth/local-profile";
 import { LoginPage, validateCliCallback } from "@multiremi/views/auth";
 import { useT } from "@multiremi/views/i18n";
+import { useWebRuntime } from '@/components/web-runtime';
 
 /**
  * Pick where a logged-in user with no explicit `?next=` should land.
@@ -38,21 +39,11 @@ async function resolveLoggedInDestination(
   hasOnboarded: boolean,
   workspaces: Workspace[],
 ): Promise<string> {
-  if (!hasOnboarded) {
-    try {
-      const invites = await api.listMyInvitations();
-      if (invites.length > 0) {
-        qc.setQueryData(workspaceKeys.myInvitations(), invites);
-        return paths.invitations();
-      }
-    } catch {
-      // fall through
-    }
-  }
   return resolvePostAuthDestination(workspaces, hasOnboarded);
 }
 
 function LoginPageContent() {
+  const runtime = useWebRuntime();
   const router = useRouter();
   const qc = useQueryClient();
   const { t } = useT("auth");
@@ -80,15 +71,15 @@ function LoginPageContent() {
 
   useEffect(() => {
     setAllowTokenLogin(allowsLocalTokenLogin(
-      process.env.NEXT_PUBLIC_LOCAL_PROFILE,
+      runtime.localProfile,
       window.location.hostname,
     ));
     setAllowPasswordLogin(allowsPasswordLogin(
-      process.env.NEXT_PUBLIC_LOCAL_PROFILE,
+      runtime.localProfile,
       window.location.hostname,
-      process.env.NEXT_PUBLIC_SITE_URL,
+      runtime.siteUrl,
     ));
-  }, []);
+  }, [runtime.localProfile, runtime.siteUrl]);
 
   // Already authenticated — honor ?next= or fall back to first workspace
   // (or /onboarding if the user has none). Skip this entire path when

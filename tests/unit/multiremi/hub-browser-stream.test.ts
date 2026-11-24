@@ -1,0 +1,253 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { afterEach, describe, expect, it } from "bun:test";
+import { createHub, type HubImpl, type HubOptions } from "@multiremi/api/hub/hub-core.js";
+import { createLocalHubTransport } from "@multiremi/api/hub/hub-transport.js";
+import { createBrowserStreamHandler } from "@multiremi/api/hub/browser-stream.js";
+import type { StreamAuthReader } from "@multiremi/api/hub/stream-auth.js";
+import type { MultiremiWebSocketClient } from "@multiremi/api/helpers/realtime-types.js";
+import { startMultiremiServer } from "@multiremi/api.js";
+import { authenticateBrowserWebSocket, createStore, nextWebSocketMessage, nextWebSocketMessages, resetMultiremiTestEnv } from "./helpers.js";
+import { deltaTraceEvent } from "../../helpers/turn-trace.js";
+
+const hubs: HubImpl[] = [];
+afterEach(() => { for (const hub of hubs.splice(0)) hub.shutdown(); resetMultiremiTestEnv(); });
+const auth: StreamAuthReader = {
+  backend: "sqlite",
+  logFacts: async () => ({ ok: true, facts: { kind: "issue", workspaceId: "w", creatorId: null, requesterIsMember: true } }),
+  traceFacts: async () => ({ ok: true, facts: { workspaceId: "w", chatSessionId: null, chatCreatorId: null, agentId: null, agentVisibility: null, agentOwnerId: null, requesterIsWorkspaceAdmin: true } }),
+};
+
+function fixture(stream: "log" | "trace" = "log", options: Partial<HubOptions> = {},
+  handlerDeps: Partial<Parameters<typeof createBrowserStreamHandler>[0]> = {}) {
+  const hub = createHub({ transport: createLocalHubTransport(), scheduleFlush: () => {}, limits: { ring: { streamMaxFrames: 3 }, laggingBytes: 10 }, ...options });
+  hubs.push(hub);
+  const frames: Array<{ type: string; payload: any }> = [];
+  let buffered = 0;
+  const client = {
+    data: { kind: "browser", connectedAt: "", workspaceId: "w", authenticated: true, userId: "u", accessToken: null },
+    sendText: (text: string) => { frames.push(JSON.parse(text)); },
+    close: () => {},
+    getBufferedAmount: () => buffered,
+  } satisfies MultiremiWebSocketClient;
+  const handler = createBrowserStreamHandler({ hub, auth, endpoint: stream, ...handlerDeps });
+  const subscribe = (fromSeq = 0) => handler.handleSubscribe(client, { type: "stream.subscribe", payload: { stream, id: "s", from_seq: fromSeq } });
+  const row = (seq: number) => {
+    if (stream === "log") hub.onEntry("s", { session_id: "s", seq, revision: 1, kind: "message", visibility: "shown" });
+    else hub.append("s", [deltaTraceEvent(seq, String(seq))]);
+  };
+  return { hub, client, handler, frames, subscribe, row, setBuffered: (bytes: number) => { buffered = bytes; } };
+}
+
+describe("MUL-436 regression 4B: real Hub browser sink", () => {
+  it("delivers completion once after data even when task state has not refreshed", async () => {
+    const { hub, frames, subscribe, row } = fixture("trace");
+    await subscribe(); row(1); row(2); hub.close("s"); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.data", "stream.closed"]);
+    expect(frames.at(-1)!.payload).toEqual({ stream: "trace", id: "s", head_seq: 2 });
+    hub.close("s"); hub.flushNow();
+    expect(frames.filter(frame => frame.type === "stream.closed")).toHaveLength(1);
+  });
+
+  it("announces zero-event completion and replays an already-closed trace", async () => {
+    const { hub, frames, subscribe, row } = fixture("trace");
+    hub.close("s"); await subscribe(); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.closed"]);
+    expect(frames[0]!.payload.closed).toBe(true);
+    expect(frames[1]!.payload.head_seq).toBe(0);
+    row(1); frames.length = 0; await subscribe(); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.data", "stream.closed"]);
+  });
+
+  it("waits for the final backpressured batch before completion", async () => {
+    const { hub, client, handler, frames, subscribe, row, setBuffered } = fixture("trace");
+    await subscribe(); setBuffered(11); row(1); hub.close("s"); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.data"]);
+    setBuffered(0); handler.notifyDrain(client); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.data", "stream.closed"]);
+  });
+
+  it("retains completion when an idle closed ring was evicted before opening", async () => {
+    let now = 0;
+    const { hub, frames, subscribe, row } = fixture("trace", { now: () => now,
+      limits: { ring: { globalMaxBytes: 100, evictAfterMs: 1 } } });
+    row(1); hub.close("s"); now = 10;
+    hub.append("hot", [deltaTraceEvent(1, "x".repeat(200))]);
+    expect(hub.head("s")).toBeNull();
+    await subscribe(2); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.closed"]);
+    expect(frames[0]!.payload.closed).toBe(true);
+  });
+
+  it("does not announce completion while an out-of-order final frame awaits its gap", async () => {
+    const { hub, frames, subscribe, row } = fixture("trace");
+    await subscribe(); row(1); row(3); hub.close("s"); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.data"]);
+    row(2); hub.flushNow();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.data", "stream.data", "stream.closed"]);
+    expect(frames.at(-2)!.payload.frames.map((frame: { seq: number }) => frame.seq)).toEqual([2, 3]);
+    expect(frames.at(-1)!.payload.head_seq).toBe(3);
+  });
+  for (const stream of ["log", "trace"] as const) {
+    it(`reports a running ${stream} ring gap before the retained tail`, async () => {
+      const { hub, frames, subscribe, row } = fixture(stream);
+      await subscribe();
+      for (let seq = 1; seq <= 10; seq++) row(seq);
+      hub.flushNow();
+      expect(frames.map((frame) => frame.type)).toEqual(["stream.ack", "stream.gap", "stream.data"]);
+      expect(frames[1]!.payload).toEqual({ stream, id: "s", from: stream === "trace" ? 1 : 0, to: 7 });
+      expect(frames[2]!.payload.frames.map((frame: { seq: number }) => frame.seq)).toEqual([8, 9, 10]);
+    });
+
+    it(`pauses ${stream} at socket backpressure and resumes only after drain`, async () => {
+      const { hub, client, handler, frames, subscribe, row, setBuffered } = fixture(stream);
+      await subscribe();
+      setBuffered(11); row(1); hub.flushNow();
+      const count = frames.length;
+      for (let seq = 2; seq <= 8; seq++) row(seq);
+      hub.flushNow();
+      expect(hub.snapshot().lagging_subscribers).toBe(1);
+      expect(frames).toHaveLength(count);
+      setBuffered(0); handler.notifyDrain(client); hub.flushNow();
+      expect(frames.slice(count).map((frame) => frame.type)).toEqual(["stream.gap", "stream.data"]);
+      expect(frames.at(-1)!.payload.frames.map((frame: { seq: number }) => frame.seq)).toEqual([6, 7, 8]);
+    });
+  }
+
+  it("reports a late lower revision instead of silently discarding it", async () => {
+    const { hub, frames, subscribe, row } = fixture();
+    await subscribe(); row(1); hub.flushNow();
+    hub.onEntry("s", { session_id: "s", target_seq: 1, revision: 4, fields: { body_html: "new" } }); hub.flushNow();
+    const count = frames.length;
+    hub.onEntry("s", { session_id: "s", target_seq: 1, revision: 3, fields: { body_html: null } }); hub.flushNow();
+    expect(frames.slice(count)).toEqual([{ type: "stream.gap", payload: { stream: "log", id: "s", from: 1, to: 1 } }]);
+  });
+
+  it("keeps synchronous data and gap behind the ack in their original order", async () => {
+    const { hub, frames, subscribe } = fixture();
+    const original = hub.subscribeWithSink.bind(hub);
+    hub.subscribeWithSink = (key, from, sink) => {
+      const sub = original(key, from, sink);
+      sink.send([{ seq: 1, kind: "entry", payload: { seq: 1 } }]);
+      sink.gap?.(2, 3);
+      sink.send([{ seq: 4, kind: "entry", payload: { seq: 4 } }]);
+      return sub;
+    };
+    await subscribe();
+    expect(frames.map((frame) => frame.type)).toEqual(["stream.ack", "stream.data", "stream.gap", "stream.data"]);
+  });
+
+  it("buffers synchronous trace data and completion behind the ack", async () => {
+    const { hub, frames, subscribe } = fixture("trace");
+    const original = hub.subscribeWithSink.bind(hub);
+    hub.subscribeWithSink = (key, from, sink) => {
+      const sub = original(key, from, sink);
+      sink.send([{ seq: 1, kind: "trace", payload: { seq: 1 } }]);
+      sink.closed?.(1);
+      return sub;
+    };
+    await subscribe();
+    expect(frames.map(frame => frame.type)).toEqual(["stream.ack", "stream.data", "stream.closed"]);
+  });
+
+  it("sends running gaps and late-revision gaps over the real browser endpoint", async () => {
+    const store = createStore();
+    const workspace = store.ensureLocalWorkspace();
+    const issue = createResponsibleTestIssue(store, { title: "Hub socket gap", workspaceId: workspace.id });
+    const session = store.getOrCreateDefaultIssueSession(issue.id, "local");
+    const token = await store.createAccessToken({ name: "Hub sink test", type: "pat", workspaceId: workspace.id });
+    const hub = createHub({ transport: createLocalHubTransport(), scheduleFlush: () => {}, limits: { ring: { streamMaxFrames: 3 } } });
+    hubs.push(hub);
+    const server = startMultiremiServer({ store, scheduler: null, port: 0, hostname: "127.0.0.1", authToken: null, liveHub: hub });
+    const socket = new WebSocket(`ws://127.0.0.1:${server.port}/ws?workspace_id=${workspace.id}`);
+    try {
+      await authenticateBrowserWebSocket(socket, token.token);
+      const ack = nextWebSocketMessage(socket);
+      socket.send(JSON.stringify({ type: "stream.subscribe", payload: { stream: "log", id: session.id, from_seq: 0 } }));
+      expect(await ack).toMatchObject({ type: "stream.ack" });
+      const tail = nextWebSocketMessages(socket, 2);
+      for (let seq = 1; seq <= 10; seq++) hub.onEntry(session.id, { session_id: session.id, seq, revision: 1, kind: "message", visibility: "shown" });
+      hub.flushNow();
+      const frames = await tail;
+      expect(frames[0]).toMatchObject({ type: "stream.gap", payload: { from: 0, to: 7 } });
+      expect(frames[1]).toMatchObject({ type: "stream.data" });
+      const patch = nextWebSocketMessage(socket);
+      hub.onEntry(session.id, { session_id: session.id, target_seq: 10, revision: 4, fields: { body_html: "new" } }); hub.flushNow();
+      expect(await patch).toMatchObject({ type: "stream.data" });
+      const gap = nextWebSocketMessage(socket);
+      hub.onEntry(session.id, { session_id: session.id, target_seq: 10, revision: 3, fields: { body_html: null } }); hub.flushNow();
+      expect(await gap).toMatchObject({ type: "stream.gap", payload: { from: 10, to: 10 } });
+    } finally {
+      socket.close(); server.stop(true);
+    }
+  });
+});
+
+describe("MUL-436 regression 4C: browser inclusive resume", () => {
+  for (const stream of ["log", "trace"] as const) {
+    it(`replays ${stream} seq 2 and 3 from next-wanted 2 on repeated subscriptions`, async () => {
+      const { hub, frames, subscribe, row } = fixture(stream);
+      for (let seq = 1; seq <= 3; seq++) row(seq);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        frames.length = 0;
+        await subscribe(2);
+        hub.flushNow();
+        expect(frames.map((frame) => frame.type)).toEqual(["stream.ack", "stream.data"]);
+        expect(frames[0]!.payload.gap).toBeNull();
+        expect(frames[1]!.payload.frames.map((frame: { seq: number }) => frame.seq)).toEqual([2, 3]);
+      }
+    });
+  }
+});
+
+describe("log projection failures", () => {
+  const until = async (done: () => boolean) => {
+    for (let n = 0; n < 200 && !done(); n++) await new Promise(resolve => setTimeout(resolve, 2));
+    expect(done()).toBe(true);
+  };
+  const secretRow = (hub: HubImpl, seq: number) =>
+    hub.onEntry("s", { session_id: "s", seq, revision: 1, kind: "message", visibility: "shown", body_md: "SECRET_BODY" } as never);
+  const seqs = (frames: Array<{ type: string; payload: any }>) =>
+    frames.filter(frame => frame.type === "stream.data").flatMap(frame => frame.payload.frames.map((f: { seq: number }) => f.seq));
+
+  it("projects a failed batch once more and keeps the stream when that answers, and says why", async () => {
+    const warnings: string[] = [];
+    let failures = 1;
+    const { hub, frames, subscribe } = fixture("log", {}, {
+      projectionRetryMs: 1, warn: message => { warnings.push(message); },
+      projectLogFrames: async (_client, _id, batch) => {
+        if (failures-- > 0) throw new Error("Missing turn for conversation pointer: tsk_1");
+        return [...batch];
+      },
+    });
+    await subscribe(1);
+    secretRow(hub, 1); hub.flushNow();
+    await until(() => seqs(frames).includes(1));
+    secretRow(hub, 2); hub.flushNow();
+    await until(() => seqs(frames).includes(2));
+    expect(frames.some(frame => frame.type === "stream.error")).toBe(false);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("log:s");
+    expect(warnings[0]).toContain("Error: Missing turn for conversation pointer: tsk_1");
+    expect(warnings[0]).toContain("retrying");
+    expect(warnings[0]).not.toContain("SECRET_BODY");
+  });
+
+  it("ends the subscription with unavailable when the retry fails too, logs it, and sends nothing unchecked", async () => {
+    const warnings: string[] = [];
+    const { hub, frames, subscribe } = fixture("log", {}, {
+      projectionRetryMs: 1, warn: message => { warnings.push(message); },
+      projectLogFrames: async () => { throw new Error(`read pool timed out ${"x".repeat(400)}`); },
+    });
+    await subscribe(1);
+    secretRow(hub, 1); hub.flushNow();
+    await until(() => frames.some(frame => frame.type === "stream.error"));
+    secretRow(hub, 2); hub.flushNow();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(frames.filter(frame => frame.type !== "stream.ack")).toEqual([
+      { type: "stream.error", payload: { stream: "log", id: "s", code: "unavailable" } },
+    ]);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toContain("closing the stream with unavailable");
+    expect(warnings.every(message => message.length < 400 && !message.includes("SECRET_BODY"))).toBe(true);
+  });
+});

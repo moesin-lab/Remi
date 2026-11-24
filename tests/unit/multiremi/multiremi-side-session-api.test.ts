@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
@@ -9,7 +10,7 @@ const headers = { Authorization: "Bearer MASTER", "Content-Type": "application/j
 describe("side Session API", () => {
   it("accepts both parent input spellings and returns a frozen snapshot through all Session reads", async () => {
     const store = createLocalStore();
-    const issue = store.createIssue({ title: "Side API", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Side API", workspaceId: "local" });
     const parent = store.getOrCreateDefaultIssueSession(issue.id);
     store.createIssueComment(issue.id, { issueSessionId: parent.id, body: "Earlier context" });
     const events = store.listSessionEvents(parent.id);
@@ -48,7 +49,7 @@ describe("side Session API", () => {
 
   it("rejects unsupported or contradictory inheritance modes without creating Sessions", async () => {
     const store = createLocalStore();
-    const issue = store.createIssue({ title: "Invalid modes", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Invalid modes", workspaceId: "local" });
     const parent = store.getOrCreateDefaultIssueSession(issue.id);
     const app = createMultiremiApp({ store, authToken: "MASTER" });
     for (const body of [
@@ -70,7 +71,7 @@ describe("side Session API", () => {
 
   it("accepts follow through both mode spellings and keeps its fork point immutable", async () => {
     const store = createLocalStore();
-    const issue = store.createIssue({ title: "Follow API", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Follow API", workspaceId: "local" });
     const parent = store.getOrCreateDefaultIssueSession(issue.id);
     const fork = store.appendSessionEvent(parent.id, { authorType: "member", body: "At fork" });
     const app = createMultiremiApp({ store, authToken: "MASTER" });
@@ -108,9 +109,9 @@ describe("side Session API", () => {
 
   it("keeps inheritance fields immutable through update and rejects invalid parents", async () => {
     const store = createLocalStore();
-    const issue = store.createIssue({ title: "Parent validation", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Parent validation", workspaceId: "local" });
     const parent = store.getOrCreateDefaultIssueSession(issue.id);
-    const other = store.createIssue({ title: "Other issue", workspaceId: "local" });
+    const other = createResponsibleTestIssue(store, { title: "Other issue", workspaceId: "local" });
     const otherParent = store.getOrCreateDefaultIssueSession(other.id);
     const app = createMultiremiApp({ store, authToken: "MASTER" });
     const created = await app.request(`/api/issues/${issue.id}/sessions`, {
@@ -134,12 +135,12 @@ describe("side Session API", () => {
     });
   });
 
-  it("authenticates direct Session reads and hides other workspaces from humans and task tokens", async () => {
+  it("authenticates shared human Session reads and hides other workspaces from task tokens", async () => {
     const store = createLocalStore();
-    const issue = store.createIssue({ title: "Visible", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Visible", workspaceId: "local" });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const workspace = store.createWorkspace({ name: "Private", slug: "private", issuePrefix: "PRI" });
-    const privateIssue = store.createIssue({ title: "Hidden", workspaceId: workspace.id });
+    const privateIssue = createResponsibleTestIssue(store, { title: "Hidden", workspaceId: workspace.id });
     const privateSession = store.getOrCreateDefaultIssueSession(privateIssue.id);
     store.createWorkspaceMember({ workspaceId: "local", userId: "reader", name: "Reader", role: "member" });
     const member = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "reader", userId: "reader" });
@@ -151,9 +152,9 @@ describe("side Session API", () => {
     for (const token of [member.token, taskToken.token]) {
       const asReader = { Authorization: `Bearer ${token}` };
       expect((await app.request(`/api/sessions/${session.id}`, { headers: asReader })).status).toBe(200);
-      const denied = await app.request(`/api/sessions/${privateSession.id}`, { headers: asReader });
-      expect(denied.status).toBe(404);
-      expect(await denied.text()).not.toContain("Hidden");
+      const otherWorkspace = await app.request(`/api/sessions/${privateSession.id}`, { headers: asReader });
+      expect(otherWorkspace.status).toBe(token === member.token ? 200 : 404);
+      if (token === taskToken.token) expect(await otherWorkspace.text()).not.toContain("Hidden");
     }
     expect((await app.request("/api/sessions/ises_missing", { headers })).status).toBe(404);
   });

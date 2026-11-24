@@ -1,3 +1,5 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createLocalStore, configureRepositoryWikiAutomation, db, resetMultiremiTestEnv } from "./helpers.js";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -10,7 +12,7 @@ function setup() {
   const agent = store.createAgent({ name: "Scheduled worker", provider: "claude", maxConcurrentTasks: 1 });
   const project = store.createProject({ title: "Example" });
   store.updateWorkspace("local", { repos: [{ id: "repo_example", name: "Example", url: "https://github.com/example/example.git", source: "github" }] });
-  const autopilot = store.createAutopilot({ title: "Nightly", assigneeId: agent.id, executionMode: "run_only" });
+  const autopilot = createResponsibleTestAutopilot(store, { title: "Nightly", assigneeId: agent.id, executionMode: "run_only" });
   const trigger = store.createAutopilotTrigger(autopilot.id, {
     kind: "schedule", cronExpression: "0 3 * * *", timezone: "Asia/Shanghai",
     scheduleTargets: { projects: { all: true, ids: [] }, repositories: { all: true, ids: [] }, prompt: "Lint the selected target" },
@@ -37,11 +39,17 @@ describe("scheduled targets", () => {
 
   it("publishes Raw for issue-free project and repository tasks without broadening their scope", async () => {
     const { store, project, autopilot, trigger } = setup();
-    const { agent } = configureRepositoryWikiAutomation(store);
+    const { agent, plugin } = configureRepositoryWikiAutomation(store);
     store.updateAgent(agent.id, { maxConcurrentTasks: 1 });
     store.updateAutopilot(autopilot.id, { assigneeId: agent.id });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
+    const runtime = store.registerRuntime({ name: "Scheduled runtime", provider: "claude", workspaceId: "local",
+      metadata: { agent_plugin_protocol: 1 } });
     const first = store.runAutopilot(autopilot.id, { triggerId: trigger.id });
+    store.reconcileAgentPluginDesiredState("local");
+    store.reportAgentPluginRuntimeState(runtime.id, plugin.activeVersionId!, {
+      status: "ready", observedDigest: plugin.activeVersion!.artifactDigest, retryGeneration: 0,
+    });
     const runFor = () => store.listAutopilotRuns(autopilot.id).find((run) => run.status === "running")!;
     for (const target of [{ kind: "project", id: project.id }, { kind: "repository", id: "repo_example" }] as const) {
       const run = runFor();
@@ -57,7 +65,9 @@ describe("scheduled targets", () => {
       expect(store.getKnowledgeSubmission(raw.submission.id)?.status).toBe("consumed");
       const denied = await app.request(target.kind === "repository" ? `/api/projects/${project.id}/knowledge/publish` : "/api/workspaces/local/repos/repo_example/wiki/publish", { method: "POST", headers, body: JSON.stringify({ outputs: [{ action: "noop" }] }) });
       expect(denied.status).toBe(403);
-      db!.run("UPDATE multiremi_autopilot_runs SET status = 'completed' WHERE id = ?", [run.id]);
+      expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);
+      store.startTask(run.taskId!);
+      store.completeTask(run.taskId!, { output: "Published" });
       store.advanceScheduledTargetRuns();
     }
     expect(first.issueId).toBeNull();
@@ -65,14 +75,14 @@ describe("scheduled targets", () => {
 
   it("adds a target schedule to a project event automation without changing event behavior", async () => {
     const { store, agent, project } = setup();
-    const autopilot = store.createAutopilot({ title: "Project events", assigneeId: agent.id, executionMode: "trigger_issue" });
+    const autopilot = createResponsibleTestAutopilot(store, { title: "Project events", assigneeId: agent.id, executionMode: "trigger_issue" });
     store.createAutopilotTrigger(autopilot.id, { kind: "system_event", eventConfig: { resource: "issue", event: "status_changed", conditions: [{ field: "status", operator: "becomes", value: "done" }] } });
     const trigger = store.createAutopilotTrigger(autopilot.id, { kind: "schedule", cronExpression: "0 3 * * *", scheduleTargets: { projects: { all: false, ids: [project.id] }, repositories: { all: false, ids: [] }, prompt: "lint" } });
     store.updateAutopilot(autopilot.id, { title: "Renamed" });
     const run = store.runAutopilot(autopilot.id, { triggerId: trigger.id });
     expect(run.taskId).toBeTruthy();
     expect(run.issueId).toBeNull();
-    const issue = store.createIssue({ title: "Delivered", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Delivered", projectId: project.id });
     const eventRun = store.runAutopilot(autopilot.id, { triggerIssueId: issue.id });
     expect(eventRun.issueId).toBe(issue.id);
     expect(eventRun.scheduleTarget).toBeNull();
@@ -95,7 +105,7 @@ describe("scheduled targets", () => {
     expect(() => store.updateAutopilot(autopilot.id, { executionMode: "create_issue" })).toThrow("schedule_targets");
     const empty = createLocalStore();
     const worker = empty.createAgent({ name: "Empty", provider: "claude" });
-    const rule = empty.createAutopilot({ title: "Empty", assigneeId: worker.id, executionMode: "run_only" });
+    const rule = createResponsibleTestAutopilot(empty, { title: "Empty", assigneeId: worker.id, executionMode: "run_only" });
     const time = empty.createAutopilotTrigger(rule.id, { kind: "schedule", scheduleTargets: { projects: { all: true, ids: [] }, repositories: { all: false, ids: [] } } });
     expect(empty.runAutopilot(rule.id, { triggerId: time.id }).status).toBe("skipped");
   });
@@ -132,7 +142,10 @@ describe("scheduled targets", () => {
   it("skips removed targets and respects paused automations", () => {
     const { store, autopilot, trigger } = setup();
     const first = store.runAutopilot(autopilot.id, { triggerId: trigger.id });
-    db!.run("UPDATE multiremi_autopilot_runs SET status = 'completed' WHERE id = ?", [first.id]);
+    const runtime = store.registerRuntime({ name: "Scheduled runtime", provider: "claude", workspaceId: "local" });
+    expect(store.claimTask(runtime.id)?.id).toBe(first.taskId!);
+    store.startTask(first.taskId!);
+    store.completeTask(first.taskId!, { output: "Completed target" });
     store.updateAutopilot(autopilot.id, { status: "paused" });
     store.advanceScheduledTargetRuns();
     expect(store.listAutopilotRuns(autopilot.id).some((r) => r.status === "queued")).toBe(true);

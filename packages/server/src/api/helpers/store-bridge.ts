@@ -5,6 +5,12 @@
 //             subscribers and the analytics recorders in one place.
 import type { Context } from "hono";
 import { MultiremiStore } from "@multiremi/store/store.js";
+import { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
+import { ActiveIssueRunError, DelegationRoundTripLimitError } from "@multiremi/store/repos/tasks-repo.js";
+import { IssueResponsibilityError } from '../../store/issue-responsibility.js';
+import { createId } from "@multiremi/ids.js";
+import { IssueLockSetStaleError } from "@multiremi/store/repos/issues-repo.js";
+import { resolveCamelOrSnakeString } from "@multiremi/store/helpers.js";
 import {
   agentBroadcastCompatibilityResponse,
   cleanString,
@@ -20,6 +26,7 @@ import type {
   AssignIssueInput,
   CreateFeedbackInput,
   CreateRuntimeUpdateInput,
+  CreateTaskInput,
   MultiremiAgent,
   MultiremiIssue,
   MultiremiProject,
@@ -44,39 +51,6 @@ export function publishIssueCreated(
   publishWorkspaceEvent(c, store, "issue:created", issue.workspaceId, { issue: response });
 }
 
-// go-compat (maybeEnqueueOnAssign): changing an issue's assignee, or moving an
-// assigned issue out of backlog, dispatches a task — the update-path twin of
-// the assign-on-create block in POST /api/issues. Done/cancelled targets are
-// excluded so bulk-closing backlog items doesn't wake agents. If no runnable
-// agent is available the assignment stands without a task, matching the Go
-// server's "not ready → skip" behavior.
-export function maybeDispatchOnIssueUpdate(
-  store: MultiremiStore,
-  previous: MultiremiIssue,
-  issue: MultiremiIssue,
-  input: UpdateIssueInput,
-): { issue: MultiremiIssue; task: MultiremiTask | null; cancelledTasks: number } {
-  const unchanged = { issue, task: null, cancelledTasks: 0 };
-  if (!issue.assigneeType || !issue.assigneeId) return unchanged;
-  if (issue.status === "backlog" || issue.status === "done" || issue.status === "cancelled") return unchanged;
-  const assigneeChanged = hasRequestField(input, "assigneeType", "assignee_type", "assigneeId", "assignee_id") &&
-    (previous.assigneeType !== issue.assigneeType || previous.assigneeId !== issue.assigneeId);
-  const leftBacklog = hasRequestField(input, "status") && previous.status === "backlog";
-  if (!assigneeChanged && !leftBacklog) return unchanged;
-  try {
-    return store.assignIssue(issue.id, {
-      assigneeType: issue.assigneeType,
-      assigneeId: issue.assigneeId,
-      actorType: input.actorType,
-      actorId: input.actorId,
-      parentTaskId: input.parentTaskId ?? input.parent_task_id ?? null,
-    });
-  } catch (err) {
-    log.warn(`assign-on-update dispatch skipped for ${issue.id}: ${err instanceof Error ? err.message : String(err)}`);
-    return unchanged;
-  }
-}
-
 export function publishIssueUpdated(
   c: Context,
   store: MultiremiStore,
@@ -85,6 +59,11 @@ export function publishIssueUpdated(
   input: UpdateIssueInput,
   response: Record<string, unknown> = issueCompatibilityResponse(issue),
 ): void {
+  // Cross-workspace moves publish their committed source removal and target
+  // update in the store, including batch/native writers. An explicit target
+  // owner may dispatch after that update, so retain its final HTTP frame.
+  if (previous.workspaceId !== issue.workspaceId && (!issue.assigneeId
+    || !hasRequestField(input, "assigneeType", "assignee_type", "assigneeId", "assignee_id"))) return;
   const assigneeChanged = hasRequestField(input, "assigneeType", "assignee_type", "assigneeId", "assignee_id") &&
     (previous.assigneeType !== issue.assigneeType || previous.assigneeId !== issue.assigneeId);
   const statusChanged = hasRequestField(input, "status") && previous.status !== issue.status;
@@ -498,21 +477,23 @@ export function safeRuntimeOnboardingBootstrap(
   // COALESCE(...,'local') so a workspace-less runtime is treated as local,
   // matching how the claim predicate (and the rest of the system) reads it.
   if (!runtime || (runtime.workspaceId ?? "local") !== workspaceId) return { error: "invalid runtime_id", status: 400 };
-  const provider = runtime.provider === "claude" || runtime.provider === "codex" ? runtime.provider : "codex";
-  const before = store.getDefaultAgent(workspaceId, provider, bootstrapUserId);
+  const provider = runtime.provider === "claude" || runtime.provider === "codex" || runtime.provider === "grok"
+    ? runtime.provider
+    : "codex";
+  const before = store.getDefaultAgent(workspaceId, provider, "local");
   const isFirstAgent = isFirstAgentInWorkspace(store, workspaceId);
   const agent = store.ensureDefaultAgent(provider, {
     workspaceId,
-    ownerId: bootstrapUserId,
+    ownerId: "local",
   });
   if (!before) {
     recordSystemAgentCreatedAnalytics(store, agent, runtime, {
-      actorId: bootstrapUserId,
+      actorId: "local",
       template: "multiremi_helper",
       isFirstAgentInWorkspace: isFirstAgent,
     });
   }
-  const issue = createOnboardingIssue(store, workspaceId, "Connect your local runtime", `Use ${runtime.name} to run your first task.`, bootstrapUserId);
+  const issue = createOnboardingIssue(store, workspaceId, "Connect your local runtime", `Use ${runtime.name} to run your first task.`, "local");
   store.createTask({
     agentId: agent.id,
     issueId: issue.id,
@@ -536,7 +517,7 @@ export function safeNoRuntimeOnboardingBootstrap(
     workspaceId,
     "Install a local runtime",
     "Install and register a local Claude or Codex runtime to start running tasks.",
-    bootstrapUserId,
+    "local",
   );
   store.markCurrentUserOnboarded(bootstrapUserId);
   return { workspace_id: workspaceId, issue_id: issue.id };
@@ -547,7 +528,7 @@ export function createOnboardingIssue(
   workspaceId: string,
   title: string,
   description: string,
-  createdBy = "local",
+  createdBy: string,
 ): ReturnType<MultiremiStore["createIssue"]> {
   const existing = store.listIssues({ workspaceId }).find((issue) => issue.title === title);
   if (existing) return existing;
@@ -564,11 +545,26 @@ export function createOnboardingIssue(
 export function safeRerunIssue(
   store: MultiremiStore,
   issueId: string,
-  body: { agent_id?: string; agentId?: string; prompt?: string; parentTaskId?: string | null },
-): { task: MultiremiTask } | { error: string; status: 400 | 404 } {
+  body: {
+    task_id?: string;
+    agent_id?: string;
+    agentId?: string;
+    prompt?: string;
+    parentTaskId?: string | null;
+    authorAgentId?: string | null;
+    dependencyForce?: CreateTaskInput["dependencyForce"];
+  },
+): { task: MultiremiTask | null; message?: unknown; wake_applied?: string; wake_reason?: string } | { error: string; status: 400 | 404 | 409; code?: string; unmet?: IssueDependencyError["details"]["unmet"] } {
   const issue = store.getIssue(issueId);
   if (!issue) return { error: "issue not found", status: 404 };
-  const agentId = body.agent_id ?? body.agentId ?? issue.assigneeId;
+  const previous = body.task_id ? store.getTaskByRef(body.task_id, { issueId }) : null;
+  if (body.task_id && (!previous || previous.issueId !== issueId || (previous.chatSessionId && !previous.issueSessionId))) {
+    return { error: "task not found", status: 404 };
+  }
+  if (previous && !["failed", "cancelled"].includes(previous.status)) {
+    return { error: "Only failed or cancelled runs can be retried", status: 409, code: "task_not_retryable" };
+  }
+  const agentId = previous?.agentId ?? body.agent_id ?? body.agentId ?? issue.assigneeId;
   if (!agentId) return { error: "issue has no agent assignee", status: 400 };
   const agent = store.getAgent(agentId);
   if (!agent) return { error: "agent not found", status: 404 };
@@ -576,24 +572,57 @@ export function safeRerunIssue(
   // access can't redirect the run to another workspace's agent (createTask
   // would reject the cross-workspace link, but fail loudly here first).
   if (agent.workspaceId !== issue.workspaceId) return { error: "agent not found", status: 404 };
-  const task = store.createTask({
-    agentId,
-    issueId: issue.id,
-    workspaceId: issue.workspaceId,
-    prompt: body.prompt ?? issue.title,
-    parentTaskId: body.parentTaskId ?? null,
-  });
-  return { task };
+  try {
+    const sourceTask = body.parentTaskId ? store.getTask(body.parentTaskId) : null;
+    const delegation = body.authorAgentId && sourceTask
+      ? store.resolveAgentDelegation({ sourceTask, authorAgentId: body.authorAgentId,
+        targetAgentId: agentId, targetIssue: issue }) : null;
+    const task = store.createTask({
+      agentId,
+      issueId: issue.id,
+      ...(previous ? {
+        issueSessionId: previous.issueSessionId,
+        holdsWorkspace: previous.holdsWorkspace,
+        issueCreationRestricted: previous.issueCreationRestricted,
+      } : {}),
+      workspaceId: issue.workspaceId,
+      prompt: previous?.prompt ?? body.prompt ?? issue.title,
+      parentTaskId: body.parentTaskId ?? null,
+      // A retry of a specific run is not consent to override prerequisites.
+      dependencyForce: previous ? undefined : body.dependencyForce,
+      ...(delegation?.ok ? {
+        delegationId: createId("dlg"), delegatedByAgentId: sourceTask!.agentId,
+        delegatedFromIssueSessionId: delegation.delegatedFromIssueSessionId,
+      } : delegation?.reason ? { delegationSkipReason: delegation.reason } : {}),
+    }, { requireIdleIssue: Boolean(previous) });
+    return { task };
+  } catch (error) {
+    if (error instanceof ActiveIssueRunError) {
+      return { error: error.message, status: 409, code: "active_run_exists" };
+    }
+    if (error instanceof DelegationRoundTripLimitError) {
+      return { error: error.message, status: 409, code: error.code };
+    }
+    if((error as any)?.message_result)return {task:null,...(error as any).message_result};
+    // MUL-400 E3 gate 3: a rerun is a *new* round, so a waiting issue cannot
+    // start one. The route answers 409 with the same code the status gate uses.
+    if (error instanceof IssueDependencyError) {
+      return { error: error.message, status: 409, code: error.code, unmet: error.details.unmet ?? [] };
+    }
+    throw error;
+  }
 }
 
 export function safeAssignIssue(
   store: MultiremiStore,
   issueId: string,
   input: AssignIssueInput,
-): ReturnType<MultiremiStore["assignIssue"]> | { error: string; status: 400 | 404 } {
+): ReturnType<MultiremiStore["assignIssue"]> | { error: string; status: 400 | 403 | 404 | 409; code?: string } {
   try {
     return store.assignIssue(issueId, input);
   } catch (error) {
+    if (error instanceof IssueResponsibilityError) return { error: error.message, status: error.status, code: error.code };
+    if (error instanceof IssueLockSetStaleError) return { error: error.message, status: 409, code: error.code };
     const message = error instanceof Error ? error.message : String(error);
     if (message.startsWith("Issue not found:")) return { error: "issue not found", status: 404 };
     if (/^(Agent|Member|Squad|Assignee) not found:/.test(message)) {
@@ -620,7 +649,10 @@ export function safeCreateRuntimeUpdateRequest(
     return store.createRuntimeUpdateRequest(runtimeId, input);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message === "target_version is required") return { apiError: message, statusCode: 400 };
+    if (message === "target_version is required" || message === "target_commit must be a full CLI build commit") return { apiError: message, statusCode: 400 };
+    if (message === "Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead") {
+      return { apiError: message, statusCode: 409 };
+    }
     if (message.startsWith("Runtime not found")) return { apiError: "runtime not found", statusCode: 404 };
     if (message === "runtime is offline") return { apiError: message, statusCode: 503 };
     if (message === "an update is already in progress for this runtime") return { apiError: message, statusCode: 409 };
@@ -628,10 +660,11 @@ export function safeCreateRuntimeUpdateRequest(
   }
 }
 
-export function safeQuickCreateIssue(store: MultiremiStore, input: QuickCreateIssueInput): ReturnType<MultiremiStore["quickCreateIssue"]> | { error: string } {
+export function safeQuickCreateIssue(store: MultiremiStore, input: QuickCreateIssueInput): ReturnType<MultiremiStore["quickCreateIssue"]> | { error: string; code?: string; status?: 403 | 404 | 409 } {
   try {
     return store.quickCreateIssue(input);
   } catch (error) {
+    if (error instanceof IssueResponsibilityError) return {error:error.message,code:error.code,status:error.status};
     const message = error instanceof Error ? error.message : String(error);
     if (
       message === "prompt is required"

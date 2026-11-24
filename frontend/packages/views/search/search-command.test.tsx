@@ -34,10 +34,14 @@ const {
   mockTheme,
   mockPathname,
   mockGetShareableUrl,
+  mockRecentQueryEnabledCalls,
   mockMembers,
   mockOpenModal,
   mockToastSuccess,
   mockClipboardWrite,
+  mockChats,
+  mockProjects,
+  mockChatQueryEnabled,
 } = vi.hoisted(() => ({
   mockPush: vi.fn(),
   mockSearchIssues: vi.fn(),
@@ -48,6 +52,7 @@ const {
   mockTheme: { current: "system" as "light" | "dark" | "system" },
   mockPathname: { current: "/ws-test/issues" as string },
   mockGetShareableUrl: vi.fn((p: string) => `https://app.multimira/${p}`),
+  mockRecentQueryEnabledCalls: vi.fn(),
   mockMembers: {
     current: [] as Array<{
       id: string;
@@ -63,6 +68,9 @@ const {
   mockOpenModal: vi.fn(),
   mockToastSuccess: vi.fn(),
   mockClipboardWrite: vi.fn(() => Promise.resolve()),
+  mockChats: { current: [] as Array<Record<string, unknown>> },
+  mockProjects: { current: [] as Array<Record<string, unknown>> },
+  mockChatQueryEnabled: vi.fn(),
 }));
 
 vi.mock("@multiremi/core/api", () => ({
@@ -109,6 +117,7 @@ vi.mock("@multiremi/core/paths", () => ({
     skills: () => "/ws-test/skills",
     settings: () => "/ws-test/settings",
     issueDetail: (id: string) => `/ws-test/issues/${id}`,
+    chat: (sessionId?: string) => `/ws-test/chat${sessionId ? `?session=${sessionId}` : ""}`,
     memberDetail: (id: string) => `/ws-test/members/${id}`,
     projectDetail: (id: string) => `/ws-test/projects/${id}`,
   }),
@@ -139,17 +148,33 @@ function resolveIssue(key: readonly unknown[]) {
   return undefined;
 }
 
+vi.mock("../common/actor-avatar", () => ({
+  ActorAvatar: ({ actorId }: { actorId: string }) => <span data-testid={`chat-avatar-${actorId}`} />,
+}));
+
 vi.mock("@tanstack/react-query", () => ({
+  queryOptions: (options: unknown) => options,
   useQuery: (opts: { queryKey: readonly unknown[]; enabled?: boolean }) => {
     const key = opts.queryKey;
     if (key[0] === "workspaces" && key[2] === "members") {
       return { data: mockMembers.current };
     }
+    if (key[0] === "chat" && key[2] === "sessions") {
+      mockChatQueryEnabled(opts.enabled ?? true);
+      return { data: opts.enabled === false ? undefined : mockChats.current };
+    }
+    if (key[0] === "projects") {
+      return { data: opts.enabled === false ? undefined : mockProjects.current };
+    }
     if (opts.enabled === false) return { data: undefined };
     return { data: resolveIssue(key) };
   },
-  useQueries: (opts: { queries: Array<{ queryKey: readonly unknown[] }> }) =>
-    opts.queries.map((q) => ({ data: resolveIssue(q.queryKey) })),
+  useQueries: (opts: { queries: Array<{ queryKey: readonly unknown[]; enabled?: boolean }> }) => {
+    mockRecentQueryEnabledCalls(opts.queries.map((q) => q.enabled ?? true));
+    return opts.queries.map((q) => ({
+      data: q.enabled === false ? undefined : resolveIssue(q.queryKey),
+    }));
+  },
 }));
 
 vi.mock("../navigation", () => ({
@@ -183,6 +208,10 @@ describe("SearchCommand", () => {
     mockOpenModal.mockReset();
     mockToastSuccess.mockReset();
     mockClipboardWrite.mockReset().mockResolvedValue(undefined);
+    mockRecentQueryEnabledCalls.mockReset();
+    mockChats.current = [];
+    mockProjects.current = [];
+    mockChatQueryEnabled.mockReset();
 
     // cmdk calls scrollIntoView on the first selected item, which jsdom doesn't implement
     Element.prototype.scrollIntoView = vi.fn();
@@ -345,53 +374,44 @@ describe("SearchCommand", () => {
     expect(useSearchStore.getState().open).toBe(false);
   });
 
-  it("lists workspace members and navigates to the member page on selection", async () => {
-    const user = userEvent.setup();
-    mockMembers.current = [
-      {
-        id: "member-1",
-        workspace_id: "ws-test",
-        user_id: "user-1",
-        role: "member",
-        created_at: "2026-01-01T00:00:00Z",
-        name: "Alice Zhang",
-        email: "alice@example.com",
-        avatar_url: null,
-      },
-      {
-        id: "member-2",
-        workspace_id: "ws-test",
-        user_id: "user-2",
-        role: "admin",
-        created_at: "2026-01-01T00:00:00Z",
-        name: "Bob Liu",
-        email: "bob@example.com",
-        avatar_url: null,
-      },
+  it("does not expose workspace people as search results", async () => {
+  const user = userEvent.setup();
+  renderSearch();
+  await user.type(screen.getByPlaceholderText("Type a command or search..."), "members");
+  await waitFor(() => expect(screen.queryByText("Members")).not.toBeInTheDocument());
+  expect(mockPush).not.toHaveBeenCalled();
+});
+
+  it("does not resolve recents until the panel is open (MUL-472 b)", () => {
+    mockRecentItems.current = [
+      { id: "issue-1", visitedAt: 2 },
+      { id: "issue-2", visitedAt: 1 },
     ];
-    renderSearch();
+    mockAllIssues.current = [
+      { id: "issue-1", identifier: "MUL-1", title: "One", status: "todo" },
+      { id: "issue-2", identifier: "MUL-2", title: "Two", status: "done" },
+    ];
 
-    const input = screen.getByPlaceholderText("Type a command or search...");
-    await user.type(input, "alice");
-
-    await waitFor(() => {
-      expect(screen.getByText("Members")).toBeInTheDocument();
-      expect(
-        screen.getByText((_, el) => el?.textContent === "Alice Zhang" && el?.tagName === "DIV"),
-      ).toBeInTheDocument();
+    // Closed: every recent-detail query is gated off.
+    act(() => {
+      useSearchStore.setState({ open: false });
     });
-    expect(
-      screen.getByText((_, el) => el?.textContent === "alice@example.com" && el?.tagName === "DIV"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Bob Liu")).not.toBeInTheDocument();
+    mockRecentQueryEnabledCalls.mockClear();
+    const closed = render(<SearchCommand />, { wrapper: I18nWrapper });
+    const closedCalls = mockRecentQueryEnabledCalls.mock.calls.flat().flat();
+    expect(closedCalls.length).toBeGreaterThan(0);
+    expect(closedCalls.every((enabled) => enabled === false)).toBe(true);
+    closed.unmount();
 
-    const aliceItem = await screen.findByText(
-      (_, el) => el?.textContent === "Alice Zhang" && el?.tagName === "DIV",
-    );
-    await user.click(aliceItem);
-
-    expect(mockPush).toHaveBeenCalledWith("/ws-test/members/user-1");
-    expect(useSearchStore.getState().open).toBe(false);
+    // Open: the same queries are enabled.
+    mockRecentQueryEnabledCalls.mockClear();
+    act(() => {
+      useSearchStore.setState({ open: true });
+    });
+    renderSearch();
+    const openCalls = mockRecentQueryEnabledCalls.mock.calls.flat().flat();
+    expect(openCalls.length).toBeGreaterThan(0);
+    expect(openCalls.every((enabled) => enabled === true)).toBe(true);
   });
 
   it("renders recent issues from query cache joined with store visit records", () => {
@@ -623,5 +643,72 @@ describe("SearchCommand", () => {
         el?.tagName === "SPAN",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("reads the chat list only while the palette is open (MUL-472)", () => {
+    act(() => {
+      useSearchStore.setState({ open: false });
+    });
+    const closed = render(<SearchCommand />, { wrapper: I18nWrapper });
+    expect(mockChatQueryEnabled).toHaveBeenCalled();
+    expect(mockChatQueryEnabled.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
+    closed.unmount();
+
+    mockChatQueryEnabled.mockClear();
+    act(() => {
+      useSearchStore.setState({ open: true });
+    });
+    renderSearch();
+    expect(mockChatQueryEnabled.mock.calls.every(([enabled]) => enabled === true)).toBe(true);
+  });
+
+  it("lists chats whose title matches, active before archived, at most nine, and opens the chat", async () => {
+    const user = userEvent.setup();
+    const chat = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
+      id, title, agent_id: `agent-${id}`, status: "active", project_id: null, runtime_workspace_id: null,
+      pinned: false, has_unread: false, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z", ...extra,
+    });
+    mockProjects.current = [{ id: "project-1", title: "Remi" }];
+    mockChats.current = [
+      chat("archived", "Deploy notes archived", { status: "archived", updated_at: "2026-10-09T00:00:00Z" }),
+      chat("older", "deploy checklist", { updated_at: "2026-10-02T00:00:00Z", project_id: "project-1" }),
+      chat("newer", "DEPLOY rollback plan", { updated_at: "2026-10-05T00:00:00Z" }),
+      chat("other", "Weekly report"),
+      ...Array.from({ length: 10 }, (_, index) => chat(`bulk-${index}`, `Bulk deploy ${index}`)),
+    ];
+    renderSearch();
+
+    const input = screen.getByPlaceholderText("Type a command or search...");
+    await user.type(input, "deploy");
+
+    expect(await screen.findByText("Chats")).toBeInTheDocument();
+    const options = screen.getAllByRole("option").filter((option) => option.querySelector("[data-testid^='chat-avatar-']"));
+    // Titles only, case-insensitive; the palette caps chats at nine.
+    expect(options).toHaveLength(9);
+    expect(options[0]).toHaveTextContent("DEPLOY rollback plan");
+    expect(options[1]).toHaveTextContent("deploy checklist");
+    expect(options[1]).toHaveTextContent("Remi");
+    expect(screen.queryByText("Weekly report")).not.toBeInTheDocument();
+    // Ten active matches fill the cap before the archived one.
+    expect(options.some((option) => option.textContent?.includes("Deploy notes archived"))).toBe(false);
+
+    await user.click(options[1]!);
+    expect(mockPush).toHaveBeenCalledWith("/ws-test/chat?session=older");
+    expect(useSearchStore.getState().open).toBe(false);
+  });
+
+  it("puts an archived chat after the active matches", async () => {
+    const user = userEvent.setup();
+    mockChats.current = [
+      { id: "archived", title: "Release archived", agent_id: "agent-a", status: "archived", updated_at: "2026-10-09T00:00:00Z" },
+      { id: "active", title: "Release active", agent_id: "agent-b", status: "active", updated_at: "2026-10-01T00:00:00Z" },
+    ];
+    renderSearch();
+    await user.type(screen.getByPlaceholderText("Type a command or search..."), "release");
+    await screen.findByText("Chats");
+    const titles = screen.getAllByRole("option")
+      .filter((option) => option.querySelector("[data-testid^='chat-avatar-']"))
+      .map((option) => option.textContent);
+    expect(titles).toEqual(["Release active", "Release archived"]);
   });
 });

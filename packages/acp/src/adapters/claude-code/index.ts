@@ -11,6 +11,9 @@ import type {
   AskUserQuestionData,
   AgentSessionOptions,
 } from "@shared/contracts/acp-protocol.js";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { titleToToolName } from "../tool-name.js";
 
 /** Our mode ids → the closest mode the bridge still advertises when ours is absent. */
@@ -22,6 +25,46 @@ const CLAUDE_PERMISSION_MODE_FALLBACKS: Record<string, string[]> = {
 export class ClaudeAdapter implements AgentAdapter {
   readonly agentType = "claude";
   readonly promptUsageSettleScope = "turn" as const;
+  /**
+   * claude-agent-acp 0.90 `_session/steering` (dist/acp-agent.js:203, 9807;
+   * advertised at :1427). The opt-in makes an idle session answer
+   * `promptRequired` with no side effects instead of a detached `prompt()`
+   * (:2397-2420), so the daemon re-prompts through its own `session/prompt`.
+   * A steer during a foreground tool call moves the call to the background
+   * (:2369-2372; live: "Command was moved to the background … it was not
+   * interrupted"), and a backgrounded shell never holds the turn open
+   * (:3108-3123), so the call's result and the answer arrive as a follow-up
+   * after `session/prompt` resolved. Steering between tool calls keeps the
+   * answer inside the prompt.
+   */
+  readonly steering = { method: "_session/steering", idleOptIn: true, waitForToolCalls: true } as const;
+  /**
+   * claude-agent-acp 0.90 turns on native child sessions for `subagents: {}`
+   * (dist/acp-subagents.js `clientSupportsSubagents`) and picks the AIR form
+   * for an AIR client like Remi (`subagentForm`): `subagent_spawned` /
+   * `subagent_state_update` on the parent session, each child's frames on its
+   * own session. No AIR capability is needed.
+   */
+  readonly nativeSubagents = { airCapability: false } as const;
+  /**
+   * After a prompt resolves, Claude Code may run a model cycle of its own (a
+   * background subagent's task notification). Its result ends with a
+   * `usage_update` whose `_meta["_claude/origin"].kind` is one of the bridge's
+   * autonomous origins (dist/acp-agent.js `AUTONOMOUS_RESULT_ORIGINS`); the
+   * human turn's is `human`.
+   */
+  readonly autonomousRounds = {
+    resultOrigins: ["task-notification", "peer", "coordinator", "observer", "observer-activity"],
+  } as const;
+  /**
+   * claude-agent-acp 0.90 publishes backgrounded shells, workflows and MCP
+   * tasks for the AIR `asyncTasks` capability (dist/async-tasks.js) and stops
+   * one through `_session/async_task/stop` on the root session. A task that
+   * ends while no prompt runs injects `<task-notification>`, and Claude Code
+   * starts a cycle of its own (dist/acp-agent.js:6800-6821): it wakes the
+   * model. A stopped shell injects nothing (dist/async-tasks.js:289-291).
+   */
+  readonly asyncTasks = { wakesModel: true } as const;
 
   resolveToolName(update: ToolCallUpdate | ToolCallProgressUpdate): string {
     const claudeCode = this._claudeCodeMeta(update);
@@ -162,9 +205,19 @@ export class ClaudeAdapter implements AgentAdapter {
     // Both survive the bridge's options literal: `...userProvidedOptions` is
     // spread at dist/acp-agent.js:4433 and no later key overrides either one.
     if (options.model) claudeOpts.model = options.model;
+    if (options.claudeEnv) claudeOpts.env = options.claudeEnv;
     // Inline SDK settings override project/local routing while retaining their
     // unrelated hooks, permissions and Plugin settings. Never include secrets.
-    if (options.claudeSettings) claudeOpts.settings = options.claudeSettings;
+    if (options.claudeSettings) {
+      claudeOpts.settings = options.claudeSettings;
+      // At HOME itself, project/local sources alias the user's personal .claude
+      // directory even with CLAUDE_CONFIG_DIR set. Runtime connections must use
+      // only the isolated user tier there. Ordinary projects keep all sources.
+      if (typeof options.cwd === "string") {
+        const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+        if (canonical(options.cwd) === canonical(homedir())) claudeOpts.settingSources = ["user"];
+      }
+    }
     if (options.allowedTools?.length) claudeOpts.allowedTools = options.allowedTools;
     const pluginPaths = (options as AgentSessionOptions & { pluginPaths?: string[] }).pluginPaths;
     if (pluginPaths?.length) {

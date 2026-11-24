@@ -5,6 +5,7 @@ import {
 } from "../agent-templates.js";
 import {
   canCurrentUserAccessAgent,
+  canCurrentUserAccessAgentChecker,
   canCurrentUserAccessChatTask,
   denyCurrentUserWorkspaceAccess,
   isFirstAgentInWorkspace,
@@ -29,6 +30,7 @@ import {
 } from "../helpers.js";
 import {
   agentCompatibilityResponse,
+  agentCompatibilityResponses,
   agentEnvResponse,
   currentTaskAccessToken,
   currentRequestUserId,
@@ -142,7 +144,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/multiremi/agents/:id/skills", (c) => {
     const loaded = loadAgentForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    const skills = store.listAgentSkills(loaded.agent.id);
+    const skills = store.listAgentSkills(loaded.agent.id, { includeFiles: true });
     return c.json({ skills, total: skills.length });
   });
   app.get("/api/multiremi/agents/:id/tasks", (c) => {
@@ -188,12 +190,8 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<SetAgentSkillsInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    const currentSkillIds = store.listAgentSkills(loaded.agent.id, { includeFiles: false })
-      .map((skill) => skill.id)
-      .filter((id): id is string => Boolean(id));
-    const nextSkillIds = Array.from(new Set([...currentSkillIds, ...(body.skillIds ?? body.skill_ids ?? [])]));
     try {
-      const skills = store.setAgentSkills(loaded.agent.id, { skillIds: nextSkillIds });
+      const skills = store.addAgentSkills(loaded.agent.id, body.skillIds ?? body.skill_ids ?? []);
       publishAgentSkillsEvent(c, store, loaded.agent, skills);
       return c.json(skills.map(skillSummaryCompatibilityResponse));
     } catch (error) {
@@ -221,12 +219,13 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const agents = store.listAgents({
+    const canAccess = canCurrentUserAccessAgentChecker(c, store);
+    const agents = store.listAgentCompatibilityCandidates(workspaceId, {
       includeArchived: c.req.query("include_archived") === "true" || c.req.query("includeArchived") === "true",
     }).filter((agent) =>
-      agent.workspaceId === workspaceId && canCurrentUserAccessAgent(c, store, agent)
+      agent.workspaceId === workspaceId && canAccess(agent)
     );
-    return c.json(agents.map((agent) => agentCompatibilityResponse(store, agent, c)));
+    return c.json(agentCompatibilityResponses(store, agents, c));
   });
   app.post("/api/agents", async (c) => {
     const body = await readJsonStrict<CreateAgentInput>(c);
@@ -340,8 +339,10 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const tasks = store.listWorkspaceAgentTaskSnapshot(workspaceId)
-      .filter((task) => canCurrentUserAccessChatTask(c, store, task)).map(taskPublicResponse);
+    const tasks = store.listWorkspaceAgentTaskSnapshot(workspaceId, {
+      userId: currentRequestUserId(c),
+      taskToken: currentTaskAccessToken(c) ?? undefined,
+    }).map(taskPublicResponse);
     return c.json({ tasks, total: tasks.length });
   });
   app.get("/api/agent-task-snapshot", (c) => {
@@ -349,8 +350,10 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    return c.json(store.listWorkspaceAgentTaskSnapshot(workspaceId)
-      .filter((task) => canCurrentUserAccessChatTask(c, store, task)).map(taskPublicResponse));
+    return c.json(store.listWorkspaceAgentTaskSnapshot(workspaceId, {
+      userId: currentRequestUserId(c),
+      taskToken: currentTaskAccessToken(c) ?? undefined,
+    }).map(taskPublicResponse));
   });
   app.get("/api/multiremi/agent-run-counts", (c) => {
     const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId") ?? c.req.query("workspace_id"));

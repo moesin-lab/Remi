@@ -1,3 +1,4 @@
+import { taskOfferResponse } from "../../fixtures/task-offer.js";
 // Workspace-level env (MUL-49): admin-only GET/PUT /api/workspaces/:id/env,
 // "****" preserve semantics shared with agent env, and the claim payload
 // carrying workspace_env so a saved value reaches the next dispatched task
@@ -37,7 +38,7 @@ describe("workspace env API", () => {
     expect(store.getWorkspaceEnv("local")).toEqual({ GH_TOKEN: "ghp_secret" });
   });
 
-  it("rejects non-admin members but gives an owner task token admin parity", async () => {
+  it("shares environment access with human operators and bound task credentials", async () => {
     const store = createLocalStore();
     store.createWorkspaceMember({ id: "mem_local_bob", workspaceId: "local", userId: "bob", name: "Bob", email: "bob@example.com", role: "member" });
     const member = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "bob", userId: "bob" });
@@ -46,7 +47,7 @@ describe("workspace env API", () => {
     const asMember = await app.request("/api/workspaces/local/env", {
       headers: { Authorization: `Bearer ${member.token}` },
     });
-    expect(asMember.status).toBe(403);
+    expect(asMember.status).toBe(200);
 
     const agent = store.createAgent({ name: "Env Gate", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "gate" });
@@ -77,7 +78,7 @@ describe("workspace env API", () => {
     store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "env claim" });
     const app = createMultiremiApp({ store });
 
-    const claim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const claim = await taskOfferResponse(store, runtime.id);
     expect(claim.status).toBe(200);
     const task = (await claim.json()).task;
     expect(task.workspace_env).toEqual({ GH_TOKEN: "ghp_ws", SHARED: "from-workspace" });
@@ -92,7 +93,7 @@ describe("workspace env API", () => {
     store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "no env" });
     const app = createMultiremiApp({ store });
 
-    const claim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const claim = await taskOfferResponse(store, runtime.id);
     const task = (await claim.json()).task;
     expect(task.workspace_env).toBeUndefined();
   });

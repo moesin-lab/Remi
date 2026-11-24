@@ -1,5 +1,6 @@
+import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MultiremiRuntimeUpdateScope } from "@multiremi/contracts/types.js";
@@ -8,13 +9,14 @@ import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coor
 import { instantiateCoResidentWorkerDaemons } from "../../../apps/remi/cli/multiremi.js";
 
 interface UpdateReport {
-  status: "running" | "completed" | "failed";
+  status: "running" | "restarting" | "completed" | "failed";
   output?: string;
   error?: string;
 }
 
 interface TestDaemonState {
   activeTaskCount: number;
+  activeTaskIds: Set<string>;
   drainingTaskCount: number;
   pendingClaimCount: number;
   claimsPaused: boolean;
@@ -27,7 +29,8 @@ interface TestDaemonState {
       report: UpdateReport,
     ): Promise<void>;
   };
-  updateRunner(targetVersion: string): string | Promise<string>;
+  updateRunner?: (targetVersion: string) => string | Promise<string>;
+  updateRestartSpec?: { command: string[]; manager?: "systemd" | "launchd" };
   updateAgentCli(): Promise<string>;
   reinstallAcpBridge(): string;
   handleRuntimeUpdate(
@@ -35,6 +38,7 @@ interface TestDaemonState {
     requestId: string,
     targetVersion: string,
     scope: MultiremiRuntimeUpdateScope,
+    drainDeadline?: string,
   ): Promise<void>;
   claimTask(runtimeId: string): Promise<unknown>;
 }
@@ -46,7 +50,7 @@ describe("co-resident CLI update coordination", () => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  it("rejects a CLI update when a sibling provider is busy and names it", async () => {
+  it("waits for a busy sibling without interrupting its tasks", async () => {
     const [claude, codex] = createDaemons();
     const claudeState = state(claude);
     const codexState = state(codex);
@@ -58,15 +62,42 @@ describe("co-resident CLI update coordination", () => {
     };
     codexState.activeTaskCount = 2;
 
-    await claudeState.handleRuntimeUpdate("rt_claude", "upd_busy", "v9.9.9", "cli");
-
+    const updating = claudeState.handleRuntimeUpdate("rt_claude", "upd_busy", "v9.9.9", "cli");
+    expect(claudeState.claimsPaused).toBe(true);
+    expect(codexState.claimsPaused).toBe(true);
     expect(updateCalls).toBe(0);
-    expect(reports).toEqual([{
-      status: "failed",
-      error: "CLI update blocked: provider is busy: codex (2 active tasks); retry when all providers are idle",
-    }]);
-    expect(claudeState.claimsPaused).toBe(false);
-    expect(codexState.claimsPaused).toBe(false);
+    expect(reports).toEqual([]);
+    codexState.activeTaskCount = 0;
+    await updating;
+    expect(updateCalls).toBe(1);
+    expect(reports.map(report => report.status)).toEqual(["running", "restarting"]);
+  });
+
+  it("times out a busy sibling using the supplied deadline and names its task", async () => {
+    const [daemon, sibling] = createDaemons();
+    const owner = state(daemon);
+    const busy = state(sibling);
+    const reports = captureReports(owner);
+    busy.activeTaskCount = 1;
+    busy.activeTaskIds.add("task_codex_busy");
+    await owner.handleRuntimeUpdate("rt_claude", "upd_timeout", "9.9.9", "cli", new Date(Date.now() + 15).toISOString());
+    expect(reports).toEqual([{ status: "failed", error: "CLI update drain deadline exceeded; remaining tasks: codex: task_codex_busy" }]);
+    expect(busy.activeTaskCount).toBe(1);
+    expect(busy.activeTaskIds.has("task_codex_busy")).toBe(true);
+    expect(owner.claimsPaused).toBe(false);
+    expect(busy.claimsPaused).toBe(false);
+  });
+
+  it("preserves a pre-existing local maintenance pause", async () => {
+    const [daemon, sibling] = createDaemons();
+    const owner = state(daemon);
+    const busy = state(sibling);
+    const reports = captureReports(owner);
+    busy.claimsPaused = true;
+    await owner.handleRuntimeUpdate("rt_claude", "upd_maintenance", "9.9.9", "cli");
+    expect(reports).toEqual([{ status: "failed", error: "CLI update already paused for maintenance" }]);
+    expect(owner.claimsPaused).toBe(false);
+    expect(busy.claimsPaused).toBe(true);
   });
 
   it("pauses claims on every provider before replacing the shared CLI", async () => {
@@ -84,7 +115,7 @@ describe("co-resident CLI update coordination", () => {
 
     expect(reports).toEqual([
       { status: "running" },
-      { status: "completed", output: "updated together" },
+      { status: "restarting", output: "updated together" },
     ]);
     expect(claudeState.claimsPaused).toBe(true);
     expect(codexState.claimsPaused).toBe(true);
@@ -104,38 +135,27 @@ describe("co-resident CLI update coordination", () => {
 
     expect(reports).toEqual([
       { status: "running" },
-      { status: "completed", output: "updated while reports drain" },
+      { status: "restarting", output: "updated while reports drain" },
     ]);
     expect(claudeState.claimsPaused).toBe(true);
     expect(codexState.claimsPaused).toBe(true);
   });
 
-  it("rejects a CLI update while a sibling claim request is in flight", async () => {
+  it("waits for a sibling pending claim before updating", async () => {
     const [claude, codex] = createDaemons();
     const claudeState = state(claude);
     const codexState = state(codex);
     const reports = captureReports(claudeState);
-    const pendingClaim = deferred<null>();
-    codexState.client = {
-      claimTask: async () => await pendingClaim.promise,
-      reportRuntimeUpdateResult: async () => {},
-    };
-    const claimRun = codexState.claimTask("rt_codex");
-    await Promise.resolve();
+    codexState.pendingClaimCount = 1;
 
-    await claudeState.handleRuntimeUpdate("rt_claude", "upd_claiming", "v9.9.9", "cli");
-
-    expect(reports).toEqual([{
-      status: "failed",
-      error: "CLI update blocked: provider is checking for new work: codex; retry when all providers are idle",
-    }]);
-    expect(claudeState.claimsPaused).toBe(false);
-    expect(codexState.claimsPaused).toBe(false);
-    expect(codexState.pendingClaimCount).toBe(1);
-
-    pendingClaim.resolve(null);
-    await claimRun;
-    expect(codexState.pendingClaimCount).toBe(0);
+    claudeState.updateRunner = () => "updated";
+    const updating = claudeState.handleRuntimeUpdate("rt_claude", "upd_claiming", "v9.9.9", "cli");
+    expect(claudeState.claimsPaused).toBe(true);
+    expect(codexState.claimsPaused).toBe(true);
+    expect(reports).toEqual([]);
+    codexState.pendingClaimCount = 0;
+    await updating;
+    expect(reports.map(report => report.status)).toEqual(["running", "restarting"]);
   });
 
   it("releases every provider claim pause when a CLI update fails", async () => {
@@ -180,25 +200,80 @@ describe("co-resident CLI update coordination", () => {
 
       expect(updateCalls).toBe(1);
       expect(reports.map((report) => report.status)).toEqual(["running", "completed"]);
-      expect(claudeState.claimsPaused).toBe(true);
+      expect(claudeState.claimsPaused).toBe(false);
       expect(codexState.claimsPaused).toBe(false);
     }
   });
 
-  it("preserves the single-provider update gate when no coordinator is injected", async () => {
+  it("fails legacy Agent requests instead of updating a different Claude or Codex installation", async () => {
+    const daemons = createDaemons();
+    for (const daemon of daemons) {
+      const daemonState = state(daemon);
+      const reports = captureReports(daemonState);
+      await daemonState.handleRuntimeUpdate("rt_managed", "upd_agent", "latest", "agent");
+      expect(reports).toEqual([
+        { status: "running" },
+        { status: "failed", error: "Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead" },
+      ]);
+      expect(daemonState.claimsPaused).toBe(false);
+      expect(daemon.restartRequested()).toBe(false);
+    }
+  });
+
+  it("times out the single-provider drain and resumes claims without cancelling work", async () => {
     const [daemon] = createDaemons(1);
     const daemonState = state(daemon);
     const reports = captureReports(daemonState);
     daemonState.activeTaskCount = 1;
+    daemonState.activeTaskIds.add("task_still_running");
 
     expect(daemonState.cliUpdateCoordinator).toBeNull();
-    await daemonState.handleRuntimeUpdate("rt_claude", "upd_single", "v9.9.9", "cli");
+    await daemonState.handleRuntimeUpdate("rt_claude", "upd_single", "v9.9.9", "cli", new Date(Date.now() - 1).toISOString());
 
     expect(reports).toEqual([{
       status: "failed",
-      error: "daemon is busy; retry update when idle",
+      error: "CLI update drain deadline exceeded; remaining tasks: claude: task_still_running",
     }]);
     expect(daemonState.claimsPaused).toBe(false);
+  });
+
+  it("reports failed and resumes sibling claims when the real installer rejects the effective service entry", async () => {
+    const [daemon, sibling] = createDaemons();
+    const daemonState = state(daemon);
+    const reports = captureReports(daemonState);
+    const root = mkdtempSync(join(tmpdir(), "multiremi-cli-entry-mismatch-"));
+    roots.push(root);
+    const mocks = join(root, "bin");
+    mkdirSync(mocks);
+    const launcher = join(mocks, "remi");
+    writeFileSync(launcher, "unchanged launcher");
+    writeFileSync(join(mocks, "systemctl"), `#!/bin/sh\nprintf '%s\\n' '{ path=${root}/versions/old/remi ; }'\n`, { mode: 0o755 });
+    const keys = ["PATH", "MULTIREMI_BIN_DIR", "MULTIREMI_INSTALL_ROOT", "MULTIREMI_STATE_DIR"];
+    const original = keys.map(key => process.env[key]);
+    daemonState.updateRunner = undefined;
+    daemonState.updateRestartSpec = { manager: "systemd", command: ["systemctl", "--user", "restart", "--no-block", "fixture.service"] };
+    try {
+      process.env.PATH = `${mocks}:${original[0]}`;
+      process.env.MULTIREMI_BIN_DIR = mocks;
+      process.env.MULTIREMI_INSTALL_ROOT = join(root, "install");
+      process.env.MULTIREMI_STATE_DIR = join(root, "state");
+      await daemonState.handleRuntimeUpdate("rt_fixture", "upd_entry", "9.9.9", "cli");
+    } finally {
+      keys.forEach((key, index) => {
+        if (original[index] === undefined) delete process.env[key];
+        else process.env[key] = original[index];
+      });
+    }
+    expect(reports.map(report => report.status)).toEqual(["running", "failed"]);
+    expect(reports.at(-1)?.error).toContain(`expected launcher=${launcher}`);
+    expect(reports.at(-1)?.error).toContain(`${root}/versions/old/remi`);
+    expect(daemon.restartRequested()).toBe(false);
+    expect(sibling!.restartRequested()).toBe(false);
+    expect(daemonState.claimsPaused).toBe(false);
+    expect(state(sibling).claimsPaused).toBe(false);
+    expect(readFileSync(launcher, "utf8")).toBe("unchanged launcher");
+    expect(existsSync(join(root, "install"))).toBe(false);
+    expect(existsSync(join(root, "state"))).toBe(false);
   });
 
   function createDaemons(count = 2): MultiremiDaemon[] {
@@ -206,6 +281,7 @@ describe("co-resident CLI update coordination", () => {
     roots.push(root);
     return instantiateCoResidentWorkerDaemons([
       {
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: "http://127.0.0.1:1",
         provider: "claude",
         workspacesRoot: root,
@@ -213,6 +289,7 @@ describe("co-resident CLI update coordination", () => {
       },
       ...(count > 1
         ? [{
+          sshMeshManager: disabledSshMeshRuntime(),
           serverUrl: "http://127.0.0.1:1",
           provider: "codex",
           workspacesRoot: root,

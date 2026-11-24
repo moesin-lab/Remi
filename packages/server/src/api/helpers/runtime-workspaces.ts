@@ -1,13 +1,33 @@
 import type { Context } from "hono";
 import type { MultiremiStore } from "@multiremi/store/store.js";
-import type { MultiremiRuntimeWorkspace } from "@multiremi/contracts/types.js";
+import type { MultiremiRuntime, MultiremiRuntimeWorkspace } from "@multiremi/contracts/types.js";
 import { RuntimeWorkspaceError } from "@multiremi/store/repos/runtime-workspaces-repo.js";
-import { currentRequestUserId, currentTaskAccessToken } from "../wire/index.js";
+import { currentRequestUserId, currentTaskAccessToken, isHumanOperatorRequest } from "../wire/index.js";
 
-export function canUseRuntimeWorkspace(c: Context, store: MultiremiStore, item: MultiremiRuntimeWorkspace): boolean {
+interface RuntimeWorkspaceReadFacts {
+  runtimes: MultiremiRuntime[];
+  workspaceExists: boolean;
+  taskWorkspaceId: string | null | undefined;
+}
+
+/** Facts live only for this response; subsequent requests re-read liveness and access. */
+export function runtimeWorkspaceListResponse(c: Context, store: MultiremiStore, workspaceId: string, items: MultiremiRuntimeWorkspace[]) {
+  if (!items.length) return [];
   const token = currentTaskAccessToken(c);
-  if (token) return store.getTask(token.taskId ?? "")?.runtimeWorkspaceId === item.id;
-  return item.ownerId === currentRequestUserId(c) || store.listRuntimes().some(r =>
+  const facts: RuntimeWorkspaceReadFacts = {
+    runtimes: store.listRuntimesLiteForWorkspace(workspaceId),
+    workspaceExists: isHumanOperatorRequest(c) ? store.getWorkspace(workspaceId) !== null : false,
+    taskWorkspaceId: token ? store.getTask(token.taskId ?? "")?.runtimeWorkspaceId : undefined,
+  };
+  return items.filter(item => item.workspaceId === workspaceId && canUseRuntimeWorkspace(c, store, item, facts))
+    .map(item => runtimeWorkspaceResponse(store, item, facts.runtimes));
+}
+
+export function canUseRuntimeWorkspace(c: Context, store: MultiremiStore, item: MultiremiRuntimeWorkspace, facts?: RuntimeWorkspaceReadFacts): boolean {
+  const token = currentTaskAccessToken(c);
+  if (token) return (facts ? facts.taskWorkspaceId : store.getTask(token.taskId ?? "")?.runtimeWorkspaceId) === item.id;
+  if (isHumanOperatorRequest(c)) return facts ? facts.workspaceExists : store.getWorkspace(item.workspaceId) !== null;
+  return item.ownerId === currentRequestUserId(c) || (facts?.runtimes ?? store.listRuntimesLiteForWorkspace(item.workspaceId)).some(r =>
     r.workspaceId === item.workspaceId && r.daemonId === item.daemonId && r.visibility === "public");
 }
 
@@ -18,8 +38,8 @@ export function assertRuntimeWorkspaceAccess(c: Context, store: MultiremiStore, 
   if (!canUseRuntimeWorkspace(c, store, item)) throw new RuntimeWorkspaceError("Runtime workspace access denied", 403);
 }
 
-export function runtimeWorkspaceResponse(store: MultiremiStore, item: MultiremiRuntimeWorkspace) {
-  const runtimes = store.listRuntimes().filter(r => r.workspaceId === item.workspaceId && r.daemonId === item.daemonId);
+export function runtimeWorkspaceResponse(store: MultiremiStore, item: MultiremiRuntimeWorkspace, runtimeFacts?: MultiremiRuntime[]) {
+  const runtimes = (runtimeFacts ?? store.listRuntimesLiteForWorkspace(item.workspaceId)).filter(r => r.workspaceId === item.workspaceId && r.daemonId === item.daemonId);
   return {
     id: item.id, workspace_id: item.workspaceId, daemon_id: item.daemonId, owner_id: item.ownerId,
     name: item.name, root_path: item.rootPath, cwd: item.cwd, context_paths: item.contextPaths,

@@ -3,13 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CommandRegistry, type CommandSpec } from "../../../apps/remi/cli/core/index.js";
-import { inviteCommandSpecs } from "../../../apps/remi/cli/commands/invite.js";
 import { knowledgeCommandSpecs } from "../../../apps/remi/cli/commands/knowledge.js";
 import { memberCommandSpecs } from "../../../apps/remi/cli/commands/member.js";
 import { projectCommandSpecs } from "../../../apps/remi/cli/commands/project.js";
 import { repoCommandSpecs } from "../../../apps/remi/cli/commands/repo.js";
 import { tokenCommandSpecs } from "../../../apps/remi/cli/commands/token.js";
 import { workspaceCommandSpecs } from "../../../apps/remi/cli/commands/workspace.js";
+import { STORAGE_SETTINGS_DEFAULTS } from "@multiremi/contracts/storage.js";
 
 const realFetch = globalThis.fetch;
 const realLog = console.log;
@@ -26,7 +26,6 @@ const savedEnv = {
 const SPECS = [
   ...workspaceCommandSpecs(),
   ...memberCommandSpecs(),
-  ...inviteCommandSpecs(),
   ...tokenCommandSpecs(),
   ...projectCommandSpecs(),
   ...repoCommandSpecs(),
@@ -46,6 +45,30 @@ afterEach(() => {
 });
 
 describe("native CLI resource contracts", () => {
+  it("routes account compatibility aliases to the authenticated account and lists one workspace operator", async () => {
+    useCliEnv();
+    console.log = () => {}; console.error = () => {};
+    const paths: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/cli/capabilities") return Response.json({ protocol_version: 1, identity: "human",
+        commands: ["account.get", "account.update", "workspace.operator"].map(id => ({ id, allowed: true })) });
+      paths.push(`${request.method} ${path}`);
+      if (path === "/api/me") return Response.json({ id: "real-account", name: "Login account" });
+      if (path === "/api/workspaces/ws_1/members") return Response.json({ members: [{ id: "operator", user_id: "local" }] });
+      throw new Error(`Unexpected request ${path}`);
+    }) as typeof fetch;
+    const registry = registryFor(SPECS);
+    await registry.execute(["member", "get", "me", "--output", "json"]);
+    await registry.execute(["member", "update", "me", "--name", "Renamed login", "--output", "json"]);
+    await registry.execute(["member", "list", "--output", "json"]);
+    expect(paths).toEqual(["GET /api/me", "PATCH /api/me", "GET /api/workspaces/ws_1/members"]);
+    await expect(registry.execute(["member", "update", "historical-member", "--name", "Changed"]))
+      .rejects.toThrow("Workspace members are no longer editable");
+    expect(paths).toHaveLength(3);
+  });
+
   it("exposes nested bot help and sends the configured sender access policy", async () => {
     const registry = registryFor(SPECS);
     expect(registry.renderHelpForArgv(["workspace", "feishu-bot", "--help"]))
@@ -117,12 +140,12 @@ describe("native CLI resource contracts", () => {
     for (const id of [
       "workspace.create",
       "workspace.delete",
-      "workspace.leave",
       "workspace.ssh-mesh.update",
       "workspace.ssh-mesh.rotate",
       "workspace.relay.reveal",
-      "member.list",
-      "invite.list",
+      "workspace.operator",
+      "account.get",
+      "account.update",
       "token.list",
       "workspace.organizer.update",
       "workspace.feishu-bot.sender.list",
@@ -339,6 +362,52 @@ describe("native CLI resource contracts", () => {
     expect(body).toMatchObject({ version_check: false });
   });
 
+  it("reads the effective storage policy and marks which values the workspace overrides", async () => {
+    useCliEnv();
+    const spec = specById("workspace.storage.get");
+    const settings = { ...STORAGE_SETTINGS_DEFAULTS, ttl_ms: 7_200_000 };
+    globalThis.fetch = mockFetch(spec.id, [], (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1") return Response.json({ id: "ws_1", name: "Workspace" });
+      expect(request.method).toBe("GET");
+      expect(path).toBe("/api/workspaces/ws_1/storage");
+      return Response.json({ settings, overrides: { ttl_ms: 7_200_000 } });
+    });
+
+    const table = await execute(spec, ["ws_1"]);
+    expect(table).toMatch(/ttl_ms\s+7200000\s+workspace\s+86400000/);
+    expect(table).toMatch(/max_retained\s+20\s+default\s+20/);
+    expect(table).toMatch(/pressure_free_percent\s+15\s+default\s+15/);
+    expect(table.split("\n")).toHaveLength(11);
+    expect(JSON.parse(await execute(spec, ["ws_1", "--output", "json"]))).toEqual({ settings, overrides: { ttl_ms: 7_200_000 } });
+  });
+
+  it("sends only the storage options that were set, resets others with null, and rejects empty updates", async () => {
+    useCliEnv();
+    const spec = specById("workspace.storage.set");
+    const bodies: unknown[] = [];
+    const settings = { ttl_ms: 7_200_000, automation_ttl_ms: 86_400_000, max_retained: 0, orphan_ttl_ms: 259_200_000, snapshot_max_bytes: 268_435_456, chat_idle_days: 14 };
+    globalThis.fetch = mockFetch(spec.id, [], async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1") return Response.json({ id: "ws_1", name: "Workspace" });
+      expect(request.method).toBe("PUT");
+      expect(path).toBe("/api/workspaces/ws_1/storage");
+      bodies.push(await request.json());
+      return Response.json({ settings, overrides: { ttl_ms: 7_200_000, max_retained: 0 } });
+    });
+
+    await execute(spec, ["ws_1", "--ttl-ms", "7200000", "--max-retained", "0", "--reset", "chat-idle-days", "--reset", "snapshot-max-bytes", "--output", "json"]);
+    expect(bodies).toEqual([{ ttl_ms: 7_200_000, max_retained: 0, chat_idle_days: null, snapshot_max_bytes: null }]);
+
+    await execute(spec, ["ws_1", "--data", '{"orphan_ttl_ms":3600000}', "--chat-idle-days", "30", "--output", "json"]);
+    expect(bodies.at(-1)).toEqual({ orphan_ttl_ms: 3_600_000, chat_idle_days: 30 });
+
+    await expect(execute(spec, ["ws_1"])).rejects.toThrow("requires an option, --reset or input JSON");
+    await expect(execute(spec, ["ws_1", "--ttl-ms", "7200000", "--reset", "ttl-ms"])).rejects.toThrow("--ttl-ms conflicts with --reset ttl-ms");
+    await expect(execute(spec, ["ws_1", "--reset", "session-archive"])).rejects.toThrow("--reset expects one of ttl-ms");
+    expect(bodies).toHaveLength(2);
+  });
+
   it("updates workspace prompts and issue archive settings through explicit commands", async () => {
     useCliEnv();
     const bodies = new Map<string, unknown>();
@@ -363,6 +432,12 @@ describe("native CLI resource contracts", () => {
     };
     const prompts = specById("workspace.prompt.update");
     globalThis.fetch = mockFetch(prompts.id, [], handler);
+    await execute(prompts, ["ws_1", "--prompt", "Workspace rules", "--expected-revision", "3", "--output", "json"]);
+    expect(bodies.get("/api/workspaces/ws_1/prompts")).toEqual({
+      prompt: "Workspace rules",
+      expected_revision: 3,
+    });
+    // The deprecated halves still pass through unchanged; the server merges them into the one prompt.
     await execute(prompts, ["ws_1", "--bootstrap-prompt", "Bootstrap", "--delta-prompt=", "--expected-revision", "3", "--output", "json"]);
     expect(bodies.get("/api/workspaces/ws_1/prompts")).toEqual({
       bootstrap_prompt: "Bootstrap",
@@ -429,9 +504,9 @@ describe("native CLI resource contracts", () => {
       }
       if (path === "/api/workspaces/ws_1/prompt-template") {
         return Response.json({
-          bootstrap: "# Bootstrap Prompt",
-          delta: "# Delta Prompt",
-          sha256: { bootstrap: "a".repeat(64), delta: "b".repeat(64) },
+          instructions: "# Remi",
+          input: "Hello",
+          sha256: { instructions: "a".repeat(64), input: "b".repeat(64) },
         });
       }
       throw new Error(`unexpected request ${request.method} ${path}`);
@@ -461,6 +536,29 @@ describe("native CLI resource contracts", () => {
     const output = await execute(spec, ["--output", "json"]);
     expect(JSON.parse(output).repositories[0]).toMatchObject({ id: "repo_db", name: "Database only" });
     expect(requests.some((request) => new URL(request.url).hostname === "127.0.0.1")).toBe(false);
+  });
+
+  it("rejects member execution defaults in project options and JSON without a project write", async () => {
+    useCliEnv();
+    expect(registryFor(SPECS).renderHelpForArgv(["project", "create", "--help"])).toContain("agent|squad");
+    expect(registryFor(SPECS).renderHelpForArgv(["project", "create", "--help"])).not.toContain("agent|member|squad");
+    for (const id of ["project.create", "project.update"]) {
+      const spec = specById(id);
+      let writes = 0;
+      globalThis.fetch = mockFetch(id, [], (request) => {
+        if (request.method !== "GET") writes += 1;
+        if (new URL(request.url).pathname === "/api/projects/prj_1") return Response.json({ id: "prj_1", title: "Project", workspace_id: "ws_1" });
+        throw new Error(`unexpected request ${request.method} ${request.url}`);
+      });
+      const prefix = id === "project.create" ? ["--title", "Project"] : ["prj_1"];
+      for (const fields of [
+        ["--default-assignee-type", "member", "--default-assignee", "mem_1"],
+        ["--data", JSON.stringify({ defaultAssigneeType: "member", defaultAssigneeId: "mem_1" })],
+      ]) {
+        await expect(execute(spec, [...prefix, ...fields])).rejects.toThrow("Project default execution assignee must be an Agent or Squad");
+      }
+      expect(writes).toBe(0);
+    }
   });
 
   it("resolves repository names when creating a project and carries explicit defaults", async () => {

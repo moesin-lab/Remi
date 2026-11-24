@@ -5,6 +5,8 @@ import { SidebarProvider, SidebarInset } from "@multiremi/ui/components/ui/sideb
 import { ModalRegistry } from "../modals/registry";
 import { AppSidebar } from "./app-sidebar";
 import { DashboardGuard } from "./dashboard-guard";
+import { FloatingPanelLayout } from "./floating-panel-layout";
+import { useAppNavPreference } from "./shell-preferences-provider";
 import { NavigationProgress } from "./navigation-progress";
 import { WorkspacePresencePrefetch } from "./workspace-presence-prefetch";
 
@@ -24,22 +26,26 @@ export function DashboardLayout({
   searchSlot,
   loadingIndicator,
 }: DashboardLayoutProps) {
+  // Expanded or the icon rail, as the server read it from the cookie.
+  const nav = useAppNavPreference();
   return (
     <DashboardGuard
       loadingFallback={
-        <div className="flex h-svh items-center justify-center">
+        <div className="flex h-[calc(100svh-var(--web-update-banner-height,0px))] items-center justify-center">
           {loadingIndicator}
         </div>
       }
     >
-      <SidebarProvider className="h-svh">
+      <SidebarProvider className="h-[calc(100svh-var(--web-update-banner-height,0px))] min-h-0 [&_[data-slot=sidebar-container]]:top-[var(--web-update-banner-height,0px)] [&_[data-slot=sidebar-container]]:h-[calc(100svh-var(--web-update-banner-height,0px))]" open={nav?.open} onOpenChange={nav?.setOpen}>
         <WorkspacePresencePrefetch />
         <AppSidebar searchSlot={searchSlot} />
         <SidebarInset className="relative overflow-hidden">
-          <NavigationProgress />
-          {children}
-          <ModalRegistry />
-          {extra}
+          <FloatingPanelLayout>
+            <NavigationProgress />
+            {children}
+            <ModalRegistry />
+            {extra}
+          </FloatingPanelLayout>
         </SidebarInset>
       </SidebarProvider>
     </DashboardGuard>

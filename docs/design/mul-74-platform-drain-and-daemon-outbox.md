@@ -1,294 +1,240 @@
-# MUL-74 设计说明:平台升级 Drain 协议 + daemon 持久化上报 Outbox
-
-目标:平台(API/Web/ssh-mesh-control-plane)升级期间,正在执行的 Agent 无感——
-不被终止、不丢消息、不卡在 `running`;升级默认不在有活跃任务时切换容器。
-
-两层保护:
-
-1. **Drain 协议**:升级切换容器前,平台进入 `draining`,daemon 暂停领取新任务,
-   Updater 等待所有在线 daemon 确认且活跃任务归零后才执行 `docker compose up`。
-2. **daemon Outbox**:daemon 对任务执行过程中的所有 API 上报改为本地持久化队列 +
-   有序幂等重放,短暂 API 不可用(如 API 容器重建的 10~30s)不再中断 provider session。
-
----
-
-## 一、Drain 协议
-
-### 1.1 持久化维护状态(新表)
-
-`packages/server/src/store/migrations.ts` 追加(遵循现有 `CREATE TABLE IF NOT EXISTS` 风格):
-
-```sql
-CREATE TABLE IF NOT EXISTS multiremi_platform_maintenance (
-  id TEXT PRIMARY KEY,                    -- 恒为 'platform'(单行)
-  mode TEXT NOT NULL DEFAULT 'normal',    -- normal | draining
-  generation INTEGER NOT NULL DEFAULT 0,  -- 每次 normal→draining 自增
-  operation_id TEXT,                      -- 持有 Drain 的平台 operation
-  started_at TEXT,
-  expires_at TEXT,                        -- lease 到期时间(UTC ISO)
-  reason TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-```
-
-`multiremi_runtimes` 增列(`addColumnIfMissing`):
-
-- `drain_ack_generation INTEGER` — 该 runtime 已确认并应用的 Drain generation
-- `drain_ack_at TEXT` — 最近一次确认时间
-- `drain_reported_active_tasks INTEGER` — daemon 自报的本地活跃任务数(仅展示/对账用)
-
-新 repo `packages/server/src/store/repos/platform-maintenance-repo.ts`:
-
-| 方法 | 语义 |
-|---|---|
-| `get()` | 读取单行;**惰性过期**:若 `mode='draining'` 且 `expires_at < now`,原地 CAS 回 `normal` 再返回(即 API 自动恢复,无需后台任务) |
-| `beginDrain({operationId, reason, ttlMs})` | `normal→draining`:generation+1、记 operation_id/started_at/expires_at;若已是 `draining` 且 operation_id 相同 → 幂等续租;不同 → 409 冲突 |
-| `renewDrain(operationId, ttlMs)` | CAS `WHERE mode='draining' AND operation_id=?` 刷新 `expires_at`;不匹配返回 null(lease 已失效/被释放) |
-| `releaseDrain(operationId)` | **幂等**:`UPDATE ... SET mode='normal', operation_id=NULL ... WHERE mode='draining' AND operation_id=?`;已是 normal 或持有者不同时为 no-op,总是返回当前状态 |
-| `recordRuntimeDrainAck(runtimeId, generation, activeTasks)` | 写 runtime 三列 |
-| `drainStatus()` | 汇总:当前 maintenance + 在线 runtime 数(复用 `isRuntimeEffectivelyOnline`,5min 窗口)+ 已确认数(`drain_ack_generation >= generation`)+ 服务端权威活跃任务数(`multiremi_tasks` 中 `dispatched/running/waiting_local_directory/awaiting_human` 计数)+ 未确认 runtime 明细 |
-
-**状态机**(mode × lease):
-
-```
-normal ──beginDrain(op)──▶ draining(gen+1, lease)
-draining ──renewDrain(同 op)──▶ draining(续租)
-draining ──releaseDrain(同 op)──▶ normal        (幂等,重复释放 no-op)
-draining ──lease 过期后任意 get()──▶ normal      (Updater 崩溃自愈)
-```
-
-active 任务口径:**服务端权威计数**(tasks 表 in-flight 状态),包含离线 runtime 上
-未恢复的 in-flight 任务——有卡死任务时 Drain 等到超时并失败,属于 fail-safe(操作者
-需先处理卡死任务或取消),不会静默切换。daemon 自报值仅用于 UI 对账展示。
-
-### 1.2 Updater API(复用 `X-Multiremi-Updater-Token` 鉴权,`denyUpdater`)
-
-- `POST /api/platform-updater/drain/begin` `{operation_id, reason?, ttl_ms?}` → `{maintenance, status}`
-- `POST /api/platform-updater/drain/renew` `{operation_id, ttl_ms?}` → `{maintenance, status, cancel_requested}`
-  (renew 即轮询:一次调用完成续租 + 拿到聚合进度 + 取消标志;lease 失效返回 409)
-- `POST /api/platform-updater/drain/release` `{operation_id}` → `{maintenance}`(幂等)
-
-`ttl_ms` 服务端钳制在 30s~10min,默认 120s。
-
-### 1.3 心跳协议扩展
-
-请求(`POST /api/daemon/heartbeat`)新增可选字段:
-
-```jsonc
-{ "drain_ack_generation": 3, "active_task_count": 2 }
-```
-
-响应 ack 新增:
-
-```jsonc
-{ "drain": { "mode": "draining", "generation": 3 } }   // normal 时 mode="normal"
-```
-
-服务端心跳 handler:读 maintenance(触发惰性过期)、下发 `drain` 字段、把 daemon 上
-报的 ack/active 写入 runtime 行。旧版 daemon 不发这两个字段 → 永不确认 → Drain 等待
-超时失败(fail-safe,错误信息列出未确认 runtime,提示先升级/退役 daemon)。
-
-### 1.4 daemon 行为(`packages/server/src/worker/daemon.ts`)
-
-新增独立状态 `serverDrainGeneration: number | null`(**不复用** `claimsPaused`:
-后者语义是"暂停后退出主循环",用于 CLI 自更新;Drain 需要"继续心跳、只停领取")。
-
-- 收到 `drain.mode === "draining"`:记下 generation;**不再进入 claim 泵**;已运行任务
-  继续;心跳继续,并在后续心跳带上 `drain_ack_generation` + `active_task_count`。
-- 收到 `drain.mode === "normal"`:清空,恢复领取。
-- `handleRuntimeUpdate` 的本地 `claimsPaused` 逻辑不变,两者互不影响。
-
-### 1.5 Updater 编排(compose driver)
-
-驱动契约扩展:`execute(operation, report, drain?)`,新增
-`packages/platform-updater/src/drain.ts` 提供 `PlatformDrainCoordinator`
-(begin / waitUntilDrained / release,基于 updater client)。
-
-`update` / `rollback` 的 `activate()` 序列改为:
-
-```
-report(pulling)  → writeImageEnv → docker compose pull        # 镜像先拉,不等 Drain
-report(draining) → drain.begin(operationId)
-                 → waitUntilDrained: 每 5s renew(续租+取进度+取消标志)
-                     · 每次把 {online, acked, active_tasks, waited_ms} 写进
-                       operation.progress.drain 并 report(draining)
-                     · cancel_requested → release → 终态 cancelled
-                     · 默认无限等待(MULTIREMI_PLATFORM_DRAIN_TIMEOUT_MS=0 或未设置)
-                     · 显式配置正数等待上限后超时
-                       → release → 抛 DrainTimeoutError → 终态 failed
-                       (error 明确写"等待运行中任务结束超时,未执行切换",不切换容器)
-report(switching) → docker compose up -d --no-deps api web ssh-mesh-control-plane
-report(verifying) → verify()
-finally           → drain.release(operationId)   # 成功/失败/健康检查失败/自动回滚后都释放,幂等
-```
-
-catch 内的自动回滚(恢复旧镜像 + `compose up` + verify)在 Drain 仍持有期间执行
-(此时活跃任务已归零,回滚切换同样安全),随后 finally 释放。
-
-`check_updates` / `restart` 不做 Drain(restart 的短暂中断由 Outbox 层兜底)。
-
-失败恢复路径:
-
-| 场景 | 结果 |
-|---|---|
-| Updater 在 wait 中崩溃 | 停止续租 → lease 到期 → API 惰性恢复 normal → daemon 恢复领取;operation 卡在 active_slot 由 Updater 重启后 claim-resume(现有行为) |
-| API 在 Drain 期间重启 | maintenance 在 DB,状态不丢;updater report/renew 有重试 |
-| Drain 超时 | 不执行 `compose up`,operation=failed,release 恢复调度 |
-| 用户取消 | 仅限进入 switching 之前;operation=cancelled,release 恢复调度 |
-| 本期不做"超时强制升级" | 保留人工路径:操作者可取消卡住的任务后重试升级 |
-
-### 1.6 平台 operation 扩展
-
-- `MultiremiPlatformOperationStatus` 新增 `draining`(非终态)、`cancelled`(终态);
-  repo `TERMINAL_STATUSES` 加 `cancelled`。
-- `multiremi_platform_operations` 增列 `cancel_requested INTEGER NOT NULL DEFAULT 0`
-  (`addColumnIfMissing`)。
-- 新操作端点 `POST /api/multiremi/platform/operations/:id/cancel`(owner/admin):
-  - `queued`:直接置终态 `cancelled`(释放 active_slot)+ releaseDrain(幂等);
-  - `preparing/pulling/draining`:置 `cancel_requested=1`,由 Updater 在 renew 时
-    发现并自行收尾(release + report cancelled);
-  - `switching/verifying/restarting/终态`:409 拒绝(已进入切换,不可取消)。
-- `GET /api/multiremi/platform/status` 响应新增 `maintenance`(mode/generation/
-  operation_id/expires_at/reason + 聚合 drain 进度)与 `lastOperation`(最近一条,
-  用于终态后展示"已恢复任务调度 / Drain 超时,升级未执行")。
-
----
-
-## 二、daemon Outbox
-
-### 2.1 存储
-
-位置:`~/.multiremi/outbox/<sha256(serverUrl|workspaceId|daemonId|provider).slice(16)>.db`
-(`MULTIREMI_STATE_DIR`/`MULTIREMI_OUTBOX_DIR` 可覆盖;在 daemon 自己的状态目录,
-不在 Git worktree;bun:sqlite,WAL,0600)。
-
-```sql
-CREATE TABLE IF NOT EXISTS outbox_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  idempotency_key TEXT NOT NULL UNIQUE,   -- 见 2.3
-  task_id TEXT NOT NULL,
-  kind TEXT NOT NULL,        -- start|prompt|session_pin|progress|messages|usage|workspace|complete|fail
-  payload TEXT NOT NULL,     -- JSON(不含 secret;只含已有上报接口的 body)
-  seq INTEGER NOT NULL,      -- 任务内单调递增(入队顺序 = 提交顺序)
-  terminal INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending', -- pending | blocked
-  attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at INTEGER,
-  last_error TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_outbox_task_seq ON outbox_events(task_id, seq);
-CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_events(status, next_attempt_at);
-```
-
-投递成功即删行(交付记录不保留)。
-
-### 2.2 发送模型
-
-新模块 `packages/server/src/worker/outbox.ts`(`TaskReportOutbox`)+ daemon 内每任务
-一个投递泵(per-task 串行,任务间并行):
-
-- `enqueue(taskId, kind, payload, {terminal})`:同步写库后立刻唤醒泵。健康网络下
-  投递延迟 ≈ 一次事件循环,不影响消息展示时延。
-- 泵按 `seq` 升序逐条投递:成功 → 删行;网络错误/连接拒绝/超时/5xx → `attempts++`,
-  有限指数退避(1s,2s,5s,10s,30s,max 60s)持续重试,**不终止 Agent**;
-  401/403/410 等永久权限错误 → 该任务队列整体 `blocked`,记录诊断,停止重试
-  (daemon 现有 terminal-authority 处理不变);404(任务已被服务端删除)同样 blocked。
-- **顺序保证**:同任务严格按 seq 提交;terminal 事件(complete/fail)总是最后入队,
-  因此必然在 messages/usage/pin 之后提交。跨任务无顺序约束。
-
-### 2.3 幂等键与服务端幂等(现状已具备,逐项核对)
-
-| kind | 幂等键 | 服务端幂等机制(已存在) |
-|---|---|---|
-| messages | `taskId:msg:<首条 seq>-<末条 seq>` | `multiremi_task_messages` `ON CONFLICT(task_id, seq) DO UPDATE`(daemon 始终携带 seq) |
-| complete | `taskId:complete` | router 守卫:非 `running` 直接返回现有任务,**不重复触发**评论/委派回流/自动化 |
-| fail | `taskId:fail` | router 守卫:非活跃状态直接返回现有任务 |
-| start | `taskId:start` | 仅 `dispatched/waiting_local_directory` 可转移,重放返回 400→按已达成处理 |
-| prompt | `taskId:prompt` | `INSERT OR IGNORE` + 不可变校验 |
-| usage | `taskId:usage:<n>` | 按 `provider+model` 合并 upsert |
-| progress | `taskId:progress:<n>` | last-write-wins,重放无害 |
-| session_pin | `taskId:pin:<n>` | `COALESCE` 更新,重放无害 |
-| workspace | `taskId:ws:<n>` | issue workspace 整行 upsert |
-
-即服务端**无需新增幂等机制**,仅需保持 router 守卫语义;新增测试固化该契约
-(complete/fail 重放不得产生第二条评论/委派回流)。
-
-### 2.4 daemon 执行路径改造
-
-- `runAgent()` 流式循环里的 `await client.reportTaskMessages(...)` → `outbox.enqueue`
-  (非阻塞)。**网络故障不再使 `runAgent()` 抛错退出、不再关闭 provider。**
-  `reportTaskPrompt`、`pinTaskSession`、`reportIssueWorkspace`、human-request 的
-  transcript message 同样入队。
-- `handleTask()`:`startTask`、`reportProgress`、`reportTaskUsage`、
-  `completeTask`/`failTask` 全部入队;terminal 入队后 `handleTask` 等待该任务队列
-  排空(不影响 provider,已关闭;保证 `once` 模式、inflight drain、本地并发计数与
-  服务端一致)。`stop()` 时中断等待,未投递记录留盘。
-- 交互式调用不变(仍走直连,失败按现状降级):claim、human-request 创建/轮询、
-  cancel 轮询、GC 等。
-- **重启恢复**:`start()` 里 register 成功后、`recoverOrphans` **之前**,先重放
-  Outbox 遗留记录(重点是 terminal)——否则实际已完成的任务会被 recoverOrphans
-  误标 failed。blocked 记录跳过并计数。
-- 上限与保留:`MULTIREMI_OUTBOX_MAX_BYTES`(默认 256MB)。超限时按序丢弃最老的
-  **非 terminal** 记录并计数告警;terminal 事件永不丢弃。指标经 daemon 本地
-  `/health` 暴露:pending/blocked 数、最老记录年龄、丢弃计数。
-
----
-
-## 三、升级 UX(版本与服务页)
-
-数据源:现有 2s/30s 自适应轮询的 `GET /api/multiremi/platform/status`(新增
-`maintenance` + `lastOperation` 字段);刷新页面天然从服务端恢复真实进度。
-
-阶段展示(由 `activeOperation.status` + `progress.drain` 推导):
-
-| 状态 | 文案 |
-|---|---|
-| queued/preparing | 正在准备升级 |
-| pulling | 正在拉取镜像 |
-| draining + acked<online | 正在暂停新任务(N/M 个 daemon 已确认) |
-| draining + active>0 | 等待 N 个运行中任务结束(已等待 X 分钟) |
-| switching | 正在切换服务 |
-| verifying | 正在验证 |
-| lastOperation=succeeded | 已恢复任务调度 |
-| lastOperation=failed(drain_timeout) | Drain 超时,升级未执行(任务继续运行,调度已恢复) |
-| lastOperation=cancelled | 升级已取消,调度已恢复 |
-
-- "取消升级"按钮:`queued/preparing/pulling/draining` 时可用 → cancel 端点;
-  switching 及之后禁用。
-- 长时间等待展示为"等待任务结束",不展示为失败;自动升级同样走 Drain 等待。
-- i18n:zh-Hans + en 补 `platform.*` 键。
-
----
-
-## 四、测试计划(对应 issue 11 项)
-
-后端 `tests/unit/multiremi/`(`createMultiremiApp` + `app.request` 范式)、
-`tests/unit/platform-updater/`(fake CommandRunner 范式)、
-`tests/unit/daemon/` 或 worker 层(fetch 注入范式):
-
-1. Drain 开启 → 心跳 ack 带 draining → daemon 不再 claim(worker 单测,fetch mock)
-2. 已领取任务 Drain 期间继续执行至 complete(worker 单测)
-3. `drainStatus()` 门:全部在线 runtime ack 当前 generation 且服务端 in-flight=0 才 ready(store/API 单测)
-4. Drain 超时:fake runner 断言未执行 `compose up`,drain released,operation failed(driver 单测)
-5. lease 过期:`get()` 惰性恢复 normal;心跳 ack 变回 normal(repo/API 单测)
-6. runAgent 流式期间 fetch 连续失败 10~30s(模拟 API 重启)→ provider 不退出、任务最终 complete(worker 单测,短退避注入)
-7. API 恢复后消息按原 seq 顺序补交(outbox 单测 + 服务端顺序断言)
-8. complete/fail 重放:仅一条 issue 评论、仅一次委派回流(API 单测)
-9. outbox 重启恢复:落盘 → 新实例重放(outbox 单测)
-10. 更新失败自动回滚后 drain released、daemon 恢复领取(driver + API 单测)
-11. 回归:`bun test` 全量、`bunx tsc --noEmit`、frontend vitest、
-    `tests/arch/release-workflows.test.ts`、API 快照黄金重生成
-    (`bun run scripts/snapshot-api-routes.ts`)
-
----
-
-## 五、安全与运维
-
-- Drain API 沿用 updater 双凭证(master token + `X-Multiremi-Updater-Token`);
-  cancel 端点沿用 owner/admin 校验;daemon 心跳新字段走既有 daemon token 门。
-- Outbox payload 仅含既有上报接口 body,不含 token/env;文件 0600。
-- 运维文档:`deploy/README.md` 增补 Drain 流程说明、超时/取消行为、
-  `MULTIREMI_PLATFORM_DRAIN_TIMEOUT_MS` 等环境变量。
-- 平台部署与 daemon CLI 发版仍是两个流程;旧 daemon 不 ack Drain 时升级安全失败。
+# 平台 Drain、备份与更新恢复
+
+当前运行契约由 [平台部署手册](../../deploy/README.md#drain-protected-updates-mul-74) 维护；本文定位协议和验证入口。
+
+## 入口与范围
+
+Web 设置的「版本与服务」和 CommandRegistry 的 `platform` 命令共用
+[platform router](../../packages/server/src/api/routers/platform.ts)。
+管理员保存 HTTPS 更新源后，持久化设置立即使旧检查结果失效；updater
+每次心跳读取设置，失败的 feed 请求不会停止心跳和操作恢复。
+检查请求可以在首次更新器心跳前排队；仅检查不受旧 driver 默认值限制，所有修改服务的
+操作仍要求 driver 一致。自定义源支持完整 manifest 和 `latest` 包裹；没有独立
+`manifestUrl` 时保留源地址供内部升级调用。执行时再次核对版本和已知 ref，拒绝源漂移。
+
+[更新 worker](../../packages/platform-updater/src/worker.ts) 组合
+[内部容器驱动](../../packages/platform-updater/src/internal-driver.ts)、
+[宿主容器应用驱动](../../packages/platform-updater/src/application-driver.ts)（Windows/macOS/Linux 的 Linux Docker）
+与 [systemd 驱动](../../packages/platform-updater/src/systemd-release-driver.ts)（Linux）。
+内部模式使用 [Compose 覆盖文件](../../deploy/docker/compose.internal-updates.yml)：API/Web
+监管进程保持运行，独立 updater 通过共享卷切换子进程；新应用包携带 Bun/Node 可执行文件，
+运行时版本可变化，CPU、glibc、原生工具及监管协议必须兼容。更新器、监管进程和 OS
+仍属于基础环境。内部模式当前覆盖标准 API/Web/PostgreSQL 拓扑，拆分 api-runtime 或
+额外持久路径需先扩展监管和备份配置，不直接套用。旧实例需一次性接入基础镜像与覆盖
+文件，之后更新不使用 Docker socket、宿主 Docker CLI，也不重启容器。
+宿主应用模式仍默认下载 API/Web 应用包，首次复用原镜像接入，之后重启相同容器；
+该模式复用镜像内的 Bun/Node，运行时不兼容仍阻止更新。运行中的 api-runtime 必须显式
+纳入其核心服务；daemon、数据库和 SSH 控制面不属于可重启范围。
+未知数据指纹拒绝更新；指纹由打包时从源码计算。指纹变化还必须有[发版阶段审核过的回退兼容声明](../../deploy/README.md#release-rollback-review)：
+发版负责人以先前已发布版本的 manifest 为依据，请人工审阅者确认兼容性，
+将声明作为目标 Release 附件交给打包流程；无声明时生成空列表，updater 继续拒绝不同指纹更新。
+迁移源清单统一来自 `packages/platform-updater/src/data-schema-inputs.json`。
+显式 `MULTIREMI_PLATFORM_UPDATE_MODE=images` 才使用原镜像驱动和 local-profile 快照协议；
+其相同迁移指纹限制继续保留。切换更新模式前需完成旧模式中的操作恢复。
+
+## Drain 状态与切换边界
+
+[maintenance repo](../../packages/server/src/store/repos/platform-maintenance-repo.ts)
+维护 `mode/generation/operationId/expiresAt`。等待期间阻止新任务领取，已领取
+任务继续运行。门闩同时检查 Runtime 对当前 generation 的确认、服务端
+in-flight 数以及 Runtime 上报的本地活跃数；断线机器残留的正活跃数也阻止切换。
+
+`drain/begin`、`drain/renew`、`drain/release` 使用 updater 双凭据；renew 同时
+返回等待进度和取消标记。[协调器](../../packages/platform-updater/src/drain.ts)
+默认无限等待任务完成，超时配置只取消更新，不取消任务；ready 后继续续租，
+覆盖备份耗时，并在提交前重新确认。上报 switching/restarting 是服务端提交点，
+必须仍持有 ready 的 drain 且没有取消请求。
+
+提交前 updater 崩溃会在租约过期后恢复调度。提交后不能因为 TTL 过期而恢复
+调度：switching/restarting/verifying/rolling_back 保持维护状态，直到程序切换或
+恢复经过验证并收到终态。操作取消仅允许 queued/preparing/pulling/draining/backing_up。
+服务端取消和切换更新均带条件，防止并发请求绕过边界。
+
+## 备份与恢复
+
+[安全工具](../../packages/platform-updater/src/safety.ts) 在 drain 后执行部署配置的
+数据库一致性导出与恢复验证命令，复制持久文件，归档命名卷，并对实际落盘
+文件检查大小和 SHA-256 后写完成清单。备份路径不能与源数据目录重叠。
+[PostgreSQL 校验器](../../scripts/verify-platform-backup.ts) 可作为通用备份验证命令。
+宿主容器应用驱动另外启动不连接生产网络的临时 PostgreSQL 容器；内部模式使用常驻的
+`network_mode: none` 演练容器，在私有临时目录启动 PostgreSQL 17。两者均以隔离凭据
+完整恢复备份，依次执行目标和旧版实际迁移，并检查既有列仍兼容；内部演练只删除自己的
+临时目录。演练容器没有生产凭据、可写程序/备份卷或生产 API home。
+缺少备份配置、恢复/迁移演练失败或兼容性未知均阻止新代码上线。
+
+下载、校验和解包应用在 drain 前完成，失败不触碰运行服务。切换前持久化本机
+恢复日志，记录旧版、目标版本和基础镜像。服务端提交后落盘 `committed` 和主机写锁，
+停止 API/Web 写入，再备份数据和演练迁移；因此这一阶段备份失败也须恢复旧服务。
+备份完成后补记位置，再原子切换应用指针。若切换失败，
+先在本机恢复旧程序并验证，再向 API 报告；不通过不可用的新 API 阻塞回滚。
+恢复失败时保留日志、备份和维护状态。服务端提交成功后、变更服务之前，
+日志落盘 `committed` 标记。重启 updater 会在联系 API 之前恢复这些日志，
+因此新 API 无法启动也不会阻止本机恢复；
+未提交日志不会触发服务重启，已验证成功的日志仅重放结果。
+
+自动更新和 Web/CLI 回滚不恢复旧数据库，因为更新之后的写入可能因此丢失。
+local-profile 默认使用上述应用驱动和保留数据的回退。旧镜像模式的历史操作日志及
+独立手动灾难恢复命令仍按其原有完整快照协议执行。不删除生产数据卷。
+备份或重启失败均保留维护状态，直到主机恢复并验证完成；终态回执、drain 释放、
+主机写锁清理之间崩溃也可在下次启动补全。健康检查后还核对进程实际运行的版本目录。
+主机配置必须覆盖部署自己的全部持久路径/卷；不把一次 HTTP 健康响应当成
+备份可恢复或所有数据完整的证据。
+
+## Daemon Outbox
+
+[worker outbox](../../packages/server/src/worker/outbox.ts) 将任务上报持久化并按任务
+顺序重试。API 暂时不可达不会因为一次上报失败关闭 provider。永久鉴权错误
+进入 blocked，存储上限仍按现有 Outbox 策略处理；这不构成任意故障下绝对不丢
+数据的保证。更新流程先等待任务和本地执行归零，再切换服务。
+Windows 上保留重试定时器的事件循环引用，避免 Bun 1.3.14 的无引用定时器
+卡住终态回传；`close()` 仍会唤醒并清理重试，不阻塞正常关闭。
+Outbox 显式缓存自己的固定 SQL 语句；关闭时等待在途投递，再 finalize 全部语句并严格关闭
+SQLite，避免 Bun 1.3.14 默认 20 条 query 缓存之外的语句等到 GC 才释放文件锁。
+磁盘回归在删除夹具前验证关闭：Linux 扫描 `/proc/self/fd`，Windows 由文件删除检查锁；
+关闭失败直接使测试失败，不吞异常、不重试删除。
+
+## 验证入口
+
+- `bun test tests/unit/platform-updater`：准备失败不停止服务、备份失败恢复旧服务、二进制备份落盘、安全解包、lease 续租、取消、兼容拒绝和崩溃恢复。
+- `bun run tests/integration/platform-application-smoke.ts`：独立 Docker 项目从 Web 代理调用真实鉴权 API、PostgreSQL 队列、worker 和 drain；覆盖任务等待、API 重启后的操作记录/去重、复用镜像、后续容器 ID 不变、故障回退、新增数据保留、测试 daemon/数据库进程不中断及 Web/WebSocket 恢复。Web 为轻量测试代理，真实设置按钮由组件测试覆盖；不调用真实模型。
+- 加 `--internal`：运行实际内部 updater、监管进程及隔离演练容器；验证 Bun 1.3.13、Node 22.13.1 基础镜像启动应用包里的不同版本，监管 PID/容器不变、显式回滚恢复旧运行时且保留新增数据。只在测试准备阶段调用宿主 Docker，内部更新器不持有 socket。
+- `bun test tests/unit/multiremi/multiremi-platform-lifecycle.test.ts tests/unit/multiremi/multiremi-platform-drain.test.ts tests/unit/multiremi/multiremi-platform-safety.test.ts`：API 鉴权、更新源、预检、调度边界和提交后维护状态。
+- views 的 `settings/components/platform-tab.test.tsx`、`settings-page.test.tsx`，core 的 `api/schemas/platform.test.ts`：设置入口、来源表单、阻塞原因和响应边界。
+- `.github/workflows/release-build-check.yml` 的 `platform-updater` job 在 Windows/macOS/Linux 运行相关测试。配置了矩阵不等于本次三平台运行均已验证；实际结果见任务/CI。
+
+## CLI 更新的 daemon drain
+
+CLI 更新在 runtimes-repo 创建带 requestId 的持久化 daemon drain，等待期间请求
+保持 pending；`daemon.drain` 状态显示排空进度，无需新增请求状态。默认期限沿用
+MUL-68 的 5 分钟，`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可覆盖，避免引入两套期限。
+服务端排空后才下发更新，HTTP heartbeat 与 WebSocket 下行携带持久化 deadline。
+manual/deploy/CLI update 到期对已协商 `turn.restart` 且上报 `capabilities.planned_restart: 1` 的 runtime 发出计划内 checkpoint 请求；
+缺失或不支持该能力的旧 daemon 回退到 MUL-45 中断/自动重试，不创建无法确认的 requested 记录。
+能力随 socket hello/heartbeat 重报并清除旧值。只有服务端确认挂起且 daemon
+报告本地执行归零，才允许更新。人工/部署 drain 不被更新接管或释放。
+
+准入在 workspace lifecycle 锁内串行：同一物理 daemon 同时最多一个 CLI 请求离开
+pending。有 update owner 时只有该 owner 可准入；人工/部署 drain 没有 owner 时，
+必须没有其他 running/restarting/verifying CLI 请求。所有准入均要求 drained 或
+drained_forced。HTTP claim、WebSocket 下行及其迟到 ACK、pending→running 上报共用此判定；
+未准入的请求保持 pending，下行不发送。pending→running 准入拒绝使用稳定错误码 `cli_update_not_admitted`（HTTP 409；WS 不可重试协议错误）。
+daemon 按 code 识别后释放本地暂停、释放 WS 去重键，不安装、不切换 launcher、不上报
+failed；同 id 在 WS 或 heartbeat 后续下发时可再次执行。
+
+CLI running 回执只有 pending→running（通过上述准入）与 running→running（幂等确认）
+可以成功。lifecycle 锁内对终态、restarting、verifying 的 running 一律返回
+`cli_update_not_runnable`（HTTP 409；WS retryable=false），不把空操作的 HTTP 200 当作
+安装许可。daemon 收到此 code 立即释放暂停并抛出以释放下行去重键，不安装、不重启、
+不补报 failed，也不按未知结果重试；平台已有终态或已有执行者。终态的其它上报保持幂等成功。
+
+HTTP heartbeat 和 WS 下行仅在 drain 的 `update_request_id` 等于本请求 id 时携带
+`drain_deadline`；人工/部署 drain 的期限不约束更新准入，即使该期限已经过去。
+没有本请求持有的 deadline 时，daemon 使用本地默认排空期限和 30 秒准入确认窗口。
+
+running 准入确认使用非持久化同步 HTTP result，兼容没有准入逻辑的旧服务端；终态仍走
+持久化 outbox。接受后才安装。超时、断线、5xx 等结果未知时，每 250ms 幂等重试，
+准入确认最多 30 秒；尚未到期时仍取剩余期限较小值，checkpoint 后已过期的 drain
+得到新的 30 秒准入窗口，每次请求
+也受该窗口的 AbortSignal 限制。30 秒限制避免无执行者长时间占用更新围栏，同时允许短暂
+网络恢复。窗口耗尽后仅投递一次带 admission confirmation deadline exceeded 原因的 failed，
+随后释放本地暂停。没有 running outbox 记录可在放弃后 replay；已到达服务端但响应丢失的
+HTTP 请求由幂等 running→running 确认，终态拒绝迟到状态回退。
+
+旧实现普通 Error 在 WS session 映射为可重试 server_error，running outbox 会持续重试；
+新实现明确拒绝为不可重试，兼容清理旧队列中该条 running 记录并拒绝其 waiter，不阻塞
+整个 rt 分区；`cli_update_not_admitted` 和 `cli_update_not_runnable` 均只删除被拒的那条
+running 记录。旧 daemon 正常只收到已准入下行，running→running 继续幂等接受。
+N-1 边界：新服务端对旧 daemon 的迟到 running 增加 HTTP 409 或不可重试 WS 错误；
+升级后的 daemon 除上述投递时单条清理外，在打开 outbox DB 时做一次有界启动恢复：
+仅处理 blocked-code 为 `cli_update_not_admitted` 或 `cli_update_not_runnable` 的分区；
+事务内先删除其中 blocked 的 `runtime.update_result` running 记录（旧执行者已退出，
+不能重放为准入），再将其余 blocked 行恢复 pending、清空 last_error/next_attempt_at，
+删除该分区的 blocked/blocked-code 元数据，让后续报告重新接受服务端校验。
+其它永久错误码（如 `protocol_violation`）保持 blocked，不扩大恢复范围。
+未升级的 0bb8c3256 daemon 对 HTTP 409 会在原有最多 30 秒窗口内重试后补报 failed，
+不会安装或无限重试，平台终态仍保持幂等。更早使用 running outbox 且不识别该 code 的
+daemon 会把不可重试 WS 错误持久化为分区 blocked；平台升级后、daemon 升级前该分区
+仍会阻塞。服务端无法改变其本地分支，这段窗口以 daemon 升级为界：升级后打开同一 DB
+即按上述规则自愈，遗留 running 不会再次投递。正常只收到已准入下行的路径不变。
+新 daemon 连接旧服务端仍按现有 HTTP 成功确认安装，旧端对终态返回 200 的许可缺口
+无法由新 daemon 单独消除，需服务端升级后获得本节保证。
+因此 owner 终态交接只需寻找 pending sibling，可在 restarting/verifying 保护之前处理。
+
+下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，
+新进程完成版本注册和启动自检、确认 completed 后释放。恢复旧版本确认 rolled_back
+同样释放。owner 进入终态时，若同一物理 daemon 仍有 pending CLI 更新，
+则把 drain 交接给最早创建的请求，并从交接时刻重新计算期限；没有 pending sibling 才释放。
+人工/部署 drain 不参与交接。进入 restarting/verifying 后排空期限不干扰新进程确认，仍由更新验证期限管理。
+`daemon.drain` 的 `expiry_action=planned_restart` 表示三种来源共用 checkpoint 交接。
+
+验证入口：`tests/unit/multiremi/daemon-drain.test.ts`、
+`tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`、
+`tests/unit/daemon/update-admission.test.ts`（真实 HTTP result、协议 report handler 和磁盘 outbox）。
+
+## MUL-31：同 attempt 计划内重启交接
+
+[planned-restarts.ts](../../packages/server/src/store/planned-restarts.ts) 提供独立于
+Turn/attempt 状态的计划内交接记录。[共享 schema](../../packages/server/src/store/planned-restart-schema.ts)
+在 SQLite 和 PostgreSQL 的迁移入口添加表，不改写已有尝试；旧 drain 回填独立 `drain_id`，
+重复 begin 保留身份与期限，更新 owner 交接产生新身份。时间戳不承担唯一身份，避免同一时刻
+undrain 后重新 drain 接受旧 checkpoint。
+
+`request` 校验当前 attempt、workspace/runtime/daemon 和持久化 drain；`suspend` 只接受同一
+fence/generation 的 checkpoint，重放必须有相同摘要。checkpoint 只保存 provider session/work_dir、
+trace head 与输入 receipt 引用，不保存凭据、消息正文或 translator 内存。输入确认水位必须与
+服务端一致，delivered ID 必须属于同一会话且已投影；写 checkpoint 不推进确认水位。
+
+`resume` 在 workspace→lane 锁与单一事务内消费 checkpoint、递增 generation 并运行调用方的
+新执行段授权；授权抛错时整个恢复回滚，另一消费者仍可接手。相同消费者可重读已提交结果，
+另一消费者被拒绝。manual/deploy drain 需要先 undrain，CLI owner 的 fence 与平台维护 fence
+同样阻止恢复。generation 检查必须在执行写入的同一事务、持有上述锁时调用。
+
+这些原语已接入 daemon 的挂起和恢复路径。新进程只对账启动时已有的 journal；当前
+进程不会消费自己刚挂起的记录。`turn.restart.resume` 在同一 CAS 事务内登记稳定 consumer
+对应的新 usage run，响应携带恢复执行上下文；本地 resumed receipt 提交后才派发 provider。
+manual/deploy 需显式 undrain；CLI 更新需版本确认释放围栏后恢复。只有服务端 suspended /
+resuming 记录豁免 orphan 和排空任务计数，本地 prepared 不授予豁免。
+
+Q 重绑定、权限/人工等待、未投递 steer 的跨重启对账和飞书补收仍未完成；不能据本节
+推断这些范围已经可用。真实 provider、飞书与隔离候选更新需各自验收。
+
+存储验证入口：`bun run test tests/unit/multiremi/planned-restarts.test.ts`，覆盖双 dialect fixture
+（PG 需显式配置）、SQLite 真正 close/open 和双连接消费者、重放、陈旧 generation/fence、
+取消竞争、摘要损坏与事务回滚。它不替代假 provider 的真正进程替换验收。
+
+### daemon 挂起：provider 关闭、报告/trace 确认与 journal
+
+[planned-restart-journal.ts](../../packages/server/src/worker/planned-restart-journal.ts) 提供
+`PlannedRestartJournal` 与 `PlannedRestartTransfer`，checkpoint 类型共用于
+[contracts](../../packages/contracts/src/planned-restart.ts) 和服务端。journal 以 SQLite WAL /
+`synchronous=FULL` 写入，文件 owner-only。`suspend` 等待调用方安全点回调完成后才写
+`prepared`，服务端 checkpoint 提交确认后才写 `acknowledged`；回调必须停止 provider 输出并
+排空报告/trace，失败不生成挂起证据。同一 handoff 的并发停止合并；不同执行身份或 checkpoint
+重放冲突拒绝，摘要损坏、未知字段与非法水位拒绝。
+
+恢复时先重放未确认的 checkpoint，再用首次本地提交时生成的稳定 consumer 调用服务端
+resume CAS；丢失恢复响应后仍重用该 consumer，避免重复授权。同 attempt 的 journal 与
+服务端 DB 真正关库重开、恢复响应丢失后的单次授权由存储联测覆盖；新进程重读 journal
+由子进程测试覆盖。本地 `resumed` receipt 不能代替服务端权威，恢复仍调用服务端 CAS，
+不能据本地文件复活已取消的执行。
+
+`taskInputSnapshot` 为已经持久化的 requested handoff 下发 `turn.restart`。daemon 在期限中断点
+abort 当前执行，等待 `runAgent` 的 provider close/trace flush 与工作目录收尾，然后等待 outbox
+和 trace 上传 ACK。`turn.restart.checkpoint` 在服务端锁下返回 session/work_dir/input 水位引用；
+daemon 写 prepared journal 后，通过 `turn.restart.suspend` 提交同一 handoff/generation 的 checkpoint，
+收到提交 ACK 才写 acknowledged。该路径不发送 fail，不关闭轮卡 trace。未确认交接仍遵循普通
+crash 恢复，不能根据本地文件降低 drain 计数。provider 不响应取消/close 或交接未能在 daemon stop budget 内确认时，终止该进程并按崩溃处理；
+没有挂起确认的记录继续由 MUL-45 标 lost 并重试，可能消耗一次 attempt。
+
+服务端任务报告（用量除外）、turn input/decision/completion 与 trace.append 在执行写入同一事务内
+校验 generation，并与恢复 CAS 共用 workspace→lane 锁。suspended 拒绝执行写入；恢复后旧代与
+遗漏 generation 的帧拒绝。已绑定 usage run 的迟到实际用量保留原会计授权。普通未交接执行继续
+兼容缺省 generation=0。daemon 对恢复后的报告、输入和 trace 上传带新 generation，
+持久化 outbox 在入队时保存它，不能在迟到发送时改成当前代。translator 从本地 trace fold
+保留原 Turn 和已用 item ID，恢复不重复写 turn.started，并添加「Remi 已更新」条目。
+原生子代理/后台任务的完整 translator 内存重绑定仍待后续范围。
+
+验证入口含 `bun run test tests/unit/daemon/planned-restart-journal.test.ts` 与
+`bun run test tests/integration/daemon-protocol-v2/planned-restart.test.ts`。后者运行真实 daemon、
+Bun socket、磁盘 outbox/journal 和假 provider，验证 provider 关闭前没有 checkpoint、真实 RPC 提交
+和 ACK 后 journal，以及旧代报告/输入/trace 拒绝。它不替代 MUL-27 的候选二进制更新验收。

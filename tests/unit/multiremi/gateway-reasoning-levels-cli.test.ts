@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 /**
  * MUL-338 — the reasoning-level declaration has to be reachable from the CLI, not
  * only from the settings page (AGENTS.md: a new user-facing endpoint ships with

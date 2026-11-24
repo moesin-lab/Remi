@@ -1,3 +1,4 @@
+import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -9,6 +10,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { MultiremiRepoCache, withRepoCacheLock } from "@daemon/agent-runtime/repo/checkout.js";
 import { runSnapshotGcOnce, type RunSnapshotGcOnceOptions } from "@daemon/agent-runtime/repo/snapshot-gc.js";
+import { codeViewsRoot, sharedReposRoot } from "@daemon/agent-runtime/workspace/layout.js";
 import { OWNED_DIRECTORY_QUARANTINE } from "@daemon/agent-runtime/workspace/safe-remove.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
 
@@ -150,9 +152,29 @@ describe("snapshot TTL GC", () => {
       },
       onError: (path) => errors.push(path),
     })).toEqual({ removed: 1, retained: 0, skipped: 1 });
-    expect(errors).toEqual([blocked]);
+    expect(errors).toHaveLength(1);
+    const failedPath = errors[0]!;
+    expect([blocked, next]).toContain(failedPath);
+    const removedPath = failedPath === blocked ? next : blocked;
+    expect(existsSync(failedPath)).toBe(true);
+    expect(existsSync(removedPath)).toBe(false);
+  });
+
+  it("aborts the sweep when the ownership fence keeps rejecting", async () => {
+    const f = fixture();
+    const blocked = f.tree("a-blocked", f.now - ttlMs - 1);
+    const next = f.tree("b-next", f.now - ttlMs - 1);
+    const errors: string[] = [];
+    await expect(runSnapshotGcOnce({
+      ...f.options,
+      assertRootOwner: () => { throw new Error("workspace supervisor lease lost"); },
+      onError: (path) => errors.push(path),
+    })).rejects.toThrow("workspace supervisor lease lost");
+    // Ownership loss ends the round: no later directory is examined, so the
+    // control plane never sees removals attributed to a root we do not own.
+    expect(errors).toEqual([]);
     expect(existsSync(blocked)).toBe(true);
-    expect(existsSync(next)).toBe(false);
+    expect(existsSync(next)).toBe(true);
   });
 
   it.each(["workspace", "repo", "snapshot"] as const)("never follows a %s symlink", async (level) => {
@@ -208,14 +230,11 @@ describe("snapshot TTL GC", () => {
     expect(statSync(sentinel).mode).toBe(fileMode);
   });
 
-  it("skips files and quarantine names at every level", async () => {
+  it("skips files at every level", async () => {
     const f = fixture();
     f.tree("old", f.now - ttlMs - 1);
-    for (const parent of [f.snapshotsRoot, f.wsDir, f.repoDir]) {
-      mkdirSync(join(parent, OWNED_DIRECTORY_QUARANTINE));
-      writeFileSync(join(parent, "file"), "keep");
-    }
-    expect(await runSnapshotGcOnce(f.options)).toEqual({ removed: 1, retained: 0, skipped: 6 });
+    for (const parent of [f.snapshotsRoot, f.wsDir, f.repoDir]) writeFileSync(join(parent, "file"), "keep");
+    expect(await runSnapshotGcOnce(f.options)).toEqual({ removed: 1, retained: 0, skipped: 3 });
     expect(existsSync(f.repoDir)).toBe(true);
   });
 
@@ -283,16 +302,17 @@ describe("snapshot TTL GC", () => {
     expect((await f.create()).created).toBe(false);
   });
 
-  it("runs snapshot collection from daemon GC without changing the workspace summary", async () => {
+  it("runs snapshot collection from daemon GC over the shared code views", async () => {
     const f = fixture();
     const expired = f.tree("old", Date.now() - ttlMs * 2);
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: "http://127.0.0.1:1",
       workspacesRoot: f.root,
       repoCacheRoot: f.repoCacheRoot,
       snapshotTtlMs: ttlMs,
     });
-    expect(await daemon.runGcOnce()).toEqual({ cleaned: 0, orphaned: 0, skipped: 0 });
+    await daemon.runGcOnce();
     expect(existsSync(expired)).toBe(false);
   });
 });
@@ -300,8 +320,8 @@ describe("snapshot TTL GC", () => {
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "multiremi-snapshot-gc-"));
   roots.push(root);
-  const snapshotsRoot = join(root, ".snapshots");
-  const repoCacheRoot = join(root, ".repos");
+  const snapshotsRoot = codeViewsRoot(root);
+  const repoCacheRoot = sharedReposRoot(root);
   const wsDir = join(snapshotsRoot, "workspace");
   const repoDir = join(wsDir, "repo.git");
   const barePath = join(repoCacheRoot, "workspace", "repo.git");

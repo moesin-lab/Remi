@@ -1,0 +1,424 @@
+# ADR 0003: Parent issue status is derived from its children
+
+## Status
+
+Accepted (MUL-400 E1, child issue MUL-406). Ships with the S1 PR; S2 (dependency
+gate and automatic promotion) extends the same hook. Amended by MUL-476 (Issue
+row lock order, item 8). Amended by
+[ADR 0017](0017-issue-execution-and-escalation.md): the done rule replaces formal
+delivery acceptance, an Issue waits in `in_review` only while its question is at
+the human stage (guard B skips that wait) and stays `in_progress` while a Leader
+answers, and an SCM merge only records activity (items 1, 3, 4, 6, 8, 9 and 10).
+
+## Context
+
+Issue status was unconstrained: any writer could PATCH any value, and the task
+terminal path derived `in_review` from the *tasks of that Issue* alone. Neither
+writer knew about `parent_issue_id`. The observable failures were:
+
+- a parent with a dozen live children showed `in_review` as soon as one of its
+  own tasks finished (MUL-383), so "in review" no longer meant "the parent's work
+  is finished";
+- `done` was reachable while children were still open, which silently orphaned
+  them;
+- conversely, nothing ever pushed a parent *out* of `in_review` when a child
+  changed, so the parent's status drifted away from its subtree.
+
+At the same time, the parent owner only heard about a child that reached `done`,
+and only on the direct Issue write path. A child that failed, blocked or was
+cancelled was silent, and a parent owner who was busy had the notification
+dropped (`active_task_exists`), so a parent could lose reports entirely.
+
+## Decision
+
+1. **Parent guards and the done rule, in the store.** No separate status-machine
+   table. Every `done` write, from leaves and intake included, goes through the
+   [done rule](0017-issue-execution-and-escalation.md): a member may close any
+   Issue, while an Agent task credential closes only a direct child of an Issue it
+   executes, never its own Issue or a root:
+   - **Guard A** runs inside `updateIssueWithOutcome`'s Issue row lock. A target
+     of `in_review` or `done` with `open_children > 0` is rejected with 409
+     `issue_status_held` (`reason: children_open`, `open_children: N`). Members
+     can explicitly override this guard with `force`; the done rule runs before it
+     and is independent of `force`.
+   - **Guard B** runs on the task-terminal derivation
+     (`syncIssueStatusFromTaskWithinTransaction`). A derived `in_review`/`done`
+     with open children is rewritten to `in_progress` and recorded as
+     `parent_status_held`. While an owner waits on an answer the Issue stays
+     `in_progress`; only a finished round derives `in_review`.
+   - **Re-derivation** happens when a child is created, re-parented or changes
+     status: an `in_review` parent with open children returns to `in_progress`
+     (`parent_status_derived`). A `done` or `cancelled` parent never moves —
+     terminal states stay human decisions, matching the existing rule in the
+     task sync path.
+2. **`open_children` excludes only `done` and `cancelled`.** `blocked` counts as
+   open: a parked child is precisely what a human must rule on, and treating it
+   as finished would let the parent close over unresolved work.
+3. **Closing is an explicit status change by the level above.** Task results and
+   summary comments remain evidence; the execution owner's final reply of a round
+   is its summary, and the round's end derives `in_review`. The parent's execution
+   owner then sets a direct child to `done` or messages the child with what to
+   change; a workspace member sets a root to `done` or comments. The former
+   final-summary signal (A1) and formal delivery acceptance are both retired. The
+   [execution contract](../dev/issue-responsibility.md) defines the single
+   resolver and the complete API.
+4. **`force` remains member-only.** It passes guard A and records
+   `issue_status_forced`; a task identity sending it gets 403. The parent-done
+   grant (A4) is retired: its write routes return 410, its columns and historical
+   activities stay readable for audit, and it never authorizes closure. The done
+   rule runs independently of the parent guard's environment switch and applies
+   the same way to PATCH, compatibility PATCH/PUT and batch writes; the
+   server-only bypass option skips only the unfinished-child check.
+5. **Child endings always notify the parent owner through one hook.**
+   `notifyChildStatusChange` is called post-commit by both Issue write paths, so
+   `done`, `failed`, `blocked` and `cancelled` all report. Agent and squad owners
+   get a `child_status_parent_notification` comment (`data.outcome` distinguishes
+   a task failure from a human block) plus a round. A busy owner no longer
+   suppresses the report: it is appended to that agent's queued round
+   (`child_status_parent_coalesced`), and several child endings coalesce into one
+   round because the workspace lock serialises the lookup and append. Human
+   handling uses the shared workspace operator and the `child_issue_terminal`
+   inbox type, warning for failed/blocked and info otherwise. A parent with no
+   assignee keeps its historic comment and skip record. When its parent-owner
+   message already reaches the operator, subscriber fanout does not create a
+   second notification for that event. Later child events still notify separately.
+   Missing legacy human contact does not suppress this notice: a complete
+   same-workspace parent chain falls back to the shared operator without creating
+   an execution Agent or a Task. Missing, cyclic or foreign ancestor chains keep
+   their unresolved audit and cannot route a notice into another workspace.
+   A child that ends while its parent is already `done`/`cancelled` is a
+   different case: the parent's status is a settled human decision and nothing
+   may be filed against a closed parent, so the ending is recorded as a single
+   `child_status_after_parent_closed` activity (child id, key and outcome) and
+   nothing else — no comment, no round, no status change. Silence would be the
+   one outcome E2 forbids.
+6. **Merge completion is recorded, never a closure.** Both leaves and parents
+   remain open after SCM merge. The effect appends a `scm_merge_completed`
+   activity with the change request, number, URL, branch, event and attribution,
+   and is marked applied without writing a status or a hold; the status follows
+   the derivation above. A child's PR naming its parent changes neither Issue's
+   status.
+7. **No backfill.** Existing parents are not rewritten in bulk. A parent sitting
+   at `in_review` with open children moves the next time a child event fires, and
+   each move leaves a `parent_status_derived` record. `MULTIREMI_PARENT_STATUS_GUARD`
+   (default on) is the emergency switch.
+
+8. **Guard decisions and child membership writes share the parent row lock.**
+   The API writer locks its Issue before the done rule and guard A. The SCM
+   effect locks the linked Issue before recording its merge activity, and retains
+   that lock through the effect transaction. Child
+   creation, moving an Issue under a new parent (including a terminal child),
+   and reopening a `done`/`cancelled` child lock that same parent before writing.
+   This also covers Agent assignment's direct terminal-to-`todo` write, whose
+   locks and assignment update commit before task creation opens its transaction.
+   Assignment now triggers the child-status hook in that same unit (MUL-482):
+   an `in_review` parent immediately returns to `in_progress`, with one
+   `parent_status_derived` activity, before the new task is created. The possible
+   ancestor re-derivation chain joins the initial sorted lock set; its relations
+   are re-read under those locks and a changed chain retries as a stale set.
+   Assignment and PATCH reopening retain the same legacy-relation contract:
+   a missing direct parent rejects with `Parent issue not found: <id>`, while
+   a parent in another workspace is ignored. Re-derivation stops at a missing
+   or foreign higher ancestor and never writes outside the child's workspace.
+   Assignment's workspace-scoped discovery still includes that boundary id in
+   its lock set. If a foreign ancestor moves back before locking, its newly
+   reachable ancestors must already be locked or the set is stale.
+   Hook failure rolls back the assignment, parent statuses and audit together;
+   broadcasts and collected follow-ups wait for the assignment's commit.
+   Lock order is workspace lifecycle (when required) and, for creation and for
+   a move into another workspace, the issue-number lock (MUL-405's W -> N -> D,
+   `store/advisory-locks.ts`; a move takes only its target's N), then
+   every Issue row the transaction writes or whose relation it changes, taken
+   **once in ascending id order** (`lockIssueRowsWithinTransaction`), then no further Issue row and no
+   workspace lock. The set is computed before locking from the input plus one
+   unlocked read of the written Issue's own `parent_issue_id` and `status`;
+   every guarded value is re-read after the locks. A child that is reopened
+   still locks its parent; a child that is re-parented locks the new parent;
+   creation locks the parent and every `blocked_by` endpoint; a dependency locks
+   both endpoints; a workspace move locks only itself, is blocked by active
+   tasks, relations and an uncleaned Issue workspace record; a cleaned record
+   follows the move with its machine fields cleared. The move takes the target's next number (number and
+   key change in the same UPDATE, because MUL-405's unique index rejects the
+   old number there); task creation locks its Issue before checking
+   the Issue's workspace, so it and a move serialize. If the post-lock re-read
+   shows the set was incomplete (the child's parent or terminal status changed
+   while it waited, or the Issue now moves and its N was not taken), the
+   transaction owner rolls back and retries once with a
+   fresh set; a second miss, or a caller-owned transaction, raises 409
+   `issue_relation_changed`. A late lock is never taken.
+   `lockIssueLifecycle` and `lockIssueRowWithinTransaction` take the same
+   Issue row lock; workspace reports, abandonment and cleanup serialize with moves.
+   A parent's guarded decision still reads children without locking their rows. A write serialized after parent closure may still introduce an
+   unfinished child under that closed parent; the closed-parent policy above
+   remains in effect. The guarantee is a current count at the parent's decision,
+   not a prohibition on later child writes.
+   Re-derivation does not lock the parent before counting: its conditional
+   `in_review` → `in_progress` UPDATE locks the row and re-checks the status
+   after any wait; a child added or reopened after the count is a child event
+   of its own; closing a child never takes that lock, so an earlier lock would
+   not make the count more current. The old parent's re-parenting hook owns a
+   separate post-commit transaction.
+   [The two-connection regression](../../tests/unit/multiremi/multiremi-parent-status-race.test.ts)
+   exercises both orders 20 times for API/SCM and creation, attachment, and
+   reopening from each terminal status through PATCH or Agent assignment.
+   SQLite's writer lock can reject the
+   contender with `BUSY`; PostgreSQL waits on the parent row.
+   [The relation-lock regression](../../tests/unit/multiremi/multiremi-issue-relation-locks.test.ts)
+   pairs these paths with each other and with dependency and move writers for
+   both id orders, and covers the stale-set retry and its 409.
+
+   **Every guarded path runs at transaction depth 1.** When this was decided,
+   `PostgresSyncDatabase.transaction()` was a bare `BEGIN`/`COMMIT`, so a nested
+   `transaction()` inside an open one committed the outer transaction early,
+   released its row locks, and turned the outer `ROLLBACK` into a no-op. Since
+   MUL-405 a nested `transaction()` is a `SAVEPOINT` inside the outer unit on
+   both backends, and `maxTransactionDepth` counts every frame, the `SAVEPOINT`
+   included, so depth 1 still means no nested frame at all (ADR 0011). The
+   store keeps its `...WithinTransaction` convention: the outermost caller owns
+   the only `BEGIN`/`COMMIT`, and everything under it calls the variant that
+   assumes an open transaction. A standalone wrapper publishes its events and
+   replays child-status changes right after its own `transaction()` returns,
+   which for a nested `SAVEPOINT` is still before the owner's `COMMIT`.
+   - **The collector and the commit-event queue are required parameters, not
+     options.** Every `...WithinTransaction` variant that can move an Issue (the
+     Issue-status sync reached from `createTaskWithinTransaction`,
+     `createTaskHumanRequest`, `startTask`, `respondTaskHumanRequest`, the
+     terminal writers, `cancelTask`/`redispatch`/`cancelTasksByTriggerComments`/
+     `recoverOrphans`, the organizer action facade, and the
+     `chat`/`feishu-bot`/`autopilot` wrappers) takes a
+     `ChildStatusChangeCollector` **and** a `CommitEventQueue` with no default,
+     no `?`, and no `?? createCommitEventQueue()` fallback. The compiler
+     therefore forces each call site to answer one question: which transaction
+     owns these writes and their events? A caller that is not inside a
+     transaction calls the outer, self-transactional variant instead
+     (`TasksRepo.createTask`, `FeishuBotRepo.prepareIssueRoundPushes`, the
+     plain `createIssueComment`). The signatures that changed for this are
+     listed in the MUL-406 fix-round comment; S2 must adopt them.
+   - **Every state change the S1 hook produces goes into the collector; the
+     caller cannot drop it.** `notifyChildStatusChange` no longer *returns* a
+     list of further transitions — it takes the collector and pushes into it,
+     so "the call site forgot the return value" is not expressible. That covers
+     the re-derivation of the parent (`rederiveParentStatus`), the parent's own
+     status moves caused by the round it queues, and the in_review -> in_progress
+     write on the direct Issue path; the re-parenting path and `createIssue`'s
+     parent re-derivation use the collector the same way.
+   - **The outermost owner replays after it commits, all the way up.** A
+     transition collected inside a transaction is handed to whoever committed
+     it, and the E1/E2 hook runs only then. The hook's own writes can produce a
+     further transition — the round it queues moves that parent's status, which
+     is a child event for ITS parent — and those go into the same collector, so
+     the replay is a drain loop that walks grandparent, great-grandparent, and
+     so on with no depth cap. It is bounded by a `seen` set keyed on (issue,
+     previous status, next status, task), so a parent/child status ping-pong
+     terminates; the API's `validateIssueParent` independently refuses to build
+     a cycle.
+   - **Events publish only after the COMMIT; a function that receives the queue
+     sends every outward event through it.** The rule covers
+     `comment:created`, `activity:created`, `issue:updated`, `chat:done`, the
+     task-enqueue wakeups, and delegation wakeup/return events. A caller-owned
+     transaction collects them in the commit-event queue and flushes it once it
+     has committed; on rollback the queue is dropped and nothing was ever sent.
+     Postgres is synchronous here, so an event emitted mid-transaction would
+     reach clients before the row was durable and, worse, would announce a row
+     a later ROLLBACK erases. The S1-introduced writes that follow this are
+     `child_status_after_parent_closed`, `parent_status_derived`,
+     `parent_status_held`, `child_done_parent_triggered`,
+     `child_status_parent_coalesced`, the system-comment wrapper, and the task
+     terminal activities/wakeups on a queue-carrying path.
+     `TasksRepo.resetSessionAgentLane` also requires the owner's queue. A claim
+     owns that queue through `snapshotTaskExecution`, flushes after its claim
+     transaction commits, and drops it on rollback. The store's standalone lane
+     reset wrapper owns a separate transaction and flushes after that commit.
+   - `notifyChildStatusChange` opens the single transaction for a child report.
+     The notification comment (with its Session event) and the parent's queued
+     round are written inside it; the round is created through
+     `TasksRepo.createTaskWithinTransaction`, so it still passes through the
+     same creation entry point the rest of the product uses (S2's dependency
+     gate lives there). `notifyTaskEnqueued` and the realtime `comment:created`
+     broadcast are deferred until after the COMMIT.
+   - `createSystemIssueComment` splits into a self-transactional wrapper and a
+     `WithinTransaction` variant, chosen by whether the caller already owns one;
+     its Session event uses `appendSessionEventWithinTransaction` for the same
+     reason.
+   - The task-terminal paths (`completeTask`, `failTask`, `cancelTask`,
+     `redispatchTaskWithinTransaction`, `cancelTasksByTriggerComments`,
+     `recoverOrphans`) and the organizer action facade collect their Issue
+     transitions and replay the hook after their own commit. The same holds for
+     the writers that derive an Issue status while creating or moving a task
+     (`createTask`, `startTask`, `createTaskHumanRequest` and its respond/expire
+     twins) and for the Chat / Feishu / Autopilot wrappers that create tasks
+     inside their own transactions; each one owns a collector and replays it
+     after it commits.
+   - **A hook failure does not roll back the child's status.** By the time the
+     hook runs, the child's transition is committed — that is the whole point of
+     running post-commit. The hook's own writes are atomic: a failure inside it
+     leaves no half-written round, comment or activity. The failure is visible at
+     the call site when the caller owns the write (the direct Issue path
+     rethrows, and the HTTP client sees 500) and is always logged with
+     `log.warn` by `TasksRepo.runChildStatusChanges` for the terminal paths,
+     which must not fail a completed run; `journalctl`/the `remi` log file
+     carries the line `child status hook skipped for <issue id>: <message>`.
+   - **Known compensation risk (accepted for now).** Because the status is
+     committed before the hook runs, a hook failure on the direct write path
+     answers 500 while the child's transition stays applied. A client that
+     simply repeats the request will not re-enter the terminal transition, so
+     that one parent report can be lost. There is no reliable retry in this
+     issue: the fix needs a durable outbox for the hook's own writes (record the
+     intended report in the same transaction, deliver it afterwards, retry on
+     failure) rather than a synchronous best-effort call. Tracked as a
+     follow-up candidate; the current behaviour is what the round-2/3 QA rounds
+     measured, and it is unchanged from the previous commit.
+   - This issue left `PostgresSyncDatabase.transaction()` alone. Teaching it
+     savepoints was a platform-level change with its own blast radius (every
+     caller, the worker bridge, and the SQLite backend's differing semantics),
+     and it landed later in MUL-405: a nested `transaction()` now sends
+     `SAVEPOINT` and then `RELEASE SAVEPOINT` or `ROLLBACK TO SAVEPOINT` inside
+     the outer unit. The constraint is still held by the call-site convention
+     above and by the depth-counter regression tests, which count every frame,
+     a `SAVEPOINT` included; the Postgres ones also record that no second
+     `BEGIN` or early `COMMIT` is sent (ADR 0011).
+   - Two nesting sites remain, both pre-existing on `main` and out of this
+     issue's scope: `FeishuBotRepo.submitMessage`'s steer path
+     (`feishu-bot-repo.ts`) and `MultiremiStore.updateAgent`'s role-change token
+     revoke (`store.ts`). They are recorded here rather than fixed, and are
+     tracked for a separate issue; the nesting scan in
+     `tests/unit/multiremi/pg-nesting-preload.ts` reproduces them on a clean
+     `origin/main` tree.
+   - **Main-existing in-transaction events, now recorded by the scan.** QA
+     round 4 extended `tests/unit/multiremi/pg-nesting-preload.ts` to also flag
+     every outward event published while a real `PostgresSyncDatabase` is in a
+     transaction ("transaction-internal emission"). On the branch the scan of
+     `tests/unit/multiremi/` reports **0** such emissions; on a clean
+     `4248ef07` archive the same scan reports **30** hits from exercised paths
+     that already existed on `main`:
+       - `TasksRepo.afterTaskTerminal`'s `chat:done` (`tasks-repo.ts`,
+         `emitWorkspaceEvent`) and the `task_<status>` activity it writes through
+         `StoreContext.appendIssueActivity`;
+       - `syncIssueStatusFromTaskWithinTransaction`'s `issue:updated` patch
+         where that function is reached without a queue (`startTask`'s sync,
+         `createTaskWithinTransaction`'s `todo` sync);
+       - `ensureDelegationWakeupWithinWorkspaceLock` /
+         `drainDelegationReturnsWithinWorkspaceLock`'s
+         `delegation_return_triggered` activity on the non-queue entry point;
+       - `afterTaskTerminal`'s cancel-path activity when reached from
+         `cancelTaskWithinWorkspaceLock`.
+     A stale provider Session/cursor on an Issue lane adds one more main-existing
+     hit when claim calls `snapshotTaskExecution` and resets that lane. The
+     original full scan did not execute this branch. This forward fix queues its
+     `session_agent_lane_reset` audit event until the claim commits. It also
+     queues the `parent_status_held` audit inside `updateIssueWithOutcome` and
+     the `issue_unassigned`/`task_cancelled` audits inside its unassign path or
+     `assignIssue`'s transaction. The deletion transaction passes the same queue
+     to the shared task-cancellation writer. Autopilot, Feishu ingest, and Feishu
+     bot creation transactions call `createIssueWithinTransaction` with their
+     owner queue for `issue_created`; Feishu ingest's two owners flush after
+     commit. Messaging outcome direct creation and proposal approval do the
+     same from their own transactions. The standalone `createIssue` path still
+     emits directly. These
+     entries describe historical main behavior and the forward repairs; the
+     two nesting sites remain separate work.
+     Coverage boundary: the scan's **0** only describes branches the tests
+     executed; it is not proof for optional queue parameters. Their evidence is
+     the all-caller table in the MUL-406 fifth fix-round comment, based on
+     `rg` and transaction-owner tracing. `CreateIssueCommentOptions` already
+     requires the queue for `withinTransaction: true`; its optional arm is for
+     the standalone path. The two generic activity APIs remain optional because
+     splitting their many public, standalone call sites would broaden this
+     repair; each current transaction-owned call is classified in that table.
+     The scan must be repeated
+     after adding cases that reach a new branch (that is how QA round 3's
+     closed-parent and re-derivation emissions were missed).
+   - S2's dependency gate lives in this same hook. Its automatic start
+     (`assignIssue`) opens its own transaction, so it must stay *outside* the
+     report transaction — before it, committing separately — and only its
+     returned readiness lines feed the report. Verified on a scratch merge of
+     the two branches: the combined path still measures depth 1 on Postgres.
+
+   **MUL-483 / ADR 0012 supplement (2026-09-29).** The post-commit E1/E2
+   report policy above describes the earlier implementation. Under
+   [ADR 0012](0012-unified-inbox-and-single-pending-turn.md), E2 child endings,
+   both E3 notifications, E4 decisions, delegation reports and agent mentions
+   write their inbox entries and pending-turn changes in the transaction that
+   owns the triggering state change. `sendEnvelopeWithinTransaction` delegates
+   to `ensurePendingTurnWithinTransaction`; neither opens a nested transaction.
+   A failure before COMMIT rolls back the state, inbox entry and wake together.
+   This removes the earlier compensation gap for these required reports.
+
+   The collector and commit-event queue remain required. E1 derivation and
+   required parent reports run through `notifyChildStatusChangeWithinTransaction`
+   at depth 1; recursive parent changes use the same transaction. Only E3's
+   durable automatic-start replay and optional notifications remain after the
+   outer COMMIT. The transaction owner publishes realtime events and task
+   enqueue notifications after COMMIT, and drops them on rollback. Optional
+   work must not reintroduce a savepoint inside the required write transaction.
+
+   The SQLite and real PostgreSQL regressions instrument E2, E3 and E4's outer
+   transaction and every task INSERT: `maxDepth === 1`, and each INSERT must
+   occur while the original transaction is open. Crash probes cover the
+   boundary after the inbox INSERT, after the pending-turn write and after
+   COMMIT. Existing parent guards, continuation semantics and Chat user queues
+   keep their contracts; a human comment joins queued work only according to
+   the Q-B constant defined in ADR 0012.
+9. **A batch update is pre-flighted as a whole, then written row by row.** Before
+   the first write, `batchUpdateIssues` evaluates the done rule and the
+   parent-status guard for every row and refuses the whole batch if any row would
+   be rejected,
+   returning the refused issue ids in `rejected_issue_ids`. This is what makes
+   "refused" and "partially applied" distinguishable. The per-row guard still
+   runs during the write, because a concurrent writer can move an Issue into a
+   guarded state in the window between the pre-flight and the write; that
+   residual race is accepted rather than solved with a global lock. The historic
+   behaviour of silently skipping non-guard errors (missing or inaccessible
+   rows) is unchanged, and a refusal in the write loop now surfaces as an error
+   instead of a 200.
+10. **Unchanged behaviours this ADR pins down.** Two things the second QA round
+    raised are deliberate and stay as they are:
+    - `batchUpdateIssues` still silently skips a row whose write fails for a
+      reason other than the parent-status guard or the done rule (a missing or
+      inaccessible Issue, for instance). That is the historic batch contract and
+      the `updated` count is what the caller uses; those two refusals must
+      surface. A caller should not read `updated` as "everything else succeeded".
+    - `recoverOrphans` only produces an E2 report when the orphan's failure
+      actually moves its Issue's status. A failed task whose Issue still has
+      another live round leaves that Issue where it was, so there is no child
+      ending to report and none is fabricated.
+
+## Alternatives considered
+
+- **Enforce in the HTTP layer.** The task-terminal path never goes through HTTP,
+  so guard B would not exist and MUL-383 would persist. Put the rule where both
+  writers meet.
+- **A status-machine table with per-transition rules.** The only rule that needs
+  enforcement is "parent with open children"; a general table would be a much
+  larger surface for the same behaviour, and would start rejecting transitions
+  today's users rely on.
+- **Let the parent owner close over open children with a warning comment.** Keeps
+  `done` reachable but leaves the children behind with no owner attention —
+  exactly the failure this ADR removes. Members keep an explicit, audited
+  override via `force` instead.
+- **A terminal child status instead of a re-derivation.** Would require defining
+  "finished enough" and would break the workbench surfaces that read
+  `in_review`.
+- **Drop the report when the owner is busy (status quo).** The reason the S1 issue
+  exists; the coalescing design keeps one pending round per parent while losing
+  no reports.
+
+## Consequences
+
+- **Positive:** a parent's status now matches its subtree; `in_review` means "the
+  owner's own work is done"; `done` cannot strand children; no child ending is
+  silently dropped; a busy owner receives at most one extra pending round per
+  parent no matter how many children end.
+- **Positive:** no migration, no schema change, no affected claim path
+  (`claimTask` / `claimNextTaskForRuntime` are untouched).
+- **Negative:** the guards are the first status validation for Issues, so scripts
+  and agents that used to PATCH `done` directly now finish children first or run
+  as a member. An Agent closes only a direct child of an Issue it executes; team
+  tooling that closes roots programmatically needs a member identity.
+- **Negative:** `MULTIREMI_PARENT_STATUS_GUARD` is a behavioural switch inside the
+  store; when off, guard A/B and the re-derivation are skipped but E2's
+  notifications continue.
+- **Neutral / open:** the round count is maintained by the workspace lock rather
+  than a partial unique index; a durable "one pending round per (parent, agent)"
+  constraint is left to a later issue if the lock-based guarantee proves
+  insufficient.

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { loadMultiremiConfig } from "@multiremi/config.js";
+import { taskCredential } from "../core/task-context.js";
 import {
   CliApiClient,
   CliError,
@@ -63,7 +64,7 @@ export async function clientFor(
     token: shareCredential
       ? null
       : stringOption(invocation, "token")
-        ?? process.env.MULTIREMI_TOKEN?.trim()
+        ?? taskCredential()
         ?? config.token
         ?? null,
     shareToken: shareCredential,
@@ -109,6 +110,65 @@ export function renderResource(invocation: CommandInvocation, value: unknown, co
       { header: "DETAIL", value: (row) => scalar(row.email) ?? scalar(row.url) ?? scalar(row.description) ?? "-", maxWidth: 72 },
       // Keep the full reason visible, including the model and thinking level.
       ...(hasWaitReason ? [{ header: "WAIT REASON", value: (row: Record<string, unknown>) => scalar(row.wait_reason) ?? scalar(row.waitReason) }] : []),
+    ],
+  });
+}
+
+/**
+ * `trace read` options (PR 2, ADR 0019). By default a read returns the folded
+ * turn (`view=turn`: `{turn, items}`, paged by `--cursor <next_item_cursor>`).
+ * `--raw` returns the stored event lines instead (`view=events`, paged by
+ * `--after <next_after_seq>`), which is also the only view of a v1 trace.
+ */
+export const TRACE_READ_OPTIONS: readonly CliOptionSpec[] = [
+  { name: "raw", type: "boolean", description: "Read the raw stored event lines (view=events); also shows v1 traces" },
+  { name: "cursor", type: "integer", valueName: "index", description: "Item cursor of the folded turn (next_item_cursor)", conflictsWith: ["after"] },
+  { name: "after", type: "integer", valueName: "seq", description: "Exclusive event cursor (next_after_seq); requires --raw", conflictsWith: ["cursor"] },
+  { name: "limit", type: "integer", valueName: "count", description: "Maximum items, or events with --raw" },
+];
+
+/** The trace route query for {@link TRACE_READ_OPTIONS}; a cursor of the other view is a usage error. */
+export function traceReadQuery(invocation: CommandInvocation, afterFallback: number | null = null): Record<string, string | number | null> {
+  const raw = invocation.options.raw === true;
+  const after = integerOption(invocation, "after") ?? afterFallback;
+  const cursor = integerOption(invocation, "cursor");
+  if (!raw && after !== null) {
+    throw new CliError("usage", "--after pages raw event lines: add --raw, or page the folded turn with --cursor <next_item_cursor>");
+  }
+  if (raw && cursor !== null) {
+    throw new CliError("usage", "--cursor pages the folded turn: with --raw, page by --after <next_after_seq>");
+  }
+  const limit = integerOption(invocation, "limit");
+  return raw ? { view: "events", after_seq: after, limit } : { view: "turn", item_cursor: cursor, limit };
+}
+
+/**
+ * Render a trace page: JSON prints the whole page (`{turn, items, ...}` or
+ * `{events, ...}`), JSONL prints one item or one raw line per line, and the
+ * table lists the items or lines.
+ */
+export function renderTraceRead(invocation: CommandInvocation, value: unknown): void {
+  const rows = (input: unknown): Record<string, unknown>[] => {
+    const page = (input ?? {}) as Record<string, unknown>;
+    if (Array.isArray(page.items)) return page.items as Record<string, unknown>[];
+    if (Array.isArray(page.events)) return page.events as Record<string, unknown>[];
+    return [page];
+  };
+  const item = (row: Record<string, unknown>): Record<string, unknown> =>
+    row.item && typeof row.item === "object" ? row.item as Record<string, unknown> : row;
+  new CliRenderer().render(value ?? null, {
+    mode: outputMode(invocation),
+    rows,
+    emptyMessage: "No trace items.",
+    columns: [
+      { header: "ID", value: (row) => scalar(row.id) ?? scalar(row.seq) ?? "-", maxWidth: 32 },
+      { header: "TYPE", value: (row) => scalar(row.type) ?? "-", maxWidth: 20 },
+      { header: "STATUS", value: (row) => scalar(item(row).status) ?? "-", maxWidth: 12 },
+      { header: "DETAIL", value: (row) => {
+        const target = item(row);
+        return scalar(target.command) ?? scalar(target.title) ?? scalar(target.text) ?? scalar(target.tool)
+          ?? scalar(target.message) ?? scalar(row.item_id) ?? scalar(row.content) ?? "-";
+      }, maxWidth: 96 },
     ],
   });
 }

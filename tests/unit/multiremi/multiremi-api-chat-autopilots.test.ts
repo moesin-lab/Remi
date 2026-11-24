@@ -1,15 +1,18 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
+import { requestMessageBody, sentTask } from "./unified-test-paths.js";
 // Chat session/message routes, autopilot API + public webhook triggering,
 // webhook rate limiting, and scheduler state sync.
-import { afterEach, describe, expect, it } from "bun:test";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createLocalSnapshotStore as createSnapshotStore, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi API — chat sessions and autopilot triggers", () => {
   it("serves chat session and message endpoints", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex" });
     const app = createMultiremiApp({ store });
@@ -22,30 +25,30 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     expect(created.status).toBe(201);
     const createdBody = await created.json();
 
-    const sent = await app.request(`/api/multiremi/chats/${createdBody.session.id}/messages`, {
+    const sent = await app.request(`/api/sessions/${createdBody.session.id}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body: "Hello" }),
+      body: JSON.stringify(requestMessageBody(store, { body: "Hello" }, { type: "agent", ref: store.getChatSession(createdBody.session.id)!.agentId })),
     });
-    expect(sent.status).toBe(201);
+    expect(sent.status).toBe(200);
     const sentBody = await sent.json();
-    expect(sentBody.task.chatSessionId).toBe(createdBody.session.id);
+    expect(sentTask(store, sentBody).chatSessionId).toBe(createdBody.session.id);
 
     const detail = await app.request(`/api/multiremi/chats/${createdBody.session.id}`);
     const detailBody = await detail.json();
     expect(detailBody.messages[0].body).toBe("Hello");
 
-    expect(store.claimTask(runtime.id)?.id).toBe(sentBody.task.id);
-    store.startTask(sentBody.task.id);
-    store.completeTask(sentBody.task.id, { output: "Hi there", sessionId: "sess-chat" });
-    const messages = await app.request(`/api/multiremi/chats/${createdBody.session.id}/messages`);
-    expect((await messages.json()).messages.map((message: any) => message.role)).toEqual(["user", "assistant"]);
+    expect(store.claimTask(runtime.id)?.id).toBe(sentTask(store, sentBody).id);
+    store.startTask(sentTask(store, sentBody).id);
+    store.completeTask(sentTask(store, sentBody).id, { output: "Hi there", sessionId: "sess-chat" });
+    const messages = await app.request(`/api/sessions/${createdBody.session.id}/messages`);
+    expect((await messages.json()).messages.map((message: any) => message.sender_type)).toEqual(["member", "agent"]);
   });
 
   it("triggers autopilots through API and webhook endpoints", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Webhook triage",
       assigneeId: agent.id,
       triggerKind: "webhook",
@@ -254,8 +257,8 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     expect((await replay.json()).delivery.replayedFromDeliveryId).toBe(webhookBody.deliveryId);
   });
 
-  it("hides every Autopilot id surface from callers in another workspace", async () => {
-    const store = createStore();
+  it("shares Autopilot access with humans while rejecting credentials bound to another workspace", async () => {
+    const store = createSnapshotStore();
     const callerWorkspace = store.createWorkspace({ name: "Caller", slug: "caller" });
     const targetWorkspace = store.createWorkspace({ name: "Target", slug: "target" });
     store.createWorkspaceMember({
@@ -275,7 +278,7 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
       provider: "codex",
       workspaceId: targetWorkspace.id,
     });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Target automation",
       assigneeId: agent.id,
       workspaceId: targetWorkspace.id,
@@ -283,7 +286,14 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     });
     const trigger = store.createAutopilotTrigger(autopilot.id, { kind: "api" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
-    const auth = { Authorization: `Bearer ${callerToken.token}` };
+    const humanRead = await app.request(`/api/multiremi/autopilots/${autopilot.id}`, {
+      headers: { Authorization: `Bearer ${callerToken.token}` },
+    });
+    expect(humanRead.status).toBe(200);
+    const workspaceToken = await store.createAccessToken({
+      name: "Workspace-bound automation", type: "pat", workspaceId: callerWorkspace.id, userId: "local",
+    });
+    const auth = { Authorization: `Bearer ${workspaceToken.token}` };
     const json = { ...auth, "Content-Type": "application/json" };
     const requests: Array<[string, RequestInit]> = [
       [`/api/multiremi/autopilots/${autopilot.id}`, { headers: auth }],
@@ -324,9 +334,9 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
   });
 
   it("rate limits public autopilot webhooks by token and source bucket", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
-    const autopilot = store.createAutopilot({ title: "Webhook limited", assigneeId: agent.id, triggerKind: "webhook" });
+    const autopilot = createResponsibleTestAutopilot(store, { title: "Webhook limited", assigneeId: agent.id, triggerKind: "webhook" });
     store.updateAutopilot(autopilot.id, { status: "paused" });
     const trigger = store.createAutopilotTrigger(autopilot.id, { kind: "webhook", label: "Limited webhook" });
 
@@ -353,7 +363,7 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     expect(await overTokenLimit.json()).toEqual({ error: "rate limit exceeded" });
 
     const ipLimitedApp = createMultiremiApp({
-      store: createStore(),
+      store: createSnapshotStore(),
       webhookRateLimit: false,
       webhookIpRateLimit: { limit: 2, windowMs: 60_000 },
     });
@@ -375,7 +385,7 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
   });
 
   it("syncs scheduler state through autopilot API updates", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const scheduler = new MultiremiScheduler({ store });
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
     const app = createMultiremiApp({ store, scheduler });
@@ -411,9 +421,10 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
   });
 
   it("validates and serializes trigger_issue system event configuration", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "codex" });
-    const issue = store.createIssue({ title: "Completed evidence", status: "done" });
+    const issue = createResponsibleTestIssue(store, { title: "Completed evidence", assigneeType: "agent", assigneeId: agent.id });
+    acceptTestIssueDelivery(store, issue.id);
     const app = createMultiremiApp({ store });
 
     const created = await app.request("/api/autopilots", {
@@ -495,3 +506,8 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     });
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

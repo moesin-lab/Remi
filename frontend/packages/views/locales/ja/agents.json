@@ -128,7 +128,7 @@
   "fallback": {
     "model_label": "予備モデル",
     "thinking_label": "予備モデルの推論強度",
-    "description": "主モデルのゲートウェイリソースが利用できない場合にのみ、現在のタスクを引き継ぎます。",
+    "description": "主モデル、モデルサービス、または実行可能な Runtime が利用できない場合に、現在のタスクを引き継ぎます。",
     "unconfigured": "未設定",
     "same_as_primary": "主モデルとは異なるモデルを選択してください",
     "clear": "予備モデルを解除",
@@ -137,6 +137,9 @@
     "switch_count": "切り替え {{count}} 回",
     "reason_gateway": "ゲートウェイリソースが利用不可",
     "reason_no_account": "利用可能なゲートウェイアカウントなし",
+    "reason_model_unavailable": "主モデルが利用不可",
+    "reason_server": "モデルプロバイダーのサーバーエラー",
+    "reason_queued": "主モデルをサポートする Runtime なし",
     "reason_unknown": "リソースが利用不可"
   },
   "inspector": {
@@ -200,7 +203,8 @@
     "label": "モデル",
     "default_provider": "デフォルト（プロバイダー）",
     "discovery_failed": "検出に失敗しました",
-    "clear_full": "選択をクリア（プロバイダーのデフォルトを使用）"
+    "clear_full": "選択をクリア（プロバイダーのデフォルトを使用）",
+    "blocked_by_policy": "このモデルはグループポリシーでブロックされています。別のモデルを選択してください。"
   },
   "tabs": {
     "activity": "アクティビティ",
@@ -279,7 +283,7 @@
       "unsaved_changes": "保存していない変更"
     },
     "instructions": {
-      "intro": "このエージェントのアイデンティティと作業スタイルを定義します。すべてのタスクでエージェントのコンテキストに注入されます。Markdown に対応しています。",
+      "intro": "このエージェントのアイデンティティと作業スタイルを定義します。このエージェントが実行するすべてのセッション（Chat と Issue）の AGENTS.md の先頭に書き込まれ、毎ターン適用されます。Markdown に対応しています。",
       "placeholder": "このエージェントの役割、専門分野、作業スタイルを定義してください。\n\n# 例\nあなたは React と TypeScript を専門とするフロントエンドエンジニアです。\n\n## 作業スタイル\n- 小さく焦点を絞った PR を作成する — 論理的な変更ごとに1コミット\n- 継承よりコンポジションを優先する\n- 新しいコンポーネントには必ずユニットテストを追加する\n\n## 制約\n- 明示的な承認なしに shared/ の型を変更しない\n- features/ の既存のコンポーネントパターンに従う"
     },
     "env": {
@@ -345,7 +349,7 @@
     },
     "integrations": {
       "intro": "このエージェントを外部のチャットプラットフォームに接続し、普段使っているツールから直接やり取りできるようにします。",
-      "members_note": "エージェントに Lark Bot を紐付けできるのはワークスペースのオーナーと管理者のみです。接続済みの Bot は「設定 → 連携」で確認できます。"
+      "members_note": "エージェントに Lark Bot を紐付けできるのはワークスペースのオーナーと管理者のみです。接続済みの Bot は「IM プラットフォーム → Feishu → ボット」で確認できます。"
     },
     "activity": {
       "section_now": "現在",
@@ -421,6 +425,17 @@
   },
   "transcript": {
     "dialog_title": "エージェント実行トランスクリプト",
+    "view_live": "実行過程をリアルタイムで表示",
+    "view_finished": "終了した実行過程を表示",
+    "trace_loading": "実行過程を読み込み中…",
+    "trace_live": "リアルタイム更新中",
+    "trace_finished": "実行終了 · {{count}} 件のイベント",
+    "trace_unreachable": "実行環境 {{name}} はオフラインです。記録を一時的に取得できません",
+    "trace_last_seen": "最終オンライン {{time}}",
+    "trace_lost": "実行記録は失われました",
+    "trace_not_found": "実行記録がありません",
+    "trace_failed": "実行記録を読み込めませんでした",
+    "trace_retry": "再試行",
     "execution_view": "実行過程",
     "prompt_view": "入力プロンプト",
     "copy_prompt": "プロンプトをコピー",
@@ -428,11 +443,16 @@
     "prompt_loading": "入力プロンプトを読み込み中...",
     "prompt_not_recorded": "入力プロンプトは記録されていません。旧バージョンのランタイムで実行された可能性があります。",
     "prompt_load_failed": "入力プロンプトを読み込めませんでした。後でもう一度お試しください。",
+    "prompt_sent_title": "このターンでエージェントに送信した内容",
+    "prompt_messages_fallback": "この実行では送信した原文が記録されていないため、このターンのメッセージを表示しています。",
+    "prompt_steers": "ターン中に送信",
+    "session_instructions": "セッション設定",
+    "session_instructions_note": "この実行時点のセッションの AGENTS.md のうち、Remi が書き込んだ部分です。ローカルワークスペースの指示ファイルはマシン上に残り、ここには表示されません。",
     "status_queued": "待機中",
     "status_dispatched": "待機中",
     "status_waiting_local_directory": "ローカルディレクトリを待機中",
     "status_running": "実行中",
-    "status_awaiting_human": "レビュー待ち",
+    "status_awaiting_human": "回答待ち",
     "status_completed": "完了",
     "status_failed": "失敗",
     "status_cancelled": "キャンセル済み",
@@ -447,21 +467,20 @@
     "final_answer": "最終回答",
     "copy_answer": "コピー",
     "tokens_context": "{{value}} コンテキスト",
+    "context_usage": "コンテキスト {{value}}",
     "waiting_dispatch": "利用可能なランタイムを待機中...",
     "waiting_start": "タスクの開始を待機しています...",
     "waiting_local_directory": "ローカルディレクトリが利用可能になるのを待機中...",
-    "waiting_human": "レビュー待ち...",
+    "waiting_human": "回答待ち...",
     "waiting_events": "イベントを待機中...",
     "no_data": "記録された実行データがありません。",
     "sort_label": "並び替え",
     "sort_chronological": "古い順",
     "sort_newest_first": "新しい順",
     "plan": "計画",
-    "command_not_recorded": "コマンドは記録されていません（以前のバージョンのタスク）",
-    "tool_running": "実行中…",
     "nested_steps_other": "{{count}} ステップ",
-    "collab_activity_hidden": "サブエージェントの内部処理は記録されません",
     "step_not_finished": "未完了",
+    "steer_not_delivered": "未配信",
     "human_answer_label": "回答：",
     "human_status": "ステータス：{{value}}",
     "human_responded_by": "応答者：{{value}}"

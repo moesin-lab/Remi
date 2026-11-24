@@ -1,16 +1,17 @@
+import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "smol-toml";
 import { MultiremiStore } from "@multiremi/store.js";
-import { startMultiremiServer } from "@multiremi/api.js";
-import { MultiremiDaemon } from "@multiremi/daemon.js";
+import { startMultiremiServer } from "../fixtures/daemon-protocol.js";
+import { TestMultiremiDaemon as MultiremiDaemon } from "../fixtures/daemon-protocol.js";
 
 it("delivers encrypted Runtime profile keys to task execution while preserving the base home", async () => {
   const root = mkdtempSync(join(tmpdir(), "remi-profile-daemon-"));
-  const db = new Database(":memory:");
+  const db = openSqliteDatabase(":memory:");
   const store = new MultiremiStore(db);
   store.ensureLocalWorkspace();
   const originalKey = process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY;
@@ -21,6 +22,7 @@ it("delivers encrypted Runtime profile keys to task execution while preserving t
   const server = startMultiremiServer({ store, scheduler: null, authToken: "profile-test-master", hostname: "127.0.0.1", port: 0 });
   const observations: { url: unknown; model: unknown; key: string | undefined; home: string }[] = [];
   const daemon = new MultiremiDaemon({
+    sshMeshManager: disabledSshMeshRuntime(),
     serverUrl: `http://127.0.0.1:${server.port}`, token: daemonToken.token, daemonId: "profile-daemon", runtimeName: "Profile daemon", provider: "codex", workspaceId: "local",
     daemonPort: 0, pollIntervalMs: 20, gcEnabled: false, workspacesRoot: join(root, "workspaces"), repoCacheRoot: join(root, "cache"), inProcessRuntimeModelDiscoveryEnabled: true,
     providerFactory: options => ({
@@ -70,7 +72,9 @@ it("delivers encrypted Runtime profile keys to task execution while preserving t
   } finally {
     daemon.stop();
     await run.catch(() => {});
-    await server.stop(true);
+    await daemon.daemonProtocolClient().drain();
+    // Bun 1.3.14 can retain closed WebSockets in the stop promise.
+    server.stop(true);
     db.close();
     if (originalKey === undefined) delete process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY; else process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = originalKey;
     if (originalHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = originalHome;

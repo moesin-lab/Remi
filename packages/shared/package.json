@@ -4,7 +4,15 @@
   "type": "module",
   "private": true,
   "exports": {
+    "./agent-execution": "./src/agent-execution.ts",
+    "./turn-trace": "./src/turn-trace.ts",
+    "./command-parse": "./src/command-parse.ts",
+    "./trace-step-copy": "./src/trace-step-copy.ts",
+    "./trace-file-change": "./src/trace-file-change.ts",
+    "./background-tasks": "./src/background-tasks.ts",
     "./*": "./src/*"
   },
-  "dependencies": {}
+  "dependencies": {
+    "diff": "^8.0.4"
+  }
 }

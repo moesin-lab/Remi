@@ -37,15 +37,17 @@
  * preserved, fields are never dropped.
  */
 
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase, deserializeSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { listAgentTemplates } from "@multiremi/api/agent-templates.js";
-import { createMultiremiApp } from "@multiremi/api.js";
+import { createMultiremiApp, retiredDaemonRouteHandler } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { VERSION } from "@shared/version.js";
+import { reportFrame } from "../tests/fixtures/report-session.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 export const GOLDEN_PATH = join(REPO_ROOT, "scripts", "api-routes.golden.json");
@@ -60,13 +62,15 @@ export const SNAPSHOT_STATUS_ONLY_ROUTES = new Set([
   "GET /ws",
   "GET /api/daemon/ws",
   "GET /api/realtime/ws",
+  "GET /api/trace/ws",
 ]);
 
 const NORMALIZER_RULES = [
   "ISO-8601 timestamps (anywhere in a string) -> \"<timestamp>\"",
   "local timestamp ids (local[-contact|-lark]-<epoch>) -> \"<timestamp>\" suffix",
-  "epoch-millisecond numbers (1.5e12..4e12) and *_ms/duration/elapsed/uptime/latency numeric keys -> 0",
+  "epoch-millisecond numbers (1.5e12..4e12) and *_ms/duration/elapsed/uptime/latency/total_seconds numeric keys -> 0",
   "absolute machine paths (repo root, $HOME, $TMPDIR, upload dir) -> \"<repo>\"/\"<home>\"/\"<tmp>\"/\"<uploads>\"",
+  "root_hint path separators -> / (portable redacted storage paths)",
   "hostname in URL/UNC authorities -> \"<hostname>\"; username in Unix/Windows home paths -> \"<user>\"",
   "package VERSION -> \"<version>\"",
   "non-JSON bodies larger than 2000 bytes -> { __body__: { contentType, bytes, sha256 } }",
@@ -149,11 +153,14 @@ function installDeterminism(): () => void {
 
   setEnv("MULTIREMI_TOKEN", undefined); // auth middleware off: snapshot handler bodies
   setEnv("MULTIREMI_DATABASE_URL", undefined); // never touch a real Postgres
+  setEnv("MULTIREMI_API_ROLE", undefined); // capture the baseline without an inherited role
   setEnv("NODE_ENV", "test");
+  setEnv("MULTIREMI_STATE_DIR", join(SNAPSHOT_TMP, "state"));
+  setEnv("MULTIREMI_MIGRATION_REPORT_DIR", join(SNAPSHOT_TMP, "reports", "migrations"));
   setEnv("MULTIREMI_UPLOAD_DIR", UPLOAD_DIR);
   setEnv("MULTIREMI_RELEASE_DIR", RELEASE_DIR);
   setEnv("MULTIREMI_SCRIPTS_DIR", SCRIPTS_DIR);
-  setEnv("MULTIREMI_RELEASE_REPO", "Grassgod/Remi");
+  setEnv("MULTIREMI_RELEASE_REPO", "moesin-lab/Remi");
   setEnv("MULTIREMI_PUBLIC_URL", "https://snapshot.invalid");
   setEnv("MULTIREMI_ALLOW_EMAIL_CODE_LOGIN", "1");
   setEnv("MULTIREMI_LOCAL_AUTH_CODE", "424242");
@@ -353,10 +360,15 @@ export function scrubString(value: string, identity: SnapshotMachineIdentity = {
   return out;
 }
 
-function normalize(value: unknown, key = ""): unknown {
-  if (typeof value === "string") return scrubString(value);
+export function normalize(value: unknown, key = ""): unknown {
+  if (typeof value === "string") {
+    // root_hint is already redacted (e.g. ...\\session-archives), so it does
+    // not match the absolute-path scrubber. Keep this OS normalization scoped
+    // to the path field; backslashes in ordinary response text are meaningful.
+    return scrubString(key === "root_hint" ? value.replaceAll("\\", "/") : value);
+  }
   if (typeof value === "number") {
-    if (TIME_KEY_RE.test(key) || MS_KEY_RE.test(key)) return 0;
+    if (TIME_KEY_RE.test(key) || MS_KEY_RE.test(key) || key === "total_seconds") return 0;
     if (Number.isFinite(value) && value >= 1_500_000_000_000 && value <= 4_000_000_000_000) return 0;
     return value;
   }
@@ -402,8 +414,9 @@ export interface RouteRef {
 export function snapshotRouteTable(app: any): RouteRef[] {
   const seen = new Set<string>();
   const out: RouteRef[] = [];
-  for (const route of app.routes as RouteRef[]) {
+  for (const route of app.routes as (RouteRef & { handler?: unknown })[]) {
     if (route.method === "ALL") continue; // middleware, not a route
+    if (route.handler === retiredDaemonRouteHandler) continue; // 426 compatibility, not a live API route
     const key = `${route.method} ${route.path}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -454,6 +467,9 @@ export interface SeedRefs {
   skillId: string;
   skillFileId: string;
   runtimeId: string;
+  executionProfileId: string;
+  executionEndpointId: string;
+  executionGroupId: string;
   projectId: string;
   repositoryId: string;
   projectResourceId: string;
@@ -471,6 +487,7 @@ export interface SeedRefs {
   chatSessionId: string;
   chatMessageId: string;
   taskId: string;
+  turnId: string;
   autopilotId: string;
   triggerId: string;
   webhookToken: string;
@@ -480,8 +497,10 @@ export interface SeedRefs {
   inboxItemId: string;
   inboxMemberId: string;
   humanRequestId: string;
+  decisionId: string;
   runtimeModelRequestId: string;
   dirScanRequestId: string;
+  gcRunRequestId: string;
   localSkillListRequestId: string;
   localSkillImportRequestId: string;
   runtimeUpdateRequestId: string;
@@ -635,11 +654,16 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     parentIssueId: issue.id,
     createdBy: member.id,
   });
+  // MUL-400 E3: the snapshot's `blocks` row means the blocked issue waits on
+  // `issue`, so this one carries the unmet prerequisite. The assignment below
+  // must therefore stay a plain owner change (gate 1 records it and skips the
+  // dispatch), and the progress/children rows exercise the waiting buckets.
   const blockedIssue = store.createIssue({
     id: "iss_snapshot_blocked",
     title: "Snapshot blocked issue",
     workspaceId,
     createdBy: member.id,
+    status: "backlog",
   });
   store.attachLabelToIssue(issue.id, label.id);
   store.setIssueMetadataKey(issue.id, "snapshot_key", "snapshot_value");
@@ -686,6 +710,41 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     kind: "permission",
     payload: { tool: "Bash", command: "ls" },
   });
+  // MUL-410: an answered decision with a revision trail. Inserted directly so
+  // the fixture stays deterministic: `createIssueDecision` would queue a round
+  // and notify, and this row only exercises the read model.
+  const decisionId = "dcs_snapshot";
+  const decisionHistory = [
+    { answererType: "agent", answererId: agent.id, answer: "Merge after CI", reason: "Checks passed",
+      overturn: "A member can reverse this if QA fails", answeredAt: "2026-01-01T00:00:01.000Z" },
+    { answererType: "member", answererId: member.id, answer: "Hold for QA", reason: "Human review",
+      overturn: null, answeredAt: "2026-01-01T00:00:02.000Z" },
+  ];
+  db.run(
+    `INSERT INTO multiremi_issue_decisions (
+      id, workspace_id, issue_id, source_issue_id, source_task_id, kind, title, body, options,
+      status, answer, answered_by_member_id, answered_at, history, owner_agent_id, created_by_agent_id,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'answered', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      decisionId,
+      workspaceId,
+      issue.id,
+      issue.id,
+      task.id,
+      "merge",
+      "Snapshot merge decision",
+      "Snapshot decision body",
+      JSON.stringify(decisionHistory[1]),
+      member.id,
+      decisionHistory[1]!.answeredAt,
+      JSON.stringify(decisionHistory),
+      agent.id,
+      agent.id,
+      "2026-01-01T00:00:00.000Z",
+      decisionHistory[1]!.answeredAt,
+    ],
+  );
   store.completeTask(task.id, { result: "done", summary: "Snapshot task complete" } as any);
 
   // Created after the task above: the issue is assigned to `agent`, so this
@@ -695,6 +754,16 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     authorType: "member",
     authorId: member.id,
     body: "Snapshot comment body",
+  });
+  // The comment queues another issue task, so its request remains pending
+  // while the completed task's request exercises terminal cancellation.
+  const waitingTask = store.listTasksForIssue(issue.id).find((entry) => entry.id !== task.id && entry.status === "queued");
+  if (!waitingTask) throw new Error("Snapshot comment did not queue a task");
+  store.createTaskHumanRequest({
+    id: "hrq_snapshot_waiting",
+    taskId: waitingTask.id,
+    kind: "permission",
+    payload: { tool: "Bash", command: "ls" },
   });
   store.addCommentReaction(comment.id, { actorType: "member", actorId: member.id, emoji: "eyes" });
 
@@ -754,9 +823,10 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
 
   const modelRequest = store.createRuntimeModelListRequest(runtime.id);
   const dirScan = store.createRuntimeDirectoryScanRequest(runtime.id, { root: "/snapshot", maxDepth: 2, mode: "scan" });
+  const gcRun = store.createRuntimeGcRunRequest(runtime.id, { mode: "dry_run", requestedBy: member.userId ?? member.id });
   const localSkillList = store.createRuntimeLocalSkillListRequest(runtime.id);
   const localSkillImport = store.createRuntimeLocalSkillImportRequest(runtime.id, { skillKey: "snapshot-skill", name: "Snapshot skill" });
-  const runtimeUpdate = store.createRuntimeUpdateRequest(runtime.id, { targetVersion: "9.9.9", scope: "agent" as any });
+  const runtimeUpdate = store.createRuntimeUpdateRequest(runtime.id, { targetVersion: "9.9.9", scope: "acp" });
   const runtimeCommandRequestId = "rcm_snapshot";
   const botMenuRequest = store.createBotMenuPublishRequest(runtime.id, {
     workspaceId,
@@ -804,13 +874,29 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
   const invitation = store.createWorkspaceInvitation(workspaceId, { email: "invitee@snapshot.invalid", role: "member" });
 
   store.createFeedback({ id: "fbk_snapshot", message: "Snapshot feedback", workspaceId, userId: user.id, memberId: member.id });
-  // Assigning to the local user is what fills the inbox the API reads for an
-  // unauthenticated request (compatibilityInboxMemberId -> "local").
+  // Explicit historical member assignment preserves legacy inbox reads. New
+  // execution assignment rejects members; this seed is not a new API write.
   const inboxMemberId = store.listWorkspaceMembers(workspaceId).find((entry) => entry.userId === "local")?.id ?? member.id;
-  store.assignIssue(blockedIssue.id, { assigneeType: "member", assigneeId: inboxMemberId } as any);
+  db.run("UPDATE multiremi_issues SET assignee_type='member', assignee_id=? WHERE id=?", [inboxMemberId, blockedIssue.id]);
+  db.run("INSERT INTO multiremi_inbox_items (id,workspace_id,issue_id,member_id,recipient_id,type,title,body,created_at) VALUES (?,?,?,?,?,'issue_assigned',?,?,?)", ["inb_snapshot_assignment", workspaceId, blockedIssue.id, inboxMemberId, inboxMemberId, `${blockedIssue.key} assigned to you`, blockedIssue.title, "2026-01-01T00:00:00.000Z"]);
   const inboxItem = store.listInboxItems(inboxMemberId)[0];
 
+  const executionProfile = store.saveExecutionProfile(workspaceId, {
+    name: "Snapshot connection", provider: "claude",
+    profile: { name: "snapshot", base_url: "https://models.snapshot.invalid", model: "claude-sonnet-4", auth_mode: "env", env_key: "REMI_CLAUDE_SNAPSHOT_KEY" },
+  }, "ep_snapshot");
+  const executionGroup = store.saveExecutionGroup(workspaceId, {
+    name: "Snapshot group", provider: "claude", profile_id: executionProfile.id, runtime_ids: [runtime.id],
+  }, "eg_snapshot");
+  const executionEndpoint = store.saveExecutionEndpoint(workspaceId, {
+    name: "Snapshot endpoint", connection: { base_url: "https://models.snapshot.invalid",
+      protocols: ["openai-responses", "anthropic-messages"], auth_mode: "env", env_key: "REMI_ENDPOINT_SNAPSHOT_KEY", auth_header: "bearer" },
+  }, "ep_endpoint_snapshot");
+
   return {
+    executionProfileId: executionProfile.id,
+    executionEndpointId: executionEndpoint.id,
+    executionGroupId: executionGroup.id,
     workspaceId,
     otherWorkspaceId: other.id,
     userId: user.id,
@@ -850,6 +936,7 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     chatSessionId: chatSession.id,
     chatMessageId: (chatMessage as any)?.message?.id ?? (chatMessage as any)?.id ?? "msg_snapshot",
     taskId: task.id,
+    turnId: store.getTurnForAttempt(task.id)!.id,
     autopilotId: autopilot.id,
     triggerId: trigger.id,
     webhookToken: (trigger as any).webhookToken ?? (trigger as any).webhook_token ?? "wht_snapshot",
@@ -859,8 +946,10 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     inboxItemId: inboxItem?.id ?? "inb_snapshot",
     inboxMemberId,
     humanRequestId: (humanRequest as any).id ?? (humanRequest as any).requestId ?? "hrq_snapshot",
+    decisionId,
     runtimeModelRequestId: (modelRequest as any).id ?? (modelRequest as any).requestId,
     dirScanRequestId: (dirScan as any).id ?? (dirScan as any).requestId,
+    gcRunRequestId: gcRun.id,
     localSkillListRequestId: (localSkillList as any).id ?? (localSkillList as any).requestId,
     localSkillImportRequestId: (localSkillImport as any).id ?? (localSkillImport as any).requestId,
     runtimeUpdateRequestId: (runtimeUpdate as any).id ?? (runtimeUpdate as any).requestId,
@@ -895,9 +984,14 @@ const ID_BY_COLLECTION: Record<string, keyof SeedRefs> = {
   runs: "knowledgeRunId",
   submissions: "knowledgeSubmissionId",
   runtimes: "runtimeId",
+  "execution-profiles": "executionProfileId",
+  "execution-endpoints": "executionEndpointId",
+  "execution-groups": "executionGroupId",
   skills: "skillId",
   squads: "squadId",
   tasks: "taskId",
+  messages: "humanRequestId",
+  turns: "turnId",
   tokens: "tokenId",
   workspaces: "workspaceId",
 };
@@ -905,6 +999,7 @@ const ID_BY_COLLECTION: Record<string, keyof SeedRefs> = {
 const BY_NAME: Record<string, keyof SeedRefs> = {
   attachmentId: "attachmentId",
   chatSessionId: "chatSessionId",
+  decisionId: "decisionId",
   dependencyId: "dependencyId",
   deliveryId: "deliveryId",
   invitationId: "invitationId",
@@ -919,6 +1014,7 @@ const BY_NAME: Record<string, keyof SeedRefs> = {
   provisionId: "runtimeProvisionId",
   squadId: "squadId",
   taskId: "taskId",
+  task_id: "taskId",
   triggerId: "triggerId",
   updateId: "runtimeUpdateRequestId",
   workspaceId: "workspaceId",
@@ -927,6 +1023,8 @@ const BY_NAME: Record<string, keyof SeedRefs> = {
 function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
   if (name === "id" && pattern.startsWith("/api/runtime-workspaces/")) return "rws_snapshot";
   switch (name) {
+    case "number":
+      return "42";
     case "digest":
       return "0".repeat(64);
     case "versionId":
@@ -943,6 +1041,10 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       return "sce_snapshot";
     case "sourceId":
       return pattern.includes("/messaging/") ? "msrc_snapshot" : "fsrc_snapshot";
+    case "threadId":
+      return "00000000-0000-4000-8000-000000000001";
+    case "requestId":
+      return "00000000-0000-4000-8000-000000000002";
     case "messageId":
       return "fmsg_snapshot";
     case "externalMessageId":
@@ -975,8 +1077,6 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       return "agent";
     case "participantId":
       return refs.agentId;
-    case "archiveId":
-      return "sar_snapshot";
     case "requestId":
       if (pattern.includes("/human-requests/")) return refs.humanRequestId;
       if (pattern.includes("/bot-menu/")) return refs.botMenuRequestId;
@@ -984,6 +1084,7 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       if (pattern.includes("/local-skills/import/")) return refs.localSkillImportRequestId;
       if (pattern.includes("/local-skills/")) return refs.localSkillListRequestId;
       if (pattern.includes("/directory-scans/")) return refs.dirScanRequestId;
+      if (pattern.includes("/gc-runs/")) return refs.gcRunRequestId;
       if (pattern.includes("/models/")) return refs.runtimeModelRequestId;
       break;
     case "sessionId":
@@ -993,6 +1094,8 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       if (pattern.includes("/lark/install/")) return "lark_snapshot_session";
       if (pattern.includes("/cloud-billing/")) return "cs_snapshot";
       if (pattern.includes("/messaging/")) return "mauth_snapshot";
+      // The follow-up queue exists only in a Chat (ADR 0020).
+      if (pattern.startsWith("/api/sessions/:sessionId/queue")) return refs.chatSessionId;
       if (pattern.includes("/issues/") || pattern.includes("/sessions/")) {
         return pattern.includes("/chat/sessions/") || pattern.includes("/chat-sessions/")
           ? refs.chatSessionId
@@ -1020,6 +1123,14 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
 /** GET routes whose handler needs a query string to return a real body. */
 function getQuery(pattern: string, refs: SeedRefs): string {
   switch (pattern) {
+    case "/api/execution-profiles":
+    case "/api/execution-profiles/:id":
+    case "/api/execution-endpoints":
+    case "/api/execution-endpoints/:id":
+    case "/api/execution-endpoints/:id/catalog":
+    case "/api/execution-groups":
+    case "/api/execution-groups/:id":
+      return `?workspace_id=${encodeURIComponent(refs.workspaceId)}`;
     case "/api/issues/search":
     case "/api/multiremi/issues/search":
     case "/api/projects/search":
@@ -1067,7 +1178,17 @@ class Recorder {
   readonly covered = new Set<string>();
   private step = 0;
 
-  constructor(private readonly app: any, private readonly routes: RouteRef[], private readonly family: string) {}
+  constructor(private app: any, private readonly routes: RouteRef[], private readonly family: string,
+    private readonly store: MultiremiStore) {}
+
+  enableAuthentication(token: string): void {
+    this.app = createMultiremiApp({ store: this.store, authToken: token });
+  }
+
+  async report(type: string, payload: Record<string, unknown>): Promise<void> {
+    const res = await reportFrame(this.store, type, payload);
+    if (res.ok !== true) throw new Error(`Snapshot seed ${type} failed: ${res.code}`);
+  }
 
   async call(method: string, path: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
     const [rawPath] = path.split("?");
@@ -1104,16 +1225,19 @@ class Recorder {
     return { status: response.status, body: parsed };
   }
 
-  json(method: string, path: string, body: unknown): Promise<{ status: number; body: any }> {
+  json(method: string, path: string, body: unknown, token?: string): Promise<{ status: number; body: any }> {
     return this.call(method, path, {
       body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     });
   }
 }
 
 async function buildApp(
-  db: Database = new Database(":memory:"),
+  // Declare the backend: the store runs migrations immediately, and an
+  // inherited MULTIREMI_DATABASE_URL must not turn this SQLite fixture into a
+  // Postgres migration (MUL-407).
+  db: Database = openSqliteDatabase(":memory:"),
 ): Promise<{ app: any; store: MultiremiStore; db: Database; refs: SeedRefs }> {
   const store = new MultiremiStore(db);
   const refs = await seedStore(store, db);
@@ -1128,13 +1252,48 @@ export const buildSnapshotApp = buildApp;
 // families
 // ---------------------------------------------------------------------------
 
-type Flow = (rec: Recorder, refs: SeedRefs) => Promise<void>;
+type Flow = (rec: Recorder, refs: SeedRefs, store: MultiremiStore) => Promise<void>;
 
 const MUTATION_FLOWS: Array<{ name: string; run: Flow }> = [];
 
 function flow(name: string, run: Flow): void {
   MUTATION_FLOWS.push({ name, run });
 }
+
+flow("unified-messages-inbox-turns", async (rec, refs) => {
+  const base = `/api/sessions/${refs.issueSessionId}/messages`;
+  const sent = await rec.json("POST", base, { body_md: "Unified snapshot", to: { type: "none" } });
+  const id = sent.body.message.id;
+  await rec.call("GET", `${base}?limit=1`);
+  await rec.call("GET", `/api/messages/${id}`);
+  await rec.json("PATCH", `/api/messages/${id}`, { body_md: "Edited snapshot" });
+  await rec.json("POST", `/api/messages/${id}/resolve`, { resolved: true });
+  await rec.json("POST", `/api/messages/${id}/reactions`, { emoji: "+1" });
+  await rec.call("DELETE", `/api/messages/${id}`);
+  await rec.call("GET", "/api/inbox");
+  await rec.json("POST", "/api/inbox/read", { session_id: refs.issueSessionId });
+  await rec.json("POST", "/api/inbox/read", { all: true });
+  await rec.call("GET", `/api/turns?issue=${refs.issueId}`);
+  await rec.call("GET", `/api/turns/${refs.turnId}?input=true&attempts=true`);
+  await rec.json("POST", `/api/turns/${refs.turnId}/wrap-up`, {});
+  await rec.json("POST", `/api/turns/${refs.turnId}/cancel`, {});
+  await rec.json("POST", `/api/turns/${refs.turnId}/retry`, { cold: true });
+  await rec.call("GET", `/api/turns/${refs.turnId}/trace`);
+});
+
+// ADR 0020: the Chat follow-up queue, on the seeded Chat whose turn is still pending.
+flow("chat-follow-up-queue", async (rec, refs) => {
+  const base = `/api/sessions/${refs.chatSessionId}/queue`;
+  const first = await rec.json("POST", base, { body_md: "Queued snapshot", client_id: "snapshot-queue-1" });
+  const second = await rec.json("POST", base, { body_md: "Second queued snapshot", client_id: "snapshot-queue-2" });
+  const firstId = first.body?.item?.id ?? "qmsg_snapshot";
+  const secondId = second.body?.item?.id ?? "qmsg_snapshot";
+  await rec.call("GET", base);
+  await rec.json("PATCH", `${base}/${firstId}`, { body_md: "Edited queued snapshot", expected_revision: 1 });
+  await rec.json("POST", `${base}/${secondId}/steer`, {});
+  await rec.call("DELETE", `${base}/${firstId}`);
+  await rec.json("POST", `${base}/resume`, {});
+});
 
 // -- agents -----------------------------------------------------------------
 flow("agents-compat", async (rec, refs) => {
@@ -1204,6 +1363,150 @@ flow("skills-native", async (rec, refs) => {
 });
 
 // -- issues -----------------------------------------------------------------
+flow("issue-responsibility-and-questions", async (rec, refs, store) => {
+  rec.enableAuthentication("snapshot-responsibility-master");
+  const user = store.getOrCreateUser({ email: "responsible@snapshot.invalid", name: "Snapshot operator account" });
+  const pat = await store.createAccessToken({ type: "pat", workspaceId: refs.workspaceId, userId: user.id, name: "Snapshot operator account" });
+  const runtime = store.registerRuntime({ name: "Responsibility snapshot provider", provider: "codex", ownerId: user.id, daemonId: "dmn_responsibility_snapshot", maxConcurrency: 8 });
+  const owner = store.createAgent({ name: "Root execution owner", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
+  const worker = store.createAgent({ name: "Child execution owner", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
+  const checked = async (method: string, path: string, body: unknown, token: string, status = 200) => {
+    const result = await rec.json(method, path, body, token);
+    if (result.status !== status) throw new Error(`Responsibility flow ${method} ${path}: expected ${status}, got ${result.status} ${JSON.stringify(result.body)}`);
+    return result.body;
+  };
+  const read = async (path: string) => {
+    const result = await rec.call("GET", path, { headers: { Authorization: `Bearer ${pat.token}` } });
+    if (result.status !== 200) throw new Error(`Responsibility read ${path}: expected 200, got ${result.status} ${JSON.stringify(result.body)}`);
+    return result.body;
+  };
+  // Neither Issue names a human; each only has an Agent execution owner.
+  const root = await checked("POST", "/api/issues", { title: "Snapshot root", workspace_id: refs.workspaceId, assignee_type: "agent", assignee_id: owner.id }, pat.token, 201);
+  const child = await checked("POST", "/api/issues", { title: "Snapshot child", workspace_id: refs.workspaceId, parent_issue_id: root.id, assignee_type: "agent", assignee_id: worker.id }, pat.token, 201);
+  const sourceTask = store.createTask({ agentId: worker.id, issueId: child.id, prompt: "Question and summary" });
+  const ownerTask = store.createTask({ agentId: owner.id, issueId: root.id, prompt: "Check the child result" });
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  const sourceToken = await store.createTaskAccessToken(store.getTask(sourceTask.id)!, user.id);
+  const ownerToken = await store.createTaskAccessToken(store.getTask(ownerTask.id)!, user.id);
+  const turn = store.getTurnForAttempt(sourceTask.id)!;
+  const createQ = (key: string) => {
+    const result = store.getDaemonTurnBridge().rpc("turn.decision", { turn_id: turn.id, attempt_id: sourceTask.id, dedupe_key: key, wait_id: `wait:${key}`, body_md: "Original snapshot AUQ", options: [{ label: "A", value: "A" }, { label: "B", value: "B" }], metadata: { kind: "question", context: { text: "Original provider context" }, questions: [{ question: "Which approach?", options: [{ label: "A" }, { label: "B" }], multiSelect: true }] } }, { runtimeId: runtime.id, daemonId: "dmn_responsibility_snapshot", workspaceId: refs.workspaceId });
+    if (!result.ok) throw new Error(`Snapshot native Q failed: ${result.code}`);
+    return store.getQuestion(String(result.message_id))!;
+  };
+  // Configure Remi before escalation so the actual human-stage notification
+  // exists; an unrelated running owner turn does not grant presentation access.
+  // The bot needs no Chat question handler for an Issue Q.
+  await checked("PUT", `/api/workspaces/${refs.workspaceId}/feishu-bot`, { agent_id: owner.id, runtime_id: runtime.id, app_id: "cli_responsibility_snapshot", app_secret: "synthetic-secret", app_secret_op: "set", domain: "feishu", enabled: false }, "snapshot-responsibility-master");
+  const question = createQ("snapshot-question-answer");
+  // The worker executes the child, so its own Q skips it and climbs to the parent's execution owner.
+  if (question.stage !== "parent_owner" || question.current_handler?.id !== owner.id) throw new Error("Snapshot Q must start at the parent execution owner");
+  await read(`/api/messages/${question.id}/question`);
+  // A member only reads an Agent-stage Q; answering belongs to that execution owner.
+  await checked("POST", `/api/messages/${question.id}/question/answer`, { expected_route_revision: question.route_revision, response: { answers: { "Which approach?": "A" } } }, pat.token, 403);
+  const humanQuestion = (await checked("POST", `/api/messages/${question.id}/question/escalate`, { expected_route_revision: question.route_revision, reason: "Needs a workspace member" }, ownerToken.token)).question;
+  if (humanQuestion.stage !== "human" || humanQuestion.current_handler !== null) throw new Error("Snapshot escalation above the root must reach the human stage without a named handler");
+  const presentation = [child.id, root.id].flatMap(id => store.listMessages(store.getOrCreateDefaultIssueSession(id).id)).find(message =>
+    message.metadata.question_present_request === true && message.metadata.root_question_id === question.id
+    && message.metadata.question_route_revision === humanQuestion.route_revision);
+  if (!presentation || typeof presentation.metadata.delivery_turn_id !== "string") throw new Error("Snapshot Remi presentation notification has no bound turn");
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  const presentationTurn = store.getTurn(presentation.metadata.delivery_turn_id)!;
+  if (presentationTurn.session_id !== presentation.session_id || presentationTurn.execution_scope !== String(presentation.metadata.execution_scope ?? "")) throw new Error("Snapshot Remi notification lane changed");
+  const presentationToken = await store.createTaskAccessToken(store.getTask(presentationTurn.current_attempt_id!)!, user.id);
+  await checked("POST", `/api/messages/${question.id}/question/present`, { expected_route_revision: humanQuestion.route_revision, summary: "Remi's separate summary; original choices remain unchanged" }, presentationToken.token);
+  // Any active workspace member handles the human stage; nobody was designated.
+  const answer = (await checked("POST", `/api/messages/${question.id}/question/answer`, { expected_route_revision: humanQuestion.route_revision, response: { answers: { "Which approach?": "A, B" } } }, pat.token)).question;
+  const consumed = store.getDaemonTurnBridge().rpc("turn.decision.consume", { turn_id: turn.id, attempt_id: sourceTask.id, message_id: question.id, reply_message_id: answer.answer.reply_message_id, wait_id: "wait:snapshot-question-answer" }, { runtimeId: runtime.id, daemonId: "dmn_responsibility_snapshot", workspaceId: refs.workspaceId });
+  if (!consumed.ok || store.getQuestion(question.id)?.wait_status !== "consumed") throw new Error("Snapshot Q answer was not consumed by the original provider wait");
+  await checked("POST", `/api/messages/${question.id}/question/answer`, { expected_route_revision: answer.route_revision, expected_answer_revision: answer.answer_revision, revise: true, reason: "New evidence", response: { answers: { "Which approach?": "B" } } }, pat.token);
+  // An exceptional operation with no detached call must be rejected, never
+  // report that a persisted answer magically restored the original provider.
+  await checked("POST", `/api/messages/${question.id}/question/continue`, { expected_route_revision: answer.route_revision }, pat.token, 409);
+  await checked("POST", `/api/messages/${question.id}/question/present`, { expected_route_revision: answer.route_revision, summary: "Unauthorized summary" }, pat.token, 403);
+  const closed = createQ("snapshot-question-close");
+  await checked("POST", `/api/messages/${closed.id}/question/close`, { expected_route_revision: closed.route_revision, reason: "Explicitly no longer needed" }, ownerToken.token);
+  await read(`/api/issues/${root.id}/questions?limit=100`);
+  await read(`/api/issues/${child.id}/responsibility`);
+  // The done rule: an Agent closes only a direct child of an Issue it executes,
+  // never its own Issue or a root; a member closes any Issue.
+  await checked("PATCH", `/api/issues/${child.id}`, { status: "done" }, sourceToken.token, 403);
+  await checked("PATCH", `/api/issues/${root.id}`, { status: "done" }, ownerToken.token, 403);
+  await checked("PATCH", `/api/issues/${child.id}`, { status: "done" }, ownerToken.token);
+  await checked("PATCH", `/api/issues/${root.id}`, { status: "done" }, pat.token);
+
+  // A detached native wait keeps its valid answer when execution is temporarily
+  // unavailable. The explicit HTTP continuation creates one new consumer;
+  // only its actual input acknowledgement can mark the question consumed.
+  const continuationIssue = await checked("POST", "/api/issues", { title: "Controlled continuation snapshot", workspace_id: refs.workspaceId, assignee_type: "agent", assignee_id: owner.id }, pat.token, 201);
+  const continuationAgent = store.createAgent({ name: "Continuation source", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace" });
+  const continuationTask = store.createTask({ agentId: continuationAgent.id, issueId: continuationIssue.id, prompt: "Continue only after explicit authorization" });
+  const continuationOwnerTask = store.createTask({ agentId: owner.id, issueId: continuationIssue.id, prompt: "Handle the continuation question" });
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  const continuationOwnerToken = await store.createTaskAccessToken(store.getTask(continuationOwnerTask.id)!, user.id);
+  const continuationTurn = store.getTurnForAttempt(continuationTask.id)!;
+  const bridge = store.getDaemonTurnBridge();
+  const scope = { runtimeId: runtime.id, daemonId: "dmn_responsibility_snapshot", workspaceId: refs.workspaceId };
+  const native = bridge.rpc("turn.decision", { turn_id: continuationTurn.id, attempt_id: continuationTask.id, dedupe_key: "snapshot-controlled-continuation", wait_id: "snapshot-continuation-wait", body_md: "Proceed after restart?", options: [{ label: "Proceed", value: "Proceed" }], metadata: { kind: "question", questions: [{ question: "Proceed after restart?", options: [{ label: "Proceed" }] }] } }, scope);
+  if (!native.ok) throw new Error(`Snapshot continuation Q failed: ${native.code}`);
+  const continuationQuestion = store.getQuestion(String(native.message_id))!;
+  const escalated = (await checked("POST", `/api/messages/${continuationQuestion.id}/question/escalate`, { expected_route_revision: continuationQuestion.route_revision, reason: "Needs a workspace member after restart" }, continuationOwnerToken.token)).question;
+  const expired = bridge.rpc("turn.decision.expire", { turn_id: continuationTurn.id, attempt_id: continuationTask.id, message_id: continuationQuestion.id, status: "timeout" }, scope);
+  if (!expired.ok) throw new Error(`Snapshot wait detach failed: ${expired.code}`);
+  store.archiveAgent(continuationAgent.id);
+  const saved = (await checked("POST", `/api/messages/${continuationQuestion.id}/question/answer`, { expected_route_revision: escalated.route_revision, response: { answer: "Proceed" } }, pat.token)).question;
+  if (saved.status !== "answered" || saved.wait_status !== "detached" || saved.wait_reason !== "question_source_agent_unavailable") throw new Error("Snapshot must preserve the answer without pretending unavailable execution resumed");
+  store.restoreAgent(continuationAgent.id);
+  const continued = (await checked("POST", `/api/messages/${continuationQuestion.id}/question/continue`, { expected_route_revision: saved.route_revision }, pat.token)).question;
+  if (continued.wait_status !== "continuation_pending" || !continued.recovery.consumer_turn_id || continued.recovery.consumer_attempt_id !== null) throw new Error("Snapshot continuation must identify a pending consumer, not a consumed attempt");
+  const replay = (await checked("POST", `/api/messages/${continuationQuestion.id}/question/continue`, { expected_route_revision: saved.route_revision }, pat.token)).question;
+  if (replay.recovery.consumer_turn_id !== continued.recovery.consumer_turn_id) throw new Error("Snapshot duplicate continuation created another consumer");
+  const consumer = store.getTurn(continued.recovery.consumer_turn_id)!;
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  const consumerTask = store.getTaskWithAgent(consumer.current_attempt_id!)!;
+  const consumerToken = await store.createTaskAccessToken(consumerTask, user.id);
+  const input = bridge.offerInput(consumerTask);
+  let cursor: string | undefined;
+  do {
+    const page = await rec.call("GET", `/api/sessions/${consumer.session_id}/messages?from=0&to=${input.input_to_seq}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { headers: { Authorization: `Bearer ${consumerToken.token}` } });
+    if (page.status !== 200) throw new Error(`Snapshot continuation context read failed: ${page.status}`);
+    cursor = page.body.next_cursor ?? undefined;
+  } while (cursor);
+  const acknowledged = bridge.rpc("turn.input", { turn_id: consumer.id, attempt_id: consumer.current_attempt_id, input_to_seq: input.input_to_seq, message_ids: input.input_messages.map(message => message.id) }, scope);
+  if (!acknowledged.ok || store.getQuestion(continuationQuestion.id)?.wait_status !== "continuation_consumed") throw new Error(`Snapshot continuation input was not consumed: ${acknowledged.code}`);
+  await read(`/api/messages/${continuationQuestion.id}/question`);
+});
+
+flow("responsibility-retired-routes", async (rec, refs) => {
+  const master = "snapshot-retired-responsibility-master";
+  rec.enableAuthentication(master);
+  const checked = async (method: string, path: string, body: unknown, status = 200) => {
+    const result = await rec.json(method, path, body, master);
+    if (result.status !== status) throw new Error(`Retired responsibility flow ${method} ${path}: expected ${status}, got ${result.status} ${JSON.stringify(result.body)}`);
+    return result.body;
+  };
+  // Old clients may still send the deprecated human field: it is accepted and
+  // ignored, never validated, so even an unknown member ID succeeds.
+  const ignored = "mem_ignored_snapshot";
+  const issue = await checked("POST", "/api/issues", { title: "Old client root", workspace_id: refs.workspaceId, responsible_member_id: ignored }, 201);
+  await checked("PATCH", `/api/issues/${issue.id}`, { responsible_member_id: ignored });
+  await checked("PATCH", `/api/autopilots/${refs.autopilotId}`, { responsible_member_id: ignored });
+  await checked("PUT", `/api/workspaces/${refs.workspaceId}/issue-topics`, { enabled: true, chat_id: "oc_retired_snapshot", project_ids: null, responsible_member_id: ignored });
+  // Historical mapping, formal delivery, explicit transfer and the parent-done
+  // grant are retired: each answers 410 with its replacement.
+  const retired: Array<[string, string]> = [
+    ["GET", `/api/workspaces/${refs.workspaceId}/issue-responsibility-migration?limit=100&offset=0`],
+    ["POST", `/api/workspaces/${refs.workspaceId}/issue-responsibility-migration/map`],
+    ["GET", `/api/issues/${issue.id}/deliveries`],
+    ["POST", `/api/issues/${issue.id}/deliveries`],
+    ["POST", `/api/issues/${issue.id}/deliveries/dlv_retired_snapshot/respond`],
+    ["POST", `/api/issues/${issue.id}/deliveries/dlv_retired_snapshot/authorize`],
+    ["POST", "/api/messages/msg_retired_snapshot/question/transfer"],
+    ...["POST", "DELETE"].flatMap((method): Array<[string, string]> => [[method, `/api/issues/${issue.id}/parent-done-grant`], [method, `/api/multiremi/issues/${issue.id}/parent-done-grant`]]),
+  ];
+  for (const [method, path] of retired) await checked(method, path, method === "GET" ? undefined : {}, 410);
+});
+
 flow("issues-compat", async (rec, refs) => {
   const created = await rec.json("POST", "/api/issues", {
     title: "Compat issue",
@@ -1447,6 +1750,25 @@ flow("webhooks", async (rec, refs) => {
   await rec.json("POST", "/api/webhooks/stripe", { type: "checkout.session.completed" });
 });
 
+// Native access is intentionally absent from this in-memory snapshot. These
+// valid requests freeze the explicit unavailable response without touching a CLI.
+flow("external-chats", async (rec, refs, store) => {
+  const runtime = store.registerRuntime({ id: "rt_external_snapshot", name: "External snapshot",
+    provider: "codex", daemonId: "dmn_external_snapshot", workspaceId: refs.workspaceId,
+    metadata: { external_chats: 1 } });
+  const base = `/api/runtimes/${runtime.id}/external-chats`;
+  const threads = `${base}/codex_snapshot/threads`;
+  const thread = `${threads}/00000000-0000-4000-8000-000000000001`;
+  const requestId = "00000000-0000-4000-8000-000000000002";
+  await rec.call("GET", base);
+  await rec.call("GET", threads);
+  await rec.call("GET", thread);
+  await rec.json("POST", `${thread}/messages`, { text: "Snapshot native continuation", request_id: requestId });
+  await rec.call("GET", `${thread}/receipts/${requestId}`);
+  await rec.json("POST", `${thread}/interrupt`, { turn_id: "turn_snapshot" });
+  await rec.json("POST", `${thread}/requests/17`, { decision: "decline" });
+});
+
 // -- runtimes ---------------------------------------------------------------
 flow("runtimes", async (rec, refs) => {
   const created = await rec.json("POST", "/api/multiremi/runtimes", {
@@ -1475,6 +1797,8 @@ flow("runtimes", async (rec, refs) => {
     timeout_ms: 1_000,
   });
   await rec.call("GET", `/api/runtimes/${id}/commands/${command.body?.id ?? refs.runtimeCommandRequestId}`);
+  const gcRun = await rec.json("POST", `/api/runtimes/${id}/gc-runs`, { mode: "run" });
+  await rec.call("GET", `/api/runtimes/${id}/gc-runs/${gcRun.body?.request?.id ?? refs.gcRunRequestId}`);
   await rec.json("POST", `/api/runtimes/${id}/archive-agents-and-delete`, {});
   await rec.call("DELETE", `/api/runtimes/${refs.runtimeId}`);
 });
@@ -1491,7 +1815,13 @@ flow("daemon-retirement", async (rec, refs) => {
 });
 
 // -- daemon -----------------------------------------------------------------
-flow("daemon", async (rec, refs) => {
+const SNAPSHOT_STORAGE_REPORT = {
+  version: 1, generated_at: "2026-01-01T00:00:00.000Z", mode: "dry_run", root: "/snapshot", bytes: null, bytes_measured_at: null,
+  subjects: { total: 0, active: 0, ended: 0, reclaimed: 0 }, retained: {}, reclaimed_this_round: 0,
+  forgotten_this_round: 0, freed_bytes: 0, plan: [], errors: [],
+};
+
+flow("daemon", async (rec, refs, store) => {
   await rec.json("POST", "/api/daemon/register", {
     workspace_id: refs.workspaceId,
     daemon_id: "dmn_flow",
@@ -1500,24 +1830,28 @@ flow("daemon", async (rec, refs) => {
     runtimes: [{ name: "flow-runtime", type: "claude", version: "9.9.9", status: "online", maxConcurrency: 1 }],
   });
   await rec.json("POST", "/api/daemon/heartbeat", { runtime_id: refs.runtimeId });
-  await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/tasks/claim`, {});
-  await rec.json("PUT", `/api/daemon/runtimes/${refs.runtimeId}/models`, {
+  store.claimTask(refs.runtimeId, { supportsBinarySkillFiles: true });
+  await rec.report("runtime.model_list_result", { runtime_id: refs.runtimeId,
     models: [{ id: "claude-sonnet-4", label: "Claude Sonnet 4" }],
   });
   await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/models/claim`, {});
-  await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/models/${refs.runtimeModelRequestId}/result`, {
+  await rec.report("runtime.model_list_result", { runtime_id: refs.runtimeId, request_id: refs.runtimeModelRequestId, status: "completed",
     models: [{ id: "claude-sonnet-4", name: "Claude Sonnet 4" }],
   });
   await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/directory-scans/claim`, {});
-  await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/directory-scans/${refs.dirScanRequestId}/result`, {
+  await rec.report("runtime.directory_scan_result", { runtime_id: refs.runtimeId, request_id: refs.dirScanRequestId, status: "completed",
     entries: [{ path: "/snapshot/project", name: "project", is_git_repo: true }],
   });
+  await rec.report("runtime.gc_run_result", { runtime_id: refs.runtimeId, request_id: refs.gcRunRequestId, status: "completed",
+    report: SNAPSHOT_STORAGE_REPORT,
+  });
+  await reportFrame(store, "gc.storage_report", { runtime_id: refs.runtimeId, report: SNAPSHOT_STORAGE_REPORT });
   await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/local-skills/claim`, {});
-  await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/local-skills/${refs.localSkillListRequestId}/result`, {
+  await rec.report("runtime.local_skills_result", { runtime_id: refs.runtimeId, request_id: refs.localSkillListRequestId, status: "completed",
     skills: [{ key: "snapshot-skill", name: "Snapshot skill" }],
   });
   await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/local-skills/import/claim`, {});
-  await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/local-skills/import/${refs.localSkillImportRequestId}/result`, {
+  await rec.report("runtime.local_skill_import_result", { runtime_id: refs.runtimeId, request_id: refs.localSkillImportRequestId, status: "completed",
     files: [{ path: "SKILL.md", content: "# imported" }],
   });
   await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/update/claim`, {});
@@ -1526,64 +1860,58 @@ flow("daemon", async (rec, refs) => {
     version: "9.9.9",
   });
   await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/commands/claim`, {});
-  await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/commands/${refs.runtimeCommandRequestId}/result`, {
+  await rec.report("runtime.command_result", { runtime_id: refs.runtimeId, request_id: refs.runtimeCommandRequestId,
     status: "completed",
     exit_code: 0,
     stdout: "snapshot",
     stderr: "",
     duration_ms: 1,
   });
-  await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/recover-orphans`, {});
+  store.recoverOrphans(refs.runtimeId, []);
   await rec.json("POST", "/api/daemon/deregister", { runtime_ids: [refs.runtimeId] });
 });
 
-flow("daemon-task-lifecycle", async (rec, refs) => {
-  const task = await rec.json("POST", "/api/multiremi/tasks", {
+flow("daemon-task-lifecycle", async (rec, refs, store) => {
+  // Keep this lifecycle turn independent of the seeded running Issue lane.
+  await rec.json("POST", "/api/multiremi/tasks", {
     agentId: refs.agentId,
-    issueId: refs.issueId,
     prompt: "Snapshot lifecycle task",
   });
-  const id = task.body?.id ?? task.body?.task?.id ?? refs.taskId;
+  const id = store.createTask({ agentId: refs.agentId,
+    prompt: "Snapshot lifecycle task" }).id;
+  let claimed = false;
   // The seeded chat session has its own queued task, so claim until ours lands.
   for (let attempt = 0; attempt < 6; attempt++) {
-    const claim = await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/tasks/claim`, {});
-    if ((claim.body?.task?.id ?? claim.body?.id) === id) break;
+    const claim = store.claimTask(refs.runtimeId, { supportsBinarySkillFiles: true });
+    if (claim?.id === id) { claimed = true; break; }
   }
+  if (!claimed) throw new Error("Snapshot lifecycle task was not actually claimed");
+  store.recordTaskOffered(id, refs.runtimeId);
   // waiting_local_directory only applies to a dispatched task, so it runs
   // before start (startTask accepts dispatched and waiting_local_directory).
   await rec.json("POST", `/api/daemon/tasks/${id}/wait-local-directory`, { reason: "missing repo" });
-  await rec.json("POST", `/api/daemon/tasks/${id}/start`, {});
-  await rec.json("POST", `/api/daemon/tasks/${id}/progress`, { summary: "half", step: 1, total: 2 });
-  await rec.json("POST", `/api/daemon/tasks/${id}/messages`, { messages: [{ type: "assistant", content: "hello" }] });
+  await rec.report("task.start", { task_id: id });
+  await rec.report("task.progress", { task_id: id, summary: "half", step: 1, total: 2 });
   const assembledPrompt = "# Bootstrap Prompt\n\n## Current Request\nSnapshot lifecycle task";
-  await rec.json("POST", `/api/daemon/tasks/${id}/prompt`, {
+  await rec.report("task.prompt", { task_id: id,
     mode: "bootstrap",
     prompt: assembledPrompt,
     sha256: createHash("sha256").update(assembledPrompt).digest("hex"),
   });
   await rec.call("GET", `/api/tasks/${id}/prompt`);
-  await rec.json("POST", `/api/daemon/tasks/${id}/session`, { session_id: "ses_snapshot", work_dir: "/snapshot/work" });
-  await rec.json("POST", `/api/daemon/tasks/${id}/usage`, { usage: [{ model: "claude-sonnet-4", input_tokens: 3, output_tokens: 4 }] });
-  const human = await rec.json("POST", `/api/daemon/tasks/${id}/human-requests`, {
-    kind: "permission",
-    payload: { tool: "Bash" },
-  });
-  const requestId = human.body?.id ?? human.body?.request_id ?? human.body?.request?.id ?? refs.humanRequestId;
+  await rec.report("task.session_pin", { task_id: id, session_id: "ses_snapshot", work_dir: "/snapshot/work" });
+  await rec.report("task.usage", { task_id: id, usage: [{ model: "claude-sonnet-4", input_tokens: 3, output_tokens: 4 }] });
+  const requestId = store.createTaskHumanRequest({ taskId: id, kind: "permission", payload: { tool: "Bash" } }).id;
   await rec.json("POST", `/api/multiremi/tasks/${id}/human-requests/${requestId}/respond`, { outcome: "approved" });
-  const second = await rec.json("POST", `/api/daemon/tasks/${id}/human-requests`, {
-    kind: "permission",
-    payload: { tool: "Read" },
-  });
-  const secondId = second.body?.id ?? second.body?.request_id ?? second.body?.request?.id ?? requestId;
+  const secondId = store.createTaskHumanRequest({ taskId: id, kind: "permission", payload: { tool: "Read" } }).id;
   await rec.json("POST", `/api/tasks/${id}/human-requests/${secondId}/respond`, { outcome: "approved" });
-  const third = await rec.json("POST", `/api/daemon/tasks/${id}/human-requests`, {
-    kind: "permission",
-    payload: { tool: "Write" },
-  });
-  const thirdId = third.body?.id ?? third.body?.request_id ?? third.body?.request?.id ?? secondId;
-  await rec.json("POST", `/api/daemon/tasks/${id}/human-requests/${thirdId}/expire`, { status: "timeout" });
-  await rec.json("POST", `/api/daemon/tasks/${id}/complete`, { result: "done", summary: "complete" });
-  await rec.json("POST", `/api/daemon/tasks/${refs.taskId}/fail`, { error: "boom" });
+  const thirdId = store.createTaskHumanRequest({ taskId: id, kind: "permission", payload: { tool: "Write" } }).id;
+  store.expireTaskHumanRequest(thirdId, "timeout");
+  const turn = store.getTaskWithAgent(id)!;
+  const input = store.getDaemonTurnBridge().offerInput(turn);
+  await rec.report("turn.complete", { turn_id: turn.turn_id, attempt_id: id,
+    input_to_seq: input.input_to_seq, reply: { body_md: "done", message_kind: "final" } });
+  await rec.report("task.fail", { task_id: refs.taskId, error: "boom" });
 });
 
 flow("tasks", async (rec, refs) => {
@@ -1625,6 +1953,11 @@ flow("chat", async (rec, refs) => {
   await rec.json("POST", `/api/chat/sessions/${compatId}/messages`, { body: "compat message" });
   await rec.json("POST", `/api/chat/sessions/${compatId}/read`, {});
   await rec.json("PATCH", `/api/chat/sessions/${compatId}`, { title: "Compat chat renamed" });
+  // PR 6: nothing runs in the background here, so the stop is refused.
+  await rec.json("POST", `/api/chat/sessions/${compatId}/background-tasks/stop`, { all: true });
+  // ADR 0025: no daemon reported a catalogue, so both answer `none`.
+  await rec.call("GET", `/api/chat/slash-commands?session_id=${compatId}`);
+  await rec.call("GET", `/api/chat/slash-commands?agent_id=${refs.agentId}`);
   await rec.call("DELETE", `/api/chat/sessions/${compatId}`);
 
   const native = await rec.json("POST", "/api/multiremi/chats", { agentId: refs.agentId, title: "Native chat" });
@@ -1673,13 +2006,17 @@ flow("workspaces", async (rec, refs) => {
   await rec.json("PUT", `/api/workspaces/${id}`, { name: "Flow workspace renamed" });
   await rec.json("PATCH", `/api/workspaces/${id}`, { description: "patched" });
   const invited = await rec.json("POST", `/api/workspaces/${id}/members`, { email: "invitee@snapshot.invalid", role: "member" });
-  const invitationId = invited.body?.id ?? invited.body?.invitation?.id ?? refs.invitationId;
+  if (invited.status !== 410 || invited.body?.code !== "workspace_members_retired") throw new Error("Workspace member mutation must stay retired");
+  const invitationId = refs.invitationId;
   await rec.json("PATCH", `/api/workspaces/${refs.workspaceId}/members/${refs.otherMemberId}`, { role: "admin" });
   await rec.call("DELETE", `/api/workspaces/${refs.workspaceId}/members/${refs.otherMemberId}`);
   await rec.call("DELETE", `/api/workspaces/${id}/invitations/${invitationId}`);
   await rec.json("PUT", `/api/workspaces/${id}/relay-config/claude`, { baseUrl: "https://relay.invalid", token: "relay-token" });
   await rec.json("POST", `/api/workspaces/${id}/relay-config/claude/reveal`, {});
   await rec.json("PUT", `/api/workspaces/${id}/relay-config/discovery`, { enabled: true });
+  await rec.call("GET", `/api/workspaces/${id}/storage`);
+  await rec.json("PUT", `/api/workspaces/${id}/storage`, { ttl_ms: 7_200_000, max_retained: null });
+  await rec.call("GET", `/api/workspaces/${id}/storage/daemons`);
   await rec.json("POST", `/api/workspaces/${id}/lark/install/begin`, {});
   await rec.call("DELETE", `/api/workspaces/${id}/lark/installations/inst_snapshot`);
   await rec.json("POST", `/api/workspaces/${id}/leave`, {});
@@ -1693,7 +2030,8 @@ flow("members-invitations", async (rec, refs) => {
     workspaceId: refs.workspaceId,
     role: "member",
   });
-  const id = created.body?.id ?? refs.otherMemberId;
+  if (created.status !== 410 || created.body?.code !== "workspace_members_retired") throw new Error("Legacy member mutation must stay retired");
+  const id = refs.otherMemberId;
   await rec.json("PATCH", `/api/multiremi/members/${id}`, { role: "admin" });
   await rec.call("DELETE", `/api/multiremi/members/${id}`);
   await rec.json("POST", `/api/invitations/${refs.invitationId}/decline`, {});
@@ -1770,6 +2108,18 @@ flow("feishu-bot", async (rec, refs) => {
 });
 
 // -- settings / misc --------------------------------------------------------
+flow("issue-topics-invalid-stored", async (rec, refs, store) => {
+  const workspace = store.getWorkspace(refs.workspaceId)!;
+  store.updateWorkspace(refs.workspaceId, { settings: { ...workspace.settings, issueTopics: {
+    enabled: true, chatId: "oc_snapshot_topics", notifyMode: "person",
+  } } });
+  const path = `/api/workspaces/${refs.workspaceId}/issue-topics`;
+  await rec.call("GET", path);
+  await rec.json("PUT", path, { enabled: true, chat_id: "oc_snapshot_topics" });
+  await rec.json("PUT", path, { enabled: true, chat_id: "oc_snapshot_topics", notify_mode: "none" });
+  await rec.call("GET", path);
+});
+
 flow("settings-misc", async (rec, refs) => {
   await rec.json("PUT", "/api/notification-preferences", { email_enabled: false });
   await rec.json("PUT", "/api/multiremi/notification-preferences", { emailEnabled: true });
@@ -1817,9 +2167,30 @@ export interface SnapshotFile {
 export async function captureApiSnapshot(): Promise<SnapshotFile> {
   const restore = installDeterminism();
   try {
+    let schema: Buffer | undefined;
+    let seedState: { clock: number; uuid: number; prng: number };
+    // Each family gets a fresh seed and still runs idempotent migrations.
+    // Reuse only the empty migrated schema, avoiding repeated full bootstraps.
+    const bootFixture = async () => {
+      resetDeterministicState();
+      const db = schema ? deserializeSqliteDatabase(schema) : openSqliteDatabase(":memory:");
+      const store = new MultiremiStore(db);
+      // Model the already prepared deployment owner explicitly. Enrolled slot
+      // startup no longer replays the historical owner-identity backfill.
+      db.run("UPDATE multiremi_users SET external_id = ? WHERE id = 'local' AND external_id IS NULL",
+        [process.env.MULTIREMI_OWNER_OPEN_ID ?? "ou_e6b7ffc662b392317275b817295c0b44"]);
+      if (!schema) {
+        schema = db.serialize();
+        seedState = { clock, uuid: uuidCounter, prng: prngState };
+      } else {
+        clock = seedState.clock; uuidCounter = seedState.uuid; prngState = seedState.prng;
+      }
+      const refs = await seedStore(store, db);
+      return { db, store, refs, app: createMultiremiApp({ store, realtimeState: { enabled: true, connections: 0 } }) };
+    };
     // --- route inventory (mechanically enumerated from the Hono route table)
     resetDeterministicState();
-    const inventoryBoot = await buildApp();
+    const inventoryBoot = await bootFixture();
     const routes = snapshotRouteTable(inventoryBoot.app);
     inventoryBoot.db.close();
 
@@ -1836,12 +2207,12 @@ export async function captureApiSnapshot(): Promise<SnapshotFile> {
 
     // --- GET sweep: every registered GET route, one shared seeded app -------
     resetDeterministicState();
-    const sweep = await buildApp();
+    const sweep = await bootFixture();
     const sweepRefs = sweep.refs;
     const templates = await sweep.app.request("/api/agent-templates");
     const templateList = (await templates.json()) as Array<{ slug?: string }>;
     sweepRefs.templateSlug = templateList?.[0]?.slug ?? "unknown-template";
-    const sweepRecorder = new Recorder(sweep.app, routes, "get-sweep");
+    const sweepRecorder = new Recorder(sweep.app, routes, "get-sweep", sweep.store);
     for (const route of routes) {
       if (route.method !== "GET") continue;
       const key = `${route.method} ${route.path}`;
@@ -1874,9 +2245,9 @@ export async function captureApiSnapshot(): Promise<SnapshotFile> {
     // --- mutation flows: fresh seeded store per family ---------------------
     for (const { name, run } of [...MUTATION_FLOWS].sort((a, b) => a.name.localeCompare(b.name))) {
       resetDeterministicState();
-      const boot = await buildApp();
-      const recorder = new Recorder(boot.app, routes, name);
-      await run(recorder, boot.refs);
+      const boot = await bootFixture();
+      const recorder = new Recorder(boot.app, routes, name, boot.store);
+      await run(recorder, boot.refs, boot.store);
       for (const entry of recorder.entries) entries.push(entry);
       for (const route of recorder.covered) covered.add(route);
       boot.db.close();

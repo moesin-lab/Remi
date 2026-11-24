@@ -1,13 +1,24 @@
+import { FeishuInboundRecovery, recoverFeishuHistory, feishuHistoryEvent, feishuRecoveryPath } from "@connectors/feishu/inbound-recovery.js";
+import { processFeishuMessageEvent } from "@connectors/feishu/receive.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createResponsibleTestIssue } from './helpers.js';
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
+import { mutateExecutionFixture, sentTask } from "./unified-test-paths.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { runMigrations } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
+import { MultiremiStore } from "@multiremi/store.js";
 import { seedLegacyChatIssueClassificationFixture } from "./chat-issue-migration-fixture.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
-import { buildTaskPrompt } from "@multiremi/prompt.js";
+import { useTaskSessionInput } from "@multiremi/api/daemon-protocol/offer-budget.js";
+import { buildTaskPromptArtifact } from "@multiremi/prompt.js";
+import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import type { MultiremiDaemon } from "@multiremi/daemon.js";
 import type { IncomingMessage, TaskStreamMeta } from "@connectors/base.js";
 import { createFeishuTaskHandler } from "../../../apps/remi/cli/multiremi.js";
-import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createHistoricalDatabase, createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
 
@@ -47,7 +58,7 @@ function scaffold(provider: "claude" | "codex" = "codex") {
     agentId: agent.id,
     runtimeId: "rt_bot",
     appId: "cli_test",
-    senderAccessPolicy: "allowlist",
+    senderAccessPolicy: "agent",
     appSecretOp: "set",
     appSecret: APP_SECRET,
     domain: "feishu",
@@ -56,7 +67,108 @@ function scaffold(provider: "claude" | "codex" = "codex") {
   return { store, agent, config };
 }
 
+function requireAllowlist(store: MultiremiStore, agentId: string) {
+  return store.upsertFeishuBotConfig("local", { agentId, runtimeId: "rt_bot", appId: "cli_test",
+    senderAccessPolicy: "allowlist", appSecretOp: "keep", domain: "feishu", enabled: true });
+}
+
 describe("Feishu bot standard Task bridge", () => {
+  it("recovers known-chat history through the same server delivery ids after a restart", async () => {
+    const { store, config } = scaffold();
+    const seed = store.submitFeishuBotMessage("local", "rt_bot", { revision: config.revision,
+      externalSessionKey: "oc_gap:thread:om_seed", externalMessageId: "om_seed", chatType: "group", chatId: "oc_gap",
+      threadId: "om_seed", senderOpenId: "ou_member", text: "Seed known chat", deliveryMode: "native_cot_v1" });
+    expect(store.getFeishuBotDaemonConfig("local", "rt_bot")!.recovery_chats)
+      .toContainEqual({ chat_id: "oc_gap", chat_type: "group" });
+    const root = mkdtempSync(join(tmpdir(), "feishu-history-")), path = join(root, "input.json"), now = Date.now();
+    const delivered = new Map<string, Set<string>>();
+    const client = { request: async () => ({ data: { users: [{ name: "Member" }] } }) } as any;
+    let loseAcknowledgement = true;
+    const deliver = async (event: NonNullable<ReturnType<typeof feishuHistoryEvent>>) => {
+      const parsed = await processFeishuMessageEvent(client, event, "ou_bot", { durableIntake: true,
+        authorizeSender: async () => true, onDenied: async () => { throw new Error("Unexpected denial"); } });
+      if (!parsed) return;
+      const result = store.submitFeishuBotMessage("local", "rt_bot", { revision: config.revision,
+        externalSessionKey: `${parsed.chatId}:thread:${parsed.rootId ?? parsed.messageId}`,
+        externalMessageId: parsed.messageId, chatType: parsed.chatType, chatId: parsed.chatId,
+        threadId: parsed.rootId ?? parsed.messageId, senderOpenId: parsed.senderOpenId,
+        text: parsed.text, deliveryMode: "native_cot_v1" });
+      const ids = delivered.get(parsed.messageId) ?? new Set<string>(); ids.add(result.taskId); delivered.set(parsed.messageId, ids);
+      if (loseAcknowledgement) { loseAcknowledgement = false; throw new Error("daemon stopped after server committed"); }
+    };
+    const item = (id: string, at: number) => ({ message_id: id, create_time: String(at), msg_type: "text",
+      sender: { id_type: "open_id", id: "ou_member", sender_type: "user" },
+      body: { content: JSON.stringify({ text: "@_user_1 Keep working" }) },
+      mentions: [{ key: "@_user_1", id: "ou_bot", id_type: "open_id", name: "Remi" }] });
+    const history = [item("om_gap_2", now - 1000), item("om_gap_1", now - 2000), item("om_too_old", now - 700_000)];
+    const list = async () => ({ code: 0, data: { items: history, has_more: true, page_token: "older" } });
+    const warnings: string[] = [];
+    try {
+      let journal = new FeishuInboundRecovery(path, () => now);
+      journal.rememberChat("oc_gap", "group");
+      await expect(recoverFeishuHistory({ journal, list, deliver, now, maxPages: 1, warn: (_, reason) => warnings.push(reason) }))
+        .rejects.toThrow("daemon stopped");
+      expect(Object.keys(JSON.parse(readFileSync(path, "utf8")).pending)).toEqual(["om_gap_1"]);
+      journal = new FeishuInboundRecovery(path, () => now);
+      await recoverFeishuHistory({ journal, list, deliver, now, maxPages: 1, warn: (_, reason) => warnings.push(reason) });
+      // The live WS copy races the backfill but still resolves to the same Task.
+      await journal.accept({ ...feishuHistoryEvent(history[0]!, "oc_gap", "group")!, recovery_source: undefined }, deliver);
+      expect([...delivered.keys()]).toEqual(["om_gap_1", "om_gap_2"]);
+      expect([...delivered.values()].map(ids => ids.size)).toEqual([1, 1]);
+      expect(new Set([...delivered.values()].flatMap(ids => [...ids])).size).toBe(2);
+      expect(warnings).toContain("history_page_limit");
+      expect(warnings).toContain("history_message_outside_window");
+      const state = JSON.parse(readFileSync(path, "utf8"));
+      expect(state.pending).toEqual({});
+      expect(state.chats.oc_gap.through).toBe(now - 1000);
+      expect(state.skipped.length).toBeGreaterThan(0);
+      expect(feishuRecoveryPath("app-a")).not.toBe(feishuRecoveryPath("app-b"));
+      expect(feishuRecoveryPath("app-a")).not.toBe(feishuRecoveryPath("app-a", "lark"));
+      expect(seed.taskId).not.toBe([...delivered.values()][0]!.values().next().value);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("replays a secondary bot's background doorbell on its original connector", () => {
+    const { store, config: defaultConfig } = scaffold();
+    store.reportFeishuBotRuntimeStatus("local", "rt_bot", { appliedRevision: defaultConfig.revision, state: "online" });
+    store.registerRuntime({ id: "rt_secondary", name: "Secondary connector", provider: "codex", workspaceId: "local" });
+    const agent = store.createAgent({ name: "Secondary Remi", provider: "codex", runtimeId: "rt_secondary", workspaceId: "local" });
+    store.heartbeatRuntime("rt_secondary", { supportsFeishuBotConfig: true });
+    const bot = store.feishuBotFor("secondary");
+    const config = bot.upsertConfig("local", { senderAccessPolicy: "agent", agentId: agent.id, runtimeId: "rt_secondary", appId: "cli_secondary",
+      appSecretOp: "set", appSecret: APP_SECRET, domain: "feishu", enabled: true });
+    store.reportFeishuBotRuntimeStatus("local", "rt_secondary", { appliedRevision: config.revision, state: "online" });
+    const inbound = bot.submitMessage("local", "rt_secondary", {
+      revision: config.revision, externalSessionKey: "oc_secondary:thread:omt_secondary",
+      externalMessageId: "om_secondary", chatId: "oc_secondary", threadId: "omt_secondary",
+      senderUnionId: "on_owner", deliveryMode: "native_cot_v1", text: "Start the background work",
+    });
+    expect(store.claimTask("rt_secondary")?.id).toBe(inbound.taskId);
+    store.startTask(inbound.taskId);
+    store.completeTask(inbound.taskId, { output: "Background task started", sessionId: "provider_secondary" });
+    for (const delivery of store.claimFeishuBotOutbounds("local", "rt_secondary")) {
+      store.reportFeishuBotOutbound("local", "rt_secondary", delivery.id, {
+        claimToken: delivery.claimToken, status: "sent", externalMessageId: `om_sent_${delivery.id}`,
+      });
+    }
+
+    const successor = store.sendChatMessage(inbound.chatSessionId, { body: "Background task completed" }).task;
+    const previousJobs = process.env.MULTIREMI_BACKGROUND_JOBS;
+    process.env.MULTIREMI_BACKGROUND_JOBS = "0";
+    try {
+      store.prepareFeishuBackgroundDoorbellDeliveryWithinTransaction(inbound.taskId,
+        store.getTurnForAttempt(inbound.taskId)!.id, successor.id);
+      const operation = db!.query("SELECT operation FROM multiremi_feishu_bot_outbound_operations WHERE kind='background_doorbell'").get() as { operation: string };
+      expect(JSON.parse(String(operation.operation))).toMatchObject({ botId: "secondary", taskId: successor.id });
+      expect(store.claimFeishuBotOutbounds("local", "rt_bot").some(row => row.taskId === successor.id)).toBe(false);
+      const delivery = store.claimFeishuBotOutbounds("local", "rt_secondary").find(row => row.taskId === successor.id)!;
+      expect(delivery).toMatchObject({ chatId: "oc_secondary", threadId: "omt_secondary", replyToMessageId: "om_secondary" });
+    } finally {
+      if (previousJobs === undefined) delete process.env.MULTIREMI_BACKGROUND_JOBS;
+      else process.env.MULTIREMI_BACKGROUND_JOBS = previousJobs;
+    }
+  });
+
   it("hands an in-flight card to the new connector after the old Runtime lease expires", () => {
     const { store, agent, config } = scaffold();
     store.registerRuntime({ id: "rt_next", name: "New host", provider: "codex", workspaceId: "local",
@@ -142,7 +254,7 @@ describe("Feishu bot standard Task bridge", () => {
           if (previousTurn === "queued") {
             // Old code could create a transport-pinned Task after the Agent
             // changed provider. Reproduce that stored state across an upgrade.
-            db!.run("UPDATE multiremi_tasks SET runtime_id = 'rt_bot' WHERE id = ?", [previous!.taskId]);
+            mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET runtime_id = 'rt_bot' WHERE id = ?", [previous!.taskId]);
           }
           const next = submit("om_after");
           if (previous) expect(next.chatSessionId).toBe(previous.chatSessionId);
@@ -174,7 +286,7 @@ describe("Feishu bot standard Task bridge", () => {
   for (const path of ["p2p", "group", "canonical-topic"] as const) {
     it(`rejects shared Chat binding creation and rolls back ${path}`, () => {
       const { store, config } = scaffold();
-      const issue = store.createIssue({ title: "Binding guard", workspaceId: "local" });
+      const issue = createResponsibleTestIssue(store, { title: "Binding guard", workspaceId: "local" });
       store.reportFeishuBotRuntimeStatus("local", "rt_bot", { appliedRevision: config.revision, state: "online" });
       store.updateWorkspace("local", { settings: { issueTopics: { enabled: true, chatId: "oc_guard" } } });
       // Simulate an abnormal writer occupying the newly created Chat. The
@@ -194,7 +306,7 @@ describe("Feishu bot standard Task bridge", () => {
         });
       expect(invoke).toThrow(/Cannot create binding .*: Chat .* already has binding conflicting_binding/);
       for (const table of ["multiremi_chat_sessions", "multiremi_feishu_bot_chat_bindings",
-        "multiremi_feishu_bot_deliveries", "multiremi_feishu_bot_outbound_deliveries", "multiremi_tasks"]) {
+        "multiremi_feishu_bot_deliveries", "multiremi_feishu_bot_outbound_deliveries", "multiremi_turn_execution_records"]) {
         expect(db!.query(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
       }
       expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_issues").get()).toEqual({ count: 1 });
@@ -203,22 +315,28 @@ describe("Feishu bot standard Task bridge", () => {
 
   for (const tableForeignKey of [false, true]) {
     it(`cold-starts p2p sharing a retained group binding after migration (table FK=${tableForeignKey})`, () => {
-      const { store } = scaffold();
+      createHistoricalDatabase();
       seedLegacyChatIssueClassificationFixture(db!, tableForeignKey);
       const chatId = "chat_classification_mixed_bindings";
       const fingerprint = createHash("sha256").update("[]").digest("hex");
       db!.run(`UPDATE multiremi_chat_sessions SET session_execution_fingerprint = ?,
         session_id = 'provider_issue_A', work_dir = '/work/issue-A' WHERE id = ?`, [fingerprint, chatId]);
       // No outstanding task is needed to trigger the provider reset.
-      db!.run("UPDATE multiremi_tasks SET status = 'completed'");
+      db!.run("UPDATE multiremi_tasks SET status = 'cancelled'");
+      bootstrapPreUnifiedSchema(db!);
+      runMigrations(db!, { historicalMaintenance: true });
+      const store = new MultiremiStore(db!);
+      // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
+      store.updateAgent("agt_chat_migration", { executionGroupId: null });
+      store.getOrCreateUser({ externalId: "ou_sso_owner", feishuUnionId: "on_owner", email: "local@example.test", name: "Owner" });
+      store.registerRuntime({ id: "rt_bot", name: "Claim host", provider: "codex", workspaceId: "local" });
       store.registerRuntime({ id: "rt_legacy", name: "Original machine", provider: "codex", workspaceId: "local" });
       store.heartbeatRuntime("rt_legacy", { supportsFeishuBotConfig: true });
       const config = store.upsertFeishuBotConfig("local", {
         agentId: "agt_chat_migration", runtimeId: "rt_legacy", appId: "cli_migration",
-        senderAccessPolicy: "allowlist", appSecretOp: "set", appSecret: APP_SECRET,
+        senderAccessPolicy: "agent", appSecretOp: "set", appSecret: APP_SECRET,
         domain: "feishu", enabled: true,
       });
-      runMigrations(db!);
       expect(db!.query("SELECT issue_id FROM multiremi_feishu_bot_chat_bindings WHERE id = ?")
         .get(`fcb_${chatId}`)).toEqual({ issue_id: "iss_classification_mixed_bindings" });
       expect(db!.query("SELECT issue_id FROM multiremi_feishu_bot_chat_bindings WHERE id = 'fcb_mixed_private'")
@@ -241,14 +359,15 @@ describe("Feishu bot standard Task bridge", () => {
       expect(wire.runtime_id).toBe(""); // Existing wire representation for an unassigned runtime.
       expect(wire.work_dir).toBeUndefined();
       expect(wire.prior_work_dir).toBeUndefined();
-      // The private task cannot consume the retained topic's directory affinity.
+      // Storage cutover invalidates the old native session and directory generation.
       expect(store.getChatSession(chatId)).toMatchObject({
         sessionId: null, sessionProvider: null, sessionExecutionFingerprint: null,
-        workDir: "/work/issue-A", sessionRuntimeId: "rt_legacy",
+        workDir: null, sessionRuntimeId: null,
       });
-      const topic = store.createTask({ agentId: "agt_chat_migration", chatSessionId: chatId,
-        issueId: "iss_classification_mixed_bindings", prompt: "Group continuation" });
-      expect(topic).toMatchObject({ runtimeId: "rt_legacy", workDir: "/work/issue-A" });
+      const topic = sentTask(store, store.sendMessage({ session_id: chatId,
+        sender: { type: "platform", id: null }, to: { type: "agent", ref: "agt_chat_migration" },
+        message_kind: "request", wake_requested: "now", execution_scope: "retained-group-fixture", body_md: "Group continuation" }));
+      expect(topic).toMatchObject({ runtimeId: null, workDir: null });
       store.cancelTask(topic.id);
       // Claim refresh must not restore the shared topic's affinity either.
       const claimed = store.claimTask("rt_bot")!;
@@ -378,7 +497,7 @@ describe("Feishu bot standard Task bridge", () => {
       text: "Create and track this Issue.",
     });
     store.cancelTask(inbound.taskId);
-    const issue = store.createIssue({
+    const issue = createResponsibleTestIssue(store, {
       title: "Proactive Feishu round",
       workspaceId: "local",
       assigneeType: "agent",
@@ -409,18 +528,6 @@ describe("Feishu bot standard Task bridge", () => {
     expect(store.claimTask("rt_issue_workspace")?.id).toBe(leaderTask.id);
     store.startTask(leaderTask.id);
 
-    const taskCountBeforeComment = store.listTasks().length;
-    store.queueAgentIssueUpdate({
-      activityId: "act_round_progress",
-      issueId: issue.id,
-      actorType: "member",
-      actorId: "local",
-      type: "comment_created",
-      body: "Include the migration result in the final summary.",
-      createdAt: new Date().toISOString(),
-    });
-    expect(store.listTasks()).toHaveLength(taskCountBeforeComment);
-
     // The reply/retry scenario below expects a specific executor. Express that
     // as Agent placement now that the transport does not impose it.
     store.updateAgent(agent.id, { runtimeId: "rt_bot" });
@@ -447,9 +554,10 @@ describe("Feishu bot standard Task bridge", () => {
     expect(store.getTaskWithAgent(roundTask.id)?.repos).toEqual([]);
     expect(store.claimTask("rt_bot")?.id).toBe(roundTask.id);
     const wire = daemonTaskClaimResponse(store, store.getTaskWithAgent(roundTask.id)!);
-    expect(wire.bound_issue_updates).toEqual([
-      expect.stringContaining("The implementation and migration are complete."),
-    ]);
+    expect((wire.bound_issue_log as { content_jsonl: string } | undefined)?.content_jsonl)
+      .toBe("");
+    expect(store.listChatMessages(inbound.chatSessionId).map(message => message.body).join("\n"))
+      .toContain("The implementation and migration are complete.");
     store.startTask(roundTask.id);
     store.failTask(roundTask.id, {
       error: "temporary provider timeout",
@@ -477,9 +585,11 @@ describe("Feishu bot standard Task bridge", () => {
     expect(retryTask).toMatchObject({ status: "queued", chatSessionId: inbound.chatSessionId });
     expect(store.claimTask("rt_bot")?.id).toBe(retryTask.id);
     const retryWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(retryTask.id)!);
-    expect(retryWire.bound_issue_updates).toEqual([
-      expect.stringContaining("The implementation and migration are complete."),
-    ]);
+    expect((retryWire.bound_issue_log as { content_jsonl: string } | undefined)?.content_jsonl)
+      .toBe("");
+    expect(store.listChatMessages(inbound.chatSessionId).filter(message =>
+      message.role === "system" && message.body.includes("The implementation and migration are complete.")))
+      .toHaveLength(1);
     store.startTask(retryTask.id);
     store.completeTask(retryTask.id, {
       output: "MUL work is complete and ready for review.",
@@ -539,10 +649,12 @@ describe("Feishu bot standard Task bridge", () => {
       error: "final failure",
       failureReason: "agent_error",
     });
-    expect(store.listTasks()).toHaveLength(countBeforeFailure);
+    expect(store.listTasks()).toHaveLength(countBeforeFailure + 1);
+    expect(store.listChatMessages(inbound.chatSessionId).some(message =>
+      message.role === "system" && message.body.includes(`状态 failed`))).toBe(true);
   });
 
-  it("steers an existing inbound Chat task instead of creating a second round task", () => {
+  it("rides an existing queued inbound Chat task instead of creating a second round task", () => {
     const { store, agent, config } = scaffold();
     const initial = store.submitFeishuBotMessage("local", "rt_bot", {
       revision: config.revision,
@@ -553,7 +665,7 @@ describe("Feishu bot standard Task bridge", () => {
       threadId: "omt_busy",
       text: "I am already waiting for a response.",
     });
-    const issue = store.createIssue({ title: "Busy Feishu topic", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Busy Feishu topic", workspaceId: "local" });
     store.cancelTask(initial.taskId);
     bindFeishuTopicFixture(store, db!, initial.chatSessionId, issue.id);
     const inbound = store.submitFeishuBotMessage("local", "rt_bot", {
@@ -572,13 +684,11 @@ describe("Feishu bot standard Task bridge", () => {
     });
     const taskCount = store.listTasks().length;
 
-    const created = store.prepareFeishuIssueRoundPushesWithinTransaction({ issue, leaderTask });
+    const created = store.prepareFeishuIssueRoundPushes({ issue, leaderTask });
 
     expect(created).toHaveLength(0);
     expect(store.listTasks()).toHaveLength(taskCount);
-    expect(store.listPendingTaskSteerMessages(inbound.taskId)).toEqual([
-      expect.objectContaining({ content: expect.stringContaining(`completed a work round for ${issue.key}`) }),
-    ]);
+    expect(store.listPendingTaskSteerMessages(inbound.taskId)).toEqual([]);
     store.cancelTask(leaderTask.id);
 
     expect(store.claimTask("rt_bot")?.id).toBe(inbound.taskId);
@@ -613,10 +723,10 @@ describe("Feishu bot standard Task bridge", () => {
     });
     expect(store.claimTask("rt_bot")?.id).toBe(inbound.taskId);
     store.startTask(inbound.taskId);
-    const issue = store.createIssue({ title: "New Issue binding", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "New Issue binding", workspaceId: "local" });
     bindFeishuTopicFixture(store, db!, inbound.chatSessionId, issue.id);
     const leader = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Issue work" });
-    const wakes = store.prepareFeishuIssueRoundPushesWithinTransaction({ issue, leaderTask: leader });
+    const wakes = store.prepareFeishuIssueRoundPushes({ issue, leaderTask: leader });
     expect(wakes).toHaveLength(1);
     expect(wakes[0]).toMatchObject({ issueId: issue.id, chatSessionId: inbound.chatSessionId });
     expect(store.listPendingTaskSteerMessages(inbound.taskId)).toEqual([]);
@@ -648,7 +758,7 @@ describe("Feishu bot standard Task bridge", () => {
       leaderId: agent.id,
       memberIds: [teammate.id],
     });
-    const issue = store.createIssue({
+    const issue = createResponsibleTestIssue(store, {
       title: "Delegated Feishu round",
       workspaceId: "local",
       assigneeType: "squad",
@@ -669,17 +779,20 @@ describe("Feishu bot standard Task bridge", () => {
       body: `Please implement this [@Teammate](mention://agent/${teammate.id})`,
     });
     const teammateTask = store.listTasksForIssue(issue.id).find((task) => task.agentId === teammate.id)!;
-    const baselineChatTaskCount = store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId).length;
+    const ordinaryChatTasks = () => store.listTasks().filter((task) =>
+      task.chatSessionId === inbound.chatSessionId && !task.issueSessionId
+    );
+    const baselineChatTaskCount = ordinaryChatTasks().length;
 
     store.completeTask(leaderTask.id, { output: "Delegated; waiting for implementation." });
-    expect(store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId)).toHaveLength(baselineChatTaskCount);
+    expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
     expect(store.claimTask("rt_bot")?.id).toBe(teammateTask.id);
     store.startTask(teammateTask.id);
     store.completeTask(teammateTask.id, { output: "Implementation complete." });
-    expect(store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId)).toHaveLength(baselineChatTaskCount);
+    expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
 
     const leaderReturn = store.listTasksForIssue(issue.id).find((task) =>
-      task.agentId === agent.id && task.parentTaskId === teammateTask.id
+      task.id === store.getTask(teammateTask.id)?.delegationReturnTaskId
     )!;
     expect(store.claimTask("rt_bot")?.id).toBe(leaderReturn.id);
     store.startTask(leaderReturn.id);
@@ -689,10 +802,12 @@ describe("Feishu bot standard Task bridge", () => {
       task.chatSessionId === inbound.chatSessionId && task.status === "queued"
     );
     expect(proactive).toHaveLength(1);
-    expect(proactive[0]?.prompt).toContain(`completed a work round for ${issue.key}`);
+    expect(store.listChatMessages(inbound.chatSessionId).at(-1)?.body).toContain("Reviewed the implementation");
+    expect(store.listChatMessages(inbound.chatSessionId).some(message =>
+      message.role === "system" && message.body.includes(issue.key))).toBe(true);
   });
 
-  it("switches the bound Chat from bootstrap to delta after the provider session is promoted", () => {
+  it("keeps the bound Chat's setup in the instructions and sends only new input after the provider session is promoted", () => {
     const { store, agent, config } = scaffold();
     store.updateAgent(agent.id, { instructions: "Follow the workspace rules.\n".repeat(400) });
     const skill = store.createSkill({
@@ -713,26 +828,28 @@ describe("Feishu bot standard Task bridge", () => {
     const firstTask = store.claimTask("rt_bot")!;
     expect(firstTask.id).toBe(firstSubmission.taskId);
     const firstWire = daemonTaskClaimResponse(store, firstTask);
+    useTaskSessionInput(store, firstTask, firstWire);
     expect((firstWire.session_projection as { mode?: string } | undefined)?.mode).toBe("bootstrap");
-    const firstPrompt = buildTaskPrompt({
+    const first = buildTaskPromptArtifact({
       ...firstTask,
+      prompt: firstWire.prompt,
       sessionProjection: firstWire.session_projection,
-      chatMessage: firstWire.chat_message,
     } as any);
+    expect(first.mode).toBe("bootstrap");
+    expect(first.prompt).toContain("first Feishu request");
+    expect(first.instructions).toContain("Follow the workspace rules.");
 
     store.startTask(firstTask.id);
+    store.recordSessionAgentRangeRead(firstSubmission.chatSessionId, agent.id,
+      { seq: 1, offset: 0 }, { seq: store.getConversationLogHead(firstSubmission.chatSessionId)!.headSeq + 1, offset: 0 }, firstTask.id);
     store.completeTask(firstTask.id, { output: "first answer", sessionId: "sess_feishu_delta" });
-    const issue = store.createIssue({ title: "Feishu bound Chat", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Feishu bound Chat", workspaceId: "local" });
     bindFeishuTopicFixture(store, db!, firstSubmission.chatSessionId, issue.id);
     const taskCountBeforeIssueUpdate = store.listTasks().length;
     store.createIssueComment(issue.id, {
       authorType: "member",
-      authorId: "member_reviewer",
+      authorId: store.createWorkspaceMember({ name: "Reviewer", workspaceId: "local" }).id,
       body: "The Feishu reviewer approved the bound Issue.",
-    });
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 60_000))).toEqual({
-      delivered: 1,
-      dropped: 0,
     });
     expect(store.listTasks()).toHaveLength(taskCountBeforeIssueUpdate);
 
@@ -749,23 +866,43 @@ describe("Feishu bot standard Task bridge", () => {
     expect(secondTask.holdsWorkspace).toBe(false);
     expect(store.getTaskWithAgent(secondTask.id)?.repos).toEqual([]);
     const secondWire = daemonTaskClaimResponse(store, secondTask);
+    useTaskSessionInput(store, secondTask, secondWire);
     expect((secondWire.session_projection as { mode?: string } | undefined)?.mode).toBe("delta");
-    const secondPrompt = buildTaskPrompt({
+    const secondInput = {
       ...secondTask,
+      prompt: secondWire.prompt,
       sessionProjection: secondWire.session_projection,
-      chatMessage: secondWire.chat_message,
       boundIssue: secondWire.bound_issue,
-      boundIssueUpdates: secondWire.bound_issue_updates,
-      boundIssueUpdatesOmittedCount: secondWire.bound_issue_updates_omitted_count,
-    } as any);
+      boundIssueLog: secondWire.bound_issue_log,
+    };
+    const second = buildTaskPromptArtifact(secondInput as any);
+    expect(second.mode).toBe("delta");
 
-    expect(secondPrompt).toContain(`## Issue\nKey: ${issue.key}`);
-    expect(secondPrompt).toContain("## Bound Issue Updates");
-    expect(secondPrompt).toContain("The Feishu reviewer approved the bound Issue.");
-    expect(secondPrompt.match(/second Feishu request/g)).toHaveLength(1);
-    expect(secondPrompt).not.toContain("## Agent Instructions");
-    expect(secondPrompt).not.toContain("## Skills");
-    expect(Buffer.byteLength(secondPrompt)).toBeLessThan(Buffer.byteLength(firstPrompt) / 2);
+    // Session setup lives in the provider's AGENTS.md, the same for a new or resumed provider session.
+    expect(second.instructions).toContain(`## Issue\nKey: ${issue.key}`);
+    expect(second.instructions).toContain("## Bound Issue\n");
+    expect(second.instructions).toContain("Follow the workspace rules.");
+    expect(second.instructions).toBe(buildTaskPromptArtifact({
+      ...secondInput,
+      sessionProjection: { ...(secondWire.session_projection as object), mode: "bootstrap" },
+    } as any).instructions);
+
+    expect(second.instructions).not.toContain("## Bound Issue Log");
+    const issueSession = store.getOrCreateDefaultIssueSession(issue.id);
+    expect(secondWire.bound_issue_log).toMatchObject({ session_id: issueSession.id, content_jsonl: "", has_more: false });
+    expect(second.instructions).not.toContain(`remi message list ${issueSession.id} --from 0 --to 1`);
+    expect(second.instructions).not.toContain("The Feishu reviewer approved the bound Issue.");
+    expect(JSON.stringify(secondWire)).not.toContain("The Feishu reviewer approved the bound Issue.");
+    expect(store.listMessages(issueSession.id).map(message => message.body_md))
+      .toEqual(["The Feishu reviewer approved the bound Issue."]);
+    expect(second.prompt.match(/second Feishu request/g)).toHaveLength(1);
+    expect(second.prompt).not.toContain("first Feishu request");
+    expect(second.prompt).not.toContain("Follow the workspace rules.");
+    expect(second.prompt).not.toContain("## ");
+    // Skills load natively from the provider's skill directory; neither part inlines them.
+    for (const text of [first.prompt, first.instructions, second.prompt, second.instructions]) {
+      expect(text).not.toContain("Inspect the repository carefully.");
+    }
   });
 
   it("deduplicates events and steers an active Task in the bound Chat Session", () => {
@@ -787,7 +924,7 @@ describe("Feishu bot standard Task bridge", () => {
       duplicate: false,
       steered: false,
       status: "queued",
-      senderAllowed: false,
+      senderAllowed: true,
     });
     const task = store.getTask(first.taskId)!;
     expect(task).toMatchObject({
@@ -796,7 +933,7 @@ describe("Feishu bot standard Task bridge", () => {
       prompt: "first message",
       workDir: null,
       requestingUserName: "Owner from Feishu",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in Settings > Integrations > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      requestingUserProfileDescription: "Source: Feishu personal bot\nAnyone who can message this bot may use the responding Agent's enabled capabilities. No separate sender approval or workspace membership is required.\nThe Agent's own permissions and approval requirements still apply. The API checks the bot's current access policy; do not infer a pending approval from earlier conversation history.",
       issueCreationRestricted: false,
     });
 
@@ -830,9 +967,46 @@ describe("Feishu bot standard Task bridge", () => {
     expect(store.listFeishuBotTaskReceiptMessageIds("local", first.taskId)).toEqual(["om_1", "om_2"]);
   });
 
-  it("admits an unknown sender but checks Issue creation against the dynamic allowlist", () => {
-    const { store, config } = scaffold();
-    const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
+  it("kicks the daemon downlink after an inbound steer commits", () => {
+    const { store, agent, config } = scaffold();
+    store.updateAgent(agent.id, { runtimeId: "rt_bot" });
+    const submit = (externalMessageId: string, text: string) => store.submitFeishuBotMessage("local", "rt_bot", {
+      revision: config.revision,
+      externalSessionKey: "oc_chat_kick",
+      externalMessageId,
+      senderOpenId: "ou_member",
+      senderUnionId: "on_owner",
+      text,
+    });
+    const first = submit("om_kick_1", "first message");
+    expect(store.claimTask("rt_bot")?.id).toBe(first.taskId);
+    store.startTask(first.taskId);
+    const storeDb = (store as unknown as { db: SqlDatabase }).db;
+    const kicks: Array<{ payload: Record<string, unknown>; inTransaction: boolean }> = [];
+    const unsubscribe = store.onWorkspaceEvent((event) => {
+      if (event.type === "daemon:task_input") kicks.push({ payload: event.payload, inTransaction: storeDb.inTransaction === true });
+    });
+    try {
+      expect(submit("om_kick_2", "add this while running")).toMatchObject({ steered: true, duplicate: false });
+      expect(kicks).toEqual([{ payload: { runtime_id: "rt_bot", task_id: first.taskId }, inTransaction: false }]);
+      expect(submit("om_kick_2", "redelivered payload")).toMatchObject({ duplicate: true });
+      expect(kicks).toHaveLength(1);
+      expect(() => storeDb.transaction(() => {
+        expect(submit("om_kick_3", "rolled back input")).toMatchObject({ steered: true, duplicate: false });
+        expect(kicks).toHaveLength(1);
+        throw new Error("rollback Feishu steer");
+      })()).toThrow("rollback Feishu steer");
+      expect(kicks).toHaveLength(1);
+      expect(store.listPendingTaskSteerMessages(first.taskId)).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("rejects an unknown sender in allowlist mode and checks Issue creation dynamically once approved", () => {
+    const { store, agent } = scaffold();
+    const config = requireAllowlist(store, agent.id);
+    const message = {
       revision: config.revision,
       externalSessionKey: "oc_external_chat",
       externalMessageId: "om_external",
@@ -840,19 +1014,28 @@ describe("Feishu bot standard Task bridge", () => {
       senderUnionId: "on_external",
       senderName: "External Alice",
       text: "help me understand this workspace",
-    });
+    };
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", message)).toThrow("allowlist");
+    const [sender] = store.listFeishuBotSenders("local");
+    expect(sender).toMatchObject({ display_name: "External Alice", allowed: false });
+    expect(store.listTasks()).toHaveLength(0);
 
-    expect(submitted.senderAllowed).toBe(false);
+    store.setFeishuBotSenderAllowed("local", sender!.id, true, "local");
+    const submitted = store.submitFeishuBotMessage("local", "rt_bot", message);
+    expect(submitted.senderAllowed).toBe(true);
     expect(store.getTask(submitted.taskId)).toMatchObject({
       requestingUserName: "External Alice",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in Settings > Integrations > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      requestingUserProfileDescription: "Source: Feishu personal bot\nOnly allowlisted Feishu accounts can use this bot. The space owner manages access in IM platforms > Feishu > Access control > Feishu account allowlist.\nIssue creation re-checks every source account of this Chat; retry after the owner updates the allowlist.",
       issueCreationRestricted: false,
     });
+    expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(false);
+    store.setFeishuBotSenderAllowed("local", sender!.id, false, "local");
     expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(true);
   });
 
   it("does not use a known Remi identity as an account approval", () => {
-    const { store, config } = scaffold();
+    const { store, agent } = scaffold();
+    const config = requireAllowlist(store, agent.id);
     const outsider = store.getOrCreateUser({
       externalId: "ou_sso_outsider",
       feishuUnionId: "on_outsider",
@@ -861,7 +1044,7 @@ describe("Feishu bot standard Task bridge", () => {
     });
     expect(store.getUserRoleInWorkspace(outsider.id, "local")).toBeNull();
 
-    const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
       revision: config.revision,
       externalSessionKey: "oc_known_outsider",
       externalMessageId: "om_known_outsider",
@@ -869,15 +1052,8 @@ describe("Feishu bot standard Task bridge", () => {
       senderUnionId: "on_outsider",
       senderName: "Stale Event Name",
       text: "hello from another workspace",
-    });
-
-    expect(submitted.senderAllowed).toBe(false);
-    expect(store.getTask(submitted.taskId)).toMatchObject({
-      requestingUserName: "Stale Event Name",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in Settings > Integrations > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
-      issueCreationRestricted: false,
-    });
-    expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(true);
+    })).toThrow("allowlist");
+    expect(store.listFeishuBotSenders("local")).toMatchObject([{ open_id: "ou_known_outsider", allowed: false }]);
   });
 
   it("keeps the Chat Session across a config revision change", () => {
@@ -962,7 +1138,7 @@ describe("Feishu bot standard Task bridge", () => {
     expect(store.getFeishuBotConfig("local")?.revision).toBe(config.revision);
   });
 
-  it("keeps one Issue round push on the newest binding after a route switch", () => {
+  it("keeps one Issue round push per active binding after a route switch", () => {
     const { store, agent, config } = scaffold();
     const externalSessionKey = "oc_round_route:thread:omt_round_route";
     const first = store.submitFeishuBotMessage("local", "rt_bot", {
@@ -976,7 +1152,7 @@ describe("Feishu bot standard Task bridge", () => {
       text: "before route switch",
     });
     store.cancelTask(first.taskId);
-    const issue = store.createIssue({
+    const issue = createResponsibleTestIssue(store, {
       title: "Routed round push",
       workspaceId: "local",
       assigneeType: "agent",
@@ -1035,31 +1211,31 @@ describe("Feishu bot standard Task bridge", () => {
     const roundTasks = store.listTasks().filter((task) =>
       task.status === "queued" && [first.chatSessionId, second.chatSessionId].includes(task.chatSessionId ?? "")
     );
-    expect(roundTasks).toHaveLength(1);
-    expect(roundTasks[0]).toMatchObject({
-      agentId: routedAgent.id,
-      chatSessionId: second.chatSessionId,
-    });
+    expect(roundTasks).toHaveLength(2);
+    expect(roundTasks.map(task => ({ agentId: task.agentId, chatSessionId: task.chatSessionId }))
+      .sort((a, b) => a.chatSessionId!.localeCompare(b.chatSessionId!))).toEqual([
+        { agentId: agent.id, chatSessionId: first.chatSessionId },
+        { agentId: routedAgent.id, chatSessionId: second.chatSessionId },
+      ].sort((a, b) => a.chatSessionId.localeCompare(b.chatSessionId)));
     expect(db!.query(
       `SELECT b.chat_session_id FROM multiremi_feishu_bot_round_pushes r
        JOIN multiremi_feishu_bot_chat_bindings b ON b.id = r.binding_id
-       WHERE r.leader_task_id = ?`,
-    ).all(leaderTask.id)).toEqual([{ chat_session_id: second.chatSessionId }]);
+       WHERE r.leader_task_id = ? ORDER BY b.chat_session_id`,
+    ).all(store.getTurnForAttempt(leaderTask.id)!.id)).toEqual([
+      { chat_session_id: first.chatSessionId }, { chat_session_id: second.chatSessionId },
+    ].sort((a, b) => a.chat_session_id.localeCompare(b.chat_session_id)));
   });
 
   it("assigns an automatically created group Issue to the routed Agent", () => {
     const { store, config } = scaffold();
     const routedAgent = store.createAgent({ name: "Issue worker", provider: "codex", workspaceId: "local" });
     store.updateWorkspace("local", {
-      settings: { issueTopics: { enabled: true, chatId: "oc_issues" } },
+      settings: { issueTopics: { enabled: true, chatId: "oc_issues", responsibleMemberId: 'mem_local_local' } },
     });
     store.replaceFeishuBotAgentRoutes("local", [
       { scope: "chat", chatId: "oc_issues", agentId: routedAgent.id },
     ]);
 
-    store.submitFeishuBotMessage("local", "rt_bot", { revision: config.revision, externalSessionKey: "oc_discovery",
-      externalMessageId: "om_discovery", senderOpenId: "ou_owner", text: "Hello" });
-    store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
     const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
       revision: config.revision,
       externalSessionKey: "oc_issues:thread:omt_issue",
@@ -1120,7 +1296,7 @@ describe("Feishu bot standard Task bridge", () => {
             outputTokens: 3,
             cacheReadTokens: 0,
             cacheWriteTokens: 0,
-            totalTokens: 0,
+            totalTokens: 15,
           }],
         },
       });

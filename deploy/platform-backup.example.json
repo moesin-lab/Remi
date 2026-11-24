@@ -1,0 +1,7 @@
+{
+  "directory": "/var/lib/multiremi-platform-updater/backups",
+  "databaseDumpCommand": ["docker", "exec", "multiremi-platform-postgres-1", "pg_dump", "-U", "multiremi", "-d", "multiremi", "-Fc"],
+  "databaseVerifyCommand": ["/usr/local/bin/bun", "/opt/multiremi-platform/updater/current/scripts/verify-platform-backup.ts", "multiremi-platform-postgres-1", "multiremi"],
+  "dataPaths": ["/srv/multiremi", "/etc/multiremi"],
+  "archives": []
+}

@@ -7,6 +7,7 @@ import type {
 import { localAttachmentFileResponse } from "../helpers.js";
 import {
   authenticatedRequestUserId,
+  currentRequestUserId,
   currentWorkspaceMember,
   currentWorkspaceRoleStrict,
   issueCompatibilityResponse,
@@ -23,6 +24,7 @@ import {
   signIssueShareId,
 } from "../helpers/issue-share-tokens.js";
 import type { RouterDeps } from "./deps.js";
+import { parseTraceWindow } from "../trace/request.js";
 
 const SHARE_DURATION_DAYS = 60;
 
@@ -46,7 +48,7 @@ export function registerIssueShareRoutes(app: Hono, deps: RouterDeps): void {
     const share = store.ensureIssueShare(
       issue.id,
       issue.workspaceId,
-      authenticatedRequestUserId(c) ?? "local",
+      currentRequestUserId(c),
       SHARE_DURATION_DAYS,
     );
     return c.json({ share: managedShareResponse(share, shareSecret) }, 201);
@@ -89,6 +91,26 @@ export function registerIssueShareRoutes(app: Hono, deps: RouterDeps): void {
     return c.json(buildSharedIssueBundle(c.req.param("token"), viewedShare, issue, deps));
   });
 
+  app.get("/api/shares/:token/tasks/:task_id/trace", async (c) => {
+    const token = c.req.param("token");
+    const signedCliRequest = c.req.header("X-Remi-Share")?.trim() === token;
+    if (!authenticatedRequestUserId(c) && !signedCliRequest) return c.json({ error: "login required" }, 401);
+    const share = resolveActiveIssueShareToken(token, store, shareSecret);
+    if (!share) return c.json({ error: "trace not found" }, 404);
+    const issue = store.getIssue(share.issueId);
+    const task = store.getTask(c.req.param("task_id"));
+    const taskSession = task?.issueSessionId ? store.getIssueSession(task.issueSessionId) : null;
+    if (!issue || issue.workspaceId !== share.workspaceId || !task
+      || task.issueId !== issue.id || task.workspaceId !== share.workspaceId || task.chatSessionId
+      || (task.issueSessionId && (!taskSession || taskSession.chatId
+        || taskSession.issueId !== issue.id || taskSession.workspaceId !== issue.workspaceId))) {
+      return c.json({ error: "trace not found" }, 404);
+    }
+    const window = parseTraceWindow(c);
+    if (!window) return c.json({ error: "invalid trace window" }, 400);
+    return c.json(await deps.traceReader.read(task.id, window));
+  });
+
   app.get("/api/shares/:token/attachments/:attachmentId/content", async (c) => {
     const token = c.req.param("token");
     const signedCliRequest = c.req.header("X-Remi-Share")?.trim() === token;
@@ -96,7 +118,9 @@ export function registerIssueShareRoutes(app: Hono, deps: RouterDeps): void {
     const share = resolveActiveIssueShareToken(token, store, shareSecret);
     if (!share) return c.json({ error: "attachment not found" }, 404);
     const attachment = store.getAttachment(c.req.param("attachmentId"));
-    if (!attachment || !attachmentBelongsToIssue(attachment.issueId, attachment.commentId, share.issueId, deps)) {
+    const issue = store.getIssue(share.issueId);
+    if (!issue || issue.workspaceId !== share.workspaceId || !attachment || attachment.workspaceId !== share.workspaceId
+      || !attachmentBelongsToIssue(attachment.issueId, attachment.commentId, share.issueId, deps)) {
       return c.json({ error: "attachment not found" }, 404);
     }
     if (!attachment.url.startsWith("/api/attachments/")) return c.redirect(attachment.url);
@@ -156,25 +180,22 @@ function buildSharedIssueBundle(
 
   const timeline = store.listIssueTimeline(issue.id, { ascending: true })
     .map((entry) => sharedTimelineEntry(token, entry));
-  const sessions = store.listIssueSessions(issue.id, true).map((session) => ({
+  const publicSessions = store.listIssueSessions(issue.id, true)
+    .filter((session) => !session.chatId && session.issueId === issue.id && session.workspaceId === issue.workspaceId);
+  const publicSessionIds = new Set(publicSessions.map((session) => session.id));
+  const sessions = publicSessions.map((session) => ({
     ...issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)),
     events: store.listSessionEvents(session.id).map(sessionEventCompatibilityResponse),
     tasks: store.listTasksForIssue(issue.id)
       .filter((task) => task.issueSessionId === session.id && !task.chatSessionId)
-      .map((task) => ({
-        ...taskCompatibilityResponse(task),
-        messages: store.listTaskMessages(task.id),
-      })),
+      .map((task) => taskCompatibilityResponse(task)),
   }));
   const unscopedTasks = store.listTasksForIssue(issue.id)
     .filter((task) => !task.issueSessionId && !task.chatSessionId)
-    .map((task) => ({
-      ...taskCompatibilityResponse(task),
-      messages: store.listTaskMessages(task.id),
-    }));
+    .map((task) => taskCompatibilityResponse(task));
   const issueWorkspace = store.getIssueWorkspace(issue.id);
   const project = issue.projectId ? store.getProject(issue.projectId) : null;
-  const parentIssue = issue.parentIssueId ? store.getIssue(issue.parentIssueId) : null;
+  const parentIssue = issue.parentIssueId ? store.getIssueByRef(issue.parentIssueId, issue.workspaceId) : null;
 
   return {
     share: publicShareResponse(share),
@@ -189,7 +210,9 @@ function buildSharedIssueBundle(
     dependencies: issue.dependencies.map(issueDependencyCompatibilityResponse),
     timeline,
     sessions,
-    session_results: store.listIssueSessionResults(issue.id).map(sessionResultCompatibilityResponse),
+    session_results: store.listIssueSessionResults(issue.id)
+      .filter((result) => publicSessionIds.has(result.sourceSessionId))
+      .map(sessionResultCompatibilityResponse),
     tasks: unscopedTasks,
     issue_workspace: issueWorkspace ? {
       issue_id: issueWorkspace.issueId,
@@ -276,9 +299,13 @@ function attachmentBelongsToIssue(
   sharedIssueId: string,
   deps: RouterDeps,
 ): boolean {
-  if (issueId === sharedIssueId) return true;
-  if (!commentId) return false;
-  return deps.store.getIssueComment(commentId)?.issueId === sharedIssueId;
+  const issue = deps.store.getIssue(sharedIssueId);
+  if (!issue) return false;
+  if (commentId) {
+    const comment = deps.store.getIssueComment(commentId);
+    return comment?.issueId === sharedIssueId && deps.store.getIssueCommentSourceWorkspaceId(commentId) === issue.workspaceId;
+  }
+  return issueId === sharedIssueId;
 }
 
 function referencedActors(

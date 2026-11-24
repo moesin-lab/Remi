@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { MultiremiIssueWorkspaceRepo, RepositoryActivityItem, RepositoryActivityResponse } from "@multiremi/contracts/types.js";
 import { canonicalGitRemoteKey, normalizeWorkspaceRepositories } from "../api/helpers/repositories.js";
-import { PostgresSyncDatabase, type SqlDatabase } from "./db/postgres.js";
+import { type SqlDatabase } from "./db/postgres.js";
 import { parseJson } from "./helpers.js";
 import { redactRuntimeCommandText } from "../runtime-command-safety.js";
 
@@ -26,24 +26,24 @@ function placeholders(values: unknown[]): string {
 }
 
 function directRepositorySql(db: SqlDatabase): string {
-  const target = db instanceof PostgresSyncDatabase ? "CAST(r.schedule_target AS JSON)" : "r.schedule_target";
+  const target = db.dialect === "postgres" ? "CAST(r.schedule_target AS JSON)" : "r.schedule_target";
   return `COALESCE((SELECT COALESCE(CASE WHEN (${target} ->> 'kind')='repository' THEN (${target} ->> 'id') END,r.repository_id)
     FROM multiremi_autopilot_runs r JOIN multiremi_autopilots ap ON ap.id=r.autopilot_id AND ap.workspace_id=t.workspace_id
-    WHERE r.task_id=t.id ORDER BY r.created_at DESC,r.id DESC LIMIT 1), e.repository_id)`;
+    WHERE r.turn_id=t.turn_id ORDER BY r.created_at DESC,r.id DESC LIMIT 1), e.repository_id)`;
 }
 
 export type ActivitySubject = "task" | "issue" | "session" | "agent" | "project";
 
 export function hasActivityForChange(db: SqlDatabase, workspaceId: string, repositoryId: string, issueIds: string[]): boolean {
   if (!issueIds.length) return false;
-  return Boolean(db.query(`SELECT 1 FROM multiremi_tasks t
+  return Boolean(db.query(`SELECT 1 FROM multiremi_turn_execution_records t
     LEFT JOIN multiremi_scm_events e ON e.id=t.assignment_source_event_id AND e.workspace_id=t.workspace_id
     WHERE t.workspace_id=? AND t.chat_session_id IS NULL AND t.issue_id IN (${placeholders(issueIds)})
     AND COALESCE(${directRepositorySql(db)},?)=? LIMIT 1`).get(workspaceId, ...issueIds, repositoryId, repositoryId));
 }
 
 export function hasProjectActivity(db: SqlDatabase, workspaceId: string, projectId: string): boolean {
-  return Boolean(db.query(`SELECT 1 FROM multiremi_tasks t JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id
+  return Boolean(db.query(`SELECT 1 FROM multiremi_turn_execution_records t JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id
     LEFT JOIN multiremi_scm_events e ON e.id=t.assignment_source_event_id AND e.workspace_id=t.workspace_id
     WHERE i.project_id=? AND t.workspace_id=? AND t.chat_session_id IS NULL AND ${directRepositorySql(db)} IS NULL LIMIT 1`).get(projectId, workspaceId));
 }
@@ -51,7 +51,7 @@ export function hasProjectActivity(db: SqlDatabase, workspaceId: string, project
 export function activityRepositories(db: SqlDatabase, workspaceId: string, subject: ActivitySubject, id: string): string[] {
   const column = { task: "t.id", issue: "i.id", session: "t.issue_session_id", agent: "t.agent_id", project: "i.project_id" }[subject];
   const rows = db.query(`WITH subjects AS (SELECT DISTINCT ${directRepositorySql(db)} AS direct_id,i.id AS issue_id,i.project_id
-    FROM multiremi_tasks t LEFT JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id
+    FROM multiremi_turn_execution_records t LEFT JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id
     LEFT JOIN multiremi_scm_events e ON e.id=t.assignment_source_event_id AND e.workspace_id=t.workspace_id
     WHERE t.workspace_id=? AND t.chat_session_id IS NULL AND ${column}=?)
     SELECT direct_id AS repo_id,NULL AS resource_ref FROM subjects WHERE direct_id IS NOT NULL
@@ -119,7 +119,7 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
     args.push(filters.after.created, filters.after.created, filters.after.id);
   }
   const rows = db.query(`WITH candidates AS (
-    SELECT t.id, t.status, t.created_at, t.started_at, t.attempt, t.progress_summary, t.wait_reason, t.failure_reason,
+    SELECT t.id, t.turn_id, t.status, t.created_at, t.started_at, t.attempt, t.progress_summary, t.wait_reason, t.failure_reason,
       CASE WHEN t.status='failed' THEN substr(t.error,1,1024) END AS error_excerpt,
       CASE t.status WHEN 'completed' THEN t.completed_at WHEN 'cancelled' THEN t.cancelled_at WHEN 'failed' THEN t.failed_at END AS ended_at,
       a.id AS agent_id, a.name AS agent_name, i.id AS issue_id, ${issueKey} AS issue_key, i.title, s.id AS session_id, s.title AS session_title,
@@ -127,9 +127,9 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
       CASE WHEN EXISTS (SELECT 1 FROM multiremi_scm_issue_links l JOIN multiremi_scm_change_requests pr
         ON pr.id=l.change_request_id AND pr.workspace_id=l.workspace_id WHERE l.issue_id=i.id AND l.workspace_id=t.workspace_id
         AND l.active=1 AND pr.repository_id=?) THEN 'issue_pr' WHEN ${projectMatch} THEN 'project_context' END AS indirect
-    FROM multiremi_tasks t JOIN multiremi_agents a ON a.id=t.agent_id AND a.workspace_id=t.workspace_id
+    FROM multiremi_turn_execution_records t JOIN multiremi_agents a ON a.id=t.agent_id AND a.workspace_id=t.workspace_id
     LEFT JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id
-    LEFT JOIN multiremi_issue_sessions s ON s.id=t.issue_session_id AND s.issue_id=i.id AND s.workspace_id=t.workspace_id
+    LEFT JOIN multiremi_issue_sessions s ON s.id=t.issue_session_id AND s.issue_id=i.id AND s.chat_id IS NULL AND s.workspace_id=t.workspace_id
     LEFT JOIN multiremi_scm_events e ON e.id=t.assignment_source_event_id AND e.workspace_id=t.workspace_id
     WHERE ${conditions.join(" AND ")}) SELECT * FROM candidates WHERE direct_id=? OR (direct_id IS NULL AND indirect IS NOT NULL)
     ORDER BY created_at DESC,id DESC LIMIT ?`).all(repository.id, ...projects, ...args, repository.id, filters.limit + 1);
@@ -141,7 +141,7 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
   const counts = new Map<string, number>();
   if (issueIds.length) {
     const ids = placeholders(issueIds);
-    for (const row of db.query(`SELECT issue_id,repos FROM multiremi_issue_workspaces WHERE workspace_id=? AND issue_id IN (${ids})`).all(workspaceId, ...issueIds)) {
+    for (const row of db.query(`SELECT issue_id,repos FROM multiremi_issue_workspaces WHERE workspace_id=? AND status<>'cleaned' AND issue_id IN (${ids})`).all(workspaceId, ...issueIds)) {
       const tree = parseJson<MultiremiIssueWorkspaceRepo[]>(row.repos, []).find(repo => repo.repoUrl && canonicalGitRemoteKey(repo.repoUrl) === remote);
       if (tree) trees.set(row.issue_id, { branch: tree.branchName || null, status: tree.status });
     }
@@ -157,7 +157,7 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
     }
   }
   const items: RepositoryActivityItem[] = rows.map(row => ({
-    task_id: row.id, status: row.status, relation: row.direct_id ? "direct" : row.indirect,
+    task_id: row.id, turn_id: row.turn_id, status: row.status, relation: row.direct_id ? "direct" : row.indirect,
     agent: row.agent_id ? { id: row.agent_id, name: row.agent_name ?? null } : null,
     issue: row.issue_id ? { id: row.issue_id, key: row.issue_key || row.issue_id, title: row.title } : null,
     issue_session: row.session_id ? { id: row.session_id, title: row.session_title } : null,

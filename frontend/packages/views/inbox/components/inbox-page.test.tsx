@@ -1,685 +1,154 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { I18nProvider } from "@multiremi/core/i18n/react";
-import enCommon from "../../locales/en/common.json";
-import enInbox from "../../locales/en/inbox.json";
-
-const TEST_RESOURCES = { en: { common: enCommon, inbox: enInbox } };
-
-const listInbox = vi.hoisted(() => vi.fn());
-const markItemsRead = vi.hoisted(() => vi.fn());
-const archiveItems = vi.hoisted(() => vi.fn());
-const navigationState = vi.hoisted(() => ({
-  searchParams: new URLSearchParams(),
-}));
-
-vi.mock("@multiremi/core/hooks", () => ({
-  useWorkspaceId: () => "ws-1",
-}));
-
-vi.mock("@multiremi/core/paths", () => ({
-  useWorkspacePaths: () => ({
-    inbox: () => "/test/inbox",
-    inboxIssue: (issueId: string, sessionId?: string) =>
-      `/test/inbox?issue=${issueId}${sessionId ? `&session=${sessionId}` : ""}`,
-    inboxItem: (itemId: string, sessionId?: string) =>
-      `/test/inbox?item=${itemId}${sessionId ? `&session=${sessionId}` : ""}`,
-    issueDetail: (id: string) => `/test/issues/${id}`,
-    issueSession: (id: string, sessionId: string) =>
-      `/test/issues/${id}?session=${sessionId}`,
-  }),
-}));
-
-vi.mock("@multiremi/core/modals", () => ({
-  useModalStore: Object.assign(() => ({ open: vi.fn() }), {
-    getState: () => ({ open: vi.fn() }),
-  }),
-}));
-
-vi.mock("@multiremi/core/issues/stores/draft-store", () => ({
-  useIssueDraftStore: Object.assign(() => ({ setDraft: vi.fn() }), {
-    getState: () => ({ setDraft: vi.fn() }),
-  }),
-}));
-
-vi.mock("@multiremi/core/inbox/queries", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@multiremi/core/inbox/queries")>()),
-  inboxPageOptions: (wsId: string) => ({
-    queryKey: ["inbox", wsId, "pages"],
-    queryFn: async ({ pageParam }: { pageParam: string | null }) => {
-      const result = await listInbox(pageParam);
-      return Array.isArray(result)
-        ? { items: result, limit: 50, has_more: false, next_cursor: null }
-        : result;
-    },
-    initialPageParam: null,
-    getNextPageParam: (lastPage: { next_cursor: string | null }) =>
-      lastPage.next_cursor ?? undefined,
-  }),
-  useInboxUnreadCount: () => 0,
-}));
-
-vi.mock("@multiremi/core/inbox/mutations", () => {
-  const noopMutation = () => ({ mutate: vi.fn(), isPending: false });
-  return {
-    useMarkInboxRead: noopMutation,
-    useArchiveInbox: noopMutation,
-    useArchiveInboxItems: () => ({ mutate: archiveItems, isPending: false }),
-    useMarkAllInboxRead: noopMutation,
-    useArchiveAllInbox: noopMutation,
-    useArchiveAllReadInbox: noopMutation,
-    useArchiveCompletedInbox: noopMutation,
-    useMarkInboxItemsRead: () => ({ mutate: markItemsRead, isPending: false }),
-  };
-});
-
-vi.mock("../../issues/components", () => ({
-  IssueDetail: ({
-    issueId,
-    initialIssueSessionId,
-    onIssueSessionChange,
-  }: {
-    issueId: string;
-    initialIssueSessionId?: string;
-    onIssueSessionChange?: (sessionId: string) => void;
-  }) => (
-    <div
-      data-testid="issue-detail"
-      data-session-route-owned={String(Boolean(onIssueSessionChange))}
-      data-initial-session={initialIssueSessionId}
-    >
-      {issueId}
-      <button
-        type="button"
-        onClick={() => onIssueSessionChange?.("session-review")}
-      >
-        Select Review session
-      </button>
-    </div>
-  ),
-}));
-
-const replace = vi.hoisted(() => vi.fn());
-vi.mock("../../navigation", () => ({
-  useNavigation: () => ({
-    searchParams: navigationState.searchParams,
-    replace,
-    push: vi.fn(),
-  }),
-}));
-
-vi.mock("./inbox-list-item", () => ({
-  InboxListItem: ({
-    item,
-    groupedItems,
-    onClick,
-    onArchive,
-  }: {
-    item: { id: string };
-    groupedItems?: Array<{ id: string }>;
-    onClick: () => void;
-    onArchive: () => void;
-  }) => (
-    <div>
-      <button type="button" data-testid="inbox-row" onClick={onClick}>
-        {item.id}{groupedItems && groupedItems.length > 1 ? ` (${groupedItems.length})` : ""}
-      </button>
-      <button type="button" aria-label={`Archive ${item.id}`} onClick={onArchive}>Archive</button>
-    </div>
-  ),
-  useTimeAgo: () => () => "just now",
-}));
-
-vi.mock("./autopilot-run-report", () => ({
-  AutopilotRunReport: ({
-    item,
-    groupedItems,
-    onSelectItem,
-  }: {
-    item: { id: string };
-    groupedItems?: Array<{ id: string }>;
-    onSelectItem?: (item: { id: string }) => void;
-  }) => (
-    <div data-testid="autopilot-run-report">
-      {item.id}
-      {groupedItems && groupedItems.length > 1 && (
-        <button type="button" onClick={() => onSelectItem?.(groupedItems[1]!)}>Select child run</button>
-      )}
-    </div>
-  ),
-}));
-
-vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
-
-vi.mock("@multiremi/ui/hooks/use-mobile", () => ({ useIsMobile: () => false }));
-
-vi.mock("react-resizable-panels", () => ({
-  Group: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Panel: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Separator: () => <div />,
-  useDefaultLayout: () => ({ defaultLayout: undefined, onLayoutChanged: vi.fn() }),
-  usePanelRef: () => ({ current: null }),
-}));
-
+import { renderWithI18n } from "../../test/i18n";
+import { messageFixture } from "../../test/messages";
+const mock = vi.hoisted(() => ({ ws: "ws-1", mobile: false, searchParams: new URLSearchParams(), getQuestion: vi.fn(), getMessage: vi.fn(), listInboxPage: vi.fn(), markInboxRead: vi.fn(), markAllInboxRead: vi.fn() }));
+vi.mock("@multiremi/core/api", () => ({ api: mock }));
+vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => mock.ws }));
+vi.mock("@multiremi/core/workspace/hooks", () => ({ useActorName: () => ({ getActorName: (_type: string, id: string) => id }) }));
+vi.mock("@multiremi/ui/hooks/use-mobile", () => ({ useIsMobile: () => mock.mobile }));
+vi.mock("../../navigation", () => ({ useNavigation: () => ({ pathname: "/inbox", searchParams: mock.searchParams, replace: vi.fn() }), AppLink: (props: { href: string; children: React.ReactNode }) => <a {...props} /> }));
+vi.mock("@multiremi/core/paths", () => ({ useWorkspacePaths: () => ({ inboxItem: (id: string) => `/ws/inbox?item=${id}`, issueDetail: (id: string) => `/ws/issues/${id}` }) }));
+vi.mock("../../common/use-list-perf-marker", () => ({ useListPerfMarker: () => null }));
+vi.mock("../../common/markdown", () => ({ Markdown: ({ children }: { children: string }) => <div>{children}</div> }));
+vi.mock("@multiremi/ui/components/ui/resizable", () => ({ ResizablePanelGroup: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, ResizablePanel: ({ children }: { children: React.ReactNode }) => <div>{children}</div>, ResizableHandle: () => null }));
+import { onInboxInvalidate } from "@multiremi/core/inbox/ws-updaters";
 import { InboxPage } from "./inbox-page";
-
-function renderInbox() {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+const page = { items: [messageFixture()], unread_count: 200, attention_count: 3, next_cursor: null };
+const mount = (qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })) => renderWithI18n(<QueryClientProvider client={qc}><InboxPage /></QueryClientProvider>);
+beforeEach(() => { vi.clearAllMocks(); mock.ws = "ws-1"; mock.mobile = false; mock.searchParams = new URLSearchParams(); mock.getMessage.mockResolvedValue(messageFixture()); mock.listInboxPage.mockResolvedValue(page); mock.markInboxRead.mockResolvedValue({ session_id: "sess_1", cursor_seq: 8 }); mock.markAllInboxRead.mockResolvedValue({ conversations_read: 12 }); });
+describe("cursor inbox", () => {
+  it("opens a private source Q using its dedicated API without reading the source message or marking its lane read", async () => {
+    mock.searchParams = new URLSearchParams("item=q-private&question=q-private&question_source=result-private");
+    mock.getMessage.mockRejectedValue(new Error("Raw private source forbidden"));
+    mock.getQuestion.mockResolvedValue({ id: "q-private", kind: "question", workspace_id: "ws-1", session_id: "private-session", source_issue_id: "private-child", source_agent_id: "worker", source_turn_id: null, source_attempt_id: null,
+      original_questions: [], original_message: "Private original question", original_context: { text: "Original context" }, options: null, summary: { body_md: "Separate Remi summary", agent_id: "remi", at: "now" },
+      current_handler: null, stage: "human", route_revision: 2, answer_revision: 1, status: "answered", wait_status: "none", wait_reason: null, answer: null,
+      history: [{ type: "notify", at: "now", actor: null, route_revision: 2, reason: "historical_source_notified", source_message_id: "result-private", source_session_id: "source-private" }], actions: { allowed: [] } });
+    mount();
+    expect(await screen.findByText("Private original question")).toBeInTheDocument();
+    expect(screen.getByText("Separate Remi summary")).toBeInTheDocument();
+    // The Issue human stage names nobody; the card shows how the Q ended instead.
+    expect(document.querySelector("[data-question-tag]")).toHaveTextContent("Answered");
+    expect(screen.getByRole("link", { name: "Source · result-private" })).toHaveAttribute("href", "/ws/inbox?item=q-private&question=q-private&question_source=result-private");
+    expect(mock.getQuestion).toHaveBeenCalledWith("q-private");
+    expect(mock.getMessage).not.toHaveBeenCalled();
+    expect(mock.markInboxRead).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /Read through/ })).toBeNull();
   });
-  return render(
-    <I18nProvider locale="en" resources={TEST_RESOURCES}>
-      <QueryClientProvider client={queryClient}>
-        <InboxPage />
-      </QueryClientProvider>
-    </I18nProvider>,
-  );
-}
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  navigationState.searchParams = new URLSearchParams();
-});
-
-describe("InboxPage", () => {
-  it("distinguishes a failed fetch from an empty inbox and offers a retry", async () => {
-    listInbox.mockRejectedValue(new Error("500"));
-    renderInbox();
-
-    // Both panes say so: the list (with the retry) and the detail placeholder.
-    expect(await screen.findAllByText("Something went wrong")).toHaveLength(2);
-    // The cheerful zero-states would be a lie here.
-    expect(screen.queryByText("No notifications")).not.toBeInTheDocument();
-    expect(screen.queryByText("Your inbox is empty")).not.toBeInTheDocument();
-
-    const callsBeforeRetry = listInbox.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => {
-      expect(listInbox.mock.calls.length).toBeGreaterThan(callsBeforeRetry);
+  it("lets any member answer an Issue Q that reached the human stage from a reminder link", async () => {
+    mock.searchParams = new URLSearchParams("item=q-human&question=q-human");
+    mock.getQuestion.mockResolvedValue({ id: "q-human", kind: "question", workspace_id: "ws-1", session_id: "issue-session", source_issue_id: "issue-1", source_agent_id: "worker", source_turn_id: null, source_attempt_id: null,
+      original_questions: [], original_message: "Retire the v1 endpoint?", original_context: null, options: [{ label: "Retire", value: "retire" }], summary: null,
+      current_handler: null, stage: "human", route_revision: 3, route_reason: null, answer_revision: 0, status: "pending", wait_status: "waiting", wait_reason: null, answer: null,
+      history: [], actions: { allowed: ["answer", "close"] } });
+    mount();
+    expect(await screen.findByText("Retire the v1 endpoint?")).toBeInTheDocument();
+    expect(document.querySelector("[data-question-tag]")).toHaveTextContent("Awaiting answer");
+    expect(screen.getByRole("button", { name: "Retire" })).toBeEnabled();
+    expect(screen.queryByText(/designated|Waiting for designated/i)).toBeNull();
+  });
+  it.each(["question_not_found", "question_access_denied"])("shows dedicated Q access failure %s without falling back to private message reads", async reason => {
+    mock.searchParams = new URLSearchParams("item=q-private&question=q-private");
+    mock.getQuestion.mockRejectedValue(new Error(reason));
+    mount();
+    expect(await screen.findByRole("alert")).toHaveTextContent(reason);
+    expect(mock.getMessage).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
+  });
+  for (const alreadyRead of [true, false]) {
+    it(`refreshes an external answer while ${alreadyRead ? "opening an already-read deep link" : "remaining in detail after marking read"}`, async () => {
+      const pending = messageFixture({ message_kind: "decision", options: [{ label: "Approve", value: "yes" }] });
+      mock.getMessage.mockResolvedValue(pending);
+      mock.listInboxPage.mockResolvedValue({ ...page, items: alreadyRead ? [] : [pending] });
+      if (alreadyRead) mock.searchParams.set("item", pending.id);
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      mount(qc);
+      if (!alreadyRead) {
+        fireEvent.click(await screen.findByRole("button", { name: /Follow up/ }));
+        await screen.findByRole("button", { name: "Read through #5" });
+        mock.listInboxPage.mockResolvedValue({ ...page, items: [] });
+        fireEvent.click(screen.getByRole("button", { name: "Read through #5" }));
+        await waitFor(() => expect(mock.markInboxRead).toHaveBeenCalled());
+        await waitFor(() => expect(screen.queryByRole("button", { name: /Follow up/ })).toBeNull());
+      }
+      await screen.findByRole("button", { name: "Approve" });
+      mock.getMessage.mockResolvedValue({ ...pending, revision: 1, resolved_at: "2026-10-05T00:00:00Z" });
+      onInboxInvalidate(qc, "ws-1");
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
+      expect(mock.getMessage).toHaveBeenCalledWith(pending.id);
+      expect(screen.getByRole("button", { name: "Read through #5" })).toBeInTheDocument();
     });
+  }
+  it("keeps global counts and makes reads explicit, without per-message archive", async () => {
+    mount(); const item = await screen.findByRole("button", { name: /Follow up/ });
+    expect(screen.getByText("200")).toBeInTheDocument();
+    fireEvent.click(item);
+    await screen.findByRole("button", { name: "Read through #5" });
+    expect(mock.markInboxRead).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Read through #5" }));
+    await waitFor(() => expect(mock.markInboxRead).toHaveBeenCalledWith({ session_id: "sess_1", to_seq: 5 }));
+    expect(await screen.findByText("Read through #8")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Archive/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Mark all as read" }));
+    await waitFor(() => expect(mock.markAllInboxRead).toHaveBeenCalledTimes(1));
   });
-
-  it("still shows the empty state when the request succeeds with no items", async () => {
-    listInbox.mockResolvedValue([]);
-    renderInbox();
-
-    expect(await screen.findByText("No notifications")).toBeInTheDocument();
-    expect(screen.queryByText("Something went wrong")).not.toBeInTheDocument();
-  });
-
-  it("loads older notifications one page at a time", async () => {
-    const item = (id: string, createdAt: string) => ({
-      id,
-      type: "comment_mention",
-      issue_id: id,
-      title: id,
-      severity: "info",
-      read: true,
-      archived: false,
-      created_at: createdAt,
-    });
-    listInbox
-      .mockResolvedValueOnce({
-        items: [item("newer", "2026-09-04T10:00:00.000Z")],
-        limit: 1,
-        has_more: true,
-        next_cursor: "cursor-1",
-      })
-      .mockResolvedValueOnce({
-        items: [item("older", "2026-09-03T10:00:00.000Z")],
-        limit: 1,
-        has_more: false,
-        next_cursor: null,
-      });
-    renderInbox();
-
-    expect(await screen.findByText("newer")).toBeInTheDocument();
+  it("continues with the opaque cursor and deduplicates overlapping pages", async () => {
+    mock.listInboxPage.mockImplementation(async ({ cursor }: { cursor: string | null }) => cursor ? { ...page, items: [messageFixture(), messageFixture({ id: "msg_2", seq: 6, body_md: "Second" })] } : { ...page, next_cursor: "opaque+next" });
+    mount(); await screen.findByRole("button", { name: /Follow up/ });
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
-    expect(await screen.findByText("older")).toBeInTheDocument();
-    expect(listInbox).toHaveBeenNthCalledWith(1, null);
-    expect(listInbox).toHaveBeenNthCalledWith(2, "cursor-1");
+    await screen.findByRole("button", { name: /Second/ });
+    expect(screen.getAllByRole("button", { name: /Follow up/ })).toHaveLength(1);
+    expect(mock.listInboxPage).toHaveBeenCalledWith({ workspace_id: "ws-1", limit: 50, cursor: "opaque+next" });
+    expect(screen.getByText("200")).toBeInTheDocument();
   });
-
-  it("groups notifications by date and filters by source", async () => {
-    const now = new Date();
-    const yesterday = new Date(now);
-    yesterday.setDate(yesterday.getDate() - 1);
-    listInbox.mockResolvedValue([
-      {
-        id: "automation-today",
-        type: "autopilot_run_completed",
-        issue_id: null,
-        title: "Daily summary completed",
-        read: false,
-        archived: false,
-        created_at: now.toISOString(),
-      },
-      {
-        id: "assignment-yesterday",
-        type: "issue_assigned",
-        issue_id: "issue-2",
-        title: "Assigned",
-        read: false,
-        archived: false,
-        created_at: yesterday.toISOString(),
-      },
-    ]);
-    renderInbox();
-
-    expect(await screen.findByRole("heading", { name: "Today" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Yesterday" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Automation" }));
-    expect(screen.getByText("automation-today")).toBeInTheDocument();
-    expect(screen.queryByText("assignment-yesterday")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Mentions" }));
-    expect(screen.getByText("No notifications match this filter")).toBeInTheDocument();
+  it("retains visible unread data when the cursor write fails", async () => {
+    mock.markInboxRead.mockRejectedValue(new Error("offline")); mount(); fireEvent.click(await screen.findByRole("button", { name: /Follow up/ }));
+    await screen.findByRole("button", { name: "Read through #5" });
+    fireEvent.click(screen.getByRole("button", { name: "Read through #5" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("offline");
+    expect(screen.getByRole("button", { name: /Follow up/ })).toBeInTheDocument();
+    expect(screen.queryByText("Read through #8")).toBeNull();
   });
-
-  it("separates the ingested message stream from platform automation", async () => {
-    const at = new Date().toISOString();
-    listInbox.mockResolvedValue([
-      {
-        id: "feishu-message",
-        type: "feishu_message_notification",
-        issue_id: null,
-        title: "飞书消息提醒",
-        details: { message_id: "msg-1", chat_name: "Dev group" },
-        read: false,
-        archived: false,
-        created_at: at,
-      },
-      {
-        id: "autopilot-run",
-        type: "autopilot_run_completed",
-        issue_id: null,
-        title: "Daily summary completed",
-        read: false,
-        archived: false,
-        created_at: at,
-      },
-    ]);
-    renderInbox();
-
-    fireEvent.click(await screen.findByRole("button", { name: "Message stream" }));
-    expect(screen.getByText("feishu-message")).toBeInTheDocument();
-    expect(screen.queryByText("autopilot-run")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Automation" }));
-    expect(screen.getByText("autopilot-run")).toBeInTheDocument();
-    expect(screen.queryByText("feishu-message")).not.toBeInTheDocument();
+  it("returns from a deep-linked mobile detail to the list", async () => {
+    mock.mobile = true; mock.searchParams.set("item", "msg_1"); mount();
+    await screen.findByRole("button", { name: "Read through #5" });
+    fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
+    expect(await screen.findByRole("button", { name: /Follow up/ })).toBeInTheDocument();
   });
-
-  it("renders same-issue ledger history independently from newer action rows", async () => {
-    listInbox.mockResolvedValue([
-      {
-        id: "mention-latest",
-        type: "comment_mention",
-        issue_id: "issue-1",
-        title: "Mention",
-        severity: "info",
-        read: false,
-        archived: false,
-        created_at: "2026-08-25T10:04:00.000Z",
-      },
-      {
-        id: "assignment-hidden",
-        type: "issue_assigned",
-        issue_id: "issue-1",
-        title: "Assignment",
-        severity: "info",
-        read: false,
-        archived: false,
-        created_at: "2026-08-25T10:03:00.000Z",
-      },
-      {
-        id: "run-failed",
-        type: "autopilot_run_failed",
-        issue_id: "issue-1",
-        title: "Run failed",
-        severity: "attention",
-        read: false,
-        archived: false,
-        created_at: "2026-08-25T10:02:00.000Z",
-      },
-      {
-        id: "run-completed",
-        type: "autopilot_run_completed",
-        issue_id: "issue-1",
-        title: "Run completed",
-        severity: "info",
-        read: false,
-        archived: false,
-        created_at: "2026-08-25T10:01:00.000Z",
-      },
-    ]);
-    renderInbox();
-
-    expect(await screen.findByText("mention-latest")).toBeInTheDocument();
-    expect(screen.queryByText("assignment-hidden")).not.toBeInTheDocument();
-    expect(screen.getByText("run-failed")).toBeInTheDocument();
-    expect(screen.getByText("run-completed")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("run-failed"));
-    expect(replace).toHaveBeenLastCalledWith("/test/inbox?item=run-failed");
-    fireEvent.click(screen.getByRole("button", { name: "Select Review session" }));
-    expect(replace).toHaveBeenLastCalledWith(
-      "/test/inbox?item=run-failed&session=session-review",
-    );
-    fireEvent.click(screen.getByText("mention-latest"));
-    expect(replace).toHaveBeenLastCalledWith("/test/inbox?issue=issue-1");
+  it("follows a new message deep link after a local row selection", async () => {
+    mock.listInboxPage.mockResolvedValue({ ...page, items: [messageFixture(), messageFixture({ id: "msg_2", seq: 9, body_md: "Second message" })] });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const element = () => <QueryClientProvider client={qc}><InboxPage /></QueryClientProvider>;
+    const view = renderWithI18n(element());
+    fireEvent.click(await screen.findByRole("button", { name: /Follow up/ }));
+    await screen.findByRole("button", { name: "Read through #5" });
+    expect(screen.getByRole("button", { name: "Read through #5" })).toBeInTheDocument();
+    mock.searchParams = new URLSearchParams("item=msg_2");
+    mock.getMessage.mockResolvedValue(messageFixture({ id: "msg_2", seq: 9, body_md: "Second message" }));
+    view.rerender(element());
+    expect(await screen.findByRole("button", { name: "Read through #9" })).toBeInTheDocument();
+    expect(mock.markInboxRead).not.toHaveBeenCalled();
   });
-
-  it("links an issue-less notification by inbox id instead of claiming it is an issue", async () => {
-    listInbox.mockResolvedValue([
-      {
-        id: "legacy-failure",
-        type: "quick_create_failed",
-        issue_id: null,
-        title: "legacy-failure",
-        severity: "attention",
-        read: false,
-        archived: false,
-        created_at: "2026-08-25T10:00:00.000Z",
-      },
-    ]);
-    renderInbox();
-
-    fireEvent.click(await screen.findByText("legacy-failure"));
-
-    expect(replace).toHaveBeenLastCalledWith("/test/inbox?item=legacy-failure");
-    expect(
-      replace.mock.calls.some(([path]) => String(path).startsWith("/test/issues/")),
-    ).toBe(false);
+  it("shows a recoverable query failure", async () => {
+    mock.listInboxPage.mockRejectedValueOnce(new Error("offline")); mount(); await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByRole("button", { name: /Follow up/ });
   });
-
-  it("marks the unread rows in a date group as read", async () => {
-    const now = new Date().toISOString();
-    listInbox.mockResolvedValue([
-      { id: "today-1", type: "comment_mention", issue_id: null, title: "One", read: false, archived: false, created_at: now },
-      { id: "today-2", type: "issue_assigned", issue_id: null, title: "Two", read: false, archived: false, created_at: now },
-    ]);
-    renderInbox();
-
-    fireEvent.click(await screen.findByRole("button", { name: "Mark group as read" }));
-    expect(markItemsRead).toHaveBeenCalledWith(
-      ["today-1", "today-2"],
-      expect.objectContaining({ onError: expect.any(Function) }),
-    );
+  it("keeps read failures visible on a mobile detail", async () => {
+    mock.mobile = true; mock.markInboxRead.mockRejectedValue(new Error("offline")); mount();
+    fireEvent.click(await screen.findByRole("button", { name: /Follow up/ }));
+    await screen.findByRole("button", { name: "Read through #5" });
+    fireEvent.click(screen.getByRole("button", { name: "Read through #5" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("offline");
   });
-
-  it("applies collapsed-run read and archive operations to every covered row", async () => {
-    const details = { autopilot_id: "autopilot-1", autopilot_title: "Atlas" };
-    listInbox.mockResolvedValue([
-      {
-        id: "run-latest",
-        type: "autopilot_run_completed",
-        issue_id: null,
-        title: "Latest",
-        severity: "info",
-        details,
-        read: false,
-        archived: false,
-        created_at: "2026-08-27T10:00:00.000Z",
-      },
-      {
-        id: "run-earlier",
-        type: "autopilot_run_completed",
-        issue_id: null,
-        title: "Earlier",
-        severity: "info",
-        details,
-        read: false,
-        archived: false,
-        created_at: "2026-08-27T09:00:00.000Z",
-      },
-    ]);
-    renderInbox();
-
-    fireEvent.click(await screen.findByRole("button", { name: "run-latest (2)" }));
-    await waitFor(() => expect(markItemsRead).toHaveBeenCalledWith(
-      ["run-latest", "run-earlier"],
-      expect.objectContaining({ onError: expect.any(Function) }),
-    ));
-
-    fireEvent.click(screen.getByRole("button", { name: "Archive run-latest" }));
-    expect(archiveItems).toHaveBeenCalledWith(
-      ["run-latest", "run-earlier"],
-      expect.objectContaining({ onError: expect.any(Function) }),
-    );
-  });
-
-  it("opens issue notifications in place and keeps Session routing under inbox", async () => {
-    listInbox.mockResolvedValue([
-      {
-        id: "inbox-1",
-        workspace_id: "ws-1",
-        user_id: "user-1",
-        type: "comment",
-        issue_id: "issue-1",
-        title: "Needs review",
-        body: null,
-        details: { issue_session_id: "session-notification" },
-        read: true,
-        archived: false,
-        created_at: "2026-01-01T00:00:00Z",
-      },
-    ]);
-    renderInbox();
-
-    fireEvent.click(await screen.findByTestId("inbox-row"));
-
-    expect(screen.getByTestId("issue-detail")).toHaveTextContent("issue-1");
-    expect(screen.getByTestId("issue-detail")).toHaveAttribute(
-      "data-session-route-owned",
-      "true",
-    );
-    expect(screen.getByTestId("issue-detail")).toHaveAttribute(
-      "data-initial-session",
-      "session-notification",
-    );
-    expect(replace).toHaveBeenLastCalledWith(
-      "/test/inbox?issue=issue-1&session=session-notification",
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Select Review session" }));
-    expect(replace).toHaveBeenLastCalledWith(
-      "/test/inbox?issue=issue-1&session=session-review",
-    );
-    expect(
-      replace.mock.calls.every(([path]) => String(path).startsWith("/test/inbox")),
-    ).toBe(true);
-  });
-
-  it("opens a structured autopilot report before IssueDetail even when the row has an issue", async () => {
-    listInbox.mockResolvedValue([{
-      id: "run-inbox-1",
-      workspace_id: "ws-1",
-      recipient_type: "member",
-      recipient_id: "member-1",
-      actor_type: "system",
-      actor_id: null,
-      type: "autopilot_run_completed",
-      severity: "info",
-      issue_id: "issue-1",
-      issue_status: null,
-      title: "Atlas",
-      body: "Completed in 2m",
-      details: {
-        autopilot_id: "autopilot-1",
-        autopilot_title: "Atlas",
-        run_id: "run-1",
-        outcome: {
-          kind: "no_change",
-          headline: null,
-          text: null,
-          links: [],
-          counts: null,
-          risks: [],
-          action: { kind: "none", text: null },
-        },
-      },
-      read: true,
-      archived: false,
-      created_at: "2026-08-28T05:28:37.614Z",
-    }]);
-
-    renderInbox();
-    fireEvent.click(await screen.findByTestId("inbox-row"));
-
-    expect(screen.getByTestId("autopilot-run-report")).toHaveTextContent("run-inbox-1");
-    expect(screen.queryByTestId("issue-detail")).not.toBeInTheDocument();
-  });
-
-  it("uses single-run title and archive semantics after opening a child from a grouped report", async () => {
-    const details = (runId: string, branch: string) => ({
-      autopilot_id: "autopilot-1",
-      autopilot_title: "Atlas",
-      run_id: runId,
-      trigger_object: {
-        event_type: "default_branch.updated",
-        repository_id: "repo-1",
-        repository_name: "Remi",
-        change_number: null,
-        change_title: null,
-        target_branch: branch,
-        source_revision: null,
-        occurred_at: "2026-08-28T05:28:37.614Z",
-        wiki_build: true,
-      },
-      outcome: {
-        kind: "no_change",
-        headline: null,
-        text: null,
-        links: [],
-        counts: null,
-        risks: [],
-        action: { kind: "none", text: null },
-      },
-    });
-    listInbox.mockResolvedValue([
-      {
-        id: "run-latest",
-        type: "autopilot_run_completed",
-        issue_id: "issue-1",
-        title: "Latest",
-        severity: "info",
-        details: details("run-1", "main"),
-        read: true,
-        archived: false,
-        created_at: "2026-08-28T10:00:00.000Z",
-      },
-      {
-        id: "run-earlier",
-        type: "autopilot_run_completed",
-        issue_id: "issue-1",
-        title: "Earlier",
-        severity: "info",
-        details: details("run-2", "release"),
-        read: true,
-        archived: false,
-        created_at: "2026-08-28T09:00:00.000Z",
-      },
-    ]);
-
-    renderInbox();
-    fireEvent.click(await screen.findByRole("button", { name: "run-latest (2)" }));
-    fireEvent.click(screen.getByRole("button", { name: "Select child run" }));
-
-    expect(screen.getByTestId("autopilot-run-report")).toHaveTextContent("run-earlier");
-    expect(screen.getByRole("heading", { name: "Atlas · Remi@release" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
-    expect(archiveItems).toHaveBeenLastCalledWith(
-      ["run-earlier"],
-      expect.objectContaining({ onError: expect.any(Function) }),
-    );
-  });
-
-  it("prefers a deep-linked Session over the notification Session", async () => {
-    navigationState.searchParams = new URLSearchParams(
-      "issue=issue-1&session=session-url",
-    );
-    listInbox.mockResolvedValue([
-      {
-        id: "inbox-1",
-        workspace_id: "ws-1",
-        user_id: "user-1",
-        type: "comment",
-        issue_id: "issue-1",
-        title: "Needs review",
-        body: null,
-        details: { issue_session_id: "session-notification" },
-        read: true,
-        archived: false,
-        created_at: "2026-01-01T00:00:00Z",
-      },
-    ]);
-
-    renderInbox();
-
-    expect(await screen.findByTestId("issue-detail")).toHaveAttribute(
-      "data-initial-session",
-      "session-url",
-    );
-  });
-
-  it("preserves a Session deep link when falling back to the issue page", async () => {
-    navigationState.searchParams = new URLSearchParams(
-      "issue=issue-missing&session=session-main",
-    );
-    listInbox.mockResolvedValue([]);
-
-    renderInbox();
-
-    await waitFor(() => {
-      expect(replace).toHaveBeenCalledWith(
-        "/test/issues/issue-missing?session=session-main",
-      );
-    });
-  });
-
-  it("keeps an unavailable ledger item link in the inbox instead of treating it as an issue", async () => {
-    navigationState.searchParams = new URLSearchParams("item=inbox-missing");
-    listInbox.mockResolvedValue([]);
-
-    renderInbox();
-
-    expect(
-      await screen.findByText("This notification is no longer available"),
-    ).toBeInTheDocument();
-    expect(replace).toHaveBeenCalledWith("/test/inbox");
-    expect(
-      replace.mock.calls.some(([path]) => String(path).startsWith("/test/issues/")),
-    ).toBe(false);
-  });
-
-  it("renders detached ledger history without an issue detail or broken navigation", async () => {
-    navigationState.searchParams = new URLSearchParams("item=run-detached");
-    listInbox.mockResolvedValue([{
-      id: "run-detached",
-      workspace_id: "ws-1",
-      recipient_type: "member",
-      recipient_id: "member-1",
-      actor_type: "system",
-      actor_id: null,
-      type: "autopilot_run_failed",
-      severity: "attention",
-      issue_id: null,
-      issue_status: null,
-      title: "Nightly cleanup failed",
-      body: "Failed after 12s · scheduled · disk full",
-      details: { issue_id: "issue-deleted" },
-      read: true,
-      archived: false,
-      created_at: "2026-08-25T10:00:00.000Z",
-    }]);
-
-    renderInbox();
-
-    expect(await screen.findByText("Nightly cleanup failed")).toBeInTheDocument();
-    expect(screen.getByText("Failed after 12s · scheduled · disk full")).toBeInTheDocument();
-    expect(screen.queryByTestId("issue-detail")).not.toBeInTheDocument();
-    expect(replace).not.toHaveBeenCalled();
+  it("allows a missing deep-linked message to be retried without a read", async () => {
+    mock.mobile = true; mock.searchParams.set("item", "not-loaded");
+    mock.getMessage.mockRejectedValueOnce(new Error("offline")); mount();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load messages");
+    expect(mock.markInboxRead).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+    await screen.findByRole("button", { name: "Read through #5" });
   });
 });

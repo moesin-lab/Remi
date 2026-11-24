@@ -2,16 +2,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpClient } from "../http";
 import { ApiContractError } from "../schema";
 import { ChatEndpoints } from "./chat";
+import { messageFixture, turnFixture } from "../unified.fixture";
 
 const session = {
   id: "chat-1", workspace_id: "ws-1", agent_id: "agent-1", creator_id: "user-1",
-  title: "Chat", status: "active", has_unread: true, pinned: false, unread_count: 2,
+  title: "Chat", status: "active", has_unread: true, pinned: false, origin: null, unread_count: 2,
   last_message: { content: "reply", role: "assistant", created_at: "2026-09-11T00:00:00Z" },
   created_at: "2026-09-11T00:00:00Z", updated_at: "2026-09-11T00:00:00Z",
 };
-const queuedTask = {
-  task_id: "task-2", content: "follow up", attachment_ids: ["attachment-1"], created_at: session.created_at,
+const workSession = {
+  id: "work-1", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1", issue_id: null,
+  workspace_id: "ws-1", title: "Investigation", status: "active", is_default: false,
+  parent_session_id: null, inherit_mode: "none", created_at: session.created_at, updated_at: session.updated_at,
 };
+const workTurn = turnFixture({
+  session_id: "work-1", chat_session_id: "chat-1", agent_id: "agent-1", issue_id: null,
+  current_attempt_id: "task-work-1", status: "pending",
+});
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -24,6 +31,101 @@ function endpointsWithResponse(body: unknown): ChatEndpoints {
 
 afterEach(() => vi.unstubAllGlobals());
 
+describe("Chat work Session contracts", () => {
+  it("reads the native envelope and keeps product Sessions distinct from Chat history", async () => {
+    const endpoints = endpointsWithResponse({ sessions: [workSession] });
+    await expect(endpoints.listChatWorkSessions("chat-1")).resolves.toMatchObject([workSession]);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/multiremi/chats/chat-1/sessions?include_archived=true", expect.any(Object));
+    await expect(endpointsWithResponse([workSession]).listChatWorkSessions("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it("requires an explicit consistent owner on Session reads and commands", async () => {
+    for (const invalid of [
+      { ...workSession, owner_type: undefined, owner_id: undefined },
+      { ...workSession, owner_type: "issue", owner_id: "issue-1", issue_id: "issue-1" },
+      { ...workSession, owner_id: "chat-2", chat_id: "chat-2" },
+    ]) {
+      await expect(endpointsWithResponse({ sessions: [invalid] }).listChatWorkSessions("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+      await expect(endpointsWithResponse({ session: invalid }).createChatWorkSession("chat-1", { title: "Investigation" })).rejects.toBeInstanceOf(ApiContractError);
+    }
+  });
+
+  it("creates a side Session in the chosen Chat without introducing Issue ownership", async () => {
+    const input = { title: "Review", holds_workspace: false, parent_session_id: "work-1" };
+    const side = { ...workSession, id: "side-1", title: "Review", holds_workspace: false, parent_session_id: "work-1", inherit_mode: "snapshot" };
+    await expect(endpointsWithResponse({ session: side }).createChatWorkSession("chat-1", input)).resolves.toMatchObject(side);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/multiremi/chats/chat-1/sessions", expect.objectContaining({ method: "POST", body: JSON.stringify(input) }));
+  });
+
+  it("sends explicit work to the chosen Session and agent through a canonical message", async () => {
+    const input = { agent_id: "agent-1", prompt: "Investigate" };
+    const message = messageFixture({ session_id: "work-1", to_agent_id: "agent-1", body_md: "Investigate" });
+    const result = { message, wake_applied: "now", wake_reason: "member_request", turn_id: workTurn.id };
+    await expect(endpointsWithResponse(result).createChatWorkSessionTask("chat-1", "work-1", input)).resolves.toMatchObject(result);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/sessions/work-1/messages", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ body_md: input.prompt, message_kind: "request", to: { type: "agent", ref: input.agent_id }, wake_requested: "now" }),
+    }));
+    for (const invalid of [{ ...message, session_id: "other" }, { ...message, to_agent_id: "other" }]) {
+      await expect(endpointsWithResponse({ ...result, message: invalid }).createChatWorkSessionTask("chat-1", "work-1", input)).rejects.toBeInstanceOf(ApiContractError);
+    }
+  });
+
+  it("keeps an accepted work message successful when dispatch is deferred", async () => {
+    const result = { message: messageFixture({ session_id: "work-1", to_agent_id: "agent-1" }), wake_applied: "next_turn", wake_reason: "active_turn" };
+    await expect(endpointsWithResponse(result).createChatWorkSessionTask("chat-1", "work-1", { agent_id: "agent-1", prompt: "Follow up" })).resolves.toMatchObject(result);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads every work Session turn page without using its owning Chat queue", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(response({ turns: [workTurn], next_cursor: "next+page" }))
+      .mockResolvedValueOnce(response({ turns: [turnFixture({ ...workTurn, id: "second", current_attempt_id: "second-attempt" })], next_cursor: null })));
+    await expect(new ChatEndpoints(new HttpClient("https://api.example.test")).listChatWorkSessionTasks("chat-1", "work-1"))
+      .resolves.toMatchObject([
+        { id: "task-work-1", turn_id: workTurn.id, chat_session_id: "chat-1", issue_session_id: "work-1", issue_id: null },
+        { id: "second-attempt", turn_id: "second", issue_session_id: "work-1" },
+      ]);
+    expect(fetch).toHaveBeenLastCalledWith("https://api.example.test/api/turns?session_id=work-1&cursor=next%2Bpage&limit=100", expect.anything());
+    await expect(endpointsWithResponse({ turns: [{ ...workTurn, session_id: "other" }], next_cursor: null }).listChatWorkSessionTasks("chat-1", "work-1")).rejects.toBeInstanceOf(ApiContractError);
+    await expect(endpointsWithResponse({ turns: [{ ...workTurn, agent_id: null }], next_cursor: null }).listChatWorkSessionTasks("chat-1", "work-1")).rejects.toBeInstanceOf(ApiContractError);
+    await expect(endpointsWithResponse({ turns: [{ ...workTurn, chat_session_id: "other" }], next_cursor: null }).listChatWorkSessionTasks("chat-1", "work-1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+});
+
+describe("ChatEndpoints slash-command catalogue (ADR 0025)", () => {
+  it("asks for the chat's own catalogue, or the agent's preview for a new chat", async () => {
+    const body = {
+      state: "session", provider: "claude", reported_at: "2026-10-20T00:00:00Z",
+      commands: [{ name: "compact", description: "Compact", hint: "[instructions]", kind: "command" }],
+    };
+    await expect(endpointsWithResponse(body).getChatSlashCommands({ agentId: "agent-1", sessionId: "chat-1" })).resolves.toEqual(body);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/slash-commands?agent_id=agent-1&session_id=chat-1", expect.anything());
+    await endpointsWithResponse({ ...body, state: "preview" }).getChatSlashCommands({ agentId: "agent 1", sessionId: null });
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/slash-commands?agent_id=agent+1", expect.anything());
+  });
+
+  it("drops a malformed command and reads unknown values leniently", async () => {
+    const api = endpointsWithResponse({
+      state: "future", provider: 7, reported_at: null,
+      commands: [
+        { name: "deploy", description: null, kind: "future-kind", skill_id: "s1", _meta: { path: "/x" } },
+        { name: "", description: "nameless" },
+        "bad",
+      ],
+    });
+    await expect(api.getChatSlashCommands({ agentId: "agent-1" })).resolves.toEqual({
+      state: "none", provider: null, reported_at: null,
+      commands: [{ name: "deploy", description: "", hint: null, kind: "command", skill_id: "s1" }],
+    });
+  });
+
+  it("refuses an answer without a command list instead of reading it as empty", async () => {
+    await expect(endpointsWithResponse({ state: "session" }).getChatSlashCommands({ agentId: "agent-1" }))
+      .rejects.toBeInstanceOf(ApiContractError);
+  });
+});
+
 describe("ChatEndpoints contracts", () => {
   it("creates sessions through the upstream agent/title contract and validates the acknowledgement", async () => {
     const api = endpointsWithResponse(session);
@@ -32,6 +134,15 @@ describe("ChatEndpoints contracts", () => {
       method: "POST", body: JSON.stringify({ agent_id: "agent-1", title: "Chat" }),
     }));
     await expect(endpointsWithResponse({ created: true }).createChatSession({ agent_id: "agent-1" })).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it("creates a chat under the client-made id and rejects an answer under another id", async () => {
+    const own = { ...session, id: "chat_0123456789ab" };
+    await expect(endpointsWithResponse(own).createChatSession({ id: own.id, agent_id: "agent-1", title: "Chat" })).resolves.toEqual(own);
+    expect(fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      body: JSON.stringify({ id: own.id, agent_id: "agent-1", title: "Chat" }),
+    }));
+    await expect(endpointsWithResponse(session).createChatSession({ id: own.id, agent_id: "agent-1" })).rejects.toBeInstanceOf(ApiContractError);
   });
 
   it("sends an optional project only when creating the session", async () => {
@@ -63,6 +174,22 @@ describe("ChatEndpoints contracts", () => {
     expect(sessions[0]).toMatchObject({ status: "future-status", unread_count: 2, last_message: { role: "future-role" } });
   });
 
+  it("asks for a chat origin and reads which automation run opened a chat", async () => {
+    const origin = { autopilot_id: "ap-1", run_id: "run-1" };
+    const api = endpointsWithResponse([{ ...session, origin }]);
+    const sessions = await api.listChatSessions({ status: "all", origin: "automation" });
+    expect(sessions[0]?.origin).toEqual(origin);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/sessions?status=all&origin=automation", expect.anything());
+    await expect(endpointsWithResponse([{ ...session, origin: { autopilot_id: 1 } }]).listChatSessions()).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it("treats a chat without an origin as the user's own", async () => {
+    const { origin: _origin, ...withoutOrigin } = session;
+    const sessions = await endpointsWithResponse([withoutOrigin]).listChatSessions();
+    expect(sessions[0]?.origin).toBeNull();
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/sessions", expect.anything());
+  });
+
   it("rejects wrong summary field types", async () => {
     await expect(endpointsWithResponse([{ ...session, unread_count: "2" }]).listChatSessions()).rejects.toBeInstanceOf(ApiContractError);
   });
@@ -81,78 +208,157 @@ describe("ChatEndpoints contracts", () => {
     await expect(endpointsWithResponse({ ...session, pinned: undefined }).updateChatSession("chat-1", { pinned: false })).rejects.toBeInstanceOf(ApiContractError);
   });
 
-  it("distinguishes an accepted follow-up from a new head", async () => {
-    const api = endpointsWithResponse({ message_id: "message-2", task_id: "task-2", created_at: session.created_at, supports_queue: true, queued: true });
-    await expect(api.sendChatMessage("chat-1", "follow up", ["attachment-1"])).resolves.toMatchObject({ queued: true, supports_queue: true });
-    expect(fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
-      body: JSON.stringify({ content: "follow up", attachment_ids: ["attachment-1"] }),
-    }));
-  });
-
-  it.each([
-    { task_id: "task-2", created_at: session.created_at, supports_queue: true, queued: true },
-    { message_id: "message-2", task_id: "task-2", created_at: session.created_at, supports_queue: true, queued: "true" },
-  ])("rejects malformed send acknowledgements", async body => {
-    await expect(endpointsWithResponse(body).sendChatMessage("chat-1", "hello")).rejects.toBeInstanceOf(ApiContractError);
-  });
-
-  it("loads the head separately from follow-ups and rejects corrupt queues", async () => {
-    const pending = { task_id: "task-1", status: "future-phase", created_at: session.created_at, supports_queue: true, queued_tasks: [queuedTask] };
-    await expect(endpointsWithResponse(pending).getPendingChatTask("chat-1")).resolves.toEqual(pending);
-    await expect(endpointsWithResponse({ ...pending, queued_tasks: [{ ...queuedTask, attachment_ids: null }] }).getPendingChatTask("chat-1")).rejects.toBeInstanceOf(ApiContractError);
-    await expect(endpointsWithResponse({ ...pending, created_at: undefined }).getPendingChatTask("chat-1")).rejects.toBeInstanceOf(ApiContractError);
-  });
-
-  it("recovers optional preparation progress while ignoring malformed summary fields", async () => {
-    const pending = { task_id: "task-1", status: "running", created_at: session.created_at, supports_queue: true, queued_tasks: [] };
-    await expect(endpointsWithResponse({ ...pending, progress_summary: "正在准备项目仓库…" }).getPendingChatTask("chat-1"))
-      .resolves.toMatchObject({ progress_summary: "正在准备项目仓库…" });
-    for (const progress_summary of [null, undefined, 17, { label: "bad shape" }]) {
-      const result = await endpointsWithResponse({ ...pending, progress_summary }).getPendingChatTask("chat-1");
-      expect(result.task_id).toBe("task-1");
-      expect(result.progress_summary).toBe(progress_summary === null ? null : undefined);
-    }
-  });
-
-  it("loads optional queued wait reasons and ignores malformed reason fields", async () => {
-    const pending = { task_id: "task-1", status: "queued", created_at: session.created_at, supports_queue: true, queued_tasks: [] };
-    const wait_reason = "等待模型能力恢复：2 个候选 Runtime 均无法执行 claude-opus-5";
-    await expect(endpointsWithResponse({ ...pending, wait_reason }).getPendingChatTask("chat-1"))
-      .resolves.toMatchObject({ status: "queued", wait_reason });
-    for (const wait_reason of [null, undefined, 17, { label: "bad shape" }]) {
-      const result = await endpointsWithResponse({ ...pending, wait_reason }).getPendingChatTask("chat-1");
-      expect(result.task_id).toBe("task-1");
-      expect(result.wait_reason).toBe(wait_reason === null ? null : undefined);
-    }
-  });
-
-  it("edits a queue item and validates its response", async () => {
-    await expect(endpointsWithResponse(queuedTask).editQueuedChatMessage("chat-1", "task-2", "follow up")).resolves.toEqual(queuedTask);
-    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/sessions/chat-1/queue/task-2", expect.objectContaining({ method: "PATCH" }));
-    await expect(endpointsWithResponse({ task_id: "task-2" }).editQueuedChatMessage("chat-1", "task-2", "follow up")).rejects.toBeInstanceOf(ApiContractError);
-  });
-
-  it("requires explicit prioritize acknowledgement including the active task", async () => {
-    await expect(endpointsWithResponse({ task_id: "task-2", active_task_id: "task-1" }).prioritizeQueuedChatMessage("chat-1", "task-2")).resolves.toEqual({ task_id: "task-2", active_task_id: "task-1" });
-    await expect(endpointsWithResponse({ task_id: "task-2" }).prioritizeQueuedChatMessage("chat-1", "task-2")).rejects.toBeInstanceOf(ApiContractError);
-  });
-
-  it("accepts 204 deletions and rejects unexpected success bodies", async () => {
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(new Response(null, { status: 204 })));
+  it("settles once the message is accepted, without reading its turn", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(session))
+      .mockResolvedValueOnce(response({ message: messageFixture({ dedupe_key: "send-1" }), wake_applied: "next_turn", wake_reason: "agent_pair_not_privileged", turn_id: "turn_1" }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
-    await expect(api.removeQueuedChatMessage("chat-1", "task-2")).resolves.toBeUndefined();
-    await expect(api.clearChatQueue("chat-1")).resolves.toBeUndefined();
-    await expect(api.deleteChatSession("chat-1")).resolves.toBeUndefined();
-    await expect(api.markChatSessionRead("chat-1")).resolves.toBeUndefined();
-    await expect(endpointsWithResponse({ error: "still running" }).deleteChatSession("chat-1")).rejects.toBeInstanceOf(ApiContractError);
-    await expect(endpointsWithResponse({ error: "still running" }).removeQueuedChatMessage("chat-1", "task-2")).rejects.toBeInstanceOf(ApiContractError);
-    await expect(endpointsWithResponse({ error: "still running" }).clearChatQueue("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+    await expect(api.sendChatMessage("chat_1", "Follow up", undefined, "send-1"))
+      .resolves.toEqual({ message_id: "msg_1", turn_id: "turn_1", created_at: "2026-10-04T00:00:00Z" });
+    // A turn read that hangs or fails can no longer hold or fail the send.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/api/turns/"), expect.anything());
+    expect(JSON.parse(fetchMock.mock.calls[1]![1]!.body).dedupe_key).toBe("send-1");
   });
-
-  it("does not unlock the composer after a malformed stop acknowledgement", async () => {
-    await expect(endpointsWithResponse({ id: "task-1", status: "cancelled" }).cancelTaskById("task-1")).resolves.toBeUndefined();
-    await expect(endpointsWithResponse({ id: "task-1", status: "running" }).cancelTaskById("task-1")).rejects.toBeInstanceOf(ApiContractError);
-    await expect(endpointsWithResponse({ success: true }).cancelTaskById("task-1")).rejects.toBeInstanceOf(ApiContractError);
+  it("sends a canonical message, preserving dedupe, with the caller's abort signal on every request", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response(session))
+      .mockResolvedValueOnce(response({ message: messageFixture(), wake_applied: "next_turn", wake_reason: "agent_pair_not_privileged", turn_id: "turn_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+    const { signal } = new AbortController();
+    await expect(api.sendChatMessage("chat_1", "Follow up", undefined, "send-1", { signal })).resolves.toMatchObject({ message_id: "msg_1", turn_id: "turn_1" });
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example.test/api/sessions/chat_1/messages", expect.objectContaining({
+      method: "POST", signal, body: JSON.stringify({ body_md: "Follow up", message_kind: "request", to: { type: "agent", ref: "agent-1" }, wake_requested: "now", dedupe_key: "send-1" }),
+    }));
+    expect(fetchMock.mock.calls.map(([, init]) => init?.signal)).toEqual([signal, signal]);
+  });
+  it("reads a sent message's turn as the pending task: its attempt while in flight, none once it ended", async () => {
+    for (const [fields, expected] of [
+      [{ status: "pending" }, { task_id: "attempt_2", turn_id: "turn_1", status: "queued", created_at: "2026-10-04T00:00:00Z", supports_queue: true }],
+      [{ status: "running", current_attempt_id: null }, { task_id: "turn_1", turn_id: "turn_1", status: "running", supports_queue: true }],
+      [{ status: "completed" }, { supports_queue: true }],
+    ] as const) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ turn: turnFixture(fields) })));
+      const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+      const task = await api.getChatTurnPendingTask("turn_1");
+      expect(task).toMatchObject(expected);
+      if (!("task_id" in expected)) expect(task).toEqual(expected);
+      expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/turns/turn_1", expect.anything());
+    }
+  });
+  it("reads the active turn through status-filtered pages, without a legacy queue", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const params = new URL(url).searchParams;
+      return response({ turns: params.get("status") === "running" ? [turnFixture()] : [], next_cursor: null });
+    }));
+    const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+    await expect(api.getPendingChatTask("chat_1")).resolves.toMatchObject({ task_id: "attempt_2", turn_id: "turn_1", status: "running" });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("pending-task"), expect.anything());
+  });
+  it("reads a running turn whose attempt waits for its local folder as waiting, with the reason (PR 6 §2.8)", async () => {
+    const reason = "local_directory /Users/me/repo (held by background tasks of chat chat_2)";
+    for (const [field, expected] of [
+      [reason, { status: "waiting_local_directory", wait_reason: reason }],
+      ["", { status: "waiting_local_directory", wait_reason: null }],
+      [null, { status: "running" }],
+      [7, { status: "running" }],
+    ] as const) {
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        const params = new URL(url).searchParams;
+        return response({ turns: params.get("status") === "running" ? [turnFixture({ local_directory_wait_reason: field })] : [], next_cursor: null });
+      }));
+      const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+      const pending = await api.getPendingChatTask("chat_1");
+      expect(pending, String(field)).toMatchObject({ task_id: "attempt_2", ...expected });
+      if (expected.status === "running") expect(pending.wait_reason, String(field)).toBeUndefined();
+    }
+  });
+  it("lists in-flight chat turns with both the attempt and the turn the cancel command addresses", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const params = new URL(url).searchParams;
+      return response({ turns: params.get("status") === "awaiting_human" ? [turnFixture({ status: "awaiting_human" })] : [], next_cursor: null });
+    }));
+    const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+    await expect(api.listPendingChatTasks()).resolves.toEqual({ tasks: [
+      { task_id: "attempt_2", turn_id: "turn_1", status: "awaiting_human", chat_session_id: "chat_1" },
+    ] });
+  });
+  it("carries the running subagent count when the server reports it, and degrades a malformed one (PR 5 §6.7)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const params = new URL(url).searchParams;
+      return response({ turns: params.get("status") === "running" ? [
+        turnFixture({ running_subagents: 2 }),
+        turnFixture({ id: "turn_3", current_attempt_id: "attempt_3", session_id: "chat_3", running_subagents: null }),
+        turnFixture({ id: "turn_4", current_attempt_id: "attempt_4", session_id: "chat_4", running_subagents: -1 }),
+        turnFixture({ id: "turn_5", current_attempt_id: "attempt_5", session_id: "chat_5" }),
+      ] : [], next_cursor: null });
+    }));
+    const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+    const { tasks } = await api.listPendingChatTasks();
+    expect(tasks.map((task) => [task.chat_session_id, task.running_subagents])).toEqual([
+      ["chat_1", 2], ["chat_3", undefined], ["chat_4", undefined], ["chat_5", undefined],
+    ]);
+    expect("running_subagents" in tasks[3]!).toBe(false);
+  });
+  it("reads the session list's background-task count, degrading a malformed one (PR 6)", async () => {
+    const list = await endpointsWithResponse([{ ...session, running_background_tasks: 2 }, { ...session, id: "chat-2", running_background_tasks: "x" }, { ...session, id: "chat-3" }])
+      .listChatSessions();
+    expect(list.map((item) => item.running_background_tasks)).toEqual([2, undefined, undefined]);
+  });
+  it("carries the attempt's background-task count into the pending list when the turn reports it (PR 6)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => response({ turns: new URL(url).searchParams.get("status") === "running"
+      ? [turnFixture({ running_background_tasks: 1 }), turnFixture({ id: "turn_2", current_attempt_id: "attempt_2", session_id: "chat_2", running_background_tasks: -3 })]
+      : [], next_cursor: null })));
+    const { tasks } = await new ChatEndpoints(new HttpClient("https://api.example.test")).listPendingChatTasks();
+    expect(tasks.map((task) => task.running_background_tasks)).toEqual([1, undefined]);
+  });
+  it("reads a chat's background tasks from the session registry, dropping a malformed row and degrading unknown values (PR 6)", async () => {
+    const row = { id: "row-1", session_id: "chat-1", task_id: "t1", task_type: "shell", name: "npm run dev", command: "npm run dev",
+      origin_attempt_id: "attempt_1", status: "running", can_stop: true, started_at: "2026-10-16T00:00:00Z", lane_state: "parked",
+      parked_until: "2026-10-16T02:00:00Z", stop_reason: "a_new_reason", origin_turn_seq: 4 };
+    const snapshot = await endpointsWithResponse({ session_id: "chat-1", rows: [row, { ...row, id: "row-2", status: "teleported", lane_state: "orbit" }, { id: "row-3" }] })
+      .listChatBackgroundTasks("chat-1");
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/sessions/chat-1/background-tasks", expect.anything());
+    expect(snapshot.rows.map((r) => [r.id, r.status, r.lane_state, r.stop_reason])).toEqual([
+      ["row-1", "running", "parked", null], ["row-2", "unknown", "closed", null],
+    ]);
+    expect(snapshot.rows[0]).toMatchObject({ origin_turn_seq: 4, stop_outcome: null, output_tail: null, usage: null });
+    // `running` is the server's, else the running rows.
+    expect(snapshot.running).toBe(1);
+    await expect(endpointsWithResponse({ session_id: "chat-9", rows: [] }).listChatBackgroundTasks("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+    await expect(endpointsWithResponse({ tasks: [] }).listChatBackgroundTasks("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+  it("asks to stop one background task or all of them (PR 6 §6.1)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 202 })));
+    const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+    await expect(api.stopChatBackgroundTasks("chat-1", { task_id: "t1" })).resolves.toEqual([]);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/sessions/chat-1/background-tasks/stop", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ task_id: "t1" }),
+    }));
+    await api.stopChatBackgroundTasks("chat-1", { all: true });
+    expect(fetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ body: JSON.stringify({ all: true }) }));
+    // The rows the server marked come back, well-formed ones of this chat only.
+    const marked = { id: "row-1", session_id: "chat-1", task_id: "t1", started_at: "2026-10-16T00:00:00Z", status: "running",
+      stop_requested_at: "2026-10-16T00:01:00Z", stop_requested_by: "member-1", stop_outcome: "pending" };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ requested_at: "2026-10-16T00:01:00Z",
+      rows: [marked, { ...marked, id: "row-x", session_id: "chat-2" }, { id: "bad" }] }), { status: 202 })));
+    await expect(new ChatEndpoints(new HttpClient("https://api.example.test")).stopChatBackgroundTasks("chat-1", { task_id: "t1" }))
+      .resolves.toMatchObject([{ id: "row-1", stop_requested_by: "member-1", stop_outcome: "pending" }]);
+    // A refusal keeps its code for the caller.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "offline", code: "runtime_offline" }), { status: 409 })));
+    await expect(new ChatEndpoints(new HttpClient("https://api.example.test")).stopChatBackgroundTasks("chat-1", { all: true }))
+      .rejects.toMatchObject({ status: 409, body: { code: "runtime_offline" } });
+  });
+  it("marks the conversation read through the cursor command and rejects an invalid acknowledgement", async () => {
+    await expect(endpointsWithResponse({ session_id: "chat_1", cursor_seq: 5 }).markChatSessionRead("chat_1")).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/inbox/read", expect.objectContaining({ body: JSON.stringify({ session_id: "chat_1" }) }));
+    await expect(endpointsWithResponse({ success: true }).markChatSessionRead("chat_1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+  it("cancels by turn ID and rejects an acknowledgement for another turn", async () => {
+    await expect(endpointsWithResponse({ turn: turnFixture({ status: "cancelled" }) }).cancelTaskById("turn_1")).resolves.toBeUndefined();
+    await expect(endpointsWithResponse({ turn: turnFixture() }).cancelTaskById("other")).rejects.toBeInstanceOf(ApiContractError);
+    await expect(endpointsWithResponse({ success: true }).cancelTaskById("turn_1")).rejects.toBeInstanceOf(ApiContractError);
   });
 });

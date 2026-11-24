@@ -40,12 +40,12 @@ import { escapeMarkdownLabel } from "../utils/escape-markdown-label";
 import { BaseMentionExtension } from "./mention-extension";
 import { createMentionSuggestion, type MentionItem } from "./mention-suggestion";
 import { SlashCommandExtension } from "./slash-command-extension";
-import { createSlashCommandSuggestion } from "./slash-command-suggestion";
+import { createSlashCommandSuggestion, type SlashMenuSource } from "./slash-command-suggestion";
 import { CodeBlockView } from "./code-block-view";
 import { PatchedListItem, PatchedTaskItem } from "./list-item";
 import { createMarkdownPasteExtension } from "./markdown-paste";
 import { createMarkdownCopyExtension } from "./markdown-copy";
-import { createSubmitExtension } from "./submit-shortcut";
+import { createSubmitExtension, type SubmitOptions } from "./submit-shortcut";
 import { createBlurShortcutExtension } from "./blur-shortcut";
 import { createFileUploadExtension } from "./file-upload";
 import { FileCardExtension } from "./file-card";
@@ -118,12 +118,14 @@ export const ImageExtension = Image.extend({
 export interface EditorExtensionsOptions {
   placeholder?: string;
   queryClient?: import("@tanstack/react-query").QueryClient;
-  onSubmitRef?: RefObject<(() => void) | undefined>;
+  onSubmitRef?: RefObject<((options: SubmitOptions) => void) | undefined>;
   onUploadFileRef?: RefObject<
     ((file: File) => Promise<UploadResult | null>) | undefined
   >;
   /** When true, bare Enter also submits (chat-style). Default false. */
   submitOnEnter?: boolean;
+  /** When true, Mod-Shift-Enter submits with `invert: true`. Default false. */
+  invertibleSubmit?: boolean;
   /**
    * When true, the `@` suggestion picker is not attached. The mention node
    * type is still registered in the schema so any mention pasted in from
@@ -136,8 +138,12 @@ export interface EditorExtensionsOptions {
   /** Override @ behavior for chat context suggestions. */
   mentionMode?: "default" | "context";
   getMentionContextItems?: () => MentionItem[];
-  /** When true, attach the `/` skill picker. Default false. */
-  enableSlashCommands?: boolean;
+  /**
+   * The Chat composer's `/` menu (ADR 0025): where it reads the agent's
+   * commands and skills. Absent: no menu (the node type stays, so old
+   * `slash://` links still render).
+   */
+  slashMenu?: SlashMenuSource;
 }
 
 export function createEditorExtensions(
@@ -197,22 +203,21 @@ export function createEditorExtensions(
     }),
     SlashCommandExtension.configure({
       HTMLAttributes: { class: "slash-command" },
-      suggestion:
-        options.enableSlashCommands && options.queryClient
-          ? createSlashCommandSuggestion(options.queryClient)
-          : { char: "/", allow: () => false },
+      suggestion: options.slashMenu
+        ? createSlashCommandSuggestion(options.slashMenu)
+        : { char: "/", allow: () => false },
     }),
     Typography,
     Placeholder.configure({ placeholder: placeholderText }),
     createMarkdownPasteExtension(),
     createSubmitExtension(
-      () => {
+      (submit) => {
         const fn = options.onSubmitRef?.current;
         if (!fn) return false; // no submit wired — let default Enter insert newline
-        fn();
+        fn(submit);
         return true;
       },
-      { submitOnEnter: options.submitOnEnter ?? false },
+      { submitOnEnter: options.submitOnEnter ?? false, invertibleSubmit: options.invertibleSubmit ?? false },
     ),
     createBlurShortcutExtension(),
     createFileUploadExtension(options.onUploadFileRef!),

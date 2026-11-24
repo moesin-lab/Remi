@@ -1,6 +1,9 @@
 import { createId, nowIso } from "@multiremi/ids.js";
-import type { StoreContext } from "@multiremi/store/context.js";
+import { createCommitEventQueue, type CommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
+import type { ChildStatusChangeCollector } from "./tasks-repo.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
+import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
+import { advisoryXactLock } from "@multiremi/store/db/postgres.js";
 import { createLogger } from "@shared/logger.js";
 import type {
   CreateIssueFromMultiremiFeishuMessageInput,
@@ -884,6 +887,7 @@ export class FeishuIngestRepo {
       if (!message || message.workspaceId !== input.workspaceId) {
         throw new Error(`Feishu message not found: ${messageId}`);
       }
+      this.lockWorkspace(input.workspaceId);
       const taskId = cleanOptionalString(input.taskId);
       this.assertTaskWorkspace(taskId, input.workspaceId);
       const inboxType = outcomeKind === "reply_drafted" ? "feishu_reply_draft" : "feishu_message_notification";
@@ -967,12 +971,25 @@ export class FeishuIngestRepo {
     input: CreateFeishuIssueOutcomeInput,
   ): CreateFeishuIssueOutcomeResult {
     const issueInput = normalizeIssueProposalInput(input);
-    return this.ctx.db.transaction(() => this.createIssueOutcomeWithinTransaction(messageId, {
-      ...issueInput,
-      workspaceId: input.workspaceId,
-      taskId: cleanOptionalString(input.taskId),
-      createdBy: cleanOptionalString(input.createdBy),
-    }))();
+    const childStatusChanges: ChildStatusChangeCollector = [];
+    const deferredEvents = createCommitEventQueue();
+    // Global lock order (MUL-405): W then N before the message row lock the
+    // helper takes. This path may create an Issue, so both locks are taken
+    // unconditionally at the top of the transaction.
+    const result = this.ctx.db.transaction(() => {
+      this.lockWorkspace(input.workspaceId);
+      this.lockIssueNumber(input.workspaceId);
+      return this.createIssueOutcomeWithinTransaction(messageId, {
+        ...issueInput,
+        workspaceId: input.workspaceId,
+        taskId: cleanOptionalString(input.taskId),
+        createdBy: cleanOptionalString(input.createdBy),
+      }, childStatusChanges, deferredEvents);
+    })();
+
+    this.ctx.emitCommitEvents(deferredEvents);
+    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChanges);
+    return result;
   }
 
   createIssueProposal(
@@ -981,10 +998,12 @@ export class FeishuIngestRepo {
   ): CreateFeishuIssueProposalResult {
     const issueInput = normalizeIssueProposalInput(input);
     return this.ctx.db.transaction(() => {
+      this.lockWorkspace(input.workspaceId);
       const message = this.getMessage(messageId);
       if (!message || message.workspaceId !== input.workspaceId) {
         throw new Error(`Feishu message not found: ${messageId}`);
       }
+      this.lockWorkspace(input.workspaceId);
       const taskId = cleanOptionalString(input.taskId);
       this.assertTaskWorkspace(taskId, input.workspaceId);
       this.lockMessage(messageId);
@@ -1089,7 +1108,13 @@ export class FeishuIngestRepo {
     proposalId: string,
     input: { workspaceId: string; approvedBy: string },
   ): ResolveFeishuIssueProposalResult {
-    return this.ctx.db.transaction(() => {
+    const childStatusChanges: ChildStatusChangeCollector = [];
+    const deferredEvents = createCommitEventQueue();
+    const approved = this.ctx.db.transaction(() => {
+      // Global lock order (MUL-405): W then N before any domain row lock.
+      this.lockWorkspace(input.workspaceId);
+      this.lockIssueNumber(input.workspaceId);
+
       let proposal = toIssueProposal(this.getIssueProposalRow(proposalId, input.workspaceId));
       this.lockMessage(proposal.messageId);
       proposal = toIssueProposal(this.getIssueProposalRow(proposalId, input.workspaceId));
@@ -1099,7 +1124,7 @@ export class FeishuIngestRepo {
         workspaceId: input.workspaceId,
         taskId: null,
         createdBy: input.approvedBy,
-      });
+      }, childStatusChanges, deferredEvents);
       const resolvedAt = nowIso();
       this.ctx.db.run(
         `UPDATE multiremi_feishu_message_outcomes
@@ -1114,6 +1139,9 @@ export class FeishuIngestRepo {
         proposal: toIssueProposal(this.getIssueProposalRow(proposalId, input.workspaceId)),
       };
     })();
+    this.ctx.emitCommitEvents(deferredEvents);
+    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChanges);
+    return approved;
   }
 
   rejectIssueProposal(
@@ -1162,6 +1190,8 @@ export class FeishuIngestRepo {
   private createIssueOutcomeWithinTransaction(
     messageId: string,
     input: CreateFeishuIssueOutcomeInput,
+    childStatusChanges: ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
   ): CreateFeishuIssueOutcomeResult {
     const message = this.getMessage(messageId);
     if (!message || message.workspaceId !== input.workspaceId) {
@@ -1184,7 +1214,9 @@ export class FeishuIngestRepo {
       }
       return { message: this.getMessage(messageId)!, outcome, issue, created: false };
     }
-    const issue = this.ctx.issues().createIssue({
+    // Who may turn a message into an Issue is the route's human-approver rule;
+    // the Issue itself needs no designated human.
+    const issue = this.ctx.issues().createIssueWithinTransaction({
       title: input.title,
       description: input.description ?? null,
       priority: input.priority,
@@ -1200,7 +1232,7 @@ export class FeishuIngestRepo {
         message_app_link: message.messageAppLink,
       }],
       createdBy: cleanOptionalString(input.createdBy),
-    });
+    }, childStatusChanges, deferredEvents);
     const createdAt = nowIso();
     const outcome = this.insertOutcome({
       workspaceId: input.workspaceId,
@@ -1213,6 +1245,16 @@ export class FeishuIngestRepo {
     });
     this.markMessageProcessed(messageId, createdAt);
     return { message: this.getMessage(messageId)!, outcome, issue, created: true };
+  }
+
+  /** W: workspace lifecycle row lock (MUL-405 lock order, step 1). */
+  private lockWorkspace(workspaceId: string): void {
+    this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+  }
+
+  /** N: this workspace's issue number lock (MUL-405 lock order, step 2). */
+  private lockIssueNumber(workspaceId: string): void {
+    advisoryXactLock(this.ctx.db, numberAllocationLockKey(`issue:${workspaceId}`));
   }
 
   private lockMessage(messageId: string): void {
@@ -1235,14 +1277,14 @@ export class FeishuIngestRepo {
   private markProposalInboxHandled(inboxItemId: string | null): void {
     if (!inboxItemId) return;
     this.ctx.db.run(
-      "UPDATE multiremi_inbox_items SET read = 1, archived = 1 WHERE id = ?",
+      "UPDATE multiremi_conversation_log SET resolved_at=COALESCE(resolved_at,updated_at) WHERE id = ?",
       [inboxItemId],
     );
   }
 
   private assertTaskWorkspace(taskId: string | null, workspaceId: string): void {
     if (!taskId) return;
-    const task = this.ctx.db.query("SELECT workspace_id FROM multiremi_tasks WHERE id = ?").get(taskId) as Row | null;
+    const task = this.ctx.db.query("SELECT workspace_id FROM multiremi_turn_execution_records WHERE id = ?").get(taskId) as Row | null;
     if (!task || String(task.workspace_id) !== workspaceId) {
       throw new Error("task_id must reference a task in this workspace");
     }

@@ -15,7 +15,9 @@
     "plugins": "プラグイン",
     "skills": "スキル",
     "settings": "設定",
-    "chat": "チャット"
+    "chat": "チャット",
+    "execution_groups": "実行機能グループ",
+    "magpie": "Magpie"
   },
   "help": {
     "trigger": "ヘルプ",
@@ -41,6 +43,8 @@
     "pinned_label": "ピン留め済み",
     "workspace_group": "ワークスペース",
     "configure_group": "設定",
-    "unread_overflow": "99+"
+    "unread_overflow": "99+",
+    "collapse": "サイドバーを折りたたむ",
+    "expand": "サイドバーを展開"
   }
 }

@@ -264,7 +264,7 @@ function safeIssue(issue: {
   };
 }
 
-function safeSession(session: { id: string; title: string; status: string; issueId: string }) {
+function safeSession(session: { id: string; title: string; status: string; issueId: string | null }) {
   return { id: session.id, title: session.title, status: session.status, issue_id: session.issueId };
 }
 

@@ -1,3 +1,4 @@
+import { databaseCommandSpecs } from "./commands/database.js";
 /**
  * Remi CLI — Command registry and dispatcher.
  *
@@ -5,12 +6,12 @@
  * Each handler exports: async run(args: string[]): Promise<void>
  */
 
-import { VERSION } from "@shared/version.js";
+import { BUILD_COMMIT, VERSION } from "@shared/version.js";
 import { CommandRegistry, type CommandInventoryEntry, type CommandSource } from "./core/command-registry.js";
 import { agentExtensionCommandSpecs } from "./commands/agent-extensions.js";
 import { contextCommandSpec } from "./commands/context.js";
 import { collaborationCommandSpecs } from "./commands/collaboration.js";
-import { inviteCommandSpecs } from "./commands/invite.js";
+import { externalChatCommandSpecs } from "./commands/external-chats.js";
 import { knowledgeCommandSpecs } from "./commands/knowledge.js";
 import { memberCommandSpecs } from "./commands/member.js";
 import { operationsCommandSpecs } from "./commands/operations.js";
@@ -19,22 +20,29 @@ import { repoCommandSpecs } from "./commands/repo.js";
 import { tokenCommandSpecs } from "./commands/token.js";
 import { workspaceCommandSpecs } from "./commands/workspace.js";
 import { runtimePrepareCommandSpec } from "./commands/runtime-prepare.js";
+import { RETIRED_CLI_COMMANDS, assertNotRetired, replaceRetiredSpecs, retiredSpec } from "./core/retired-commands.js";
+import { unifiedCommandSpecs } from "./commands/unified.js";
 
 const commandRegistry = new CommandRegistry();
+for (const spec of databaseCommandSpecs()) commandRegistry.register(spec);
 commandRegistry.register(contextCommandSpec());
 commandRegistry.register(runtimePrepareCommandSpec());
-for (const spec of [
+for (const spec of replaceRetiredSpecs([
   ...workspaceCommandSpecs(),
   ...memberCommandSpecs(),
-  ...inviteCommandSpecs(),
   ...tokenCommandSpecs(),
   ...projectCommandSpecs(),
   ...repoCommandSpecs(),
   ...knowledgeCommandSpecs(),
   ...collaborationCommandSpecs(),
+  ...externalChatCommandSpecs(),
   ...agentExtensionCommandSpecs(),
   ...operationsCommandSpecs(),
-]) commandRegistry.register(spec);
+])) commandRegistry.register(spec);
+for (const spec of unifiedCommandSpecs()) commandRegistry.register(spec);
+for (const [path, replacement] of Object.entries(RETIRED_CLI_COMMANDS)) {
+  commandRegistry.register(retiredSpec(path.split(" "), replacement));
+}
 
 // Lazy-load commands to avoid importing heavy modules when not needed
 function register(
@@ -97,7 +105,7 @@ register("login", "Interactive setup wizard", async () => {
   return { run: runLogin };
 });
 
-register("update", "Download latest version from GitHub", async () => {
+register("update", "Install a verified CLI release from the platform or GitHub", async () => {
   const { runUpdate } = await import("./update.js");
   return { run: runUpdate };
 });
@@ -179,11 +187,17 @@ function normalizeCommandId(value: string): string {
 }
 
 export async function dispatch(args: string[]): Promise<void> {
+  assertNotRetired(args);
   const cmd = args[0] ?? "help";
   const cmdArgs = args.slice(1);
 
   if (cmd === "--version" || cmd === "-V") {
     console.log(VERSION);
+    return;
+  }
+
+  if (cmd === "--build-info") {
+    console.log(JSON.stringify({ version: VERSION, commit: BUILD_COMMIT }));
     return;
   }
 
@@ -200,19 +214,29 @@ export async function dispatch(args: string[]): Promise<void> {
   }
 
   const helpIndex = args.findIndex((arg) => arg === "--help" || arg === "-h");
-  if (commandRegistry.isImplicitGroup(args)) {
-    console.log(commandRegistry.renderHelp(args));
-    return;
-  }
   if (helpIndex >= 0 && commandRegistry.supportsGeneratedHelp(args.slice(0, helpIndex))) {
     console.log(commandRegistry.renderHelpForArgv(args.slice(0, helpIndex)));
+    return;
+  }
+
+  const group = helpIndex < 0 ? commandRegistry.groupDispatch(args) : null;
+  if (group) {
+    const help = commandRegistry.renderHelp(group.path);
+    if (group.unknown) {
+      console.error(`Unknown command: remi ${args.join(" ")}`);
+      console.error(help);
+      process.exitCode = 1;
+    } else {
+      console.log(help);
+    }
     return;
   }
 
   if (!commandRegistry.resolve(args)) {
     console.error(`Unknown command: ${cmd}`);
     showHelp();
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   await commandRegistry.execute([cmd, ...cmdArgs], {

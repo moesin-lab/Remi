@@ -33,6 +33,7 @@ import {
   FeishuBotCandidatesSchema,
   FeishuBotChatsSchema,
   FeishuBotConfigSchema,
+  FeishuBotListSchema,
   FeishuBotRegistrationSessionSchema,
   FeishuBotSenderSchema,
   FeishuBotSenderListSchema,
@@ -57,8 +58,18 @@ export type FeishuBotView =
 export class FeishuBotEndpoints {
   constructor(readonly http: HttpClient) {}
 
-  async getFeishuBot(workspaceId: string): Promise<FeishuBotView> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot`);
+  async listFeishuBots(workspaceId: string): Promise<{ bots: Array<FeishuBotConfig & { bot_id: string; status: string }> }> {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bots`);
+    return parseStrictResponse(raw, FeishuBotListSchema, { endpoint: "GET /api/workspaces/:id/feishu-bots" });
+  }
+
+  async createFeishuBot(workspaceId: string, input: UpsertFeishuBotRequest): Promise<FeishuBotConfig> {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bots`, { method: "POST", body: JSON.stringify(input) });
+    return parseStrictResponse(raw, FeishuBotConfigSchema, { endpoint: "POST /api/workspaces/:id/feishu-bots" });
+  }
+
+  async getFeishuBot(workspaceId: string, botId = "default"): Promise<FeishuBotView> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot`, botId));
     // The member projection has no `workspace_id`; the admin view always does.
     // Sniffing the payload beats trusting a flag, because a flag is one more
     // field that can drift and hand a member the admin branch.
@@ -85,8 +96,8 @@ export class FeishuBotEndpoints {
     };
   }
 
-  async getFeishuBotStatus(workspaceId: string): Promise<FeishuBotStatusSnapshot> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/status`);
+  async getFeishuBotStatus(workspaceId: string, botId = "default"): Promise<FeishuBotStatusSnapshot> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/status`, botId));
     return parseWithFallback(raw, FeishuBotStatusSchema, EMPTY_FEISHU_BOT_STATUS, {
       endpoint: "GET /api/workspaces/:id/feishu-bot/status",
     });
@@ -99,8 +110,8 @@ export class FeishuBotEndpoints {
     });
   }
 
-  async getFeishuBotRoutes(workspaceId: string): Promise<FeishuBotAgentRoutes> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/routes`);
+  async getFeishuBotRoutes(workspaceId: string, botId = "default"): Promise<FeishuBotAgentRoutes> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/routes`, botId));
     return parseWithFallback(raw, FeishuBotAgentRoutesSchema, {
       ...EMPTY_FEISHU_BOT_AGENT_ROUTES,
       workspace_id: workspaceId,
@@ -109,9 +120,8 @@ export class FeishuBotEndpoints {
 
   async saveFeishuBotRoutes(
     workspaceId: string,
-    input: ReplaceFeishuBotAgentRoutesRequest,
-  ): Promise<FeishuBotAgentRoutes> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/routes`, {
+    input: ReplaceFeishuBotAgentRoutesRequest, botId = "default"): Promise<FeishuBotAgentRoutes> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/routes`, botId), {
       method: "PUT",
       body: JSON.stringify(input),
     });
@@ -121,17 +131,17 @@ export class FeishuBotEndpoints {
     }, { endpoint: "PUT /api/workspaces/:id/feishu-bot/routes" });
   }
 
-  async getFeishuBotChats(workspaceId: string): Promise<FeishuBotChats> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/chats`);
+  async getFeishuBotChats(workspaceId: string, botId = "default"): Promise<FeishuBotChats> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/chats`, botId));
     return parseWithFallback(raw, FeishuBotChatsSchema, {
       ...EMPTY_FEISHU_BOT_CHATS,
       workspace_id: workspaceId,
     }, { endpoint: "GET /api/workspaces/:id/feishu-bot/chats" });
   }
 
-  async listFeishuBotAudit(workspaceId: string, limit = 20): Promise<FeishuBotAuditList> {
+  async listFeishuBotAudit(workspaceId: string, limit = 20, botId = "default"): Promise<FeishuBotAuditList> {
     const raw = await this.http.fetch<unknown>(
-      `/api/workspaces/${workspaceId}/feishu-bot/audit?limit=${limit}`,
+      botPath(`/api/workspaces/${workspaceId}/feishu-bot/audit?limit=${limit}`, botId),
     );
     return parseWithFallback(
       raw,
@@ -141,8 +151,8 @@ export class FeishuBotEndpoints {
     );
   }
 
-  async listFeishuBotSenders(workspaceId: string): Promise<FeishuBotSenderList> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/senders`);
+  async listFeishuBotSenders(workspaceId: string, botId = "default"): Promise<FeishuBotSenderList> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/senders`, botId));
     return parseStrictResponse(raw, FeishuBotSenderListSchema, {
       endpoint: "GET /api/workspaces/:id/feishu-bot/senders",
     });
@@ -151,10 +161,9 @@ export class FeishuBotEndpoints {
   async updateFeishuBotSender(
     workspaceId: string,
     senderId: string,
-    input: { allowed: boolean },
-  ): Promise<FeishuBotSender> {
+    input: { allowed: boolean }, botId = "default"): Promise<FeishuBotSender> {
     const raw = await this.http.fetch<unknown>(
-      `/api/workspaces/${workspaceId}/feishu-bot/senders/${senderId}`,
+      botPath(`/api/workspaces/${workspaceId}/feishu-bot/senders/${senderId}`, botId),
       { method: "PUT", body: JSON.stringify(input) },
     );
     return parseStrictResponse(raw, FeishuBotSenderSchema, {
@@ -186,8 +195,8 @@ export class FeishuBotEndpoints {
    * Save. `*_op` defaults to `keep` server-side, so a form that leaves the
    * secret box untouched simply omits it and the stored credential survives.
    */
-  async saveFeishuBot(workspaceId: string, input: UpsertFeishuBotRequest): Promise<FeishuBotConfig> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot`, {
+  async saveFeishuBot(workspaceId: string, input: UpsertFeishuBotRequest, botId = "default"): Promise<FeishuBotConfig> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot`, botId), {
       method: "PUT",
       body: JSON.stringify(input),
     });
@@ -196,8 +205,8 @@ export class FeishuBotEndpoints {
     });
   }
 
-  async deleteFeishuBot(workspaceId: string): Promise<FeishuBotConfig> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot`, {
+  async deleteFeishuBot(workspaceId: string, botId = "default"): Promise<FeishuBotConfig> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot`, botId), {
       method: "DELETE",
     });
     return parseWithFallback(raw, FeishuBotConfigSchema, EMPTY_FEISHU_BOT_CONFIG, {
@@ -205,8 +214,8 @@ export class FeishuBotEndpoints {
     });
   }
 
-  async deployFeishuBot(workspaceId: string): Promise<FeishuBotStatusSnapshot> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/deploy`, {
+  async deployFeishuBot(workspaceId: string, botId = "default"): Promise<FeishuBotStatusSnapshot> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/deploy`, botId), {
       method: "POST",
       body: "{}",
     });
@@ -215,8 +224,8 @@ export class FeishuBotEndpoints {
     });
   }
 
-  async stopFeishuBot(workspaceId: string): Promise<FeishuBotStatusSnapshot> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/stop`, {
+  async stopFeishuBot(workspaceId: string, botId = "default"): Promise<FeishuBotStatusSnapshot> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/stop`, botId), {
       method: "POST",
       body: "{}",
     });
@@ -226,8 +235,8 @@ export class FeishuBotEndpoints {
   }
 
   /** Probe credentials against the Feishu open platform before saving them. */
-  async testFeishuBot(workspaceId: string, input: FeishuBotTestRequest = {}): Promise<FeishuBotTestResult> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/feishu-bot/test`, {
+  async testFeishuBot(workspaceId: string, input: FeishuBotTestRequest = {}, botId = "default"): Promise<FeishuBotTestResult> {
+    const raw = await this.http.fetch<unknown>(botPath(`/api/workspaces/${workspaceId}/feishu-bot/test`, botId), {
       method: "POST",
       body: JSON.stringify(input),
     });
@@ -295,3 +304,7 @@ const EMPTY_REGISTRATION_SESSION: FeishuBotRegistrationSession = {
   created_by_open_id: null,
   error_message: null,
 };
+
+function botPath(path: string, botId: string): string {
+  return botId === "default" ? path : `${path}${path.includes("?") ? "&" : "?"}bot_id=${encodeURIComponent(botId)}`;
+}

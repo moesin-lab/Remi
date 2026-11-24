@@ -1,0 +1,511 @@
+import { createResponsibleTestIssue } from './helpers.js';
+/**
+ * MUL-432 segment 2 item 5: the live `turn` card takes the round-card fields
+ * of a daemon's `turn.complete` / `task.fail` frame through A's seam, wired in
+ * the real server's terminal transaction. Only `trace.event_count`, `tool_call_count`,
+ * `type_histogram`, `model`, the PR 2 trace summary (`context_usage`,
+ * `worked_ms`, `process_item_count`) and PR 5's `late_subagents` are written
+ * (ruling (z)); the frame's
+ * `final_reply_md` is not, so the chat card keeps its assistant message and the
+ * Issue card its `final_entry_id`. The card is created with the turn and stays the same row at reply
+ * completion. A daemon that sends no fields writes nothing and
+ * fails nothing. A card write failure rolls back the terminal transition and
+ * the daemon can replay the report. On SQLite and Postgres.
+ */
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import { DAEMON_MIN_CLI_VERSION, type DaemonTaskCompletionFields } from "@multiremi/contracts/daemon-protocol.js";
+import type { ConversationLogEntry, ConversationLogPatch } from "@multiremi/contracts/conversation-log.js";
+import { startMultiremiServer } from "@multiremi/api.js";
+import type { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
+import type { MultiremiStore } from "@multiremi/store.js";
+import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { traceBackfillBackends, type OpenedStore } from "./trace-backfill-backends.js";
+import { createHub } from "@multiremi/api/hub/hub-core.js";
+import { createLocalHubTransport } from "@multiremi/api/hub/hub-transport.js";
+import type { HubFrame, HubStreamKey } from "@multiremi/contracts/live-hub.js";
+
+const TIMEOUT = 60_000;
+const backends = await traceBackfillBackends("cardfields");
+
+afterAll(async () => {
+  for (const backend of backends) await backend.dispose();
+});
+
+const FIELDS: DaemonTaskCompletionFields = {
+  trace: {
+    head: 5,
+    event_count: 5,
+    closed: true,
+    tool_call_count: 2,
+    type_histogram: [
+      { type: "text", tool: null, count: 1 },
+      { type: "tool_use", tool: "Bash", count: 2 },
+      { type: "tool_result", tool: "Bash", count: 2 },
+    ],
+  },
+  final_reply_md: "FRAME REPLY, not for the card",
+  model: { provider: "claude", model: "claude-sonnet-5" },
+  context_usage: { used: 48_213, size: 200_000 },
+  worked_ms: 73_400,
+  process_item_count: 4,
+  late_subagents: [
+    { item_id: "sa:counter", name: "Counter", status: "completed", duration_ms: 9_100 },
+    { item_id: "sa:linter", name: "Linter", status: "failed", duration_ms: null },
+  ],
+};
+
+const CARD_FIELDS = {
+  event_count: 5,
+  tool_call_count: 2,
+  type_histogram: FIELDS.trace.type_histogram,
+  model: FIELDS.model,
+  // The Chat page reads these from the card, never from the trace (MUL-472).
+  context_usage: FIELDS.context_usage,
+  worked_ms: FIELDS.worked_ms,
+  process_item_count: FIELDS.process_item_count,
+  // The finished turn's "finished in the background" rows (PR 5), also without the trace.
+  late_subagents: FIELDS.late_subagents,
+};
+
+/**
+ * Send one report frame through the daemon protocol layer of a real server
+ * (`startMultiremiServer`), so the seam runs through the server's own wiring.
+ */
+async function serverReport(store: MultiremiStore, runtimeId: string, type: string, payload: Record<string, unknown>) {
+  let layer: DaemonProtocolLayer | undefined;
+  const server = startMultiremiServer({
+    store, scheduler: null, backgroundJobs: false, hostname: "127.0.0.1", port: 0, authToken: "fixture-master",
+    onDaemonProtocol: (created) => { layer = created; },
+  });
+  try {
+    const frames: Array<Record<string, any>> = [];
+    const session = layer!.openSession({
+      get bufferedAmount() { return 0; },
+      send(text) { frames.push(JSON.parse(text)); return Buffer.byteLength(text); },
+      close() {},
+    }, { accessToken: null, masterToken: true });
+    try {
+      const runtime = store.getRuntimeLite(runtimeId)!;
+      // Every task the daemon still runs, so the hello does not treat a
+      // sibling as lost.
+      const active = store.listTasksForRuntimeStatuses(runtimeId, ["dispatched", "running"]).map((task) => task.id);
+      await session.handleMessage(JSON.stringify({ v: 2, t: "hello", p: {
+        protocol: 2, cli_version: DAEMON_MIN_CLI_VERSION, daemon_id: runtime.daemonId ?? "fixture-reports",
+        runtimes: [{ runtime_id: runtimeId, provider: runtime.provider, max_concurrency: 1, active_task_ids: active }],
+      } }));
+      await session.handleMessage(JSON.stringify({ v: 2, t: type, seq: 1, rt: runtimeId, p: payload }));
+      const reply = frames.find((frame) => frame.t === "res" && frame.re === "1");
+      if (!reply) throw new Error(`No res for ${type}: ${JSON.stringify(frames)}`);
+      return reply.p as Record<string, unknown>;
+    } finally {
+      session.handleSocketClose();
+    }
+  } finally {
+    await layer?.drain();
+    server.stop(true);
+  }
+}
+
+interface World {
+  opened: OpenedStore;
+  store: MultiremiStore;
+  db: SqlDatabase;
+  runtimeId: string;
+  agentId: string;
+}
+
+async function withWorld(backend: (typeof backends)[number], body: (world: World) => Promise<void>) {
+  const opened = await backend.open();
+  try {
+    const { store } = opened;
+    store.ensureLocalWorkspace();
+    const runtime = store.registerRuntime({ daemonId: "fixture-reports", name: "Card daemon", provider: "claude", workspaceId: "local" });
+    const agent = store.createAgent({ name: "Card agent", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
+    await body({ opened, store, db: opened.db, runtimeId: runtime.id, agentId: agent.id });
+  } finally {
+    await opened.close();
+  }
+}
+
+function runIssueTask(world: World, title: string, agentId = world.agentId, runtimeId = world.runtimeId) {
+  const issue = createResponsibleTestIssue(world.store, { title, workspaceId: "local" });
+  const task = world.store.createTask({ agentId, workspaceId: "local", issueId: issue.id, prompt: title });
+  expect(world.store.claimTask(runtimeId)?.id).toBe(task.id);
+  world.store.startTask(task.id);
+  return task;
+}
+
+function card(world: World, taskId: string): ConversationLogEntry {
+  const entry = world.store.findTurnEntry(taskId);
+  expect(entry).not.toBeNull();
+  return entry!;
+}
+
+/** Complete the offered input receipt before reporting the stable turn. */
+function turnCompletionPayload(world: World, taskId: string, body: string, fields: DaemonTaskCompletionFields | null = FIELDS) {
+  const task = world.store.getTaskWithAgent(taskId)!;
+  const bridge = world.store.getDaemonTurnBridge();
+  const offer = bridge.offerInput(task);
+  if (task.status === "running") {
+    world.store.recordSessionAgentRangeRead(offer.input_messages[0]!.session_id, task.agentId,
+      { seq: 1, offset: 0 }, { seq: offer.input_to_seq + 1, offset: 0 });
+    expect(bridge.rpc("turn.input", { ...offer, message_ids: offer.input_messages.map((message) => message.id) },
+      { runtimeId: task.runtimeId!, daemonId: world.store.getRuntimeLite(task.runtimeId!)!.daemonId!, workspaceId: task.workspaceId }).ok)
+      .toBe(true);
+  }
+  return {
+    ...fields,
+    turn_id: offer.turn_id,
+    attempt_id: taskId,
+    input_to_seq: offer.input_to_seq,
+    reply: { body_md: body, message_kind: "final" },
+  };
+}
+
+/** The frame fields are absent from a card no daemon filled. */
+function expectNoFrameFields(entry: ConversationLogEntry) {
+  for (const key of Object.keys(CARD_FIELDS)) expect(entry.metadata[key] ?? null).toBeNull();
+}
+
+/**
+ * Record the seam's card writes: the patches the conversation-log write hook
+ * sees for `taskId`'s card, whether each ran inside a transaction, and the
+ * `transaction()` depth when each card write starts.
+ */
+function watchSeam(world: World) {
+  const patches: Array<{ patch: ConversationLogPatch; inTransaction: boolean }> = [];
+  const entries: ConversationLogEntry[] = [];
+  world.store.setConversationLogListener({
+    onEntry: (_session, payload) => {
+      if ("target_seq" in payload) patches.push({ patch: payload, inTransaction: Boolean(world.db.inTransaction) });
+      else entries.push(payload);
+    },
+  });
+  const target = world.db as unknown as { transaction: (fn: (...args: never[]) => unknown) => (...args: unknown[]) => unknown };
+  const original = target.transaction;
+  let depth = 0;
+  target.transaction = (fn) => {
+    const run = original.call(target, fn);
+    return (...args: unknown[]) => {
+      depth += 1;
+      try {
+        return run(...args);
+      } finally {
+        depth -= 1;
+      }
+    };
+  };
+  const calls: Array<{ taskId: string; fields: unknown; changed: boolean; depth: number }> = [];
+  const record = world.store.recordTurnCardCompletionFieldsWithinTransaction.bind(world.store);
+  const spy = spyOn(world.store, "recordTurnCardCompletionFieldsWithinTransaction").mockImplementation((taskId, fields) => {
+    const changed = record(taskId, fields);
+    calls.push({ taskId, fields, changed, depth });
+    return changed;
+  });
+  return {
+    patches,
+    entries,
+    calls,
+    restore() {
+      spy.mockRestore();
+      delete (target as Partial<typeof target>).transaction;
+      world.store.setConversationLogListener(null);
+    },
+  };
+}
+
+for (const backend of backends) {
+  describe.skipIf(!backend.available)(`live turn card fields from the terminal frame (${backend.name})`, () => {
+    it("turn.complete with the fields writes the frame fields onto the Issue card and keeps final_entry_id", async () => {
+      await withWorld(backend, async (world) => {
+        const task = runIssueTask(world, "Card issue");
+        const before = card(world, task.id);
+        const seam = watchSeam(world);
+        try {
+          const reply = await serverReport(world.store, world.runtimeId, "turn.complete",
+            turnCompletionPayload(world, task.id, "issue answer"));
+          expect(reply.ok).toBe(true);
+        } finally {
+          seam.restore();
+        }
+        expect(world.store.getTask(task.id)?.status).toBe("completed");
+        const after = card(world, task.id);
+        expect({ id: after.id, seq: after.seq, session: after.session_id })
+          .toEqual({ id: before.id, seq: before.seq, session: before.session_id });
+        expect(after.metadata).toMatchObject({ ...CARD_FIELDS, status: "completed" });
+        expect(after.metadata.final_reply_md ?? null).toBeNull();
+        const reply = world.store.getConversationLogEntryById(String(after.metadata.final_entry_id));
+        expect(reply).toMatchObject({ task_id: task.id, body_md: "issue answer" });
+
+        // One card write in the terminal transaction, before the reply comment.
+        expect(seam.calls).toEqual([{ taskId: task.id, fields: { ...FIELDS, final_reply_md: "issue answer" }, changed: true, depth: 1 }]);
+        const fieldPatch = seam.patches.find(({ patch }) => patch.target_seq === after.seq
+          && patch.fields.metadata?.event_count === CARD_FIELDS.event_count)!;
+        // The card is written at seam depth 1 and rolls back with the terminal transaction; listeners see it after COMMIT.
+        expect(fieldPatch.inTransaction).toBe(false);
+        expect(fieldPatch.patch.fields.metadata).toMatchObject(CARD_FIELDS);
+
+        // A replayed frame is absorbed by the terminal state and rewrites nothing.
+        const replay = await serverReport(world.store, world.runtimeId, "turn.complete",
+          turnCompletionPayload(world, task.id, "issue answer"));
+        expect(replay.ok).toBe(true);
+        expect(card(world, task.id).revision).toBe(after.revision);
+        expect(card(world, task.id).revision).toBe(after.revision);
+      });
+    }, TIMEOUT);
+
+    it("turn.complete updates the existing chat turn card in place with every frame field", async () => {
+      await withWorld(backend, async (world) => {
+        const chat = world.store.createChatSession({ agentId: world.agentId, workspaceId: "local", creatorId: "local" });
+        const sent = world.store.sendChatMessage(chat.id, { content: "hello" });
+        expect(world.store.claimTask(world.runtimeId)?.id).toBe(sent.task.id);
+        world.store.startTask(sent.task.id);
+        const before = card(world, sent.task.id);
+        expect(before.visibility).toBe("hidden");
+        expect(world.store.locateConversationLogEntry(chat.id, before.id)).toBeNull();
+        expect(world.store.listConversationLogShown(chat.id).filter((row) => row.kind === "turn")).toHaveLength(0);
+        expect(world.store.conversationLogWindow(chat.id).entries.filter((row) => row.kind === "turn")).toHaveLength(0);
+        expect(world.db.query("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM multiremi_conversation_log WHERE session_id=? AND kind='turn'").get(chat.id).n).toBe(1);
+        const seam = watchSeam(world);
+        try {
+          const reply = await serverReport(world.store, world.runtimeId, "turn.complete",
+            turnCompletionPayload(world, sent.task.id, "chat answer"));
+          expect(reply.ok).toBe(true);
+        } finally {
+          seam.restore();
+        }
+        const message = world.store.listChatMessages(chat.id).find((row) => row.taskId === sent.task.id && row.role === "assistant")!;
+        const after = card(world, sent.task.id);
+        expect({ id: after.id, seq: after.seq, session: after.session_id })
+          .toEqual({ id: before.id, seq: before.seq, session: chat.id });
+        expect(after.metadata.final_entry_id).toBe(message.id);
+        expect(after.visibility).toBe("shown");
+        expect(world.store.locateConversationLogEntry(chat.id, before.id)).toMatchObject({ id: before.id, seq: before.seq });
+        // A full entry restores the card in replicas that consumed its hidden
+        // marker before completion; a patch has no cached display row to edit.
+        expect(seam.entries.filter((row) => row.id === before.id).at(-1))
+          .toMatchObject({ id: before.id, seq: before.seq, kind: "turn", visibility: "shown", metadata: CARD_FIELDS });
+        expect(world.store.conversationLogWindow(chat.id).entries.filter((row) => row.kind === "turn")).toHaveLength(1);
+        expect(world.store.listConversationLogEntries(chat.id).filter((row) => row.task_id === sent.task.id && row.kind === "turn"))
+          .toHaveLength(1);
+        expect(after.metadata).toMatchObject({ ...CARD_FIELDS, status: "completed", final_reply_md: "chat answer" });
+        expect(seam.calls).toEqual([{ taskId: sent.task.id, fields: { ...FIELDS, final_reply_md: "chat answer" }, changed: true, depth: 1 }]);
+        const replay = await serverReport(world.store, world.runtimeId, "turn.complete",
+          turnCompletionPayload(world, sent.task.id, "chat answer"));
+        expect(replay.ok).toBe(true);
+        expect(card(world, sent.task.id).revision).toBe(after.revision);
+        expect(world.db.query("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM multiremi_conversation_log WHERE session_id=? AND kind='turn'").get(chat.id).n).toBe(1);
+      });
+    }, TIMEOUT);
+
+    it("the live hub forwards the finished chat card to a subscriber that holds its hidden marker", async () => {
+      await withWorld(backend, async (world) => {
+        const scheduled: (() => void)[] = [];
+        const hub = createHub({ transport: createLocalHubTransport(), fill: null, scheduleFlush: (callback) => { scheduled.push(callback); } });
+        const flush = () => { while (scheduled.length > 0) scheduled.shift()!(); };
+        // Wired the way the API server wires its own hub.
+        const unsubscribe = world.store.subscribeConversationLog({ onEntry: (sessionId, payload) => {
+          hub.onEntry(sessionId, "target_seq" in payload ? { ...payload, session_id: sessionId } : payload);
+        } });
+        try {
+          const chat = world.store.createChatSession({ agentId: world.agentId, workspaceId: "local", creatorId: "local" });
+          const frames: HubFrame[] = [];
+          hub.subscribeWithSink(`log:${chat.id}` as HubStreamKey, 1, { getBufferedAmount: () => 0, send: (batch) => { frames.push(...batch); } });
+          const sent = world.store.sendChatMessage(chat.id, { content: "hello" });
+          expect(world.store.claimTask(world.runtimeId)?.id).toBe(sent.task.id);
+          world.store.startTask(sent.task.id);
+          flush();
+          const running = card(world, sent.task.id);
+          // The page holds the card's position as a hidden marker while the turn runs.
+          expect(frames.filter((frame) => frame.seq === running.seq).at(-1)?.payload).toMatchObject({ visibility: "hidden" });
+          const reply = await serverReport(world.store, world.runtimeId, "turn.complete",
+            turnCompletionPayload(world, sent.task.id, "chat answer"));
+          expect(reply.ok).toBe(true);
+          flush();
+          const message = world.store.listChatMessages(chat.id).find((row) => row.taskId === sent.task.id && row.role === "assistant")!;
+          expect(frames.some((frame) => frame.kind === "entry" && (frame.payload as { id?: string }).id === message.id)).toBe(true);
+          // The finished card reaches the subscriber live, at its old position.
+          expect(frames.filter((frame) => frame.seq === running.seq).at(-1)).toMatchObject({ kind: "entry", payload: {
+            id: running.id, kind: "turn", visibility: "shown", metadata: { status: "completed", final_entry_id: message.id, process_item_count: 4 },
+          } });
+        } finally {
+          unsubscribe();
+          hub.shutdown();
+        }
+      });
+    }, TIMEOUT);
+
+    it("task.fail with the fields writes them onto the card", async () => {
+      await withWorld(backend, async (world) => {
+        const task = runIssueTask(world, "Card failure");
+        const reply = await serverReport(world.store, world.runtimeId, "task.fail",
+          { task_id: task.id, error: "boom", ...FIELDS });
+        expect(reply.ok).toBe(true);
+        expect(world.store.getTask(task.id)?.status).toBe("failed");
+        const after = card(world, task.id);
+        expect(after.metadata).toMatchObject({ ...CARD_FIELDS, status: "failed" });
+        expect(after.metadata.final_reply_md ?? null).toBeNull();
+      });
+    }, TIMEOUT);
+
+    it("completes a one-shot task on its existing auto conversation card with every frame field", async () => {
+      await withWorld(backend, async (world) => {
+        const task = world.store.createTask({ agentId: world.agentId, workspaceId: "local", prompt: "One-shot" });
+        const before = card(world, task.id);
+        expect(before.session_id).toStartWith("auto_");
+        expect(world.store.claimTask(world.runtimeId)?.id).toBe(task.id);
+        world.store.startTask(task.id);
+        const seam = watchSeam(world);
+        try {
+          const reply = await serverReport(world.store, world.runtimeId, "turn.complete",
+            turnCompletionPayload(world, task.id, "done"));
+          expect(reply).toEqual({ ok: true, turn_id: task.id, reply_message_id: card(world, task.id).metadata.final_entry_id });
+        } finally {
+          seam.restore();
+        }
+        expect(world.store.getTask(task.id)?.status).toBe("completed");
+        const after = card(world, task.id);
+        expect({ id: after.id, seq: after.seq, session: after.session_id })
+          .toEqual({ id: before.id, seq: before.seq, session: before.session_id });
+        expect(after.metadata).toMatchObject({ ...CARD_FIELDS, status: "completed" });
+        expect(after.metadata.final_reply_md ?? null).toBeNull();
+        expect(world.store.getConversationLogEntryById(String(after.metadata.final_entry_id)))
+          .toMatchObject({ session_id: before.session_id, body_md: "done" });
+        expect(world.store.listConversationLogEntries(before.session_id).filter((row) => row.kind === "turn"))
+          .toHaveLength(1);
+        expect(seam.calls).toEqual([{ taskId: task.id, fields: { ...FIELDS, final_reply_md: "done" }, changed: true, depth: 1 }]);
+        await serverReport(world.store, world.runtimeId, "turn.complete", turnCompletionPayload(world, task.id, "done"));
+        expect(card(world, task.id).revision).toBe(after.revision);
+      });
+    }, TIMEOUT);
+
+    it("an old daemon without the fields writes nothing, reports no error and changes nothing else", async () => {
+      await withWorld(backend, async (world) => {
+        // The twin runs on its own runtime and Agent: this fixture's runtime
+        // claims one task.
+        const twinRuntime = world.store.registerRuntime({ daemonId: "fixture-twin-reports", name: "Twin daemon", provider: "claude", workspaceId: "local" });
+        const twin = world.store.createAgent({ name: "Twin agent", provider: "claude", workspaceId: "local", runtimeId: twinRuntime.id });
+        const seam = watchSeam(world);
+        let old: ConversationLogEntry;
+        let current: ConversationLogEntry;
+        try {
+          const oldTask = runIssueTask(world, "Old daemon");
+          const newTask = runIssueTask(world, "New daemon", twin.id, twinRuntime.id);
+          const oldReply = await serverReport(world.store, world.runtimeId, "turn.complete",
+            turnCompletionPayload(world, oldTask.id, "old answer", null));
+          expect(oldReply).toEqual({ ok: true, turn_id: oldTask.id, reply_message_id: card(world, oldTask.id).metadata.final_entry_id });
+          expect(world.store.getTask(oldTask.id)?.status).toBe("completed");
+          expect(world.store.getTaskTrace(oldTask.id)).toMatchObject({ location: "daemon", runtimeId: world.runtimeId });
+          old = card(world, oldTask.id);
+          expectNoFrameFields(old);
+          expect(old.metadata.status).toBe("completed");
+          expect(world.store.getConversationLogEntryById(String(old.metadata.final_entry_id)))
+            .toMatchObject({ body_md: "old answer" });
+          expect(seam.calls).toEqual([{ taskId: oldTask.id, fields: null, changed: false, depth: 1 }]);
+
+          // The same path with the fields differs by exactly the seam's one write.
+          await serverReport(world.store, twinRuntime.id, "turn.complete",
+            turnCompletionPayload(world, newTask.id, "new answer"));
+          current = card(world, newTask.id);
+        } finally {
+          seam.restore();
+        }
+        expect(current.revision).toBe(old.revision + 1);
+      });
+    }, TIMEOUT);
+
+    it("a malformed trace summary field lands as null next to the rest of the card", async () => {
+      await withWorld(backend, async (world) => {
+        const task = runIssueTask(world, "Malformed summary");
+        const error = spyOn(console, "error").mockImplementation(() => {});
+        try {
+          const reply = await serverReport(world.store, world.runtimeId, "turn.complete", {
+            ...turnCompletionPayload(world, task.id, "answer"), context_usage: { used: "lots", size: 1 }, worked_ms: -1,
+            late_subagents: [...FIELDS.late_subagents!, { item_id: "sa:x", name: "X", status: "running", duration_ms: 1 }],
+          });
+          expect(reply.ok).toBe(true);
+        } finally { error.mockRestore(); }
+        expect(card(world, task.id).metadata).toMatchObject({ ...CARD_FIELDS, context_usage: null, worked_ms: null, late_subagents: null,
+          status: "completed" });
+        const attempt = world.store.listTurnAttempts(world.store.getTurnForAttempt(task.id)!.id).find((row) => row.id === task.id)!;
+        expect(attempt).toMatchObject({ context_usage: null, worked_ms: null, process_item_count: FIELDS.process_item_count,
+          late_subagents: null });
+      });
+    }, TIMEOUT);
+
+    it("rewrites the card when only the trace summary changed and keeps its revision otherwise", async () => {
+      await withWorld(backend, async (world) => {
+        const task = runIssueTask(world, "Summary revision");
+        const write = (fields: DaemonTaskCompletionFields) =>
+          world.db.transaction(() => world.store.recordTurnCardCompletionFieldsWithinTransaction(task.id, fields))();
+        expect(write(FIELDS)).toBe(true);
+        const first = card(world, task.id);
+        expect(first.metadata).toMatchObject(CARD_FIELDS);
+        expect(write(FIELDS)).toBe(false);
+        expect(card(world, task.id).revision).toBe(first.revision);
+        for (const patch of [{ context_usage: { used: 1, size: 200_000 } }, { worked_ms: 1 }, { process_item_count: 0 },
+          { late_subagents: [{ ...FIELDS.late_subagents![0]!, duration_ms: 9_101 }] },
+          { late_subagents: [{ ...FIELDS.late_subagents![0]!, duration_ms: 9_101, status: "stopped" as const }] },
+          { late_subagents: [{ ...FIELDS.late_subagents![0]!, name: "Renamed" }] },
+          { late_subagents: null }, { context_usage: null, late_subagents: null }]) {
+          expect(write({ ...FIELDS, ...patch }), JSON.stringify(patch)).toBe(true);
+          expect(card(world, task.id).metadata).toMatchObject(patch);
+          expect(write({ ...FIELDS, ...patch })).toBe(false);
+        }
+        const attempt = world.store.listTurnAttempts(world.store.getTurnForAttempt(task.id)!.id).find((row) => row.id === task.id)!;
+        expect(attempt).toMatchObject({ context_usage: null, worked_ms: FIELDS.worked_ms, process_item_count: FIELDS.process_item_count,
+          late_subagents: null });
+        // An empty list is "none did": the same card as null.
+        expect(write({ ...FIELDS, context_usage: null, late_subagents: [] })).toBe(false);
+        expect(write({ ...FIELDS, context_usage: null, late_subagents: FIELDS.late_subagents })).toBe(true);
+        expect(card(world, task.id).metadata.late_subagents).toEqual(FIELDS.late_subagents);
+      });
+    }, TIMEOUT);
+
+    it("an older daemon without late_subagents lands null next to the rest of the card, without a warning", async () => {
+      await withWorld(backend, async (world) => {
+        const task = runIssueTask(world, "Pre-PR 5 daemon");
+        const { late_subagents: _omitted, ...older } = FIELDS;
+        const warn = spyOn(console, "warn").mockImplementation(() => {});
+        const error = spyOn(console, "error").mockImplementation(() => {});
+        try {
+          const reply = await serverReport(world.store, world.runtimeId, "turn.complete",
+            turnCompletionPayload(world, task.id, "answer", older as DaemonTaskCompletionFields));
+          expect(reply.ok).toBe(true);
+          const logged = [...warn.mock.calls, ...error.mock.calls].map((call) => JSON.stringify(call));
+          expect(logged.filter((line) => line.includes("round-card") || line.includes("turn summary"))).toEqual([]);
+        } finally { warn.mockRestore(); error.mockRestore(); }
+        expect(card(world, task.id).metadata).toMatchObject({ ...CARD_FIELDS, late_subagents: null, status: "completed" });
+      });
+    }, TIMEOUT);
+
+    it.each(["turn.complete", "task.fail"])("a failed %s card write rolls back and replays with every frame field", async (type) => {
+      await withWorld(backend, async (world) => {
+        const task = runIssueTask(world, "Card write failure");
+        const payload = type === "turn.complete" ? turnCompletionPayload(world, task.id, "answer")
+          : { task_id: task.id, error: "failed", ...FIELDS };
+        const before = card(world, task.id);
+        const write = spyOn(world.store, "recordTurnCardCompletionFieldsWithinTransaction").mockImplementation(() => {
+          throw new Error("injected card write failure");
+        });
+        let failureReply: Record<string, unknown>;
+        try {
+          failureReply = await serverReport(world.store, world.runtimeId, type, payload);
+          expect(write).toHaveBeenCalledTimes(1);
+        } finally {
+          write.mockRestore();
+        }
+        expect(world.store.getTask(task.id)?.status).toBe("running");
+        expect(card(world, task.id).revision).toBe(before.revision);
+        expectNoFrameFields(card(world, task.id));
+        const replay = await serverReport(world.store, world.runtimeId, type, payload);
+        expect(replay).toEqual(type === "turn.complete"
+          ? { ok: true, turn_id: task.id, reply_message_id: card(world, task.id).metadata.final_entry_id } : { ok: true });
+        expect(world.store.getTask(task.id)?.status).toBe(type === "turn.complete" ? "completed" : "failed");
+        expect(card(world, task.id).metadata).toMatchObject(CARD_FIELDS);
+        // Check rollback and manual replay even when the failure response is wrong.
+        expect(failureReply).toMatchObject({ ok: false, code: "server_error", retryable: true });
+      });
+    }, TIMEOUT);
+  });
+}

@@ -18,16 +18,47 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "acp-client-test-"));
 }
 
-async function waitFor(predicate: () => boolean, attempts = 150): Promise<void> {
-  for (let attempt = 0; attempt < attempts && !predicate(); attempt++) {
-    await new Promise((r) => setTimeout(r, 20));
+async function waitFor(
+  predicate: () => boolean,
+  condition: string,
+  timeoutMs = 3_000,
+  diagnostics: () => string = () => "",
+): Promise<void> {
+  const started = performance.now();
+  while (!predicate()) {
+    const elapsed = performance.now() - started;
+    if (elapsed >= timeoutMs) {
+      throw new Error(`Timed out after ${Math.round(elapsed)}ms (budget ${timeoutMs}ms) waiting for ${condition}. ${diagnostics()}`);
+    }
+    await Bun.sleep(20);
   }
+}
+
+// CI has exceeded the old 3s limit while starting the launcher and then Node.
+// Give fixture startup its own budget; process termination still gets only 3s.
+const NATIVE_CHILD_STARTUP_MS = 10_000;
+
+async function waitForChildPid(path: string, client: AcpClient, logs: string[]): Promise<number> {
+  const started = performance.now();
+  await waitFor(() => existsSync(path), `native child PID file ${path}`, NATIVE_CHILD_STARTUP_MS,
+    () => `launcher alive=${client.alive}; launcher log: ${logs.join(" | ")}`);
+  console.info(`[acp-fixture] launcher + native child ready in ${Math.round(performance.now() - started)}ms`);
+  return Number(readFileSync(path, "utf8"));
 }
 
 /** Text of every agent_message_chunk the fake agent echoed back at us. */
 function echoes(updates: any[]): any[] {
   return updates.map((u) => JSON.parse(u.update.content.text));
 }
+
+describe("ACP fixture waits", () => {
+  it("reports the missing condition, budget and launcher diagnostics on timeout", async () => {
+    await expect(waitFor(() => false, "native child PID file /missing/child.pid", 20,
+      () => "launcher alive=false; stderr: startup failed")).rejects.toThrow(
+      /budget 20ms.*native child PID file \/missing\/child.pid.*launcher alive=false; stderr: startup failed/,
+    );
+  });
+});
 
 describe("AcpClient process death", () => {
   it("rejects in-flight requests when the agent dies without responding", async () => {
@@ -68,7 +99,7 @@ describe("AcpClient process death", () => {
     const reasons: string[] = [];
     const client = new AcpClient({ executable, onProcessExit: (reason) => reasons.push(reason) });
     await client.start();
-    await waitFor(() => reasons.length > 0);
+    await waitFor(() => reasons.length > 0, "process exit callback");
 
     expect(reasons).toHaveLength(1);
     expect(reasons[0]).toMatch(/exit code 0|stdout EOF/);
@@ -103,16 +134,25 @@ setInterval(() => {}, 1_000);
 `,
       "js",
     );
-    const client = new AcpClient({ executable });
-    await client.start();
-    await waitFor(() => existsSync(childPidPath));
-    const childPid = Number(readFileSync(childPidPath, "utf8"));
-    expect(processIsAlive(childPid)).toBe(true);
+    const logs: string[] = [];
+    const client = new AcpClient({ executable, log: (...args) => logs.push(args.join(" ")) });
+    let childPid = 0;
+    try {
+      await client.start();
+      childPid = await waitForChildPid(childPidPath, client, logs);
+      expect(processIsAlive(childPid)).toBe(true);
 
-    await client.stop();
-    await waitFor(() => !processIsAlive(childPid));
-    expect(processIsAlive(childPid)).toBe(false);
-  });
+      await client.stop();
+      await waitFor(() => !processIsAlive(childPid), `native child ${childPid} to exit`);
+      expect(processIsAlive(childPid)).toBe(false);
+    } finally {
+      // Also sweep the process group when startup fails before the PID is known.
+      await client.stop();
+      if (childPid > 0 && processIsAlive(childPid)) {
+        try { process.kill(childPid, "SIGKILL"); } catch {}
+      }
+    }
+  }, 20_000);
 
   it("kills an inherited native child when its launcher crashes", async () => {
     if (process.platform === "win32") return;
@@ -131,16 +171,16 @@ setTimeout(() => process.exit(1), 100);
 `,
       "js",
     );
-    const client = new AcpClient({ executable });
+    const logs: string[] = [];
+    const client = new AcpClient({ executable, log: (...args) => logs.push(args.join(" ")) });
     let childPid = 0;
     try {
       await client.start();
-      await waitFor(() => existsSync(childPidPath));
-      childPid = Number(readFileSync(childPidPath, "utf8"));
+      childPid = await waitForChildPid(childPidPath, client, logs);
       expect(processIsAlive(childPid)).toBe(true);
 
-      await waitFor(() => !client.alive);
-      await waitFor(() => !processIsAlive(childPid));
+      await waitFor(() => !client.alive, "launcher to exit");
+      await waitFor(() => !processIsAlive(childPid), `native child ${childPid} to exit`);
       expect(client.alive).toBe(false);
       expect(processIsAlive(childPid)).toBe(false);
     } finally {
@@ -149,7 +189,7 @@ setTimeout(() => process.exit(1), 100);
       }
       await client.stop();
     }
-  });
+  }, 20_000);
 });
 
 function processIsAlive(pid: number): boolean {
@@ -268,7 +308,7 @@ rl.on("line", (line) => {
     const client = new AcpClient({ executable, onSessionUpdate: (n) => updates.push(n) });
     await client.start();
     await client.initialize();
-    await waitFor(() => updates.length >= 3);
+    await waitFor(() => updates.length >= 3, "three filesystem responses");
     await client.stop();
 
     const byId = new Map(echoes(updates).map((e) => [e.id, e]));
@@ -324,7 +364,7 @@ rl.on("line", (line) => {
     await client.start();
     await client.initialize();
 
-    await waitFor(() => updates.length >= 1);
+    await waitFor(() => updates.length >= 1, "cancellation response");
     expect(echoes(updates)).toEqual([{ outcome: { outcome: "cancelled" } }]);
 
     // The late human decision must not produce a second response for id 99.
@@ -368,7 +408,7 @@ rl.on("line", (line) => {
     });
     await client.start();
     await client.initialize();
-    await waitFor(() => updates.length >= 1);
+    await waitFor(() => updates.length >= 1, "cancellation response");
     await client.stop();
 
     expect(echoes(updates)).toEqual([{ action: "cancel" }]);
@@ -420,7 +460,10 @@ rl.on("line", (line) => {
 // `requiredDefaultOnError` raises "Required value is missing" for an omitted
 // `mcpServers` rather than defaulting it, so the load fails with -32602.
 describe("AcpClient loadSession", () => {
-  it("sends cwd and mcpServers on session/load", async () => {
+  it.each([
+    undefined,
+    { _meta: { claudeCode: { options: { model: "claude-opus-5", env: { ANTHROPIC_CUSTOM_MODEL_OPTION: "claude-opus-5[1m]" } } } } },
+  ])("sends cwd, mcpServers and optional metadata on session/load: %j", async extra => {
     const executable = fakeAgent(
       `#!/usr/bin/env node
 const readline = require("node:readline");
@@ -442,7 +485,7 @@ rl.on("line", (line) => {
     await client.start();
     await client.initialize();
     const servers = [{ name: "recall", command: "/bin/recall", args: [], env: [] }];
-    const result = await client.loadSession("sess_1", "/work/repo", servers);
+    const result = await client.loadSession("sess_1", "/work/repo", servers, extra);
     await client.stop();
 
     expect(result.sessionId).toBe("sess_1");
@@ -450,6 +493,71 @@ rl.on("line", (line) => {
       sessionId: "sess_1",
       cwd: "/work/repo",
       mcpServers: servers,
+      ...(extra ? { _meta: extra._meta } : {}),
     });
+  });
+});
+
+// PR 6 §3.1: the AIR `asyncTasks` capability, per adapter and behind the switch.
+describe("AcpClient asyncTasks capability", () => {
+  const echoAgent = (advertised: string[]) => fakeAgent(
+    `#!/usr/bin/env node
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1,
+      _meta: { echo: msg.params, jetbrains: { air: { version: 1, capabilities: ${JSON.stringify(advertised)} } } } } });
+  } else if (msg.method === "_session/async_task/stop") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { stopped: msg.params.asyncTaskId === "bash-1", echo: msg.params } });
+  }
+});
+`,
+    "js",
+  );
+
+  for (const [agentType, base] of [
+    ["claude", ["sessionFailure"]],
+    ["codex", ["recommendedValue", "sessionFailure"]],
+  ] as const) {
+    it(`${agentType}: lists asyncTasks only when asked, after the other AIR capabilities`, async () => {
+      for (const asyncTasks of [true, false]) {
+        const client = new AcpClient({ executable: echoAgent(["sessionFailure", "asyncTasks"]), agentType, asyncTasks });
+        await client.start();
+        const result = await client.initialize();
+        await client.stop();
+        const sent = (result._meta as any).echo.clientCapabilities._meta.jetbrains.air.capabilities;
+        expect(sent).toEqual(asyncTasks ? [...base, "asyncTasks"] : [...base]);
+      }
+    });
+  }
+
+  it("asyncTasksEnabled needs both the request and the agent's advertisement", async () => {
+    const cases: Array<[boolean, string[], boolean]> = [
+      [true, ["sessionFailure", "asyncTasks"], true],
+      [true, ["sessionFailure"], false],
+      [false, ["sessionFailure", "asyncTasks"], false],
+    ];
+    for (const [asked, advertised, enabled] of cases) {
+      const client = new AcpClient({ executable: echoAgent(advertised), agentType: "claude", asyncTasks: asked });
+      await client.start();
+      expect(client.asyncTasksEnabled).toBe(false);
+      await client.initialize();
+      expect(client.asyncTasksEnabled).toBe(enabled);
+      if (process.platform !== "win32") expect(client.processGroupId).toBe(client.processId);
+      await client.stop();
+      expect(client.processId).toBeNull();
+    }
+  });
+
+  it("stopAsyncTask sends _session/async_task/stop with the given session and reads the answer", async () => {
+    const client = new AcpClient({ executable: echoAgent(["asyncTasks"]), agentType: "claude", asyncTasks: true });
+    await client.start();
+    await client.initialize();
+    expect(await client.stopAsyncTask("sess_root", "bash-1")).toEqual({ stopped: true });
+    expect(await client.stopAsyncTask("sess_root", "bash-2")).toEqual({ stopped: false });
+    await client.stop();
   });
 });

@@ -1,5 +1,8 @@
+import { executionModelPolicyReason } from "@multiremi/contracts/execution-endpoint.js";
+import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
+import { executionEndpointGroupCatalog, blockExecutionGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { createLogger } from "@shared/logger.js";
-import { workspaceRuntimeModelCatalog, catalogAllowsModel, commonThinkingCapabilities, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { workspaceRuntimeModelCatalog, intersectExecutionGroupCatalogs, catalogAllowsModel, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { GATEWAY_REASONING_LEVELS, manualThinkingResponse } from "@multiremi/store/runtime-model-catalog.js";
 import type { FleetModelThinkingResponse, FleetModelThinkingSource } from "@multiremi/store/runtime-model-catalog.js";
 import type { RelayEngine } from "@multiremi/store/store.js";
@@ -68,7 +71,8 @@ export function executionGroupRuntimes(store: MultiremiStore, workspaceId: strin
   const ids = new Set(group.runtimeIds);
   return store.listRuntimes().filter((runtime) => ids.has(runtime.id)
     && (runtime.workspaceId ?? "local") === workspaceId
-    && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId));
+    && (runtime.provider === "any" || runtime.provider === group.provider)
+    );
 }
 
 /** An explicit group model must be supported by every currently eligible member. */
@@ -76,54 +80,19 @@ export function executionGroupModelCatalog(store: MultiremiStore, workspaceId: s
   const group = store.getExecutionGroup(groupId, workspaceId);
   if (!group) return [];
   const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId).sort((a, b) => a.id.localeCompare(b.id));
-  const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime)
+  if (group.connectionMode !== "legacy") return [executionEndpointGroupCatalog(group,
+    runtimeId => store.getRuntimeBindingModelCatalog(groupId, runtimeId), runtimes.filter(runtime => runtime.status === "online").length)];
+  const profile = group.managed ? store.getGroupExecutionProfile(groupId, workspaceId)?.profile ?? null : undefined;
+  if (profile && !runtimes.length) return [blockExecutionGroupCatalog({
+    provider: group.provider,
+    models: runtimeConnectionModels(profile, group.provider, []),
+    online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
+    ...(!profile.model ? { model_catalog_status: "unknown" as const } : {}),
+  }, group.modelPolicy)];
+  const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime, profile, group.managed ? groupId : undefined)
     .find((entry) => entry.provider === group.provider));
-  const catalogs = providers.map((entry) => entry?.models ?? []);
-  const models = (catalogs[0] ?? []).flatMap((model): FleetModelResponse[] => {
-    const matches = catalogs.map((catalog) => catalog.find((candidate) => candidate.id === model.id));
-    if (matches.some((candidate) => !candidate)) return [];
-    const supported = modelThinkingLevels([model], model.id).filter((level) => matches.every((candidate) =>
-      candidate && modelThinkingLevels([candidate], candidate.id).some((entry) => entry.value === level.value)));
-    const failed = matches.find((candidate) => candidate?.thinking?.status === "error")?.thinking;
-    const unknown = matches.some((candidate) => !candidate?.thinking || candidate.thinking.status === "unknown");
-    const status = failed ? "error" : unknown ? "unknown" : supported.length ? "supported" : "unsupported";
-    const explicitStatus = matches.some((candidate) => candidate?.thinking?.status !== undefined);
-    const defaultLevel = model.thinking?.default_level;
-    const thinkingDefault = defaultLevel && supported.some((level) => level.value === defaultLevel)
-      && matches.every((candidate) => candidate?.thinking?.default_level === defaultLevel) ? defaultLevel : undefined;
-    // These levels are the intersection across the group's members, so naming a
-    // single member's source for the consensus would misattribute it: report one
-    // only when every member that offers the model states the same source.
-    const sources = matches.map((candidate) => candidate?.thinking_source);
-    const thinkingSource = sources.length > 0
-      && sources.every((source) => source !== undefined && source === sources[0]) ? sources[0] : undefined;
-    return [{
-      id: model.id, label: model.label, provider: group.provider,
-      ...(matches.some(candidate => candidate?.execution_status !== undefined) ? {
-        execution_status: matches.some(candidate => candidate?.execution_status === "unknown") ? "unknown" as const
-          : matches.some(candidate => candidate?.execution_status === "unavailable") ? "unavailable" as const : "available" as const,
-      } : {}),
-      ...(matches.every((candidate) => candidate?.default) ? { default: true } : {}),
-      ...(supported.length || explicitStatus || matches.every((candidate) => candidate?.thinking) ? { thinking: {
-        supported_levels: supported,
-        ...(explicitStatus ? { status } : {}),
-        ...(failed?.error ? { error: failed.error } : {}),
-        ...(thinkingDefault ? { default_level: thinkingDefault } : {}),
-      } } : {}),
-      ...(thinkingSource ? { thinking_source: thinkingSource } : {}),
-    }];
-  });
-  return [{ provider: group.provider, models, online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
-    ...(providers.some((entry) => entry?.model_catalog_status === "unknown")
-      ? { model_catalog_status: "unknown" as const }
-      : providers.some((entry) => entry?.model_catalog_status === "error")
-      ? { model_catalog_status: "error" as const }
-      : providers.some((entry) => entry?.model_catalog_status === "ready")
-      ? { model_catalog_status: "ready" as const } : {}),
-    ...(providers.some((entry) => entry?.default_thinking) ? { default_thinking: commonThinkingCapabilities(providers.map((entry) =>
-      entry?.default_thinking ?? { supported_levels: modelThinkingLevels(entry?.models ?? [], "") })),
-    } : {}),
-  }];
+  return intersectExecutionGroupCatalogs(group.provider, providers, runtimes.filter(runtime => runtime.status === "online").length,
+    Boolean(profile && !profile.model)).map(catalog => blockExecutionGroupCatalog(catalog, group.modelPolicy));
 }
 
 export function executionGroupRequestOwner(c: Context, store: MultiremiStore, workspaceId: string): string | Response {
@@ -168,6 +137,7 @@ function workspaceProviderCatalog(
 export interface GatewayReasoningLevelRow {
   model_id: string;
   label: string;
+  context_window: { one_million: true; updated_by: string | null; updated_at: string } | null;
   /** The administrator's stored declaration, or null when none is stored. */
   manual: GatewayReasoningLevelManual | null;
   /** What routing will use, or null when the model has no reasoning entry. */
@@ -221,6 +191,7 @@ export function gatewayReasoningLevels(
 ): { engine: RelayEngine; allowed_levels: readonly string[]; models: GatewayReasoningLevelRow[] } {
   const snapshot = store.getGatewayModels(workspaceId, engine);
   const declarations = store.listGatewayModelReasoning(workspaceId, engine);
+  const contexts = store.listGatewayModelContext(workspaceId, engine);
   // The provider entry (not just its models) is what says whether a model can be
   // selected at all: the Codex execution catalog's loading state lives here.
   const catalog = workspaceProviderCatalog(store, workspaceId, engine, callerOwnerId);
@@ -228,6 +199,7 @@ export function gatewayReasoningLevels(
   const rows = new Map<string, {
     model_id: string;
     label: string;
+    context_window: GatewayReasoningLevelRow["context_window"];
     decl: {
       modelId: string; levels: string[]; defaultLevel?: string;
       updatedBy: string | null; updatedAt: string;
@@ -236,7 +208,7 @@ export function gatewayReasoningLevels(
     effective: GatewayReasoningLevelRow["effective"];
   }>();
   for (const model of snapshot?.models ?? []) {
-    rows.set(model.id, { model_id: model.id, label: model.label, decl: null, manual: null, effective: null });
+    rows.set(model.id, { model_id: model.id, label: model.label, context_window: null, decl: null, manual: null, effective: null });
   }
   // A declaration outlives the model's gateway entry: the snapshot is replaced on
   // every probe, so an alias that disappears would otherwise become impossible to
@@ -248,10 +220,18 @@ export function gatewayReasoningLevels(
     rows.set(decl.modelId, {
       model_id: decl.modelId,
       label: existing?.label ?? decl.modelId,
+      context_window: null,
       decl,
       manual: null,
       effective: null,
     });
+  }
+  for (const decl of contexts) {
+    const existing = rows.get(decl.modelId) ?? {
+      model_id: decl.modelId, label: decl.modelId, decl: null, manual: null, effective: null, context_window: null,
+    };
+    existing.context_window = { one_million: true, updated_by: decl.updatedBy, updated_at: decl.updatedAt };
+    rows.set(decl.modelId, existing);
   }
   for (const [modelId, row] of rows) {
     const resolved = effectiveModels.get(modelId);
@@ -298,6 +278,15 @@ function manualState(
  * CLI verbatim — an unknown spelling would route as if declared and then fail at
  * execution, which is worse than a 400 here.
  */
+export function validateGatewayContextWindow(
+  input: { model?: unknown; one_million?: unknown },
+): { ok: true; modelId: string; oneMillion: boolean } | { ok: false; error: string } {
+  const modelId = cleanString(typeof input.model === "string" ? input.model : "");
+  if (!modelId) return { ok: false, error: "model is required" };
+  if (typeof input.one_million !== "boolean") return { ok: false, error: "one_million must be a boolean" };
+  return { ok: true, modelId, oneMillion: input.one_million };
+}
+
 export function validateGatewayReasoningLevels(
   engine: RelayEngine,
   input: { model?: unknown; levels?: unknown; default_level?: unknown },
@@ -432,12 +421,15 @@ function validateAgentModelSelection(
   },
 ): Response | null {
   const profile = input.runtimeId ? store.getRuntimeExecutionProfile(input.runtimeId, input.provider) : null;
-  if (profile && input.model && input.model !== profile.model) {
+  if (profile && input.model && !(profile.models ?? [profile.model]).includes(input.model)) {
     return c.json({ error: `model "${input.model}" is not supported by the selected Runtime connection; expected "${profile.model}"` }, 400);
   }
   // Unrelated edits may resend the saved selection. Discovery must never force
   // users to replace a saved model/effort just to edit an Agent's metadata.
   if (input.preserveSavedSelection) return null;
+  const policyGroup = input.executionGroupId ? store.getExecutionGroup(input.executionGroupId, input.workspaceId) : null;
+  if (policyGroup && input.model && executionModelPolicyReason(policyGroup.modelPolicy, input.model) === "model_blocked_by_policy")
+    return c.json({ code: "model_blocked_by_policy", error: `model "${input.model}" blocked by policy` }, 400);
   const groupCatalog = !input.runtimeId && input.executionGroupId
     ? executionGroupModelCatalog(store, input.workspaceId, input.executionGroupId, input.ownerId ?? currentRequestUserId(c))[0]
     : undefined;
@@ -511,7 +503,10 @@ function validateAgentFallbackSelection(
   if (effectiveModel === input.fallbackModel) {
     return c.json({ error: "fallback_model must be different from the primary model" }, 400);
   }
-  if (profile && input.fallbackModel !== profile.model) {
+  const policyGroup = input.executionGroupId ? store.getExecutionGroup(input.executionGroupId, input.workspaceId) : null;
+  if (policyGroup && executionModelPolicyReason(policyGroup.modelPolicy, input.fallbackModel) === "model_blocked_by_policy")
+    return c.json({ code: "model_blocked_by_policy", error: `fallback_model "${input.fallbackModel}" blocked by policy` }, 400);
+  if (profile && !(profile.models ?? [profile.model]).includes(input.fallbackModel)) {
     return c.json({
       code: "model_not_in_execution_catalog",
       error: `fallback_model "${input.fallbackModel}" is not supported by the selected Runtime connection`,
@@ -1085,8 +1080,9 @@ export function resolveAgentRequestProvider(
     if (!group) return c.json({ error: "invalid execution_group_id" }, 400);
     const requestedProvider = cleanString(typeof input.provider === "string" ? input.provider : null);
     if (requestedProvider && requestedProvider !== group.provider) return c.json({ error: "provider does not match the selected execution group" }, 400);
-    if (!executionGroupRuntimes(store, workspaceId, groupId, agentOwnerId).length) {
-      return c.json({ error: "no execution group member can run this owner's agents" }, 403);
+    const runtimes = executionGroupRuntimes(store, workspaceId, groupId, agentOwnerId);
+    if (!runtimes.length || runtimes.some(runtime => !canCurrentUserUseRuntime(c, store, runtime))) {
+      return c.json({ error: "no execution group member is available in this workspace" }, 403);
     }
     return group.provider;
   }
@@ -1096,10 +1092,7 @@ export function resolveAgentRequestProvider(
       return c.json({ error: "invalid runtime_id" }, 400);
     }
     if (!canCurrentUserUseRuntime(c, store, runtime)) {
-      return c.json({ error: "this runtime is private; only its owner or a workspace admin can create agents on it" }, 403);
-    }
-    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== agentOwnerId) {
-      return c.json({ error: "a private runtime can only execute agents owned by its owner" }, 403);
+      return c.json({ error: "this credential cannot use the selected runtime" }, 403);
     }
     const requestedProvider = cleanString(typeof input.provider === "string" ? input.provider : null);
     if (runtime.provider !== "any" && requestedProvider && requestedProvider !== runtime.provider) {

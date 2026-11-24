@@ -1,9 +1,11 @@
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { createHash } from "node:crypto";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { parseJson, toJson } from "@multiremi/store/helpers.js";
 import type { StoreContext } from "@multiremi/store/context.js";
 import { RUNTIME_AUXILIARY_TABLES } from "@multiremi/store/runtime-lifecycle-tables.js";
 import { isRuntimeEffectivelyOnline } from "@multiremi/store/repos/runtimes-repo.js";
+import { BackgroundTasksRepo } from "@multiremi/store/repos/background-tasks-repo.js";
 
 type Row = Record<string, unknown>;
 
@@ -17,6 +19,8 @@ const BLOCKING_TASK_STATUSES = ["dispatched", "running", "waiting_local_director
 const RUNTIME_AUXILIARY_IDENTITY_COLUMNS: Partial<Record<(typeof RUNTIME_AUXILIARY_TABLES)[number], string[]>> = {
   multiremi_runtime_models: ["runtime_id", "model_id"],
   multiremi_execution_group_members: ["runtime_id", "provider", "group_id"],
+  multiremi_execution_binding_states: ["workspace_id", "group_id", "runtime_id", "generation"],
+  multiremi_execution_binding_generations: ["workspace_id", "group_id", "runtime_id", "generation"],
   multiremi_runtime_codex_profiles: ["runtime_id", "profile"],
   multiremi_runtime_claude_profiles: ["runtime_id", "profile"],
   multiremi_runtime_provision_states: ["runtime_id", "provision_id"],
@@ -97,6 +101,8 @@ export interface DaemonRetirementPlan {
     runtimeId: string;
     rootPath: string;
   }>;
+  /** Traces still held by the Runtimes' daemon: retiring makes them unreadable. */
+  tracesToLose: number;
   impact: DaemonRetirementImpact;
 }
 
@@ -306,8 +312,19 @@ export class DaemonRetirementRepo {
     );
   }
 
-  /** Must be called inside a database transaction. Updating the row is the cross-database lock. */
+  /**
+   * Must be called inside a database transaction. Updating the row is the
+   * cross-database lock.
+   *
+   * MUL-405: the workspace lifecycle row lock (W) comes first. This row is a
+   * domain lock (D), and every caller here also needs W for its plan read or
+   * its Runtime/Agent writes, so taking W at the top of this helper keeps the
+   * whole set on one order — W -> N -> D — instead of each call site being
+   * free to take D first. Re-taking W in the caller is free inside the same
+   * transaction, so callers that already do so are unaffected.
+   */
   lockLifecycle(workspaceId: string, daemonId: string): void {
+    this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
     const now = nowIso();
     this.ctx.db.run(
       `INSERT INTO multiremi_daemon_lifecycle_locks (workspace_id, daemon_id, updated_at)
@@ -411,7 +428,7 @@ export class DaemonRetirementRepo {
     );
     const activeTasks = this.rowsForRuntimeIds(
       `SELECT id, status, agent_id, runtime_id, issue_id
-       FROM multiremi_tasks
+       FROM multiremi_turn_execution_records
        WHERE runtime_id IN (__RUNTIME_IDS__)
          AND status IN (${BLOCKING_TASK_STATUSES.map(() => "?").join(",")})
        ORDER BY id ASC`,
@@ -420,7 +437,7 @@ export class DaemonRetirementRepo {
     );
     const queuedTasks = this.rowsForRuntimeIds(
       `SELECT id, status, agent_id, runtime_id, issue_id
-       FROM multiremi_tasks
+       FROM multiremi_turn_execution_records
        WHERE runtime_id IN (__RUNTIME_IDS__) AND status = 'queued'
        ORDER BY id ASC`,
       runtimeIds,
@@ -441,7 +458,7 @@ export class DaemonRetirementRepo {
     );
     const sessionLaneRows = this.rowsForRuntimeIds(
       `SELECT session_id, agent_id, runtime_id
-       FROM multiremi_session_agent_lanes
+       FROM multiremi_agent_lane_records
        WHERE runtime_id IN (__RUNTIME_IDS__)
        ORDER BY session_id ASC, agent_id ASC`,
       runtimeIds,
@@ -460,6 +477,7 @@ export class DaemonRetirementRepo {
       ]),
     );
     const localDirectoryResources = this.listLocalDirectoryResources(workspaceId, daemonId);
+    const tracesToLose = this.countDaemonTraces(runtimeIds);
     const tokenRows = this.ctx.db.query(
       `SELECT id, revoked_at
        FROM multiremi_access_tokens
@@ -519,6 +537,7 @@ export class DaemonRetirementRepo {
       const current = this.ctx.runtimes().getRuntime(runtime.id);
       return current ? isRuntimeEffectivelyOnline(current) : false;
     });
+    // An offline daemon cannot reclaim its Issue workspaces; abandoning gives them up.
     const canAbandonIssueWorkspaces = mappedIssueWorkspaces.length > 0
       && mappedActiveTasks.length === 0
       && localDirectoryResources.length === 0
@@ -545,6 +564,7 @@ export class DaemonRetirementRepo {
       localDirectoryResources,
       issueWorkspaces: mappedIssueWorkspaces,
       cleanedIssueWorkspaces,
+      tracesToLose,
       sessionLanes,
       chatSessions,
       runtimeAuxiliaryState,
@@ -568,6 +588,7 @@ export class DaemonRetirementRepo {
       queuedTasks: mappedQueuedTasks,
       localDirectoryResources,
       issueWorkspaces: mappedIssueWorkspaces,
+      tracesToLose,
       impact,
     };
   }
@@ -635,25 +656,24 @@ export class DaemonRetirementRepo {
            WHERE runtime_id IN (${placeholders})`,
           [now, ...runtimeIds],
         ).changes;
-        queuedTasksRequeued = this.ctx.db.run(
-          `UPDATE multiremi_tasks
-           SET runtime_id = NULL, session_id = NULL, work_dir = NULL, updated_at = ?
+        queuedTasksRequeued = runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
+           SET runtime_id = NULL, session_id = NULL, work_dir = NULL, offered_at = NULL, accepted_at = NULL, updated_at = ?
            WHERE runtime_id IN (${placeholders}) AND status = 'queued'`,
           [now, ...runtimeIds],
         ).changes;
         sessionLanesReset = this.ctx.db.run(
-          `UPDATE multiremi_session_agent_lanes
+          `UPDATE multiremi_session_lanes
            SET provider_session_id = NULL,
                runtime_id = NULL,
                provider = NULL,
                execution_fingerprint = NULL,
                work_dir = NULL,
-               cursor_seq = 0,
+               provider_cursor_seq = 0,
                parent_cursor_seq = 0,
                generation = generation + 1,
-               last_task_id = NULL,
+               last_attempt_id = NULL,
                updated_at = ?
-           WHERE runtime_id IN (${placeholders})`,
+           WHERE reader_type = 'agent' AND runtime_id IN (${placeholders})`,
           [now, ...runtimeIds],
         ).changes;
         chatSessionsReset = this.ctx.db.run(
@@ -675,6 +695,9 @@ export class DaemonRetirementRepo {
             [now, now, ...runtimeIds],
           ).changes;
         }
+        this.ctx.taskTraces().markTaskTracesLostForRuntimes(runtimeIds);
+        // PR 6: the retired daemon's background tasks are gone with it.
+        new BackgroundTasksRepo(this.ctx).endRuntimeTasksWithinTransaction(runtimeIds);
         this.ctx.db.run(
           `UPDATE multiremi_issue_workspaces
            SET runtime_id = NULL, updated_at = ?
@@ -686,6 +709,10 @@ export class DaemonRetirementRepo {
         }
         this.ctx.db.run(`DELETE FROM multiremi_runtimes WHERE id IN (${placeholders})`, runtimeIds);
       }
+      this.ctx.db.run(
+        "DELETE FROM multiremi_daemon_storage_reports WHERE workspace_id = ? AND daemon_id = ?",
+        [workspaceId, daemonId],
+      );
       const tokensRevoked = this.ctx.db.run(
         `UPDATE multiremi_access_tokens
          SET revoked_at = COALESCE(revoked_at, ?)
@@ -776,6 +803,16 @@ export class DaemonRetirementRepo {
     if (!runtimeIds.length) return [];
     const placeholders = runtimeIds.map(() => "?").join(",");
     return this.ctx.db.query(sql.replace("__RUNTIME_IDS__", placeholders)).all(...runtimeIds, ...trailingParams) as Row[];
+  }
+
+  /** Traces whose file lives on one of the Runtimes; retiring the daemon loses them. */
+  private countDaemonTraces(runtimeIds: string[]): number {
+    const rows = this.rowsForRuntimeIds(
+      `SELECT COUNT(*) AS count FROM multiremi_task_traces
+       WHERE location = 'daemon' AND runtime_id IN (__RUNTIME_IDS__)`,
+      runtimeIds,
+    );
+    return Number(rows[0]?.count ?? 0);
   }
 
   private runtimeAuxiliarySnapshotRows(

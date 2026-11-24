@@ -1,9 +1,11 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
+import { reportFrame } from "../../fixtures/report-session.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { daemonClaimSkillResponse, skillFileCompatibilityResponse } from "@multiremi/api/wire/skills.js";
 import type { MultiremiSkillFile } from "@multiremi/contracts/types.js";
 import { MultiremiStore } from "@multiremi/store.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createStore, createHistoricalDatabase, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -17,13 +19,13 @@ describe("Skill file encoding", () => {
     const skill = store.createSkill({ name: "binary skill", content: "# Skill", files: [pngFile, textFile] });
     const agent = store.createAgent({ name: "Skilled", provider: "codex" });
     store.setAgentSkills(agent.id, [skill.id!]);
-    for (const files of [store.getSkill(skill.id!)!.files!, store.listSkillFiles(skill.id!), store.listAgentSkills(agent.id)[0]!.files!]) {
+    for (const files of [store.getSkill(skill.id!, { includeFiles: true })!.files!, store.listSkillFiles(skill.id!), store.listAgentSkills(agent.id, { includeFiles: true })[0]!.files!]) {
       expect(files[0]).toMatchObject(pngFile);
       expect(Buffer.from(files[0]!.content, "base64")).toEqual(pngBytes);
       expect(files[1]).toMatchObject(textFile);
       expect(files[1]!.encoding).toBeUndefined();
     }
-    expect(daemonClaimSkillResponse(store.getSkill(skill.id!)!).files).toEqual([pngFile, textFile]);
+    expect(daemonClaimSkillResponse(store.getSkill(skill.id!, { includeFiles: true })!).files).toEqual([pngFile, textFile]);
   });
 
   it("preserves unknown inline file encodings for the daemon to reject instead of treating them as text", () => {
@@ -34,7 +36,7 @@ describe("Skill file encoding", () => {
         name: `Inline ${String(encoding)}`, provider: "codex",
         skills: [{ name: "inline", content: "# Skill", files: [file] }],
       });
-      const stored = store.listAgentSkills(agent.id)[0]!;
+      const stored = store.listAgentSkills(agent.id, { includeFiles: true })[0]!;
       expect(daemonClaimSkillResponse(stored).files).toEqual([{ path: file.path, content: file.content, encoding }]);
       expect(skillFileCompatibilityResponse(stored.files![0]!)).toHaveProperty("encoding", encoding);
     }
@@ -47,7 +49,7 @@ describe("Skill file encoding", () => {
     const binary = { ...pngFile, path: textFile.path };
     expect(store.upsertSkillFile(skill.id!, binary)).toMatchObject(binary);
     expect(store.upsertSkillFile(skill.id!, { ...textFile, encoding: "utf8" }).encoding).toBeUndefined();
-    expect(store.getSkill(skill.id!)!.files![0]).toMatchObject(textFile);
+    expect(store.getSkill(skill.id!, { includeFiles: true })!.files![0]).toMatchObject(textFile);
     expect(store.updateSkill(skill.id!, { files: [pngFile] }).files![0]).toMatchObject(pngFile);
     expect(store.upsertSkill({ id: skill.id!, name: skill.name, content: skill.content, files: [textFile] }).files![0]!.encoding).toBeUndefined();
     expect(store.upsertSkill({ id: skill.id!, name: skill.name, content: skill.content, files: [pngFile] }).files![0]).toMatchObject(pngFile);
@@ -64,7 +66,7 @@ describe("Skill file encoding", () => {
       expect(() => store.createSkill({ name: "invalid", content: "# Skill", files: [file] })).toThrow(/Invalid (skill file encoding|base64 skill file content)/);
       expect(() => store.updateSkill(skill.id!, { content: "Do not commit this", files: [file] })).toThrow(/Invalid/);
       expect(() => store.upsertSkillFile(skill.id!, { ...file, path: textFile.path })).toThrow(/Invalid/);
-      expect(store.getSkill(skill.id!)!.content).toBe("Keep this");
+      expect(store.getSkill(skill.id!, { includeFiles: true })!.content).toBe("Keep this");
       expect(store.listSkillFiles(skill.id!)[0]).toMatchObject(textFile);
     }
     expect(store.listSkills()).toHaveLength(1);
@@ -129,24 +131,24 @@ describe("Skill file encoding", () => {
     });
     const imported = store.createRuntimeLocalSkillImportRequest(runtime.id, { scanRequestId: scan.id, skillKey: "helper" });
     const app = createMultiremiApp({ store });
-    const report = await app.request(`/api/daemon/runtimes/${runtime.id}/local-skills/import/${imported.id}/result`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "completed", skill: { name: "helper", content: "# Skill", source_path: "/skills/helper", files: [pngFile, textFile] } }),
-    });
-    expect(report.status).toBe(200);
+    const report = await reportFrame(store, "runtime.local_skill_import_result", { runtime_id: runtime.id, request_id: imported.id, status: "completed", skill: { name: "helper", content: "# Skill", source_path: "/skills/helper", files: [pngFile, textFile] } }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(report.ok).toBe(true);
     const response = await (await app.request(`/api/runtimes/${runtime.id}/local-skills/import/${imported.id}`)).json();
     expect(response.status).toBe("completed");
     expect(response.skill.files[0]).toMatchObject(pngFile);
     expect(response.skill.files[1].encoding).toBeUndefined();
-    expect(store.getSkill(response.skill.id)!.files![0]).toMatchObject(pngFile);
+    expect(store.getSkill(response.skill.id, { includeFiles: true })!.files![0]).toMatchObject(pngFile);
     const reopened = new MultiremiStore(db!);
     expect(reopened.getRuntimeLocalSkillImportRequest(runtime.id, imported.id)!.skill!.files![0]).toMatchObject(pngFile);
   });
 
   it("migrates existing text files without changing their public response", () => {
-    const store = createStore();
-    const skill = store.createSkill({ name: "legacy", content: "# Legacy", files: [textFile] });
+    createHistoricalDatabase();
+    const skill = { id: "skill_legacy" };
+    db!.run("INSERT INTO multiremi_skills(id,name,content,created_at,updated_at) VALUES(?,'legacy','# Legacy',?,?)", [skill.id, "2026-09-01", "2026-09-01"]);
+    db!.run("INSERT INTO multiremi_skill_files(id,skill_id,path,content,created_at,updated_at) VALUES('file_legacy',?,?,?,?,?)", [skill.id, textFile.path, textFile.content, "2026-09-01", "2026-09-01"]);
     db!.run("ALTER TABLE multiremi_skill_files DROP COLUMN encoding");
+    runMigrations(db!, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(db!);
     const file = upgraded.listSkillFiles(skill.id!)[0]!;
     expect(file).toMatchObject(textFile);

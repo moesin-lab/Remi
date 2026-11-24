@@ -3,11 +3,14 @@ import type {
   MultiremiPlatformOperation,
   MultiremiPlatformRelease,
   MultiremiPlatformService,
+  MultiremiPlatformPreflight,
+  MultiremiPlatformUpdateMode,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
 import type { PlatformDrainGate } from "./drain.js";
 
 export interface PlatformInspection {
+  updateMode?: MultiremiPlatformUpdateMode;
   driver: MultiremiPlatformDeploymentDriver;
   currentRelease: MultiremiPlatformRelease | null;
   recentReleases: MultiremiPlatformRelease[];
@@ -15,14 +18,27 @@ export interface PlatformInspection {
 }
 
 export interface PlatformDeploymentDriver {
+  readonly updateMode?: MultiremiPlatformUpdateMode;
   readonly kind: MultiremiPlatformDeploymentDriver;
+  /** Recover committed host changes before depending on the control API. */
+  recoverInterrupted?(): Promise<void>;
   inspect(): Promise<PlatformInspection>;
+  preflight(): Promise<MultiremiPlatformPreflight>;
+  /** Refine preparation requirements after resolving the actual target manifest. */
+  preflightForRelease?(manifest: unknown): Promise<MultiremiPlatformPreflight>;
+  /** Validate a target's artifacts and runtime/migration contract, if applicable. */
+  validateRelease?(manifest: unknown): Promise<void>;
+  /** Release a host-owned write fence only after reporting and drain release. */
+  finalize?(operationId: string): Promise<void>;
+  /** Replay a terminal outcome after a crash between report and fence release. */
+  pendingFinalization?(): Promise<{ operationId: string; report: ReportPlatformOperationInput } | null>;
   execute(
     operation: MultiremiPlatformOperation,
     report: (input: ReportPlatformOperationInput) => Promise<void>,
     /**
-     * When provided (update/rollback), the driver must wait for this gate
-     * between preparing artifacts (image pull / build) and the service switch,
+     * Required for every service mutation (update/rollback/restart). Wait here
+     * between preparing artifacts (image pull / build) and an offline switch.
+     * Compatible internal API slot handovers skip waiting on this gate,
      * and the caller releases it after the operation finishes.
      */
     drain?: PlatformDrainGate,
@@ -36,19 +52,27 @@ export interface CommandResult {
 }
 
 export interface CommandRunner {
-  run(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string> }): Promise<CommandResult>;
+  run(command: string, args: string[], options?: CommandOptions): Promise<CommandResult>;
+}
+
+export interface CommandOptions {
+  cwd?: string;
+  env?: Record<string, string | undefined>;
+  stdoutFile?: string;
+  stdinFile?: string;
 }
 
 export class BunCommandRunner implements CommandRunner {
-  async run(command: string, args: string[], options: { cwd?: string; env?: Record<string, string> } = {}): Promise<CommandResult> {
+  async run(command: string, args: string[], options: CommandOptions = {}): Promise<CommandResult> {
     const proc = Bun.spawn([command, ...args], {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
-      stdout: "pipe",
+      stdout: options.stdoutFile ? Bun.file(options.stdoutFile) : "pipe",
+      stdin: options.stdinFile ? Bun.file(options.stdinFile) : "ignore",
       stderr: "pipe",
     });
     const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
+      typeof proc.stdout === "number" ? Promise.resolve("") : new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ]);

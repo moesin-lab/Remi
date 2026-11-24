@@ -53,7 +53,9 @@ describe("password accounts", () => {
     const user = store.getOrCreateUser({ email: "other@example.test" });
     const pat = await store.createAccessToken({ name: "test PAT", userId: user.id });
     const daemon = await store.createAccessToken({ name: "test daemon", type: "daemon" });
-    const task = await store.createAccessToken({ name: "test task", type: "task", taskId: "test-task", agentId: "test-agent" });
+    const agent = store.createAgent({ name: "Credential fixture", provider: "codex" });
+    const attempt = store.createTask({ agentId: agent.id, prompt: "credential boundary" });
+    const task = await store.createTaskAccessToken(attempt, "local");
     const jwt = signTestJwt({ sub: "local", exp: Date.now() / 1000 + 60 }, process.env.JWT_SECRET);
     const input = { email: "tester@localhost", password: password() };
     expect((await post(app, "/api/auth/password-accounts", input)).status).toBe(401);
@@ -84,7 +86,8 @@ describe("password accounts", () => {
     const account = await configured.json();
     expect(account).toMatchObject({ workspaceId: "local", role: "owner" });
     expect(account.user.id).toStartWith("usr_");
-    expect(store.getUserRoleInWorkspace(account.user.id, "local")).toBe("owner");
+    expect(store.getUserRoleInWorkspace(account.user.id, "local")).toBeNull();
+    expect(store.getWorkspaceOperator("local")?.role).toBe("owner");
     expect(store.getWorkspaceMember(beforeOwner!.id)).toEqual(beforeOwner!);
     const credential = db!.query("SELECT password_hash FROM multiremi_password_credentials WHERE user_id = ?").get(account.user.id) as { password_hash: string };
     expect(credential.password_hash).toStartWith("$argon2id$");
@@ -104,7 +107,7 @@ describe("password accounts", () => {
     expect((await post(app, "/auth/logout", {}, session.token)).status).toBe(200);
   });
 
-  it("preserves one user across configured workspaces and denies unrelated workspaces", async () => {
+  it("preserves login identity while sharing every workspace", async () => {
     const { app, store } = setup();
     const secret = password();
     const secondary = store.createWorkspace({ name: "Second test", slug: "second-test" });
@@ -115,9 +118,9 @@ describe("password accounts", () => {
     const session = await (await post(app, "/auth/password", { email: "tester@localhost", password: secret })).json();
     const headers = { Authorization: `Bearer ${session.token}` };
     const workspaces = await (await app.request("/api/workspaces", { headers })).json();
-    expect(workspaces.map((w: { id: string }) => w.id).sort()).toEqual(["local", secondary.id].sort());
+    expect(workspaces.map((w: { id: string }) => w.id).sort()).toEqual(["local", secondary.id, hidden.id].sort());
     expect((await app.request(`/api/workspaces/${secondary.id}`, { headers })).status).toBe(200);
-    expect((await app.request(`/api/workspaces/${hidden.id}`, { headers })).status).toBe(404);
+    expect((await app.request(`/api/workspaces/${hidden.id}`, { headers })).status).toBe(200);
   });
 
   it("reuses an unambiguous real SSO user without changing their identity", async () => {

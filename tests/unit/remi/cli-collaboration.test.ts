@@ -3,12 +3,22 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, writeFile, rm, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { createMultiremiApp } from "@multiremi/api.js";
+import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
+import { createCommitEventQueue } from "@multiremi/store/context.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { conversationLogPgAdminUrl, withConversationLogStore } from "../multiremi/fixtures/conversation-log-store.js";
 import { CommandRegistry, type CommandSpec } from "../../../apps/remi/cli/core/index.js";
 import {
   BOOTSTRAP_COMPATIBILITY_PATHS,
   collaborationCommandSpecs,
 } from "../../../apps/remi/cli/commands/collaboration.js";
 import { runMultiremi } from "../../../apps/remi/cli/multiremi.js";
+import { dispatch } from "../../../apps/remi/cli/index.js";
+import { unifiedCommandSpecs } from "../../../apps/remi/cli/commands/unified.js";
+import { RETIRED_CLI_COMMANDS } from "../../../apps/remi/cli/core/retired-commands.js";
+import { backendsInScope } from "../../helpers/postgres-scope.js";
 
 const root = resolve(import.meta.dir, "../../..");
 const realFetch = globalThis.fetch;
@@ -21,6 +31,25 @@ const savedEnv = {
 };
 const specs = collaborationCommandSpecs();
 
+it("session log window forwards --with-activity and retains the sidecar in JSON", async () => {
+  useCliEnv();
+  const spec = specById("session.log.window");
+  const queries: URLSearchParams[] = [];
+  globalThis.fetch = capabilityFetch(spec.id, request => {
+    const query = new URL(request.url).searchParams;
+    queries.push(query);
+    return Response.json({ entries: [], ...(query.get("with_activity") === "1" ? { activities: [{ id: "act_test" }], activities_truncated: true } : {}) });
+  });
+  const registry = registryFor([spec]);
+  expect(registry.renderHelp(spec.path)).toContain("--with-activity");
+  const result = await capture(() => registry.execute([...spec.path, "ises_test", "--with-activity", "--before", "7", "--json"]));
+  expect(queries[0]?.get("with_activity")).toBe("1");
+  expect(queries[0]?.get("before")).toBe("7");
+  expect(JSON.parse(result.stdout)).toMatchObject({ activities: [{ id: "act_test" }], activities_truncated: true });
+  await capture(() => registry.execute([...spec.path, "ises_test", "--json"]));
+  expect(queries[1]?.has("with_activity")).toBe(false);
+});
+
 afterEach(() => {
   globalThis.fetch = realFetch;
   console.log = realLog;
@@ -31,6 +60,485 @@ afterEach(() => {
 });
 
 describe("native collaboration CLI contracts", () => {
+  it("routes every owner-scoped Session command to its declared owner", async () => {
+    useCliEnv();
+    const cases: Array<{ id: string; args: string[]; method: string; tail: string; body?: unknown }> = [
+      { id: "list", args: [], method: "GET", tail: "" },
+      { id: "create", args: ["--title", "Side", "--from", "ises_parent", "--inherit-mode", "follow", "--with-code"], method: "POST", tail: "", body: { title: "Side", holds_workspace: false, parent_session_id: "ises_parent", inherit_mode: "follow", with_code: true } },
+      { id: "get", args: ["ises_1"], method: "GET", tail: "/ises_1" },
+      { id: "update", args: ["ises_1", "--title", "Renamed", "--status", "archived"], method: "PATCH", tail: "/ises_1", body: { title: "Renamed", status: "archived" } },
+      { id: "participant.list", args: ["ises_1"], method: "GET", tail: "/ises_1/participants" },
+      { id: "participant.add", args: ["ises_1", "--type", "agent", "--id", "agt_1"], method: "POST", tail: "/ises_1/participants", body: { participant_type: "agent", participant_id: "agt_1" } },
+      { id: "participant.remove", args: ["ises_1", "agent", "agt_1", "--yes"], method: "DELETE", tail: "/ises_1/participants/agent/agt_1" },
+      { id: "event.list", args: ["ises_1", "--since-seq", "3", "--to-seq", "9"], method: "GET", tail: "/ises_1/events?since_seq=3&to_seq=9" },
+      { id: "message.create", args: ["ises_1", "--content", "Continue"], method: "POST", tail: "/ises_1/messages", body: { content: "Continue" } },
+      { id: "task.list", args: ["ises_1"], method: "GET", tail: "/ises_1/tasks" },
+      { id: "task.create", args: ["ises_1", "--agent", "agt_1", "--prompt", "Check"], method: "POST", tail: "/ises_1/tasks", body: { agent_id: "agt_1", prompt: "Check" } },
+      { id: "result.publish", args: ["ises_1", "--content", "Complete"], method: "POST", tail: "/ises_1/results" },
+    ];
+    const registry = registryFor(specs);
+    for (const owner of ["chat", "issue"] as const) {
+      for (const entry of cases) {
+        const id = `${owner === "issue" ? "issue." : ""}session.${entry.id}`;
+        const spec = specById(id);
+        if (RETIRED_CLI_COMMANDS[spec.path.join(" ")]) continue;
+        const ownerRef = owner === "issue" ? "MUL-1" : "chat_1";
+        const base = owner === "issue" ? "/api/issues/MUL-1/sessions" : "/api/multiremi/chats/chat_1/sessions";
+        let requests = 0;
+        globalThis.fetch = capabilityFetch(id, async (request) => {
+          requests++;
+          const url = new URL(request.url);
+          expect(`${url.pathname}${url.search}`, id).toBe(`${base}${entry.tail}`);
+          expect(request.method, id).toBe(entry.method);
+          if (entry.body) expect(await request.json(), id).toEqual(entry.body);
+          return Response.json({ id: "ises_1", owner_type: owner, owner_id: ownerRef });
+        });
+        const result = await capture(() => registry.execute([...spec.path, ownerRef, ...entry.args, "--json"]));
+        expect(JSON.parse(result.stdout), id).toMatchObject({ owner_type: owner, owner_id: ownerRef });
+        expect(requests, id).toBe(1);
+        expect(spec.positionals?.[0]?.name, id).toBe(owner);
+        expect(spec.aliases, id).toEqual([]);
+        expect(spec.auth, id).toEqual(specById(`session.${entry.id}`).auth);
+        expect(registry.renderHelp(spec.path), id).toContain(`<${owner}>`);
+      }
+    }
+    expect(registry.resolve(["issue", "session", "adopt", "MUL-1", "ises_1"])).toBeNull();
+  });
+
+  it("keeps Issue result aggregation and the historical --session publish form executable", async () => {
+    useCliEnv();
+    const list = specById("issue.session.result.list");
+    globalThis.fetch = capabilityFetch(list.id, (request) => {
+      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-1/session-results");
+      return Response.json([{ id: "sres_1", source_session_id: "ises_1" }, { id: "sres_2", source_session_id: "ises_2" }]);
+    });
+    const registry = registryFor(specs);
+    const filtered = await capture(() => registry.execute([...list.path, "MUL-1", "--session-id", "ises_1", "--json"]));
+    expect(JSON.parse(filtered.stdout)).toEqual([{ id: "sres_1", source_session_id: "ises_1" }]);
+    const all = await capture(() => registry.execute([...list.path, "MUL-1", "--json"]));
+    expect(JSON.parse(all.stdout)).toHaveLength(2);
+
+    const publish = specById("issue.session.result.publish");
+    globalThis.fetch = capabilityFetch(publish.id, async (request) => {
+      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-1/sessions/ises_1/results");
+      expect(await request.json()).toEqual({ title: "Report", body: "Done", metadata: { kind: "report", refs: [{ type: "url", value: "https://example.test/report" }] } });
+      return Response.json({ id: "sres_1" });
+    });
+    await capture(() => registry.execute([...publish.path, "MUL-1", "--session", "ises_1", "--title", "Report", "--type", "report", "--ref", "url:https://example.test/report", "--content", "Done", "--json"]));
+    expect(registry.renderHelp(publish.path)).toContain("[<session>]");
+    expect(registry.renderHelp(publish.path)).toContain("--session, --session-id <session-id>");
+  });
+
+  it("rejects incomplete Issue Session writes before requesting capabilities or mutation", async () => {
+    useCliEnv();
+    let requests = 0;
+    globalThis.fetch = (async () => { requests++; throw new Error("Unexpected API call"); }) as unknown as typeof fetch;
+    const registry = registryFor(specs);
+    for (const argv of [
+      ["issue", "session", "create"],
+      ["issue", "session", "participant", "remove", "MUL-1", "ises_1", "agent", "agt_1"],
+      ["issue", "session", "task", "create", "MUL-1", "ises_1"],
+      ["issue", "session", "result", "publish", "MUL-1", "ises_1"],
+      ["issue", "session", "result", "publish", "MUL-1", "--content", "Done"],
+      ["issue", "session", "result", "publish", "MUL-1", "ises_1", "--content", "Done", "--type", "unknown"],
+    ]) {
+      await expect(capture(() => registry.execute(argv)), argv.join(" ")).rejects.toThrow();
+    }
+    expect(requests).toBe(0);
+  });
+
+  it("reads an unread range in one command and joins paginated long entries", async () => {
+    useCliEnv();
+    const get = specById("session.log.get");
+    let requests = 0;
+    globalThis.fetch = capabilityFetch(get.id, request => {
+      const url = new URL(request.url);
+      expect(url.searchParams.get("from")).toBe("0");
+      expect(url.searchParams.get("to")).toBe("50");
+      requests++;
+      return Response.json(requests === 1
+        ? { entries: [{ seq: 1, id: "cmt_1", body_md: "first ", body_offset: 0, body_omitted_chars: 5 }], next_cursor: '{"seq":1,"offset":6}' }
+        : { entries: [{ seq: 1, id: "cmt_1", body_md: "entry", body_offset: 6, body_omitted_chars: 0 },
+          { seq: 50, id: "cmt_50", body_md: "last", body_offset: 0 }], next_cursor: null });
+    });
+    const result = await capture(() => registryFor([get]).execute([...get.path, "ises_1", "--from", "0", "--to", "50", "--output", "json"]));
+    expect(requests).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject([{ seq: 1, body_md: "first entry" }, { seq: 50, body_md: "last" }]);
+  });
+
+  for (const backend of backendsInScope(import.meta.path, ["sqlite", "pg"] as const)) {
+    it.skipIf(backend === "pg" && !conversationLogPgAdminUrl)(
+      `${backend}: session log get reports Issue claim, Chat reply and symbolic recipient delivery`, async () => {
+        await withConversationLogStore(backend, async (store, db) => {
+          store.ensureLocalWorkspace();
+          const runtime = store.registerRuntime({ name: "Delivery CLI runtime", provider: "codex" });
+          const agent = store.createAgent({ name: "Delivery CLI owner", provider: "codex", runtimeId: runtime.id });
+          const issue = store.createIssue({ title: "Delivery CLI issue", status: "in_progress",
+            assigneeType: "agent", assigneeId: agent.id, responsibleMemberId: "mem_local_local" });
+          const session = store.getOrCreateDefaultIssueSession(issue.id);
+          const issueTask = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Read issue" });
+          const [issueDelivery] = db.transaction(() => store.sendEnvelopeWithinTransaction({
+            to: { role: "issue_owner", issueId: issue.id }, kind: "report", wake: "now",
+            body: "Symbolic Issue request", source: {},
+          }, [], createCommitEventQueue()))();
+          expect(issueDelivery.task?.id).toBe(issueTask.id);
+          expect(store.findTurnEntry(issueTask.id)!.seq).toBeLessThan(issueDelivery.entry.seq);
+          expect(issueDelivery.entry.metadata.envelope?.recipient_agent_id).toBe(agent.id);
+          const chat = store.createChatSession({ agentId: agent.id });
+          const [chatDelivery] = db.transaction(() => store.sendEnvelopeWithinTransaction({
+            to: { role: "chat", chatSessionId: chat.id, agentId: agent.id },
+            kind: "request", wake: "now", body: "Chat request", source: {},
+          }, [], createCommitEventQueue()))();
+          const legacy = store.appendConversationLog({ sessionId: session.id, kind: "message",
+            authorType: "member", authorId: "local", bodyMd: "Before recipient metadata" });
+          const app = createMultiremiApp({ store, authToken: "test-token" });
+          useCliEnv();
+          const get = specById("session.log.get");
+          globalThis.fetch = capabilityFetch(get.id, (request) => {
+            const url = new URL(request.url);
+            return app.request(`${url.pathname}${url.search}`, { method: request.method, headers: request.headers });
+          });
+          const registry = registryFor([get]);
+          const delivered = async (sessionId: string, seq: number) => {
+            const result = await capture(() => registry.execute([...get.path, sessionId, String(seq), "--output", "json"]));
+            return JSON.parse(result.stdout).delivered as boolean | null;
+          };
+          expect(await delivered(session.id, issueDelivery.entry.seq)).toBe(false);
+          expect(await delivered(chat.id, chatDelivery.entry.seq)).toBe(false);
+          expect(await delivered(session.id, legacy.seq)).toBeNull();
+
+          expect(store.claimTask(runtime.id)?.id).toBe(issueTask.id);
+          daemonTaskClaimResponse(store, store.getTaskWithAgent(issueTask.id)!);
+          expect(store.getSessionAgentLane(session.id, agent.id)?.cursorSeq ?? 0).toBeLessThan(issueDelivery.entry.seq);
+          expect(store.findTurnEntry(issueTask.id)?.metadata.inbox?.delivered_to_seq)
+            .toBeGreaterThanOrEqual(issueDelivery.entry.seq);
+          expect(await delivered(session.id, issueDelivery.entry.seq)).toBe(true);
+          store.startTask(issueTask.id);
+          store.completeTask(issueTask.id, { output: "Issue reply" });
+
+          const [cursorOnly] = db.transaction(() => store.sendEnvelopeWithinTransaction({
+            to: { role: "issue_owner", issueId: issue.id }, kind: "report", wake: "inbox_only",
+            body: "Covered only by cursor", source: {},
+          }, [], createCommitEventQueue()))();
+          expect(await delivered(session.id, cursorOnly.entry.seq)).toBe(false);
+          store.getOrCreateSessionAgentLane(session.id, agent.id, "");
+          db.run("UPDATE multiremi_session_lanes SET cursor_seq = ? WHERE session_id = ? AND reader_type='agent' AND reader_id = ? AND execution_scope = ?",
+            [cursorOnly.entry.seq, session.id, agent.id, ""]);
+          expect(await delivered(session.id, cursorOnly.entry.seq)).toBe(true);
+
+          const other = store.createAgent({ name: "Other receipt author", provider: "codex" });
+          const [uncovered] = db.transaction(() => store.sendEnvelopeWithinTransaction({
+            to: { role: "issue_owner", issueId: issue.id }, kind: "report", wake: "inbox_only",
+            body: "Not covered by recipient", source: {},
+          }, [], createCommitEventQueue()))();
+          expect(await delivered(session.id, uncovered.entry.seq)).toBe(false);
+          store.recordSessionAgentRangeRead(session.id, other.id,
+            { seq: 1, offset: 0 }, { seq: uncovered.entry.seq + 1, offset: 0 });
+          expect(await delivered(session.id, uncovered.entry.seq)).toBe(false);
+
+          expect(store.claimTask(runtime.id)?.id).toBe(chatDelivery.task?.id);
+          daemonTaskClaimResponse(store, store.getTaskWithAgent(chatDelivery.task!.id)!);
+          store.startTask(chatDelivery.task!.id);
+          store.completeTask(chatDelivery.task!.id, { output: "Chat reply" });
+          expect(store.findTurnEntry(chatDelivery.task!.id)?.metadata.inbox?.delivered_to_seq)
+            .toBeGreaterThanOrEqual(chatDelivery.entry.seq);
+          expect(await delivered(chat.id, chatDelivery.entry.seq)).toBe(true);
+        });
+      }, 30_000,
+    );
+
+    for (const { author, expected, label } of [
+      { author: "other", expected: false, label: "foreign reader cannot deliver recipient receipt" },
+      { author: "mirror", expected: true, label: "recipient range reader supplies the receipt" },
+    ] as const) {
+      it.skipIf(backend === "pg" && !conversationLogPgAdminUrl)(
+        `${backend}: session log get ${label}`, async () => {
+          await withConversationLogStore(backend, async (store, db) => {
+            store.ensureLocalWorkspace();
+            const recipient = store.createAgent({ name: "Receipt recipient", provider: "codex" });
+            const other = store.createAgent({ name: "Other receipt author", provider: "codex" });
+            const issue = store.createIssue({ title: "Receipt attribution", status: "in_progress",
+              assigneeType: "agent", assigneeId: recipient.id, responsibleMemberId: "mem_local_local" });
+            const session = store.getOrCreateDefaultIssueSession(issue.id);
+            const task = store.createSessionTask(session.id, { agentId: recipient.id, prompt: "Read issue" });
+            const [delivery] = db.transaction(() => store.sendEnvelopeWithinTransaction({
+              to: { role: "issue_owner", issueId: issue.id }, kind: "report", wake: "inbox_only",
+              body: "Receipt attribution probe", source: {},
+            }, [], createCommitEventQueue()))();
+            const app = createMultiremiApp({ store, authToken: "test-token" });
+            useCliEnv();
+            const get = specById("session.log.get");
+            globalThis.fetch = capabilityFetch(get.id, (request) => {
+              const url = new URL(request.url);
+              return app.request(`${url.pathname}${url.search}`, { method: request.method, headers: request.headers });
+            });
+            const registry = registryFor([get]);
+            const delivered = async () => {
+              const result = await capture(() => registry.execute([
+                ...get.path, session.id, String(delivery.entry.seq), "--output", "json",
+              ]));
+              return JSON.parse(result.stdout).delivered as boolean;
+            };
+            expect(await delivered()).toBe(false);
+            const reader = author === "other" ? other : recipient;
+            const receipt = store.recordSessionAgentRangeRead(session.id, reader.id,
+              { seq: 1, offset: 0 }, { seq: delivery.entry.seq + 1, offset: 0 });
+            expect(receipt.seq).toBe(delivery.entry.seq);
+            expect(await delivered()).toBe(expected);
+          });
+        }, 30_000,
+      );
+    }
+  }
+
+  it("expands Session entries by seq or id and forwards event sequence bounds", async () => {
+    useCliEnv();
+    const get = specById("session.log.get");
+    const list = specById("session.event.list");
+    const paths: string[] = [];
+    globalThis.fetch = capabilityFetch(get.id, (request) => {
+      const url = new URL(request.url);
+      paths.push(`${url.pathname}${url.search}`);
+      return Response.json({ session_id: "ises_1", seq: 12, id: "cmt_12", body_md: "complete\nsecond line", metadata: {}, delivered: null });
+    });
+    const getRegistry = registryFor([get]);
+    const json = await capture(() => getRegistry.execute([...get.path, "ises_1", "12", "--output", "json"]));
+    expect(JSON.parse(json.stdout).delivered).toBeNull();
+    await capture(() => getRegistry.execute([...get.path, "ises_1", "cmt_12", "--output", "json"]));
+    const table = await capture(() => getRegistry.execute([...get.path, "ises_1", "12"]));
+    expect(table.stdout).toContain("Delivered: 未知（旧条目无收件人）");
+    expect(table.stdout).toContain("Body:\ncomplete\nsecond line");
+    expect(paths).toEqual([
+      "/api/sessions/ises_1/log/entry?seq=12",
+      "/api/sessions/ises_1/log/entry?id=cmt_12",
+      "/api/sessions/ises_1/log/entry?seq=12",
+    ]);
+    globalThis.fetch = capabilityFetch(list.id, (request) => {
+      const url = new URL(request.url);
+      expect(url.searchParams.get("since_seq")).toBe("3");
+      expect(url.searchParams.get("to_seq")).toBe("12");
+      return Response.json([]);
+    });
+    await capture(() => registryFor([list]).execute([
+      ...list.path, "MUL-485", "ises_1", "--since-seq", "3", "--to-seq", "12", "--output", "json",
+    ]));
+  });
+
+  it("executes assignee grouped lists with the opt-in workspace archive count", async () => {
+    useCliEnv();
+    const spec = specById("issue.grouped");
+    globalThis.fetch = capabilityFetch(spec.id, async (request) => {
+      const url = new URL(request.url);
+      expect(url.pathname).toBe("/api/issues/grouped");
+      expect(url.searchParams.get("include_archived_total")).toBe("true");
+      return Response.json({ groups: [], archived_total: 7 });
+    });
+    const output = await capture(() => registryFor([spec]).execute([...spec.path, "--include-archived-total", "--output", "json"]));
+    expect(JSON.parse(output.stdout).archived_total).toBe(7);
+  });
+
+  it("requires confirmation for orphaned Issue workspace abandonment and preserves the read command", async () => {
+    useCliEnv();
+    const abandon = specById("issue.workspace.abandon");
+    const read = specById("issue.workspace");
+    const registry = registryFor([read, abandon]);
+    const requests: Request[] = [];
+    const handler = (request: Request) => {
+      requests.push(request);
+      return Response.json({ status: "ok", issue_workspaces_abandoned: 1 });
+    };
+    globalThis.fetch = capabilityFetch(abandon.id, handler);
+    await expect(registry.execute(["issue", "workspace", "abandon", "MUL-467"]))
+      .rejects.toThrow("requires --yes");
+    expect(requests).toHaveLength(0);
+    const result = await capture(() => registry.execute(["issue", "workspace", "abandon", "MUL-467", "--yes", "--output", "json"]));
+    expect(requests[0]!.method).toBe("POST");
+    expect(new URL(requests[0]!.url).pathname).toBe("/api/issues/MUL-467/workspace/abandon");
+    expect(JSON.parse(result.stdout).issue_workspaces_abandoned).toBe(1);
+    globalThis.fetch = capabilityFetch(read.id, handler);
+    await capture(() => registry.execute(["issue", "workspace", "MUL-467", "--output", "json"]));
+    expect(requests[1]!.method).toBe("GET");
+    expect(new URL(requests[1]!.url).pathname).toBe("/api/issues/MUL-467/workspace");
+  });
+
+  it("issue grouped sends only the plural assignee type query parameter", async () => {
+    useCliEnv();
+    const spec = specById("issue.grouped");
+    globalThis.fetch = capabilityFetch(spec.id, (request) => {
+      const url = new URL(request.url);
+      expect(url.pathname).toBe("/api/issues/grouped");
+      expect(url.searchParams.get("assignee_types")).toBe("member");
+      expect(url.searchParams.has("assignee_type")).toBe(false);
+      return Response.json({ groups: [], total: 0 });
+    });
+    await capture(() => registryFor([spec]).execute([...spec.path, "--assignee-type", "member", "--output", "json"]));
+  });
+
+  it("issue grouped filters assignee types through the real route with the archive opt-in", async () => {
+    useCliEnv();
+    process.env.MULTIREMI_WORKSPACE_ID = "local";
+    const database = openSqliteDatabase(":memory:");
+    try {
+      const store = new MultiremiStore(database);
+      store.ensureLocalWorkspace();
+      const member = store.createWorkspaceMember({ name: "Grouped CLI member" });
+      const agent = store.createAgent({ name: "Grouped CLI agent", provider: "codex" });
+      const squad = store.createSquad({ name: "Grouped CLI squad" });
+      const assignments = [
+        { type: "member", id: member.id },
+        { type: "agent", id: agent.id },
+        { type: "squad", id: squad.id },
+      ] as const;
+      const issues = assignments.map(({ type, id }) => store.createIssue({
+        title: `Grouped ${type}`, assigneeType: type === "member" ? null : type, assigneeId: type === "member" ? null : id, responsibleMemberId: member.id,
+      }));
+      // Preserve historical member assignments so the list/filter migration
+      // assertions remain useful without exercising a forbidden new write.
+      database.run("UPDATE multiremi_issues SET assignee_type='member',assignee_id=? WHERE id=?", [member.id, issues[0]!.id]);
+      store.createIssue({ title: "Grouped unassigned", responsibleMemberId: member.id });
+      const app = createMultiremiApp({ store, authToken: "test-token" });
+      const spec = specById("issue.grouped");
+      const requests: URL[] = [];
+      globalThis.fetch = capabilityFetch(spec.id, (request) => {
+        requests.push(new URL(request.url));
+        return app.request(request);
+      });
+      for (const [index, { type }] of assignments.entries()) {
+        const output = await capture(() => registryFor([spec]).execute([
+          ...spec.path, "--assignee-type", type, "--include-archived-total", "--output", "json",
+        ]));
+        const result = JSON.parse(output.stdout);
+        expect(output.stderr).toBe("");
+        expect(result.groups).toHaveLength(1);
+        expect(result.groups[0].assigneeType).toBe(type);
+        expect(result.groups[0].total).toBe(1);
+        expect(result.groups[0].issues.map((issue: { id: string }) => issue.id)).toEqual([issues[index]!.id]);
+        expect(result.archived_total).toBe(0);
+      }
+      expect(requests.map((url) => url.pathname)).toEqual(Array(3).fill("/api/issues/grouped"));
+      expect(requests.map((url) => url.searchParams.get("assignee_types"))).toEqual(["member", "agent", "squad"]);
+      expect(requests.every((url) => !url.searchParams.has("assignee_type")
+        && url.searchParams.get("include_archived_total") === "true")).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("executes status-pages with list filters and optional archived total", async () => {
+    useCliEnv();
+    const spec = specById("issue.status-pages");
+    globalThis.fetch = capabilityFetch(spec.id, async (request) => {
+      const url = new URL(request.url);
+      expect(request.method).toBe("GET");
+      expect(url.pathname).toBe("/api/issues/status-pages");
+      for (const [name, value] of Object.entries({
+        workspace_id: "ws_1", statuses: "todo,done", assignee_id: "usr_1", assignee_types: "member",
+        project_id: "prj_1", parent_id: "iss_parent", top_level_only: "true", limit: "50",
+        metadata: '{"lane":1}', include_archived_total: "true",
+      })) expect(url.searchParams.get(name)).toBe(value);
+      expect(url.searchParams.has("assignee_type")).toBe(false);
+      return Response.json({ groups: { todo: { issues: [], total: 0, has_more: false } }, archived_total: 3 });
+    });
+    const output = await capture(() => registryFor([spec]).execute([
+      ...spec.path, "--statuses", "todo,done", "--assignee", "usr_1", "--assignee-type", "member",
+      "--project", "prj_1", "--parent", "iss_parent", "--top-level-only", "--limit", "50",
+      "--metadata", '{"lane":1}', "--include-archived-total", "--output", "json",
+    ]));
+    expect(JSON.parse(output.stdout).archived_total).toBe(3);
+  });
+  it("routes the deprecated Chat list alias to Session log and resends file contents unchanged", async () => {
+    useCliEnv();
+    const list = specById("session.log.window");
+    const create = specById("chat.message.create");
+    const registry = registryFor([list, create]);
+    const content = "I can't retry\n\n  Keep inner spaces  \nlast line";
+    expect(content).toBe(content.trim());
+    const requests: URL[] = [];
+    let sent: unknown;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/cli/capabilities") {
+        return Response.json({ commands: [list, create].map((spec) => ({ id: spec.id, allowed: true })) });
+      }
+      requests.push(url);
+      if (request.method === "POST") {
+        sent = await request.json();
+        return Response.json({ task_id: "tsk_replayed" }, { status: 201 });
+      }
+      return Response.json({ entries: [{ seq: 3, content }] });
+    }) as typeof fetch;
+    const common = ["--output", "json"];
+    const first = JSON.parse((await capture(() => registry.execute([
+      "chat", "message", "list", "chat_1", "--anchor", "3", ...common,
+    ]))).stdout);
+    expect(first.entries).toEqual([{ seq: 3, content }]);
+    expect(requests[0]!.pathname).toBe("/api/sessions/chat_1/log");
+    expect(requests[0]!.searchParams.get("anchor")).toBe("3");
+    const dir = await mkdtemp(resolve(tmpdir(), "chat-resend-"));
+    try {
+      const file = resolve(dir, "original.txt");
+      await writeFile(file, content);
+      await capture(() => registry.execute([...create.path, "chat_1", "--content-file", file, ...common]));
+      expect(sent).toEqual({ content });
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  it("requests and answers a decision through the real canonical message routes", async () => {
+    useCliEnv();
+    const database = openSqliteDatabase(":memory:");
+    try {
+      const store = new MultiremiStore(database);
+      store.ensureLocalWorkspace();
+      const owner = store.createAgent({ name: "CLI parent owner", provider: "codex" });
+      const parent = store.createIssue({ title: "CLI parent", assigneeType: "agent", assigneeId: owner.id });
+      const child = store.createIssue({ title: "CLI child", parentIssueId: parent.id });
+      const childSession = store.getOrCreateDefaultIssueSession(child.id);
+      const parentSession = store.getOrCreateDefaultIssueSession(parent.id);
+      const app = createMultiremiApp({ store, authToken: "test-token" });
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).pathname === "/api/cli/capabilities") {
+          return Response.json({ commands: ["send", "list", "get", "resolve"].map((name) => ({
+            id: `message.${name}`, allowed: true,
+          })) });
+        }
+        return app.request(request);
+      }) as typeof fetch;
+      const run = async (name: string, args: string[]) => {
+        const spec = unifiedCommandSpecs().find(spec => spec.id === `message.${name}`)!;
+        const output = await capture(() => registryFor([spec]).execute([...spec.path, ...args, "--output", "json"]));
+        return JSON.parse(output.stdout);
+      };
+      // The parent_owner role resolves only to the parent's execution owner, in the parent's Main session.
+      const toOwner = await run("send", [childSession.id, "--to", "parent_owner", "--kind", "decision", "--content", "Ship it?", "--option", "yes", "--option", "no"]);
+      expect(toOwner.message).toMatchObject({ message_kind: "decision", session_id: parentSession.id, to_agent_id: owner.id, to_member_id: null });
+      // A member answers a decision addressed to them.
+      const first = await run("send", [parentSession.id, "--to", "mem_local_local", "--kind", "decision", "--content", "Ship it", "--option", "yes", "--option", "no"]);
+      expect(first.message.message_kind).toBe("decision");
+      expect(first.message.to_member_id).toBe("mem_local_local");
+      expect(first.message.metadata.message_choice.status).toBe("pending");
+      const listed = await run("list", [parentSession.id, "--kind", "decision"]);
+      expect(listed.messages.map((message: { id: string }) => message.id)).toEqual(expect.arrayContaining([toOwner.message.id, first.message.id]));
+      expect(store.getQuestion(first.message.id)).toBeNull();
+      const answered = await run("send", [parentSession.id, "--reply-to", first.message.id, "--content", "Approved", "--option", "yes"]);
+      expect(answered.message.reply_to_id).toBe(first.message.id);
+      const settled = await run("get", [first.message.id]);
+      expect(settled.message.metadata.message_choice.status).toBe("answered");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects all five retired issue decision commands before HTTP", async () => {
+    useCliEnv();
+    let requests = 0;
+    globalThis.fetch = (async () => { requests++; throw new Error("Retired command sent HTTP"); }) as unknown as typeof fetch;
+    for (const name of ["request", "list", "answer", "escalate", "withdraw"]) {
+      await expect(capture(() => dispatch(["issue", "decision", name, "MUL-400"]))).rejects.toThrow("已移除");
+    }
+    expect(requests).toBe(0);
+  });
+
   it("forwards project and directory work locations through real Chat and quick-create commands", async () => {
     useCliEnv();
     for (const [command, flag, field] of [
@@ -125,6 +633,24 @@ describe("native collaboration CLI contracts", () => {
       await rm(dir, { recursive: true, force: true });
     }
     expect(requests).toBe(0);
+  });
+
+  it("lists user chats by default and forwards the requested chat origin", async () => {
+    useCliEnv();
+    const spec = specById("chat.list");
+    const queries: Array<Record<string, string>> = [];
+    globalThis.fetch = capabilityFetch(spec.id, (request) => {
+      const url = new URL(request.url);
+      expect(url.pathname).toBe("/api/chat/sessions");
+      queries.push(Object.fromEntries(url.searchParams));
+      return Response.json({ sessions: [{ id: "chat_auto", title: "Daily report · 09:00", origin: { autopilot_id: "apt_1", run_id: "run_1" } }] });
+    });
+    expect(registryFor([spec]).renderHelp(spec.path)).toContain("--origin <user|automation|all>");
+
+    await capture(() => registryFor([spec]).execute([...spec.path, "--json"]));
+    await capture(() => registryFor([spec]).execute([...spec.path, "--origin", "automation", "--json"]));
+    expect(queries[0]).not.toHaveProperty("origin");
+    expect(queries[1]).toMatchObject({ workspace_id: "ws_1", origin: "automation" });
   });
 
   it("advertises the Project flag only for creation and rejects empty Project values", async () => {
@@ -320,7 +846,7 @@ describe("native collaboration CLI contracts", () => {
   it.each([
     ["task.list", ["task", "list"], "/api/multiremi/tasks"],
     ["task.get", ["task", "get", "tsk_queued"], "/api/multiremi/tasks/tsk_queued"],
-    ["session.task.list", ["session", "task", "list", "iss_1", "ises_1"], "/api/issues/iss_1/sessions/ises_1/tasks"],
+    ["session.task.list", ["session", "task", "list", "chat_1", "ises_1"], "/api/multiremi/chats/chat_1/sessions/ises_1/tasks"],
     ["issue.active-task", ["issue", "active-task", "iss_1"], "/api/issues/iss_1/active-task"],
   ] as const)("shows complete queued task wait reasons through %s", async (id, argv, path) => {
     useCliEnv();
@@ -346,9 +872,9 @@ describe("native collaboration CLI contracts", () => {
     expect(JSON.parse(jsonl.stdout)).toEqual(task);
   });
 
-  it.each(["wait_reason", "waitReason"] as const)("shows complete issue run wait reasons from %s", async (reasonField) => {
+  it.each(["wait_reason", "waitReason"] as const)("shows complete canonical attempt wait reasons from %s", async (reasonField) => {
     useCliEnv();
-    const spec = specById("issue.task-runs");
+    const spec = unifiedCommandSpecs().find(spec => spec.id === "turn.get")!;
     const waitReason = "等待模型能力恢复（任务创建已达 15 分钟）：3 个候选 Runtime 均无法执行 claude-opus-5-with-an-extra-long-model-name（thinking: high）";
     const tasks = [
       { id: "tsk_queued", status: "queued", [reasonField]: waitReason },
@@ -358,18 +884,14 @@ describe("native collaboration CLI contracts", () => {
     ];
     globalThis.fetch = capabilityFetch(spec.id, (request) => {
       expect(request.method).toBe("GET");
-      expect(new URL(request.url).pathname).toBe("/api/issues/iss_1/task-runs");
-      return Response.json(tasks);
+      expect(new URL(request.url).pathname).toBe("/api/turns/turn_1");
+      expect(new URL(request.url).searchParams.get("attempts")).toBe("true");
+      return Response.json({ id: "turn_1", attempts: tasks });
     });
 
-    const table = await capture(() => registryFor([spec]).execute(["issue", "runs", "iss_1"]));
-    expect(table.stdout).toContain("WAIT REASON");
-    expect(table.stdout.split("\n").find((line) => line.startsWith("tsk_queued"))).toContain(waitReason);
-    expect(table.stdout.split("\n").find((line) => line.startsWith("tsk_human"))).toContain("Need approval");
-    expect(table.stdout.split("\n").find((line) => line.startsWith("tsk_dir"))).toContain("/tmp/workspace");
-    expect(table.stdout.split("\n").find((line) => line.startsWith("tsk_done"))).toMatch(/running\s+(?:-\s+){4}-$/);
-    const json = await capture(() => registryFor([spec]).execute(["issue", "runs", "iss_1", "--output", "json"]));
-    expect(JSON.parse(json.stdout)).toEqual(tasks);
+    const json = await capture(() => registryFor([spec]).execute(["turn", "get", "turn_1", "--attempts", "--output", "json"]));
+    expect(JSON.parse(json.stdout)).toEqual({ id: "turn_1", attempts: tasks });
+    expect(json.stdout).toContain(waitReason);
   });
 
   it("preserves other waiting states and cleared reasons in task tables", async () => {
@@ -453,26 +975,23 @@ describe("native collaboration CLI contracts", () => {
     }
   });
 
-  it("injects canonical daemon prompt paths while preserving legacy issue dispatch", () => {
+  it("injects canonical daemon prompt paths while preserving legacy comment dispatch", () => {
     const daemonSource = readFileSync(resolve(root, "packages/daemon/src/agent-runtime/prompts/ephemeral.ts"), "utf8");
     const canonicalPromptPaths = [
-      "comment list",
-      "comment add",
-      "session result publish",
-      "session list",
-      "session task list",
-      "session task create",
-      "task get",
-      "task steer",
-      "task steer list",
+      "message list",
+      "message send",
+      "issue session list",
+      "turn list",
+      "turn get",
     ];
     for (const path of canonicalPromptPaths) {
       expect(daemonSource, path).toContain(`remi ${path}`);
     }
+    expect(daemonSource).toContain("remi issue session list");
+    expect(daemonSource).toContain("remi issue session result publish");
     const compatibilityPaths = [
       "issue comment list",
       "issue comment add",
-      "issue session result publish",
     ];
     for (const path of compatibilityPaths) {
       expect(daemonSource, path).not.toContain(`remi ${path}`);
@@ -483,16 +1002,22 @@ describe("native collaboration CLI contracts", () => {
     registry.register(legacyParent("issue"));
     registry.register(legacyParent("attachment"));
     for (const spec of specs) registry.register(spec);
+    expect(registry.inventory().find(entry => entry.id === "session.result.publish")?.path)
+      .toEqual(["session", "result", "publish"]);
     const cases = [
       ["issue", "comment", "list", "iss_1", "--thread", "cmt_1", "--output", "json"],
       ["issue", "comment", "add", "iss_1", "--parent", "cmt_1", "--content-stdin"],
-      ["issue", "session", "result", "publish", "iss_1", "--session", "ises_1", "--content-stdin"],
     ];
     for (const argv of cases) {
       const invocation = registry.resolve(argv);
       expect(invocation?.spec.id, argv.join(" ")).toBe(`legacy.${argv[0]}`);
       expect(invocation?.rawArgs, argv.join(" ")).toEqual(argv.slice(1));
     }
+    const issuePublish = registry.resolve(["issue", "session", "result", "publish", "iss_1", "--session", "ises_1", "--content-stdin"]);
+    expect(issuePublish?.spec.id).toBe("issue.session.result.publish");
+    expect(issuePublish?.positionals).toEqual(["iss_1"]);
+    expect(issuePublish?.options.session).toBe("ises_1");
+    expect(BOOTSTRAP_COMPATIBILITY_PATHS).toContain("issue session result publish");
 
     const attachmentDownload = registry.resolve(["attachment", "download", "att_1", "--output-dir", "/tmp"]);
     expect(attachmentDownload?.spec.id).toBe("issue.attachment.download");
@@ -505,8 +1030,9 @@ describe("native collaboration CLI contracts", () => {
     }
 
     const taskMessages = registry.resolve(["task", "messages", "tsk_1", "--since", "4"]);
-    expect(taskMessages?.spec.id).toBe("task.message.list");
+    expect(taskMessages?.spec.id).toBe("task.trace.read");
     expect(taskMessages?.options.since).toBe(4);
+    expect(registry.resolve(["task", "message", "list", "tsk_1"])?.spec.id).toBe("task.trace.read");
   });
 
   it("keeps issue list output byte-compatible with the legacy handler", async () => {
@@ -520,6 +1046,92 @@ describe("native collaboration CLI contracts", () => {
     const nativeAdapter = specById("issue.list");
     const viaRegistry = await capture(() => registryFor([nativeAdapter]).execute(["issue", "list", "--output", "json"]));
     expect(viaRegistry).toEqual(direct);
+  });
+
+  it("issue list sends plural assignee types through both Registry and legacy paths", async () => {
+    useCliEnv();
+    const queries: URLSearchParams[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      expect(url.pathname).toBe("/api/issues");
+      queries.push(url.searchParams);
+      return Response.json({ issues: [], total: 0 });
+    }) as typeof fetch;
+    const args = ["issue", "list", "--assignee-type", "member", "--output", "json"];
+    await capture(() => runMultiremi(args));
+    await capture(() => registryFor([specById("issue.list")]).execute(args));
+    expect(queries).toHaveLength(2);
+    for (const query of queries) {
+      expect(query.get("assignee_types")).toBe("member");
+      expect(query.has("assignee_type")).toBe(false);
+    }
+  });
+
+  it("keeps the dependency CLI aligned with the legacy issue handler", async () => {
+    useCliEnv();
+    interface Call { method: string; path: string; query: string; body?: unknown }
+    const calls: Call[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/cli/capabilities") {
+        return Response.json({ commands: ["issue.list", "issue.create", "issue.dependency.add"].map((id) => ({ id, allowed: true })) });
+      }
+      calls.push({
+        method: request.method,
+        path: url.pathname,
+        query: url.searchParams.toString(),
+        ...(request.body ? { body: await request.json() } : {}),
+      });
+      if (url.pathname === "/api/issues" && request.method === "POST") {
+        return Response.json({ id: "iss_new", key: "MUL-500" }, { status: 201 });
+      }
+      if (url.pathname === "/api/issues" && request.method === "GET") {
+        return Response.json({ issues: [], total: 0 });
+      }
+      if (url.pathname.endsWith("/dependencies") && request.method === "POST") {
+        return Response.json({ dependency: { id: "dep_1", type: "blocked_by" } }, { status: 201 });
+      }
+      throw new Error(`unexpected request ${request.method} ${url.pathname}`);
+    }) as typeof fetch;
+
+    // `issue create --blocked-by` is repeatable and reaches the body under the
+    // server's `blocked_by` key; the Registry adapter and the legacy passthrough
+    // entry must send the same request.
+    const createArgs = ["issue", "create", "--title", "Blocked", "--blocked-by", "MUL-2", "--blocked-by", "iss_3", "--output", "json"];
+    await capture(() => registryFor([specById("issue.create")]).execute(createArgs));
+    await capture(() => runMultiremi(createArgs, { programName: "remi multiremi" }));
+    expect(calls[0]).toEqual(calls[1]);
+    expect(calls[0]).toMatchObject({
+      method: "POST",
+      path: "/api/issues",
+      body: { title: "Blocked", blocked_by: ["MUL-2", "iss_3"] },
+    });
+
+    // `issue list --parent` sends `parent_id` and `--top-level-only` sends
+    // `top_level_only`; both entry points build the same query.
+    const listArgs = ["issue", "list", "--parent", "MUL-9", "--top-level-only", "--output", "json"];
+    await capture(() => registryFor([specById("issue.list")]).execute(listArgs));
+    await capture(() => runMultiremi(listArgs, { programName: "remi multiremi" }));
+    expect(calls[2]).toEqual(calls[3]);
+    expect(calls[2]).toMatchObject({ method: "GET", path: "/api/issues" });
+    expect(new URLSearchParams(calls[2]!.query).get("parent_id")).toBe("MUL-9");
+    expect(new URLSearchParams(calls[2]!.query).get("top_level_only")).toBe("true");
+
+    // `issue dependency add` posts the new request body and defaults the type.
+    const addSpec = specById("issue.dependency.add");
+    await capture(() => registryFor([addSpec]).execute(["issue", "dependency", "add", "MUL-1", "MUL-2", "--output", "json"]));
+    await capture(() => registryFor([addSpec]).execute(["issue", "dependency", "add", "iss_1", "iss_2", "--type", "related", "--output", "json"]));
+    expect(calls[4]).toMatchObject({
+      method: "POST",
+      path: "/api/issues/MUL-1/dependencies",
+      body: { depends_on_issue_id: "MUL-2", type: "blocked_by" },
+    });
+    expect(calls[5]).toMatchObject({
+      method: "POST",
+      path: "/api/issues/iss_1/dependencies",
+      body: { depends_on_issue_id: "iss_2", type: "related" },
+    });
   });
 
   it("supports table, JSON, and JSONL on a native collaboration read command", async () => {
@@ -555,13 +1167,13 @@ describe("native collaboration CLI contracts", () => {
     expect(requests).toBe(0);
   });
 
-  it("creates workspace Sessions by default and supports discussion Sessions", async () => {
+  it("creates Chat-owned Sessions by default and supports discussion Sessions", async () => {
     useCliEnv();
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = capabilityFetch("session.create", async (input) => {
       const request = input;
       expect(request.method).toBe("POST");
-      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-136/sessions");
+      expect(new URL(request.url).pathname).toBe("/api/multiremi/chats/chat-136/sessions");
       const body = await request.json() as Record<string, unknown>;
       bodies.push(body);
       return Response.json({ id: `ises_${bodies.length}`, ...body }, { status: 201 });
@@ -569,10 +1181,10 @@ describe("native collaboration CLI contracts", () => {
     const spec = specById("session.create");
 
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-136", "--title", "Implementation", "--output", "json",
+      "session", "create", "chat-136", "--title", "Implementation", "--output", "json",
     ]));
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-136", "--title", "Design chat", "--discussion", "--output", "json",
+      "session", "create", "chat-136", "--title", "Design chat", "--discussion", "--output", "json",
     ]));
 
     expect(bodies).toEqual([
@@ -586,14 +1198,14 @@ describe("native collaboration CLI contracts", () => {
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = capabilityFetch("session.create", async (request) => {
       expect(request.method).toBe("POST");
-      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-312/sessions");
+      expect(new URL(request.url).pathname).toBe("/api/multiremi/chats/chat-312/sessions");
       bodies.push(await request.json() as Record<string, unknown>);
       return Response.json({ id: "ises_side" }, { status: 201 });
     });
     const spec = specById("session.create");
     for (const extra of [[], ["--discussion"]]) {
       await capture(() => registryFor([spec]).execute([
-        "session", "create", "MUL-312", "--title", "Side", "--from", "ises_main", ...extra,
+        "session", "create", "chat-312", "--title", "Side", "--from", "ises_main", ...extra,
       ]));
     }
     expect(bodies).toEqual([
@@ -635,7 +1247,30 @@ describe("native collaboration CLI contracts", () => {
       "/api/sessions/ises_side", "/api/sessions/ises_side", "/api/sessions/ises_side",
       "/api/sessions/ises_side/inherited-context",
     ]);
-    expect(registryFor(specs).resolve(["session", "get", "MUL-312", "ises_side"])?.spec.id).toBe("session.get");
+    expect(registryFor(specs).resolve(["session", "get", "chat-312", "ises_side"])?.spec.id).toBe("session.get");
+  });
+
+  it("shows explicit ownership for both owners through the generic Session command", async () => {
+    useCliEnv();
+    const spec = specById("session.show");
+    const registry = registryFor([spec]);
+    for (const owner of ["chat", "issue"] as const) {
+      const session = { id: `ises_${owner}`, title: "Side", owner_type: owner, owner_id: `${owner}_1`, status: "active" };
+      globalThis.fetch = capabilityFetch(spec.id, (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === `/api/sessions/${session.id}/inherited-context`) return Response.json({});
+        expect(path).toBe(`/api/sessions/${session.id}`);
+        return Response.json(session);
+      });
+      for (const mode of ["json", "jsonl"]) {
+        const result = await capture(() => registry.execute([...spec.path, session.id, "--output", mode]));
+        expect(JSON.parse(result.stdout)).toEqual(session);
+      }
+      const table = await capture(() => registry.execute([...spec.path, session.id]));
+      expect(table.stdout).toContain("OWNER TYPE");
+      expect(table.stdout).toContain("OWNER ID");
+      expect(table.stdout).toContain(session.owner_id);
+    }
   });
 
   it("creates follow Sessions with an explicit inheritance mode", async () => {
@@ -647,7 +1282,7 @@ describe("native collaboration CLI contracts", () => {
       return Response.json({ id: "ises_follow" }, { status: 201 });
     });
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-324", "--title", "Follow", "--from", "ises_main", "--inherit-mode", "follow",
+      "session", "create", "chat-324", "--title", "Follow", "--from", "ises_main", "--inherit-mode", "follow",
     ]));
     expect(body).toEqual({ title: "Follow", holds_workspace: false, parent_session_id: "ises_main", inherit_mode: "follow" });
     expect(registryFor([spec]).renderHelpForArgv(["session", "create", "--help"]))
@@ -659,14 +1294,14 @@ describe("native collaboration CLI contracts", () => {
     const spec = specById("session.create");
     const bodies: unknown[] = [];
     globalThis.fetch = capabilityFetch(spec.id, async (request) => {
-      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-324/sessions");
+      expect(new URL(request.url).pathname).toBe("/api/multiremi/chats/chat-324/sessions");
       bodies.push(await request.json());
       return Response.json({ id: "ises_code" }, { status: 201 });
     });
     for (const inheritMode of ["snapshot", "follow"]) {
       for (const extra of [[], ["--with-code"]]) {
         await capture(() => registryFor([spec]).execute([
-          "session", "create", "MUL-324", "--from", "ises_main", "--inherit-mode", inheritMode, ...extra,
+          "session", "create", "chat-324", "--from", "ises_main", "--inherit-mode", inheritMode, ...extra,
         ]));
       }
     }
@@ -825,8 +1460,8 @@ describe("native collaboration CLI contracts", () => {
   it("uploads attachments against the requested issue and honors structured output", async () => {
     useCliEnv();
     let uploadedIssue = "";
-    globalThis.fetch = (async (_input, init) => {
-      const form = init?.body as FormData;
+    globalThis.fetch = (async (input, init) => {
+      const form = await new Request(input, init).formData();
       uploadedIssue = String(form.get("issue_id"));
       return Response.json({ attachment: { id: "att_1", issue_id: uploadedIssue, filename: "package.json" } });
     }) as typeof fetch;

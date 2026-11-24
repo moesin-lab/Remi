@@ -1,3 +1,5 @@
+import type { DaemonRuntimeUpdatePayload } from "./daemon-protocol.js";
+import type { PlatformSchemaContractFailure } from './platform-failure.js';
 // Wire contracts for every Multiremi product domain. Entities and their Create*/Update* input DTOs
 // are grouped into the sections below; within a section, enums come first, then entities, then the
 // inputs that build them. Type-only module — no runtime code lives here.
@@ -6,6 +8,8 @@
 
 import type { RuntimeCodexProfile } from "./codex-profile.js";
 import type { RuntimeClaudeProfile } from "./claude-profile.js";
+import type { RuntimeProtocolStatus } from "./runtime-protocol.js";
+import type { GcRunMode, SubjectSnapshot } from "./storage.js";
 
 export type MultiremiAgentProvider = "claude" | "codex" | string;
 
@@ -67,6 +71,8 @@ export interface MultiremiAgentTemplate extends MultiremiAgentTemplateSummary {
 export type MultiremiAgentRole = "normal" | "maintainer" | "supervisor";
 
 export interface MultiremiAgent {
+  /** Computed from current group policy; never changes the stored model. */
+  model_policy_reason?: string | null;
   executionGroupId?: string | null;
   execution_group_id?: string | null;
   id: string;
@@ -612,7 +618,7 @@ export type MultiremiRuntimeModelListRequestStatus = "pending" | "running" | "co
 
 export type MultiremiRuntimeDirectoryScanRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
 
-export type MultiremiRuntimeUpdateRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
+export type MultiremiRuntimeUpdateRequestStatus = "pending" | "running" | "restarting" | "verifying" | "completed" | "rolled_back" | "failed" | "timeout";
 
 export type MultiremiRuntimeCommandRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
 
@@ -649,6 +655,8 @@ export interface CreateRuntimeWorkspaceInput {
 }
 
 export interface MultiremiRuntime {
+  daemonProtocolVersion?: number | null;
+  protocol?: RuntimeProtocolStatus;
   executionGroupIds?: string[];
   executionGroupId?: string | null;
   execution_group_id?: string | null;
@@ -795,7 +803,8 @@ export interface MultiremiRuntimeDirectoryScanRequest {
 
 /**
  * What a runtime update request targets: the remi CLI binary (`cli`), the ACP
- * bridges (`acp`), or the underlying agent CLI — claude/codex (`agent`).
+ * release-pinned ACP bundles (`acp`, reinstall), or the standalone Grok CLI
+ * (`agent`). Claude/Codex/Antigravity are upgraded with the Remi CLI release.
  */
 export type MultiremiRuntimeUpdateScope = "cli" | "acp" | "agent";
 
@@ -806,6 +815,8 @@ export interface MultiremiRuntimeUpdateRequest {
   scope: MultiremiRuntimeUpdateScope;
   targetVersion: string;
   target_version?: string;
+  targetCommit?: string | null;
+  target_commit?: string | null;
   output: string | null;
   error: string | null;
   createdAt: string;
@@ -895,15 +906,11 @@ export interface CreateWorkspaceRuntimeProvisionInput {
 
 export type UpdateWorkspaceRuntimeProvisionInput = Partial<CreateWorkspaceRuntimeProvisionInput>;
 
-export interface MultiremiDaemonHeartbeatAck {
+export interface MultiremiDaemonRuntimeInput {
   runtime_id: string;
   status: "ok" | "runtime_gone";
   runtime_gone?: boolean;
-  pending_update?: {
-    id: string;
-    target_version: string;
-    scope?: MultiremiRuntimeUpdateScope;
-  };
+  pending_update?: DaemonRuntimeUpdatePayload;
   pending_model_list?: {
     id: string;
   };
@@ -916,6 +923,10 @@ export interface MultiremiDaemonHeartbeatAck {
     root?: string;
     max_depth?: number;
     mode?: string;
+  };
+  pending_gc_run?: {
+    id: string;
+    mode: GcRunMode;
   };
   pending_local_skill_import?: {
     id: string;
@@ -954,10 +965,17 @@ export interface MultiremiDaemonHeartbeatAck {
   feishu_bot?: MultiremiFeishuBotDirective;
   /** One leased proactive reply for the Runtime hosting the Feishu concierge. */
   pending_feishu_outbound?: MultiremiFeishuBotOutboundDelivery;
+  pending_feishu_outbounds?: MultiremiFeishuBotOutboundDelivery[];
   ssh_mesh?: MultiremiSshMeshHeartbeatAck;
   /** Platform maintenance directive: daemons must pause task claims while draining. */
   drain?: MultiremiDaemonDrainDirective;
+  /** Compatibility upgrade probes reconcile local attempts after WS rejection. */
+  cancelled_tasks?: Array<{ task_id: string; status: "completed" | "failed" | "cancelled" }>;
 }
+
+/** The v1 compatibility heartbeat only delivers the mandatory upgrade and drain. */
+export type MultiremiDaemonHeartbeatAck = Pick<MultiremiDaemonRuntimeInput,
+  "runtime_id" | "status" | "runtime_gone" | "pending_update" | "drain" | "cancelled_tasks">;
 
 /** Server → daemon drain instruction carried in every heartbeat ack. */
 export interface MultiremiDaemonDrainDirective {
@@ -1200,12 +1218,15 @@ export interface ReportRuntimeModelListInput {
 }
 
 export interface CreateRuntimeUpdateInput {
+  targetCommit?: string;
+  target_commit?: string;
   targetVersion?: string;
   target_version?: string;
   scope?: MultiremiRuntimeUpdateScope;
 }
 
 export interface ReportRuntimeUpdateInput {
+  self_check?: boolean;
   status?: string;
   output?: string;
   error?: string;
@@ -1267,6 +1288,7 @@ export interface RepositoryActivityChangedPayload {
 
 export interface RepositoryActivityItem {
   task_id: string;
+  turn_id?: string;
   status: MultiremiTaskStatus;
   relation: RepositoryActivityRelation;
   agent: { id: string; name: string | null } | null;
@@ -1304,6 +1326,126 @@ export interface MultiremiTaskHumanRequest {
   respondedBy: string | null;
   createdAt: string;
   respondedAt: string | null;
+  /**
+   * Deadline the executing daemon asked for (MUL-407). The server defaults it
+   * to an hour when an older daemon omits `timeout_ms`; the reminder lane and
+   * the terminal card both read it. The daemon still owns the actual timeout
+   * decision, so this is a scheduling hint rather than a second authority.
+   */
+  expiresAt?: string | null;
+}
+
+/**
+ * MUL-400 E4: one "waiting for your decision" item recorded on a parent Issue.
+ *
+ * A child run raises it instead of blocking: the parent owner either answers it
+ * itself (`answered`) or hands it to a human (`escalated`). Only escalated rows
+ * enter the human "waiting for you" list. This is deliberately a light row, not
+ * a scoped grant object: there is no scope, expiry or revocation.
+ */
+export type MultiremiIssueDecisionKind = "merge" | "production_change" | "criteria" | "question" | "permission" | "other";
+
+export type MultiremiIssueDecisionStatus = "pending" | "escalated" | "answered" | "withdrawn";
+
+/** Who answered: a human (`member`) or the parent's owner agent (`agent`). */
+export type MultiremiIssueDecisionAnswererType = "member" | "agent";
+
+export interface MultiremiIssueDecisionAnswer {
+  answererType: MultiremiIssueDecisionAnswererType;
+  answererId: string;
+  /** The answer itself: the chosen option(s) or free text. */
+  answer: string;
+  /** Why this is the right call. Required for an agent answer. */
+  reason: string;
+  /** How to overturn it. Required when the parent's owner agent answers. */
+  overturn: string | null;
+  answeredAt: string;
+}
+
+export interface MultiremiIssueDecision {
+  id: string;
+  workspaceId: string;
+  /** The Issue the row hangs on: the source Issue's parent, or the source itself. */
+  issueId: string;
+  /** The child Issue (or the run's own Issue) that raised it. */
+  sourceIssueId: string;
+  sourceTaskId: string | null;
+  kind: MultiremiIssueDecisionKind;
+  title: string;
+  body: string;
+  options: string[] | null;
+  status: MultiremiIssueDecisionStatus;
+  /** Latest answer; earlier answers stay in {@link history}. */
+  answer: MultiremiIssueDecisionAnswer | null;
+  answeredByMemberId: string | null;
+  answeredAt: string | null;
+  /** Every answer in order, so a human re-answer keeps the previous record. */
+  history: MultiremiIssueDecisionAnswer[];
+  /** The parent owner agent expected to answer a `pending` row, when one exists. */
+  ownerAgentId: string | null;
+  createdByAgentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type MultiremiIssueDecisionBucket = "waiting_on_human" | "pending_owner" | "answered";
+
+/**
+ * MUL-400 E4 read model: the two groups the parent page renders. The waiting
+ * group mixes escalated decisions with the subtree's pending human requests, so
+ * it is a union view rather than a mirror table.
+ */
+export interface MultiremiIssueDecisionEntry {
+  id: string;
+  bucket: MultiremiIssueDecisionBucket;
+  type: "decision" | "human_request";
+  kind: MultiremiIssueDecisionKind;
+  title: string;
+  body: string | null;
+  status: string;
+  issueId: string;
+  sourceIssueId: string | null;
+  sourceTaskId: string | null;
+  options: string[] | null;
+  /** Original payload for the existing human-request cards. */
+  payload?: Record<string, unknown>;
+  answer: MultiremiIssueDecisionAnswer | null;
+  /**
+   * Every answer in chronological order, oldest first. Present on `decision`
+   * entries (and `[]` when never answered) so a member revision does not hide
+   * the owner's original call; human-request entries omit the key.
+   */
+  history?: MultiremiIssueDecisionAnswer[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MultiremiIssueDecisionList {
+  waiting_on_human: MultiremiIssueDecisionEntry[];
+  owner_and_answered: {
+    pending: MultiremiIssueDecisionEntry[];
+    answered: MultiremiIssueDecisionEntry[];
+  };
+  count: number;
+}
+
+export interface IssueDecisionActor {
+  type: "member" | "agent";
+  id: string;
+  taskId: string | null;
+}
+
+export interface CreateIssueDecisionInput {
+  kind: string;
+  title: string;
+  body?: string | null;
+  options?: string[] | null;
+}
+
+export interface AnswerIssueDecisionInput {
+  answer: string;
+  reason: string;
+  overturn?: string | null;
 }
 
 export type MultiremiTaskPromptMode = "bootstrap" | "delta";
@@ -1314,12 +1456,15 @@ export interface MultiremiTaskPromptArtifact {
   prompt: string;
   sha256: string;
   assembledAt: string;
+  /** ADR 0023: the Remi Chat block of the provider instruction file in effect; null outside native Chat or on older daemons. */
+  instructions: string | null;
 }
 
 export interface RecordTaskPromptInput {
   mode: MultiremiTaskPromptMode;
   prompt: string;
   sha256: string;
+  instructions?: string | null;
 }
 
 export interface CreateTaskHumanRequestInput {
@@ -1327,6 +1472,8 @@ export interface CreateTaskHumanRequestInput {
   taskId: string;
   kind: MultiremiTaskHumanRequestKind;
   payload: Record<string, unknown>;
+  /** Requested lifetime in milliseconds; omitted by daemons that predate it. */
+  timeoutMs?: number;
 }
 
 export type MultiremiTaskSteerKind = "steer" | "force_answer";
@@ -1373,6 +1520,8 @@ export interface MultiremiBoundIssue {
 export interface MultiremiTask {
   runtimeWorkspaceId?: string | null;
   id: string;
+  /** Canonical turn containing this execution attempt. */
+  turn_id?: string | null;
   taskKind: "direct" | "quick_create";
   agentId: string;
   runtimeId: string | null;
@@ -1388,6 +1537,7 @@ export interface MultiremiTask {
   /** Runtime connection frozen at claim time, without credentials. */
   codexProfile?: RuntimeCodexProfile | null;
   claudeProfile?: RuntimeClaudeProfile | null;
+  executionConnection?: import("./execution-endpoint.js").ExecutionConnectionSnapshot | null;
   plugin_snapshot?: MultiremiTaskPluginSnapshotEntry[];
   /** Stable hash of the exact Plugin versions, binding config and Runtime
    * Codex connection/credential version used by this execution. Provider sessions only resume when it
@@ -1415,7 +1565,7 @@ export interface MultiremiTask {
   issueId: string | null;
   issueSessionId: string | null;
   issue_session_id?: string | null;
-  /** Generation of this task's per-agent Issue Session lane, frozen at claim
+  /** Generation of this task's per-agent Session lane, frozen at claim
    * time and persisted so late completions cannot promote into a newer lane. */
   issueSessionGeneration?: number | null;
   execution_scope?: string;
@@ -1452,6 +1602,8 @@ export interface MultiremiTask {
   auth_token?: string | null;
   chatMessage?: string | null;
   chat_message?: string | null;
+  boundIssueLog?: MultiremiBoundIssueLog;
+  bound_issue_log?: MultiremiBoundIssueLog;
   boundIssueUpdates?: string[];
   bound_issue_updates?: string[];
   boundIssueUpdatesOmittedCount?: number;
@@ -1511,6 +1663,20 @@ export interface MultiremiTask {
   /** Return task that has claimed this delegated task's terminal report. */
   delegationReturnTaskId: string | null;
   delegation_return_task_id?: string | null;
+  /** MUL-400 E2b: the Issue Session the delegator was in when it dispatched
+   *  this task. The terminal report returns there, not to the task's own
+   *  Session, so a cross-issue delegation calls the leader back home. */
+  delegatedFromIssueSessionId: string | null;
+  delegated_from_issue_session_id?: string | null;
+  /** MUL-400 E2b: why a task-token dispatch was NOT recorded as a delegation.
+   *  Read at terminal time to explain the silence instead of dropping it. */
+  delegationSkipReason: string | null;
+  delegation_skip_reason?: string | null;
+  /** MUL-400 E2b server-owned origin of a notification round. `child_status`
+   *  marks the E2 parent wake-up, so the delegation-return de-duplication can
+   *  tell a server wake round apart from an agent's manual wake-up task. */
+  wakeSource: string | null;
+  wake_source?: string | null;
   assignmentEventId: string | null;
   assignment_event_id?: string | null;
   /** System event that caused the automation-owned task to be assigned. This
@@ -1561,10 +1727,21 @@ export interface MultiremiTask {
   createdAt: string;
   updatedAt: string;
   dispatchedAt: string | null;
+  offeredAt?: string | null;
+  acceptedAt?: string | null;
   startedAt: string | null;
   completedAt: string | null;
   failedAt: string | null;
   cancelledAt: string | null;
+}
+
+export interface MultiremiBoundIssueLog {
+  session_id: string;
+  from_seq: number;
+  to_seq: number;
+  content_jsonl: string;
+  next_seq: number;
+  has_more: boolean;
 }
 
 export type MultiremiTaskQueueBlockerReason =
@@ -1685,11 +1862,20 @@ export interface TaskUsageEntry {
   outputTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
-  /** Total context tokens consumed, for bridges (ACP `used`) that report no input/output split. */
+  /** Actual consumption across input/output/cache/unsplit. Context is diagnostic only. */
   totalTokens?: number;
 }
 
+export interface TaskDependencyForceInput {
+  source: "comment" | "mention" | "rerun";
+  actorMemberId: string;
+  commentId?: string | null;
+}
+
 export interface CreateTaskInput {
+  executionConnection?: import("./execution-endpoint.js").ExecutionConnectionSnapshot | null;
+  /** Internal canonical conversation for automation/message producers. */
+  conversationSessionId?: string;
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
   id?: string;
@@ -1728,6 +1914,20 @@ export interface CreateTaskInput {
   /** Server-internal lane generation. Public task creation strips this field. */
   issueSessionGeneration?: number | null;
   issue_session_generation?: number | null;
+  /**
+   * Server-internal: a credential-verified member explicitly started an Issue
+   * that is still waiting on prerequisites. Public task creation strips both
+   * spellings before the task funnel sees them.
+   */
+  dependencyForce?: TaskDependencyForceInput;
+  dependency_force?: TaskDependencyForceInput;
+  /**
+   * Server-internal: exempt this task's Issue transition from guard B.
+   * `createTaskHumanRequest` parks the Issue at `in_review` while its owner waits
+   * for an answer; that transient is deliberately outside the guard.
+   */
+  exemptFromParentStatusGuard?: boolean;
+  exempt_from_parent_status_guard?: boolean;
   chatSessionId?: string | null;
   triggerCommentId?: string | null;
   trigger_comment_id?: string | null;
@@ -1744,6 +1944,7 @@ export interface CreateTaskInput {
   sessionId?: string | null;
   attempt?: number | null;
   maxAttempts?: number | null;
+  max_attempts?: number | null;
   /** Server-internal retry level used to shrink Session projection budgets. */
   projectionDegradeLevel?: number | null;
   projection_degrade_level?: number | null;
@@ -1762,6 +1963,15 @@ export interface CreateTaskInput {
   delegation_id?: string | null;
   delegatedByAgentId?: string | null;
   delegated_by_agent_id?: string | null;
+  /** MUL-400 E2b server-internal return landing point and skip audit. Public
+   *  task creation strips both; only the task-token route sets them. */
+  delegatedFromIssueSessionId?: string | null;
+  delegated_from_issue_session_id?: string | null;
+  delegationSkipReason?: string | null;
+  delegation_skip_reason?: string | null;
+  /** Server-internal; the task-token route strips both spellings. */
+  wakeSource?: string | null;
+  wake_source?: string | null;
   /** Public dispatch hint. The API validates the referenced delegated task and
    * derives its lineage; callers cannot provide a delegation ID directly. */
   continueTaskId?: string | null;
@@ -1858,7 +2068,7 @@ export interface MultiremiIssueWithTasks extends MultiremiIssue {
   attachments: MultiremiAttachment[];
   children: MultiremiIssue[];
   childProgress: MultiremiIssueChildProgress;
-  dependencies: MultiremiIssueDependency[];
+  dependencies: MultiremiIssueDependencyView[];
 }
 
 export interface MultiremiIssueShare {
@@ -1913,77 +2123,13 @@ export interface MultiremiIssueWorkspace {
   repos: MultiremiIssueWorkspaceRepo[];
   lastTaskId: string | null;
   cleanedAt: string | null;
-  cleanedArchiveId: string | null;
-  cleanedArchiveSourceRevision: string | null;
-  cleanedArchiveSha256: string | null;
+  /** What the daemon saved when it reclaimed the workspace; null when nothing needed saving. */
+  snapshot: SubjectSnapshot | null;
+  snapshotAt: string | null;
+  /** True when the reclaimed workspace held unsaved work that the snapshot preserves. */
+  unsavedWork: boolean;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface MultiremiIssueWorkspaceArchiveBinding {
-  archiveId: string;
-  sourceRevision: string;
-  sha256: string;
-}
-
-export type MultiremiSessionArchiveStatus =
-  | "pending"
-  | "uploading"
-  | "ready"
-  | "failed"
-  | "superseded";
-
-export const MULTIREMI_SESSION_ARCHIVE_MIN_TTL_MS = 60 * 60 * 1000;
-export const MULTIREMI_SESSION_ARCHIVE_MAX_TTL_MS = 365 * 24 * 60 * 60 * 1000;
-export const MULTIREMI_SESSION_ARCHIVE_MIN_GC_INTERVAL_MS = 60 * 1000;
-export const MULTIREMI_SESSION_ARCHIVE_PREPARATION_FAILURE_REVISION = "preparation-failed";
-
-/**
- * Control-plane metadata for a provider-native Issue session archive.
- * Archive bytes live in SessionArchiveStore, never in SQL.
- */
-export interface MultiremiSessionArchive {
-  id: string;
-  workspaceId: string;
-  issueId: string;
-  runtimeId: string;
-  daemonId: string;
-  sourceRevision: string;
-  sha256: string;
-  sizeBytes: number;
-  uploadedSizeBytes: number;
-  fileCount: number | null;
-  status: MultiremiSessionArchiveStatus;
-  relativePath: string;
-  metadata: Record<string, unknown>;
-  attemptCount: number;
-  lastError: string | null;
-  nextRetryAt: string | null;
-  retryExhaustedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-  completedAt: string | null;
-}
-
-export interface InitSessionArchiveInput {
-  workspaceId: string;
-  issueId: string;
-  runtimeId: string;
-  daemonId: string;
-  sourceRevision: string;
-  sha256: string;
-  sizeBytes: number;
-  fileCount?: number | null;
-  metadata?: Record<string, unknown>;
-}
-
-export interface ReportSessionArchiveFailureInput {
-  workspaceId: string;
-  issueId: string;
-  runtimeId: string;
-  daemonId: string;
-  stage: "prepare";
-  error: string;
 }
 
 export interface ReportIssueWorkspaceInput {
@@ -1997,9 +2143,11 @@ export interface ReportIssueWorkspaceInput {
   cleanedAt?: string | null;
 }
 
-export interface MarkIssueWorkspaceCleanedInput extends MultiremiIssueWorkspaceArchiveBinding {
+export interface MarkIssueWorkspaceCleanedInput {
   issueId: string;
   runtimeId: string;
+  snapshot: SubjectSnapshot | null;
+  unsavedWork: boolean;
 }
 
 export interface MultiremiIssueAssigneeGroup {
@@ -2022,7 +2170,25 @@ export interface MultiremiIssueChildProgress {
   parentIssueId: string;
   total: number;
   done: number;
+  /**
+   * Child buckets used by the issue surfaces (MUL-400 E1/E3). `cancelled` and
+   * `blocked` are terminal/parked states, `active` counts children with work in
+   * flight, and `waiting` counts children parked in `backlog` with at least one
+   * unmet `blocked_by` prerequisite.
+   */
+  cancelled: number;
+  blocked: number;
+  waiting: number;
+  active: number;
 }
+
+/**
+ * MUL-400 E3: which side of the relation the caller is on. `blocked_by` means
+ * the caller waits for the other issue, `blocks` means the other issue waits
+ * for the caller, and `null` is `related`, which carries no direction at all —
+ * it is neither a prerequisite nor a dependent.
+ */
+export type MultiremiIssueDependencyDirection = "blocked_by" | "blocks" | null;
 
 export interface MultiremiIssueDependency {
   id: string;
@@ -2033,6 +2199,43 @@ export interface MultiremiIssueDependency {
   issue: MultiremiIssue | null;
   dependsOnIssue: MultiremiIssue | null;
   createdAt: string;
+}
+
+/**
+ * MUL-400 E3: one dependency row as read from a single issue's point of view.
+ * `direction` is computed relative to the requested issue: `blocked_by` means
+ * this issue waits on `issue`, `blocks` means `issue` waits on this one. Rows
+ * stored as `blocks` are read back reversed, so no migration is needed.
+ */
+export interface MultiremiIssueDependencyView {
+  id: string;
+  workspaceId: string;
+  issueId: string;
+  dependsOnIssueId: string;
+  type: MultiremiIssueDependencyType;
+  /** `null` for `related`, which has no direction. */
+  direction: MultiremiIssueDependencyDirection;
+  /** The issue on the other side of the relation, relative to the queried issue. */
+  issue: MultiremiIssue | null;
+  dependsOnIssue: MultiremiIssue | null;
+  createdAt: string;
+}
+
+/** MUL-400 E3: one unmet prerequisite of an issue, for gates and page data. */
+export interface MultiremiIssuePrerequisite {
+  issueId: string;
+  dependsOnIssueId: string;
+  key: string;
+  title: string;
+  status: string;
+  dependencyId: string;
+}
+
+export interface MultiremiIssueWaitingOn {
+  /** Direct prerequisites that are not `done` yet. */
+  unmet: MultiremiIssuePrerequisite[];
+  /** The full direct prerequisite list, met or not. */
+  prerequisites: MultiremiIssuePrerequisite[];
 }
 
 export interface MultiremiIssueComment {
@@ -2153,6 +2356,19 @@ export interface MultiremiTimelinePage {
 }
 
 export interface CreateIssueInput {
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsible_member_id?: string | null;
+  /**
+   * MUL-400 E3: prerequisite issues this one waits on, as keys or ids. Created
+   * with the issue in the same transaction, with cycle and ancestor checks.
+   * When any prerequisite is unmet the issue parks at `backlog` whatever
+   * `status` asked for, and the create response reports
+   * `dispatch_skipped_reason: dependencies_unmet`.
+   */
+  blockedBy?: string[];
+  blocked_by?: string[];
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
   id?: string;
@@ -2193,6 +2409,10 @@ export interface CreateIssueWithTaskInput extends CreateIssueInput {
 }
 
 export interface UpdateIssueInput {
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsible_member_id?: string | null;
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
   /** Server-internal attribution, overwritten from the authenticated request. */
@@ -2224,6 +2444,55 @@ export interface UpdateIssueInput {
   /** Server-internal creator lineage for assignment/status-triggered tasks. */
   parentTaskId?: string | null;
   parent_task_id?: string | null;
+  /**
+   * Member-only override for the parent-status guard (MUL-400 E1) and for the
+   * dependency gate (MUL-400 E3). A parent issue with unfinished children cannot
+   * enter `in_review`/`done`, and an issue with unmet prerequisites cannot leave
+   * `backlog`, unless the caller is a member and passes `force: true`; task
+   * identities always get a 403 from the routes, so a run can never bypass
+   * either guard on its own.
+   */
+  force?: boolean;
+}
+
+/**
+ * Server-internal options for {@link UpdateIssueInput} writes. These deliberately
+ * live OUTSIDE the input object: the wire layer builds `UpdateIssueInput` straight
+ * from the request body, so anything on that shape is client-reachable. Only
+ * server writers pass this positionally.
+ */
+export interface UpdateIssueOptions {
+  /**
+   * Skip guard A's unfinished-child check for a server-owned writer. It never
+   * bypasses the done rule: a member may close any Issue, while an Agent closes
+   * only a direct child of an Issue it executes.
+   */
+  allowParentStatusGuardBypass?: boolean;
+  /** Record `parent_status_held` instead of applying the requested status. */
+  holdParentStatus?: boolean;
+  /** Extra fields for the `parent_status_held` activity, e.g. the merge source. */
+  holdParentStatusData?: Record<string, unknown> | null;
+  /**
+   * MUL-400 E3 (QA round 2, blocker 5): batch update keeps S1's member override
+   * for the *parent-status* guard, but it must not become a second way to cross
+   * the dependency gate - the plan allows exactly one (the member PATCH status
+   * write) so an override always leaves `dependency_force_started`. The batch
+   * route moves the request's `force` here, where only the parent-status guard
+   * reads it.
+   */
+  parentStatusForce?: boolean;
+}
+
+/**
+ * MUL-400 E3: server-internal dispatch options. The dependency override is
+ * deliberately NOT part of {@link AssignIssueInput}: that type is bound straight
+ * from request bodies, and a body-reachable bypass would let a caller start a
+ * waiting issue without the `dependency_force_started` record the plan requires.
+ * Only `IssuesRepo.dispatchForcedStart` passes it, after the member-only status
+ * write has already been validated and audited.
+ */
+export interface AssignIssueOptions {
+  force?: boolean;
 }
 
 export interface BatchUpdateIssuesInput {
@@ -2255,6 +2524,12 @@ export interface ListIssuesInput {
   projectIds?: string[];
   project_ids?: string[];
   metadata?: Record<string, string | number | boolean> | null;
+  /** MUL-400 E3: only direct children of this issue (key or id). */
+  parentId?: string | null;
+  parent_id?: string | null;
+  /** MUL-400 E3: only issues without a parent. Takes precedence over `parentId`. */
+  topLevelOnly?: boolean;
+  top_level_only?: boolean;
   includeNoAssignee?: boolean;
   includeNoProject?: boolean;
   includeArchived?: boolean;
@@ -2263,6 +2538,12 @@ export interface ListIssuesInput {
   archived_only?: boolean;
   limit?: number;
   offset?: number;
+}
+
+export interface IssueStatusPages {
+  groups: Record<string, { issues: MultiremiIssue[]; total: number; has_more: boolean }>;
+  /** Workspace-wide count, independent of the page's status/assignee/project filters. */
+  archived_total?: number;
 }
 
 export interface AssignIssueInput {
@@ -2287,6 +2568,12 @@ export interface AssignIssueResult {
 }
 
 export interface QuickCreateIssueInput {
+  parentIssueId?: string | null;
+  parent_issue_id?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsible_member_id?: string | null;
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
   agentId?: string | null;
@@ -2309,9 +2596,21 @@ export interface QuickCreateIssueResult {
 
 export interface CreateIssueDependencyInput {
   id?: string;
+  /**
+   * MUL-400 E3: a key (`MUL-12`) or an id, resolved server-side. Stored rows are
+   * always `blocked_by`; when `type: blocks` is requested the pair is flipped so
+   * the table keeps exactly one direction.
+   */
   dependsOnIssueId?: string;
   depends_on_issue_id?: string;
   type?: MultiremiIssueDependencyType | string;
+  /** Server-internal attribution for the `issue_dependency_added` activity. */
+  actorType?: string;
+  actor_type?: string;
+  actorId?: string | null;
+  actor_id?: string | null;
+  parentTaskId?: string | null;
+  parent_task_id?: string | null;
 }
 
 export interface CreateIssueCommentInput {
@@ -2349,9 +2648,17 @@ export interface MultiremiProjectSearchResult extends MultiremiProject {
   matchedSnippet?: string;
 }
 
-// ─── Issue sessions ──────────────────────────────────────────────────────────────────────────────
+// ─── Sessions ────────────────────────────────────────────────────────────────────────────────────
+// Sessions are core product entities owned by a Chat. Issue is an optional
+// work-management projection on a Session (for example, from an Issue entry
+// point or a validated Feishu Issue topic); it is not a generic Chat binding.
+// `IssueSession` names below remain compatibility aliases for the former
+// issue-nested API.
 
-export type MultiremiIssueSessionStatus = "active" | "archived";
+export type MultiremiSessionStatus = "active" | "archived";
+
+/** @deprecated Use `MultiremiSessionStatus`. */
+export type MultiremiIssueSessionStatus = MultiremiSessionStatus;
 
 export type MultiremiIssueSessionInheritMode = "none" | "snapshot" | "follow";
 
@@ -2359,7 +2666,7 @@ export type MultiremiSessionParticipantType = "agent" | "member";
 
 export type MultiremiSessionProjectionMode = "bootstrap" | "delta" | "inherited_delta";
 
-export interface MultiremiIssueSession {
+export interface MultiremiSession {
   /** Opt-in detached, read-only code from the parent workspace. */
   withCode?: boolean;
   with_code?: boolean;
@@ -2367,12 +2674,19 @@ export interface MultiremiIssueSession {
   codeRuntimeId?: string | null;
   code_runtime_id?: string | null;
   id: string;
-  issueId: string;
-  issue_id?: string;
+  /** Exactly one owner: a Chat, or an Issue when chatId is null. */
+  ownerType: "chat" | "issue";
+  ownerId: string;
+  /** Owning Chat, or null for an Issue-owned Session. */
+  chatId: string | null;
+  chat_id?: string | null;
+  /** Issue owner when chatId is null; optional work-management projection otherwise. */
+  issueId: string | null;
+  issue_id?: string | null;
   workspaceId: string;
   workspace_id?: string;
   title: string;
-  status: MultiremiIssueSessionStatus;
+  status: MultiremiSessionStatus;
   isDefault: boolean;
   is_default?: boolean;
   holdsWorkspace: boolean;
@@ -2396,6 +2710,9 @@ export interface MultiremiIssueSession {
   updatedAt: string;
   updated_at?: string;
 }
+
+/** @deprecated Use `MultiremiSession`. */
+export type MultiremiIssueSession = MultiremiSession;
 
 /** On-demand diagnostics for the latest task with a recorded inherited projection. */
 export interface MultiremiSessionInheritedContext {
@@ -2492,8 +2809,10 @@ export interface MultiremiSessionAgentLane {
 
 export interface MultiremiSessionResult {
   id: string;
-  issueId: string;
-  issue_id?: string;
+  chatId: string | null;
+  chat_id?: string | null;
+  issueId: string | null;
+  issue_id?: string | null;
   sourceSessionId: string;
   source_session_id?: string;
   title: string;
@@ -2532,12 +2851,12 @@ export interface MultiremiSessionProjection {
   inherited_session_projection?: MultiremiSessionProjection | null;
 }
 
-export interface CreateIssueSessionInput {
+export interface CreateSessionInput {
   withCode?: boolean;
   with_code?: boolean;
   id?: string;
-  issueId?: string;
-  issue_id?: string;
+  chatId?: string;
+  chat_id?: string;
   title?: string;
   createdByType?: string;
   created_by_type?: string;
@@ -2554,11 +2873,17 @@ export interface CreateIssueSessionInput {
   inherit_mode?: MultiremiIssueSessionInheritMode;
 }
 
-export interface UpdateIssueSessionInput {
+/** @deprecated Use `CreateSessionInput`. */
+export type CreateIssueSessionInput = CreateSessionInput;
+
+export interface UpdateSessionInput {
   title?: string;
-  status?: MultiremiIssueSessionStatus;
+  status?: MultiremiSessionStatus;
   summary?: string | null;
 }
+
+/** @deprecated Use `UpdateSessionInput`. */
+export type UpdateIssueSessionInput = UpdateSessionInput;
 
 export interface AddSessionParticipantInput {
   participantType?: MultiremiSessionParticipantType;
@@ -2621,6 +2946,9 @@ export interface MultiremiInboxItem {
   workspace_id?: string;
   issueId: string | null;
   issue_id?: string | null;
+  issue_parent_id?: string | null;
+  issue_parent_key?: string | null;
+  issue_parent_title?: string | null;
   memberId: string;
   member_id?: string;
   recipientType: string;
@@ -3153,6 +3481,26 @@ export interface MultiremiKnowledgeSubmission {
   updatedAt: string;
 }
 
+/**
+ * Submission as it appears in a list page (MUL-386 C.2).
+ *
+ * The list route deliberately stops reading `body` and `patch`: 100 raw bodies
+ * plus patches were 11.8–14 MB of `db_bytes` per request. `bodyExcerpt` is the
+ * SQL-side prefix that keeps the one-line list preview working; the full text is
+ * fetched per id when a row is actually opened.
+ */
+export interface MultiremiKnowledgeSubmissionListItem
+  extends Omit<MultiremiKnowledgeSubmission, "body" | "patch"> {
+  bodyExcerpt: string;
+}
+
+/** Id/title/path only — the fields an `artifact` summary in a run list uses. */
+export interface MultiremiKnowledgeDocSummary {
+  id: string;
+  title: string;
+  path: string;
+}
+
 export interface MultiremiKnowledgeCompilationRun {
   id: string;
   workspaceId: string;
@@ -3175,6 +3523,8 @@ export interface MultiremiKnowledgeSubmissionListInput {
   repositoryId?: string | null;
   scope?: string | null;
   status?: string | null;
+  /** Literal, case-insensitive substring match over body/id/path/slug/type/scope. */
+  q?: string | null;
   cursor?: string | null;
   limit?: number | null;
 }
@@ -3202,6 +3552,16 @@ export interface MultiremiKnowledgeCompilationRunSource {
   metadata: Record<string, unknown>;
   createdAt: string;
 }
+
+/**
+ * Run source without `metadata` (MUL-386 C.2).
+ *
+ * `metadata` is arbitrary JSON (SCM payloads with file lists); the runs list
+ * shipped up to 13.8 MB of it for 100 runs. Only the single-run route returns it.
+ */
+export type MultiremiKnowledgeCompilationRunSourceListItem =
+  Omit<MultiremiKnowledgeCompilationRunSource, "metadata">;
+
 
 export interface MultiremiKnowledgeCompilationOutput {
   id: string;
@@ -3711,8 +4071,8 @@ export type MultiremiSystemEventStatus = "pending" | "processing" | "processed" 
 export interface MultiremiSystemEvent {
   id: string;
   workspaceId: string;
-  resource: "issue" | "feishu_source";
-  event: "status_changed" | "messages_ingested";
+  resource: "issue" | "feishu_source" | "issue_comment";
+  event: "status_changed" | "messages_ingested" | "dependency_auto_start_check" | "comment_dispatch" | "trigger_comment_changed";
   resourceId: string;
   projectId: string | null;
   payload: Record<string, unknown>;
@@ -3726,6 +4086,11 @@ export interface MultiremiSystemEvent {
 }
 
 export interface MultiremiAutopilot {
+  /** Server-delivered run report; configuring it requires a human operator. Null clears it. */
+  deliveryChatSessionId?: string | null;
+  delivery_chat_session_id?: string | null;
+  /** Server-owned authorizing workspace operator; never trusted from API input. */
+  deliveryAuthorizedBy?: string | null;
   id: string;
   workspaceId: string;
   workspace_id?: string;
@@ -3809,6 +4174,8 @@ export interface MultiremiAutopilotRun {
   triggerId: string | null;
   eventId: string | null;
   issueSessionId: string | null;
+  /** Chat opened for a `run_only` run. */
+  chatSessionId: string | null;
   triggeredAt: string;
   completedAt: string | null;
   failureReason: string | null;
@@ -3818,8 +4185,17 @@ export interface MultiremiAutopilotRun {
 }
 
 export interface CreateAutopilotInput {
+  /** Server-delivered run report; configuring it requires a human operator. Null clears it. */
+  deliveryChatSessionId?: string | null;
+  delivery_chat_session_id?: string | null;
+  /** Server-owned authorizing workspace operator; never trusted from API input. */
+  deliveryAuthorizedBy?: string | null;
   id?: string;
   title: string;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsible_member_id?: string | null;
   description?: string | null;
   projectId?: string | null;
   project_id?: string | null;
@@ -3896,7 +4272,16 @@ export interface UpdateAutopilotTriggerInput {
 }
 
 export interface UpdateAutopilotInput {
+  /** Server-delivered run report; configuring it requires a human operator. Null clears it. */
+  deliveryChatSessionId?: string | null;
+  delivery_chat_session_id?: string | null;
+  /** Server-owned authorizing workspace operator; never trusted from API input. */
+  deliveryAuthorizedBy?: string | null;
   title?: string;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
+  responsible_member_id?: string | null;
   description?: string | null;
   projectId?: string | null;
   assigneeType?: MultiremiAutopilotAssigneeType;
@@ -4034,7 +4419,20 @@ export interface ResolvedBotMenuUserConfig {
 
 export interface ResolvedBotMenuConfig {
   default?: BotMenuItemConfig[];
+  /** Legacy personalized menus; new control-plane publishes only use clearUsers. */
   users?: ResolvedBotMenuUserConfig[];
+  clearUsers?: Array<{ userId: string; userIdType: BotMenuUserIdType }>;
+  unresolvedLegacyTargetCount?: number;
+  target?: BotMenuPublishTarget;
+}
+
+export const BOT_MENU_PROTOCOL_VERSION = 2;
+
+export interface BotMenuPublishTarget {
+  botId: string;
+  appId: string;
+  domain: string;
+  revision: number;
 }
 
 export type MultiremiBotMenuPublishRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
@@ -4043,12 +4441,15 @@ export interface BotMenuPublishResult {
   dryRun: boolean;
   defaultPublished: boolean;
   userMenuCount: number;
+  clearedUserMenuCount?: number;
+  unresolvedLegacyTargetCount?: number;
 }
 
 export interface MultiremiBotMenuPublishRequest {
   id: string;
   runtimeId: string;
   workspaceId: string;
+  botId: string;
   config: ResolvedBotMenuConfig;
   dryRun: boolean;
   status: MultiremiBotMenuPublishRequestStatus;
@@ -4062,6 +4463,7 @@ export interface MultiremiBotMenuPublishRequest {
 
 export interface CreateBotMenuPublishRequestInput {
   workspaceId: string;
+  botId?: string;
   config: ResolvedBotMenuConfig;
   dryRun: boolean;
   createdBy?: string | null;
@@ -4076,13 +4478,37 @@ export interface ReportBotMenuPublishInput {
 /**
  * Workspace Feishu concierge bot (MUL-206).
  *
- * One bot per workspace: `multiremi_feishu_bot_configs` is keyed by workspace
+ * Multiple bots per workspace: `multiremi_feishu_bot_configs` is keyed by workspace and bot
  * so the control plane, not a daemon machine's environment, owns which Agent
  * answers Feishu messages and which Runtime hosts the connector.
  */
 
 /** Capability a Runtime must advertise before it can be selected to host the bot. */
 export const FEISHU_CONCIERGE_CONFIG_CAPABILITY = "feishu_concierge_config_v1";
+
+/**
+ * Metadata flag a bot host sets when it can render server-built decision cards
+ * (MUL-407). The control plane only writes a `decision_card` delivery for a host
+ * that reports it, so an older daemon keeps the previous "wake a relay Agent"
+ * behavior until it is upgraded.
+ */
+export const FEISHU_DECISION_CARD_CAPABILITY = "feishu_decision_card";
+
+/** Heartbeat field carrying {@link FEISHU_DECISION_CARD_CAPABILITY}. */
+export const FEISHU_DECISION_CARD_PROTOCOL_VERSION = 1;
+
+/**
+ * Metadata flag an Issue topic's bot host sets when it can render and answer
+ * decision cards (MUL-412). Human requests and decisions share the card
+ * pipeline but not this flag: a host that predates decisions keeps sending
+ * human-request cards while the control plane writes no decision delivery for
+ * it, so an escalation stays on the web workbench instead of becoming a card
+ * nobody can answer.
+ */
+export const FEISHU_ISSUE_DECISION_CARD_CAPABILITY = "feishu_issue_decision_card";
+
+/** Heartbeat field carrying {@link FEISHU_ISSUE_DECISION_CARD_CAPABILITY}. */
+export const FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION = 1;
 
 /** Protocol version a daemon reports in register/heartbeat when it can host the bot. */
 export const FEISHU_CONCIERGE_PROTOCOL_VERSION = 1;
@@ -4114,12 +4540,63 @@ export interface IssueTopicConfig {
   notifyOpenId?: string;
 }
 
+/** Static validation details for a stored Issue topic configuration. */
+export interface IssueTopicConfigInvalid {
+  code: "issue_topic_config_invalid";
+  message: string;
+}
+
 export interface FeishuBotOutboundMention {
   mode: IssueTopicNotifyMode;
   openId?: string;
   /** Omitted until prepared; null means a deliberate no-mention outcome. */
   resolvedOpenId?: string | null;
 }
+
+/**
+ * Feishu outbound lanes (MUL-407 / E5). The human-request lifecycle feeds only
+ * these; MUL-403 replaces the event source (Live Hub subscription) without
+ * changing the kinds or the checkpoint fields.
+ */
+export type FeishuBotOutboundDeliveryKind =
+  | "cot"
+  | "interaction_card"
+  | "result_card"
+  | "receipt"
+  | "decision_card"
+  | "decision_card_patch"
+  | "decision_reminder";
+
+/**
+ * Lifecycle events a decision-card pipeline consumes, keyed by request id.
+ * Today the source is the request write plus bot-host polling; MUL-403 swaps in
+ * a subscription. Names are part of the interface with MUL-403.
+ */
+export type FeishuHumanRequestLifecycleEvent =
+  | "created"
+  | "reminder_due"
+  | "responded"
+  | "expired"
+  | "cancelled";
+
+/**
+ * Why a decision lane fell back to plain text (MUL-407). The first three mean
+ * "nobody could be identified as the person to ask", so the reminder must not
+ * @ anyone; `send_failed` keeps whatever recipient was already resolved.
+ */
+export type FeishuDecisionDegradeReason =
+  | "notify_none"
+  | "invalid_recipient"
+  | "unresolved_recipient"
+  | "send_failed";
+
+/** Reasons where no one was addressable, so a reminder must not @ anyone. */
+export const FEISHU_DECISION_NO_RECIPIENT_REASONS: readonly FeishuDecisionDegradeReason[] =
+  ["notify_none", "invalid_recipient", "unresolved_recipient"];
+
+/** Every reason a decision lane may report, accepted at the daemon boundary. */
+export const FEISHU_DECISION_DEGRADE_REASONS: readonly FeishuDecisionDegradeReason[] =
+  [...FEISHU_DECISION_NO_RECIPIENT_REASONS, "send_failed"];
 
 /** What the control plane wants the selected Runtime to do with the connector. */
 export type FeishuBotDesiredState = "running" | "stopped";
@@ -4130,15 +4607,24 @@ export type FeishuBotRuntimeState = "stopped" | "starting" | "online" | "failed"
 export type FeishuBotOutboundBodyOrigin = "issue" | "agent";
 
 /** Delivery state only. Task messages and human responses remain authoritative. */
+/** Native CoT renderers, oldest first: `semantic_v1` read fragment events, `items_v1` reads turn + items. */
+export type FeishuCotPresentation = "semantic_v1" | "items_v1";
+
 export interface FeishuPresentationCheckpoint {
+  /** Invocation IDs whose native START is deferred until display arguments arrive. */
+  deferredToolIds?: string[];
   version: "native_cot_v1";
   startedAt: number;
   throughSeq: number;
   interactionOpenId?: string;
   cot?: {
     status: "creating" | "active" | "finished" | "disabled";
-    /** Keep event IDs/layout from different renderers out of the same CoT. */
-    presentation?: "semantic_v1";
+    /**
+     * Keep event IDs/layout from different renderers out of the same CoT.
+     * `items_v1` is the turn + items renderer; an active CoT with any other tag
+     * (or none) belongs to an earlier renderer and is closed once on resume.
+     */
+    presentation?: FeishuCotPresentation;
     cotId?: string;
     messageId?: string;
     /** Set before a write, cleared after its acknowledgement is checkpointed. */
@@ -4167,7 +4653,7 @@ export interface MultiremiFeishuBotOutboundDelivery {
   body: string;
   bodyOrigin: FeishuBotOutboundBodyOrigin;
   body_origin?: FeishuBotOutboundBodyOrigin;
-  /** Stable across retries so Feishu can deduplicate send-success/ack-failure. */
+  /** Base delivery key. Question cards derive a key per rotated credential. */
   idempotencyKey: string;
   idempotency_key?: string;
   /** Present only for stream-capable daemons; absent on topic seed messages. */
@@ -4177,6 +4663,51 @@ export interface MultiremiFeishuBotOutboundDelivery {
   presentation?: FeishuPresentationCheckpoint;
   /** The requester, including in private chats where the final card needs no @. */
   interactionOpenId?: string;
+  /**
+   * What the host should do with this delivery. Absent means the
+   * legacy behavior: text for a topic seed, a Task stream when `taskId` is set.
+   * `decision_card` carries a server-built card in `body` and posts it as a
+   * proactive thread reply; `decision_card_patch` edits the message named by
+   * `targetMessageId`; `decision_reminder` carries a rotated card and text nudge.
+   * C5 adds independent CoT, interaction, result and receipt handlers.
+   */
+  kind?: FeishuBotOutboundDeliveryKind;
+  /** A receipt owns exactly one original inbound message and state transition. */
+  receiptState?: "received" | "completed" | "failed";
+  /** Set on every decision-card lane so the host can poll the request. */
+  humanRequestId?: string;
+  human_request_id?: string;
+  /**
+   * The Task that asked. The host needs it to read and answer the request over
+   * the existing task-scoped routes, including after it restarts and has to
+   * route a click without any per-message registration.
+   */
+  humanRequestTaskId?: string;
+  human_request_task_id?: string;
+  /** Card patch/reminder target or the original inbound message a receipt updates. */
+  targetMessageId?: string;
+  target_message_id?: string;
+  /**
+   * Set when a decision lane could not address the person who was asked
+   * (MUL-407). The host then sends `body` as plain text instead of rendering a
+   * card, and the control plane skips both the terminal patch and the reminder
+   * mention for this request.
+   */
+  degraded?: FeishuDecisionDegradeReason;
+  degradeReason?: FeishuDecisionDegradeReason;
+  /** Reminder deadline for `decision_card` / `decision_reminder`. */
+  expiresAt?: string | null;
+  expires_at?: string | null;
+  /**
+   * Set on every delivery of an E4 issue decision's card lane (MUL-412). A
+   * decision has no deadline, so `expires_at` stays null for these rows; the
+   * one reminder is scheduled off the decision row's own `reminder_at`.
+   */
+  decisionId?: string;
+  decision_id?: string;
+  /** The Issue the decision hangs on — the one whose topic carries the card. */
+  decisionIssueId?: string;
+  decision_issue_id?: string;
 }
 
 /**
@@ -4206,6 +4737,8 @@ export type FeishuBotErrorCode =
 
 /** Server-side config row. Secrets live only in the `*Encrypted` fields. */
 export interface MultiremiFeishuBotConfig {
+  botId: string;
+  name: string;
   workspaceId: string;
   agentId: string;
   runtimeId: string;
@@ -4213,6 +4746,8 @@ export interface MultiremiFeishuBotConfig {
   domain: FeishuBotDomain;
   enabled: boolean;
   senderAccessPolicy: "agent" | "allowlist";
+  /** Member who answers questions from Feishu transport Chats without an Issue; never an Issue creation requirement. */
+  responsibleMemberId?: string | null;
   /** Bumped on every mutation; daemons refetch when their applied revision lags. */
   revision: number;
   hasAppSecret: boolean;
@@ -4233,6 +4768,10 @@ export interface MultiremiFeishuBotConfig {
  * short hint; the plaintext never leaves the server.
  */
 export interface FeishuBotConfigView {
+  bot_id?: string;
+  name?: string;
+  /** Member who answers questions from Feishu transport Chats without an Issue. */
+  responsible_member_id?: string | null;
   configured: boolean;
   workspace_id: string;
   agent_id: string | null;
@@ -4295,12 +4834,15 @@ export interface FeishuBotStatusView {
 export type FeishuBotSecretOp = "keep" | "set" | "clear";
 
 export interface UpsertFeishuBotConfigInput {
+  name?: string;
   agentId: string;
   runtimeId: string;
   appId: string;
   domain: FeishuBotDomain;
   enabled: boolean;
   senderAccessPolicy?: "agent" | "allowlist";
+  /** Member who answers questions from Feishu transport Chats without an Issue. */
+  responsibleMemberId?: string | null;
   appSecretOp: FeishuBotSecretOp;
   appSecret?: string;
   actor?: string | null;
@@ -4308,6 +4850,7 @@ export interface UpsertFeishuBotConfigInput {
 
 /** Per-Runtime reported state, used to derive status and detect double-runs. */
 export interface MultiremiFeishuBotRuntimeStatus {
+  releasePending?: boolean;
   workspaceId: string;
   runtimeId: string;
   appliedRevision: number;
@@ -4344,6 +4887,10 @@ export interface MultiremiFeishuBotDirective {
 
 /** Runtime-scoped payload returned to the daemon. Contains decrypted secrets. */
 export interface MultiremiFeishuBotDaemonConfig {
+  /** Existing bot-scoped bindings/routes only; unseen chats are not discovered. */
+  recovery_chats?: Array<{ chat_id: string; chat_type: "p2p" | "group" }>;
+  /** Older control planes omit this for the original bot. */
+  bot_id?: string;
   workspace_id: string;
   runtime_id: string;
   agent_id: string;
@@ -4515,6 +5062,7 @@ export interface FeishuBotTestResult {
 }
 
 export type FeishuBotAuditAction =
+  | "receipt_failed"
   | "configured"
   | "updated"
   | "deleted"
@@ -4541,17 +5089,20 @@ export interface MultiremiFeishuBotAuditEntry {
   createdAt: string;
 }
 
+/** ADR 0023: the workspace's own prompt text, one setting; Remi's rules are not part of it. */
 export interface MultiremiPromptSettings {
-  bootstrapPrompt: string;
-  deltaPrompt: string;
+  prompt: string;
   revision: number;
   updatedAt: string | null;
   updatedBy: string | null;
 }
 
 export interface UpdateMultiremiPromptSettingsInput {
+  prompt?: string;
+  /** Deprecated: clients from before ADR 0023; stored merged with `delta_prompt` into `prompt`. */
   bootstrapPrompt?: string;
   bootstrap_prompt?: string;
+  /** Deprecated: see `bootstrap_prompt`. */
   deltaPrompt?: string;
   delta_prompt?: string;
   expectedRevision?: number;
@@ -4757,6 +5308,8 @@ export interface MultiremiChatSession {
   unreadSince: string | null;
   hasUnread: boolean;
   pinned: boolean;
+  /** Set for Chats opened by an automation run. */
+  origin: { autopilot_id: string; run_id: string } | null;
   unreadCount: number;
   lastMessage: { content: string; role: MultiremiChatMessageRole; createdAt: string } | null;
   createdAt: string;
@@ -4798,6 +5351,7 @@ export interface UpdateChatSessionInput {
 export interface SendChatMessageInput {
   body?: string | null;
   content?: string | null;
+  client_id?: string;
   attachmentIds?: string[];
   attachment_ids?: string[];
   /** Server-internal creator lineage. */
@@ -5296,9 +5850,7 @@ export interface MultiremiUsageDaily {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  // Pre-0.2.49 ACP bridges only reported the context-occupancy total, so
-  // historical rows carry totalTokens with zero splits; keep it in the
-  // aggregate so that history is not silently erased.
+  /** Canonical actual input/output/cache/unsplit sum; legacy totals remain audit evidence. */
   totalTokens: number;
   taskCount: number;
 }
@@ -5364,7 +5916,18 @@ export interface MultiremiAgentActivityBucket {
 
 // ─── Platform lifecycle ─────────────────────────────────────────────────────
 
-export type MultiremiPlatformDeploymentDriver = "systemd_release" | "docker_compose";
+export type MultiremiPlatformDeploymentDriver = "systemd_release" | "docker_compose" | "local_profile";
+
+/** Execution mode reported by the updater; changing a UI selection cannot change deployment topology. */
+export type MultiremiPlatformUpdateMode = "images" | "host_application" | "internal_application" | "systemd_release";
+
+export interface MultiremiPlatformSourceCapabilities {
+  url: string;
+  manifestUrl: string | null;
+  /** Artifact availability only. Host/runtime and data compatibility still require preflight. */
+  modes: Array<{ mode: MultiremiPlatformUpdateMode; available: boolean; missing: string[] }>;
+  error: string | null;
+}
 
 export type MultiremiPlatformOperationKind =
   | "check_updates"
@@ -5377,6 +5940,7 @@ export type MultiremiPlatformOperationStatus =
   | "preparing"
   | "pulling"
   | "draining"
+  | "backing_up"
   | "switching"
   | "restarting"
   | "verifying"
@@ -5429,6 +5993,8 @@ export interface MultiremiPlatformService {
 }
 
 export interface MultiremiPlatformRelease {
+  /** Migration-source identity; application bundles also declare and rehearse backward compatibility. */
+  dataSchema?: string | null;
   version: string;
   ref: string;
   publishedAt: string | null;
@@ -5440,13 +6006,15 @@ export interface MultiremiPlatformRelease {
 
 export interface MultiremiPlatformOperation {
   id: string;
+  /** Caller-supplied retry key, scoped to requestedBy. */
+  requestId?: string | null;
   kind: MultiremiPlatformOperationKind;
   status: MultiremiPlatformOperationStatus;
   driver: MultiremiPlatformDeploymentDriver;
   targetVersion: string | null;
   targetRef: string | null;
   targetManifest: Record<string, unknown>;
-  progress: Record<string, unknown>;
+  progress: Record<string, unknown> & { failure?: PlatformSchemaContractFailure };
   requestedBy: string;
   output: string | null;
   error: string | null;
@@ -5481,6 +6049,10 @@ export interface MultiremiPlatformAutoUpdateSchedule {
 }
 
 export interface MultiremiPlatformStatus {
+  updateMode?: MultiremiPlatformUpdateMode | null;
+  releaseFeedUrl?: string | null;
+  defaultReleaseFeedUrl?: string | null;
+  preflight?: MultiremiPlatformPreflight | null;
   canManage: boolean;
   driver: MultiremiPlatformDeploymentDriver;
   currentRelease: MultiremiPlatformRelease | null;
@@ -5499,8 +6071,19 @@ export interface MultiremiPlatformStatus {
   recentReleases: MultiremiPlatformRelease[];
 }
 
+export interface MultiremiPlatformPreflight {
+  source?: MultiremiPlatformSourceCapabilities | null;
+  ready: boolean;
+  checkedAt: string;
+  platform: string;
+  arch: string;
+  checks: Array<{ code: string; ok: boolean; message: string }>;
+}
+
 export interface CreatePlatformOperationInput {
   kind: MultiremiPlatformOperationKind;
+  /** Makes repeated create requests return the same operation. */
+  requestId?: string | null;
   targetVersion?: string | null;
   targetRef?: string | null;
   targetManifest?: Record<string, unknown>;
@@ -5508,7 +6091,7 @@ export interface CreatePlatformOperationInput {
 
 export interface ReportPlatformOperationInput {
   status: MultiremiPlatformOperationStatus;
-  progress?: Record<string, unknown>;
+  progress?: Record<string, unknown> & { failure?: PlatformSchemaContractFailure };
   output?: string | null;
   error?: string | null;
   previousRelease?: MultiremiPlatformRelease | null;
@@ -5533,6 +6116,14 @@ export interface MultiremiMetricCounter {
 
 export interface MultiremiExecutionGroup {
   id: string;
+  name: string;
+  description: string;
+  profileId: string | null;
+  profileRevision: number | null;
+  endpointId: string | null;
+  connectionMode: "legacy" | "native" | "endpoint";
+  modelPolicy: import("./execution-endpoint.js").ExecutionModelPolicy;
+  managed: boolean;
   workspaceId: string;
   provider: string;
   machineId: string | null;

@@ -1,8 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { MultiremiTaskHumanRequest } from "@multiremi/contracts/types.js";
-import { buildTaskInteractionCard, handleTaskInteractionEvent, interactionMarker, parseQuestionAnswers, registerTaskInteraction } from "@connectors/feishu/task-interaction.js";
+import { buildTaskInteractionCard, handleTaskInteractionEvent, interactionMarker, parseQuestionAnswers } from "@connectors/feishu/task-interaction.js";
+import { buildTaskInteractionCard as buildSharedCard } from "@shared/feishu-task-card.js";
+import { registerTaskInteractionFixture as registerTaskInteraction, resetQuestionCardHostFixtures } from "./question-card-host-fixture.js";
+afterEach(resetQuestionCardHostFixtures);
 import { FeishuTaskPresentation } from "@connectors/feishu/task-presentation.js";
-import { nativeHarness, taskEvent, completed } from "./feishu-native-harness.js";
+import { item, nativeHarness, snapshot, started, terminal, turnStarted } from "./feishu-native-harness.js";
 
 const questions = [
   { question: "Which features?", multiSelect: true, options: [{ label: "A", description: "First" }, { label: "B" }] },
@@ -18,7 +21,7 @@ function request(kind: "question" | "permission" = "question"): MultiremiTaskHum
 }
 const action = (name: string, form_value?: Record<string, unknown>, operator = "ou_owner") => ({
   operator: { open_id: operator }, context: { open_chat_id: "oc_group", open_message_id: "om_request" },
-  action: { tag: "button", name, ...(form_value ? { form_value } : {}) },
+  action: { tag: "button", name, value: { t: "card-token-fixture", message_id: "hr_test" }, ...(form_value ? { form_value } : {}) },
 });
 const answered = (r: MultiremiTaskHumanRequest, response: Record<string, unknown>): MultiremiTaskHumanRequest =>
   ({ ...r, status: "responded", response, respondedAt: new Date().toISOString(), respondedBy: "feishu" });
@@ -71,6 +74,38 @@ describe("standalone Task interactions", () => {
     expect(() => parseQuestionAnswers(questions, { q0_option0: "not-a-boolean" })).toThrow("选项值无效");
   });
 
+  for (const text of ["a", "中"]) {
+    it(`MUL-493 B5 parser accepts 1000 ${text === "a" ? "ASCII" : "Chinese"} characters and blocks character 1001`, () => {
+      const custom = text.repeat(1000);
+      expect(parseQuestionAnswers(questions, { q0_custom: custom, q1_custom: { value: custom } }))
+        .toEqual({ "Which features?": `自定义回答：${custom}`, "Which environment?": `自定义回答：${custom}` });
+      expect(() => parseQuestionAnswers(questions, { q0_custom: custom + text, q1_option0: true })).toThrow("问题 1 的自定义回答过长");
+      expect(() => parseQuestionAnswers(questions, { q0_option0: true, q1_custom: { content: custom + text } })).toThrow("问题 2 的自定义回答过长");
+    });
+  }
+
+  for (const length of [1000, 1001]) {
+    it(`MUL-493 B5 callback ${length === 1000 ? "persists 1000 characters" : "rejects 1001 characters without consuming the question"}`, async () => {
+      const r = request();
+      const writes: Record<string, unknown>[] = [];
+      const registration = registerTaskInteraction({ appId: "cli_test", chatId: "oc_group", messageId: "om_request", recipientOpenId: "ou_owner", request: r,
+        submit: async response => { writes.push(response); return answered(r, response); } });
+      try {
+        const custom = "a".repeat(length);
+        const result = await handleTaskInteractionEvent("cli_test", action(interactionMarker(r.taskId, r.id), { q0_custom: custom, q1_option0: true }));
+        if (length === 1000) {
+          expect((result as any).toast.type).toBe("success");
+          expect(writes).toEqual([{ answers: { "Which features?": `自定义回答：${custom}`, "Which environment?": "Staging" } }]);
+          expect(registration.current()?.status).toBe("responded");
+        } else {
+          expect((result as any).toast).toEqual({ type: "error", content: "问题 1 的自定义回答过长" });
+          expect(writes).toEqual([]);
+          expect(registration.current()).toBeUndefined();
+        }
+      } finally { registration.dispose(); }
+    });
+  }
+
   for (const [choice, selected] of [[0, "allow"], [1, "deny"]] as const) {
     it(`persists ${selected} on the original request before returning a non-interactive receipt`, async () => {
       const r = request("permission");
@@ -90,21 +125,20 @@ describe("standalone Task interactions", () => {
     });
   }
 
-  it("rejects another operator, chat, message, app or button without resolving the Task", async () => {
+  it("forwards operator checks to the server and rejects another app or button", async () => {
     const r = request("permission"); let writes = 0;
     const registration = registerTaskInteraction({ appId: "cli_test", chatId: "oc_group", messageId: "om_request", recipientOpenId: "ou_owner", request: r,
       submit: async response => { writes++; return answered(r, response); } });
     try {
       const name = `${interactionMarker(r.taskId, r.id)}_o0`;
-      const events = [action(name, undefined, "ou_other"), { ...action(name), context: { open_chat_id: "oc_other", open_message_id: "om_request" } },
-        { ...action(name), context: { open_chat_id: "oc_group", open_message_id: "om_forwarded" } }, action("fr_invalid_o0")];
+      const events = [action(name, undefined, "ou_other"), action("fr_invalid_o0")];
       for (const event of events) expect((await handleTaskInteractionEvent("cli_test", event) as any).toast.type).not.toBe("success");
       expect((await handleTaskInteractionEvent("cli_other", action(name)) as any).toast.type).not.toBe("success");
       expect(writes).toBe(0);
     } finally { registration.dispose(); }
   });
 
-  it("two simultaneous decisions commit only the first one", async () => {
+  it("two simultaneous callbacks reach server CAS and only the first commits", async () => {
     const r = request("permission"); const writes: any[] = [];
     let resolve!: (request: MultiremiTaskHumanRequest) => void;
     const registration = registerTaskInteraction({ appId: "cli_test", chatId: "oc_group", messageId: "om_request", recipientOpenId: "ou_owner", request: r,
@@ -112,9 +146,11 @@ describe("standalone Task interactions", () => {
     try {
       const first = handleTaskInteractionEvent("cli_test", action(`${interactionMarker(r.taskId, r.id)}_o0`));
       const second = handleTaskInteractionEvent("cli_test", action(`${interactionMarker(r.taskId, r.id)}_o1`));
+      await Bun.sleep(1);
       expect(writes).toEqual([{ option_id: "allow" }]);
       resolve(answered(r, writes[0]));
-      expect(await first).toEqual(await second);
+      expect((await first)?.toast).toMatchObject({ type: "success" });
+      expect((await second)?.toast).toMatchObject({ type: "info", content: "请求已结束" });
     } finally { registration.dispose(); }
   });
 
@@ -123,11 +159,11 @@ describe("standalone Task interactions", () => {
       const h = nativeHarness();
       const r = { ...request(), status, response: status === "responded" ? { answers: { "Which features?": "A", "Which environment?": "Staging" } } : null };
       const presentation = new FeishuTaskPresentation(h.client as any, "oc_group", {
-        taskId: r.taskId, getHumanRequest: async () => r, respondHumanRequest: async () => { throw new Error("must not respond"); },
+        taskId: r.taskId, getHumanRequest: async () => r,
       }, { appId: "cli_test", idempotencyKey: "delivery", checkpoint: {
         version: "native_cot_v1", startedAt: Date.now(), throughSeq: 0, interactions: { hr_test: { messageId: "om_existing" } },
       }, save: h.save });
-      async function* stream() { yield taskEvent(1, "question_request", { input: { request_id: r.id } }); yield completed; }
+      async function* stream() { yield started(1, requestItem(r)); yield terminal; }
       await presentation.consume(stream());
       expect(h.calls.filter(c => c.operation === "patch")).toHaveLength(1);
       expect(h.calls[0]!.input.path.message_id).toBe("om_existing");
@@ -139,14 +175,15 @@ describe("standalone Task interactions", () => {
   it("restores the original pending card and submits all answers through its original Task", async () => {
     const h = nativeHarness();
     let r = request();
+    registerTaskInteraction({ appId: "cli_test", chatId: "oc_group", messageId: "om_request", recipientOpenId: "ou_owner", request: r,
+      submit: async response => { r = answered(r, response); return r; } });
     const presentation = new FeishuTaskPresentation(h.client as any, "oc_group", {
       taskId: r.taskId, getHumanRequest: async () => r,
-      respondHumanRequest: async (id, response) => { expect(id).toBe("hr_test"); r = answered(r, response); return r; },
     }, { appId: "cli_test", idempotencyKey: "delivery", checkpoint: {
       version: "native_cot_v1", startedAt: Date.now(), throughSeq: 0, interactionOpenId: "ou_owner",
       interactions: { hr_test: { messageId: "om_request" } },
     }, save: h.save });
-    async function* stream() { yield taskEvent(1, "question_request", { input: { request_id: r.id } }); yield completed; }
+    async function* stream() { yield started(1, requestItem(r)); yield terminal; }
     const running = presentation.consume(stream());
     await Bun.sleep(10);
     const response = await handleTaskInteractionEvent("cli_test", action(interactionMarker(r.taskId, r.id),
@@ -167,17 +204,23 @@ describe("standalone Task interactions", () => {
     expect(JSON.stringify(events)).not.toContain("<at ");
   });
 
-  it("finishes a saved native waiting step after restart without repeating the card or waiting announcement", async () => {
+  it.each((["permission", "question"] as const).flatMap(kind =>
+    [undefined, "responded"].map(receiptStatus => ({ kind, receiptStatus }))))(
+    "finishes a saved native waiting step after restart without repeating the card or waiting announcement (%j)", async ({ kind, receiptStatus }) => {
     const h = nativeHarness();
-    const r = answered(request("permission"), { option_id: "allow" });
+    const r = answered(request(kind), kind === "permission" ? { option_id: "allow" } : { answers: { "Which features?": "A" } });
     const presentation = new FeishuTaskPresentation(h.client as any, "oc_group", {
-      taskId: r.taskId, getHumanRequest: async () => r, respondHumanRequest: async () => { throw new Error("already answered"); },
+      taskId: r.taskId, getHumanRequest: async () => r,
     }, { appId: "cli_test", idempotencyKey: "delivery", save: h.save, checkpoint: {
       version: "native_cot_v1", startedAt: Date.now(), throughSeq: 1,
-      cot: { status: "active", presentation: "semantic_v1", cotId: "cot_1", messageId: "om_cot", runStarted: true },
-      interactions: { hr_test: { messageId: "om_request", waitingStarted: true } },
+      cot: { status: "active", presentation: "items_v1", cotId: "cot_1", messageId: "om_cot", runStarted: true },
+      interactions: { hr_test: { messageId: "om_request", waitingStarted: true, receiptStatus } },
     } });
-    async function* stream() { yield taskEvent(1, "permission_request", { input: { request_id: r.id } }); yield completed; }
+    async function* stream() {
+      yield started(1, requestItem(r));
+      yield started(1, requestItem(r));
+      yield terminal;
+    }
     await presentation.consume(stream());
     expect(h.events().filter(e => e.event_type === "STEP_STARTED")).toHaveLength(0);
     expect(h.events().filter(e => e.event_type === "STEP_FINISHED")).toHaveLength(1);
@@ -191,11 +234,12 @@ describe("standalone Task interactions", () => {
     const pending = new Promise<void>(resolve => { release = resolve; });
     h.client.request = async input => { blocked = true; await pending; return original(input); };
     let r = request("permission");
+    registerTaskInteraction({ appId: "cli_test", chatId: "oc_group", messageId: "om_1", recipientOpenId: "ou_owner", request: r,
+      submit: async response => { r = answered(r, response); return r; } });
     const presentation = new FeishuTaskPresentation(h.client as any, "oc_group", {
       taskId: r.taskId, getHumanRequest: async () => r,
-      respondHumanRequest: async (_id, response) => { r = answered(r, response); return r; },
     }, { appId: "cli_test", idempotencyKey: "delivery", mentionOpenId: "ou_owner", save: h.save });
-    async function* stream() { yield taskEvent(1, "permission_request", { input: { request_id: r.id } }); yield completed; }
+    async function* stream() { yield started(1, requestItem(r)); yield terminal; }
     const running = presentation.consume(stream());
     try {
       while (!blocked) await Bun.sleep(1);
@@ -211,16 +255,17 @@ describe("standalone Task interactions", () => {
   it("gives the request card, its receipt and the result card one shared session title", async () => {
     const h = nativeHarness();
     let r = request("permission");
+    registerTaskInteraction({ appId: "cli_test", chatId: "oc_group", messageId: "om_1", recipientOpenId: "ou_owner", request: r,
+      submit: async response => { r = answered(r, response); return r; } });
     const presentation = new FeishuTaskPresentation(h.client as any, "oc_group", {
       taskId: r.taskId, displayName: "小助手", sessionId: null, getHumanRequest: async () => r,
-      respondHumanRequest: async (_id, response) => { r = answered(r, response); return r; },
     }, { appId: "cli_test", idempotencyKey: "delivery", mentionOpenId: "ou_owner", save: h.save });
     async function* stream() {
-      yield taskEvent(1, "execution", { meta: { agentName: "小助手", provider: "claude" } });
+      yield turnStarted(1, { agent_name: "小助手", provider: "claude" });
       // The provider session is pinned mid-run, before the request card is sent.
-      yield { kind: "snapshot", snapshot: { ...(completed as any).snapshot, status: "running", result: null } } as typeof completed;
-      yield taskEvent(2, "permission_request", { input: { request_id: r.id } });
-      yield completed;
+      yield snapshot({ status: "running", result: null });
+      yield started(2, requestItem(r));
+      yield terminal;
     }
     const running = presentation.consume(stream());
     while (r.status === "pending") {
@@ -240,3 +285,55 @@ describe("standalone Task interactions", () => {
     expect(JSON.stringify(buildTaskInteractionCard(r, { receipt: true }))).not.toContain("<at ");
   });
 });
+
+describe("a request raised by a native subagent's child session (PR 5 §1.3)", () => {
+  // The shared body every request card is built from (connector, topic and proactive cards alike),
+  // with a fixed header. Captured from the builder before the prefix existed.
+  const PENDING = '{"schema":"2.0","header":{},"config":{"update_multi":true,"enable_forward":false,"width_mode":"default",'
+    + '"summary":{"content":"Remi · 操作审批"}},"body":{"padding":"12px 16px","elements":[{"tag":"markdown","content":"**Bash**"},'
+    + '{"tag":"collapsible_panel","expanded":true,"header":{"title":{"tag":"plain_text","content":"操作详情"}},'
+    + '"elements":[{"tag":"markdown","content":"{\\n  \\"command\\": \\"echo approved\\"\\n}"}]},'
+    + '{"tag":"form","name":"form_fr_3f08c9395e8e24797eee0b9a","elements":[{"tag":"column_set","flex_mode":"none","columns":['
+    + '{"tag":"column","width":"weighted","weight":1,"elements":[{"tag":"button","name":"fr_3f08c9395e8e24797eee0b9a_o0",'
+    + '"form_action_type":"submit","value":{"t":"tok","message_id":"hr_test"},"type":"default","width":"fill",'
+    + '"text":{"tag":"plain_text","content":"允许一次"}}]},{"tag":"column","width":"weighted","weight":1,"elements":['
+    + '{"tag":"button","name":"fr_3f08c9395e8e24797eee0b9a_o1","form_action_type":"submit","value":{"t":"tok","message_id":"hr_test"},'
+    + '"type":"danger","width":"fill","text":{"tag":"plain_text","content":"拒绝"}}]}]}]},'
+    + '{"tag":"markdown","content":"<at id=ou_owner></at>"}]}}';
+  const withSubagent = (subagent: unknown): MultiremiTaskHumanRequest => {
+    const r = request("permission");
+    return { ...r, payload: { ...r.payload, subagent } };
+  };
+  const shared = (r: MultiremiTaskHumanRequest, options: Partial<Parameters<typeof buildSharedCard>[1]> = { recipientOpenId: "ou_owner", token: "tok" }) =>
+    buildSharedCard(r, { header: {}, ...options }) as { body: { elements: Array<Record<string, unknown>> } };
+  /** The card without its first body element. */
+  const rest = (card: { body: { elements: unknown[] } }) => JSON.stringify({ ...card, body: { ...card.body, elements: card.body.elements.slice(1) } });
+
+  it("leaves a card byte-identical when the decision names no subagent", () => {
+    expect(JSON.stringify(shared(request("permission")))).toBe(PENDING);
+    // Older daemons send no field; a malformed or unnamed one is ignored the same way.
+    for (const subagent of [undefined, null, "sa:x", [], {}, { item_id: "sa:x" }, { item_id: "sa:x", name: "  " }, { name: 7 }]) {
+      expect(JSON.stringify(shared(withSubagent(subagent)))).toBe(PENDING);
+    }
+  });
+
+  it("names the subagent first, escaped like the card's other text, on the card and on its receipt", () => {
+    const r = withSubagent({ item_id: "sa:agent-1", name: " code*review\nbot " });
+    const card = shared(r);
+    expect(card.body.elements[0]).toEqual({ tag: "markdown", content: "子代理 code&#42;review bot 请求：" });
+    expect(rest(card)).toBe(PENDING);
+    const receipt = shared(answered(r, { option_id: "allow" }), { receipt: true });
+    expect(receipt.body.elements[0]).toEqual({ tag: "markdown", content: "子代理 code&#42;review bot 请求：" });
+    expect(rest(receipt)).toBe(JSON.stringify(shared(answered(request("permission"), { option_id: "allow" }), { receipt: true })));
+    // The connector's card keeps its own header around the same body.
+    const question = { ...request("question"), payload: { questions, subagent: { item_id: "sa:agent-1", name: "planner" } } };
+    const connector = buildTaskInteractionCard(question, { agentName: "Remi", recipientOpenId: "ou_owner" }) as any;
+    expect(connector.body.elements[0]).toEqual({ tag: "markdown", content: "子代理 planner 请求：" });
+    expect(connector.body.elements[1].tag).toBe("form");
+  });
+});
+
+/** The daemon's request item for `r`: keyed by its decision message in `message_id`. */
+function requestItem(r: MultiremiTaskHumanRequest) {
+  return item(r.kind, `${r.kind === "question" ? "q" : "perm"}:${r.id}`, { message_id: r.id });
+}

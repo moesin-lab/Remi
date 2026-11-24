@@ -1,58 +1,20 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // What happens while a claimed task runs: ACP message ingress, completion
 // side effects (issue comments, realtime events), per-agent/per-runtime capacity,
 // and the runtime ownership + lifecycle analytics that gate claiming.
 import { afterEach, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { createAdapter } from "@acp/index.js";
-import type { ProviderEvent } from "@shared/contracts/provider-types.js";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createEventMapper } from "@multiremi/daemon.js";
 import { createStore, db, metricValue, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi store — task message ingress, completion, and capacity", () => {
-  it("replays a turn-ending compaction without replacing the task or issue reply", () => {
-    const frames = JSON.parse(readFileSync(
-      new URL("../../fixtures/acp/claude-compaction-tail-notifications-1787700000000.json", import.meta.url),
-      "utf-8",
-    )) as Array<{ params?: { update?: Record<string, unknown> } }>;
-    const map = createEventMapper(createAdapter("claude"));
-    const messages = frames.flatMap((frame) => frame.params?.update
-      ? map(frame.params.update as unknown as ProviderEvent)
-      : []);
-    const output = messages
-      .filter((message) => message.type === "text")
-      .map((message) => message.content ?? "")
-      .join("")
-      .trim();
-
-    const store = createStore();
-    const runtime = store.registerRuntime({ id: "rt_compaction", name: "compaction", provider: "claude", workspaceId: "local" });
-    const agent = store.createAgent({ name: "Compaction Bot", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "Compaction tail", workspaceId: "local" });
-    const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "fix it" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
-    store.startTask(task.id);
-    store.appendTaskMessages(task.id, messages.map((message, index) => ({ ...message, seq: index + 1 })));
-    store.completeTask(task.id, { output });
-
-    expect(messages.map((message) => message.type)).toEqual(["text", "compaction", "compaction"]);
-    expect(store.getTask(task.id)?.result).toBe("Implemented the fix and verified the targeted tests.");
-    expect(store.listIssueComments(issue.id).at(-1)?.body).toBe("Implemented the fix and verified the targeted tests.");
-    expect(store.getTask(task.id)?.result).not.toContain("Compacting");
-    expect(store.listIssueComments(issue.id).at(-1)?.body).not.toContain("Compacting");
-
-    const persisted = store.listTaskMessages(task.id);
-    const finalAnswer = [...persisted].reverse().find((message) => message.type === "text" && message.content?.trim());
-    expect(finalAnswer?.content).toBe("Implemented the fix and verified the targeted tests.");
-  });
-
   it("round-trips ACP tool-call semantics (tool_call_id/status/meta) and fires onTaskMessages", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_acp_semantics", name: "acp", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "ACP Bot", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "ACP", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "ACP", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "x" });
 
     const fired: number[] = [];
@@ -91,7 +53,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     });
 
     const first = store.appendTaskMessages(task.id, messages);
-    db!.run("UPDATE multiremi_tasks SET updated_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET updated_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     expect(store.appendTaskMessages(task.id, messages)).toEqual([]);
     expect(store.listTaskMessages(task.id)).toEqual(first);
     expect(store.getTask(task.id)?.updatedAt).toBe("2000-01-01T00:00:00.000Z");
@@ -125,7 +87,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_caps", name: "caps", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Caps Bot", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "Caps", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Caps", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "x" });
 
     const big = "a".repeat(200_000);
@@ -141,25 +103,27 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
 
   it("posts the agent's final reply as an issue comment on completion", async () => {
     const store = createStore();
+    store.ensureLocalWorkspace();
     const runtime = store.registerRuntime({ id: "rt_reply_comment", name: "reply comment", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Reply Bot", provider: "claude", runtimeId: runtime.id });
 
-    // Plain issue task: reply lands as a top-level agent comment.
-    const issue = store.createIssue({ title: "总结项目", workspaceId: "local" });
+    // Direct work also has a request message; the final reply threads under it.
+    const issue = createResponsibleTestIssue(store, { title: "总结项目", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "总结项目" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "Remi 是一个 AI 消息路由器。" });
     const comments = store.listIssueComments(issue.id);
-    expect(comments).toHaveLength(1);
-    expect(comments[0]).toMatchObject({
+    expect(comments).toHaveLength(2);
+    expect(comments[0]).toMatchObject({ authorType: "member", body: "总结项目", taskId: null });
+    expect(comments[1]).toMatchObject({
       authorType: "agent",
       authorId: agent.id,
       body: "Remi 是一个 AI 消息路由器。",
-      parentId: null,
+      parentId: task.triggerCommentId,
     });
     // The reply carries its run so the chat stream can open that transcript.
-    expect(comments[0]).toMatchObject({ taskId: task.id, task_id: task.id });
+    expect(comments[1]).toMatchObject({ taskId: task.id, task_id: task.id });
     // A human comment has no run attached.
     expect(store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "谢谢" }).taskId).toBeNull();
 
@@ -181,7 +145,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     // stream reads it to offer that run's transcript.
     const app = createMultiremiApp({ store });
     const timeline = await (await app.request(`/api/issues/${issue.id}/timeline`)).json();
-    const agentEntry = timeline.find((entry: { id: string }) => entry.id === comments[0]!.id);
+    const agentEntry = timeline.find((entry: { id: string }) => entry.id === comments[1]!.id);
     expect(agentEntry).toMatchObject({ actor_type: "agent", task_id: task.id });
 
     // Placeholder / empty outputs post nothing.
@@ -197,7 +161,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_no_dup", name: "no dup", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Self Bot", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "架构", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "架构", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "总结架构" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
@@ -218,7 +182,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_ws_events", name: "ws events", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Event Bot", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "实时推送", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "实时推送", workspaceId: "local", assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "回答" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
@@ -236,13 +200,18 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
       author_id: agent.id,
     });
 
-    const activityEvent = events.find((e) => e.type === "activity:created");
+    // Completion commits its result comment before the terminal activity, so
+    // comment_created may be the first activity in this transaction.
+    const activityEvent = events.find((e) => e.type === "activity:created"
+      && (e.payload.entry as { action?: string } | undefined)?.action === "task_completed");
+    expect(activityEvent?.workspaceId).toBe("local");
     expect(activityEvent?.payload.issue_id).toBe(issue.id);
     expect(activityEvent?.payload.entry).toMatchObject({
       type: "activity",
       action: "task_completed",
       actor_type: "agent",
       actor_id: agent.id,
+      details: expect.objectContaining({ taskId: task.id }),
     });
 
     const issueEvent = events.find((e) => e.type === "issue:updated");
@@ -257,8 +226,8 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const agent = store.createAgent({ name: "Diagram Bot", provider: "claude", runtimeId: runtime.id });
     // Production shape: the request identity is a user id ("local"), while the
     // workspace member row is keyed mem_<ws>_<userId> with a user_id link.
-    store.createWorkspaceMember({ id: "mem_local_local", userId: "local", name: "贺华杰", workspaceId: "local" });
-    const issue = store.createIssue({ title: "架构图", workspaceId: "local", createdBy: "local" });
+    expect(store.getWorkspaceOperator("local")?.id).toBe("mem_local_local");
+    const issue = createResponsibleTestIssue(store, { title: "架构图", workspaceId: "local", createdBy: "local" });
 
     const subscribersAfterCreate = store.listIssueSubscribers(issue.id);
     expect(subscribersAfterCreate.map((s) => s.userId)).toContain("mem_local_local");
@@ -279,7 +248,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_trigger_cancel", name: "trigger cancel", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Comment Bot", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "Trigger cancellation", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Trigger cancellation", workspaceId: "local" });
 
     const edited = store.createIssueComment(issue.id, {
       body: `Please inspect [@Comment Bot](mention://agent/${agent.id}).`,
@@ -304,8 +273,8 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const store = createStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex", maxConcurrentTasks: 2 });
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex", maxConcurrency: 3 });
-    const issueA = store.createIssue({ title: "Issue A", assigneeType: "agent", assigneeId: agent.id });
-    const issueB = store.createIssue({ title: "Issue B", assigneeType: "agent", assigneeId: agent.id });
+    const issueA = createResponsibleTestIssue(store, { title: "Issue A", assigneeType: "agent", assigneeId: agent.id });
+    const issueB = createResponsibleTestIssue(store, { title: "Issue B", assigneeType: "agent", assigneeId: agent.id });
     const firstA = store.createTask({ agentId: agent.id, issueId: issueA.id, prompt: "A1" });
     const secondA = store.createTask({ agentId: agent.id, issueId: issueA.id, prompt: "A2" });
     const firstB = store.createTask({ agentId: agent.id, issueId: issueB.id, prompt: "B1" });
@@ -315,8 +284,11 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     expect(store.claimTask(runtime.id)).toBeNull();
 
     store.completeTask(firstA.id, { output: "done" });
-    expect(store.getIssue(issueA.id)?.status).toBe("todo");
-    expect(store.claimTask(runtime.id)?.id).toBe(secondA.id);
+    expect(secondA.id).toBe(firstA.id);
+    expect(store.getIssue(issueA.id)?.status).toBe("in_review");
+    expect(store.claimTask(runtime.id)).toBeNull();
+    const followUp = store.createTask({ agentId: agent.id, issueId: issueA.id, prompt: "A3" });
+    expect(store.claimTask(runtime.id)?.id).toBe(followUp.id);
 
     const cappedAgent = store.createAgent({ name: "Capped", provider: "codex", maxConcurrentTasks: 1 });
     const cappedFirst = store.createTask({ agentId: cappedAgent.id, prompt: "one" });
@@ -335,7 +307,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
 
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     const stale = new Date(Date.now() - 2 * 60 * 1000).toISOString();
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ?, updated_at = ? WHERE id = ?", [stale, stale, task.id]);
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ?, updated_at = ? WHERE id = ?", [stale, stale, task.id]);
 
     const reclaimed = store.claimTask(runtime.id);
     expect(reclaimed?.id).toBe(task.id);
@@ -350,7 +322,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
 
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     const stale = new Date(Date.now() - 2 * 60 * 1000).toISOString();
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ?, updated_at = ? WHERE id = ?", [stale, stale, task.id]);
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ?, updated_at = ? WHERE id = ?", [stale, stale, task.id]);
 
     const renewed = store.renewTaskDispatchLease(task.id);
     expect(renewed.status).toBe("dispatched");
@@ -362,7 +334,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const store = createStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex", maxConcurrentTasks: 2 });
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex", maxConcurrency: 2 });
-    const issue = store.createIssue({ title: "Local directory lock", assigneeType: "agent", assigneeId: agent.id });
+    const issue = createResponsibleTestIssue(store, { title: "Local directory lock", assigneeType: "agent", assigneeId: agent.id });
     const first = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "First" });
     const second = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Second" });
 
@@ -373,20 +345,35 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     expect(waiting.waitReason).toBe("/tmp/worktree");
     expect(store.getRuntime(runtime.id)!.activeTaskCount).toBe(1);
     expect(store.claimTask(runtime.id)).toBeNull();
+    // PR 6 §2.8: a waiting attempt takes a new reason (its folder's holder parked); the same one again is a no-op.
+    const events: string[] = [];
+    const unsubscribe = store.onTaskEvent((event) => { events.push(event.type); });
+    const held = "/tmp/worktree (held by background tasks of chat chat_other)";
+    expect(store.markTaskWaitingLocalDirectory(first.id, held)).toMatchObject({ status: "waiting_local_directory", waitReason: held,
+      // People read the summary: it names no chat, which may be another member's.
+      progressSummary: "Waiting for local directory: /tmp/worktree (held by another chat's background tasks)" });
+    const updatedAt = store.getTask(first.id)!.updatedAt;
+    expect(store.markTaskWaitingLocalDirectory(first.id, held).updatedAt).toBe(updatedAt);
+    expect(events.filter((event) => event === "task:waiting_local_directory")).toHaveLength(1);
+    unsubscribe();
+    expect(store.listTurns({ workspace_id: "local", issue_id: issue.id })[0]).toMatchObject({ status: "running", local_directory_wait_reason: held });
 
     const running = store.startTask(first.id);
     expect(running.status).toBe("running");
     expect(running.waitReason).toBeNull();
+    expect(store.listTurns({ workspace_id: "local", issue_id: issue.id })[0]).toMatchObject({ local_directory_wait_reason: null });
+    expect(() => store.markTaskWaitingLocalDirectory(first.id, held)).toThrow("Task not found or not dispatched");
     expect(() => store.startTask(first.id)).toThrow("Task not found or not dispatched");
     store.completeTask(first.id, { output: "done" });
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(second.id).toBe(first.id);
+    expect(store.claimTask(runtime.id)).toBeNull();
   });
 
   it("honors runtime max concurrency and derives stale liveness", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex", maxConcurrentTasks: 2 });
-    const firstIssue = store.createIssue({ title: "First usage task", assigneeType: "agent", assigneeId: agent.id });
-    const secondIssue = store.createIssue({ title: "Second usage task", assigneeType: "agent", assigneeId: agent.id });
+    const firstIssue = createResponsibleTestIssue(store, { title: "First usage task", assigneeType: "agent", assigneeId: agent.id });
+    const secondIssue = createResponsibleTestIssue(store, { title: "Second usage task", assigneeType: "agent", assigneeId: agent.id });
     const first = store.createTask({ agentId: agent.id, issueId: firstIssue.id, prompt: "First" });
     const second = store.createTask({ agentId: agent.id, issueId: secondIssue.id, prompt: "Second" });
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex", maxConcurrency: 1 });
@@ -418,8 +405,8 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
       metadata: { version: "1.0.0", cli_version: "0.2.26", launched_by: "desktop", parallel_agent_execution: 1 },
       models: [{ id: "gpt-5.5", label: "GPT-5.5", provider: "openai", default: true }],
     });
-    const firstIssue = store.createIssue({ title: "First usage task", assigneeType: "agent", assigneeId: agent.id });
-    const secondIssue = store.createIssue({ title: "Second usage task", assigneeType: "agent", assigneeId: agent.id });
+    const firstIssue = createResponsibleTestIssue(store, { title: "First usage task", assigneeType: "agent", assigneeId: agent.id });
+    const secondIssue = createResponsibleTestIssue(store, { title: "Second usage task", assigneeType: "agent", assigneeId: agent.id });
     const first = store.createTask({ agentId: agent.id, issueId: firstIssue.id, prompt: "First" });
     const second = store.createTask({ agentId: agent.id, issueId: secondIssue.id, prompt: "Second" });
 

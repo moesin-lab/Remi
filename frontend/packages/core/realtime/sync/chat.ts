@@ -1,8 +1,11 @@
-import type { InfiniteData, QueryClient } from "@tanstack/react-query";
+import type { QueryClient } from "@tanstack/react-query";
 import { createLogger } from "../../logger";
 import { getCurrentWsId } from "../../platform/workspace-storage";
 import { chatKeys } from "../../chat/queries";
+import { chatWorkSessionKeys } from "../../chat/work-sessions";
+import { issueKeys } from "../../issues/queries";
 import { removeChatSessionFromCache, updateChatSessionInCache } from "../../chat/session-cache";
+import { applyBackgroundTasksEvent } from "../../chat/background-tasks";
 import { useChatStore } from "../../chat";
 import type {
   TaskQueuedPayload,
@@ -13,26 +16,47 @@ import type {
   TaskFailedPayload,
   TaskCancelledPayload,
   ChatDonePayload,
-  ChatMessage,
   ChatPendingTask,
   TaskAwaitingHumanPayload,
   TaskProgressPayload,
-  ChatMessagesPage,
+  TaskSubagentsPayload,
   ChatSession,
+  PendingChatTasksResponse,
 } from "../../types";
 import type { SyncContext, SyncModule } from "./types";
 
 const chatWsLogger = createLogger("chat.ws");
 
+/**
+ * A running turn's event for a chat whose cached pending task names no task.
+ * The handlers below only patch a cached task with the same id, and the poll
+ * stops once a read finds none, so a read that missed the running turn (see
+ * `readPendingChatTask`) would hide it until the next event that refetches.
+ * Read it again now.
+ */
+function refetchUnheldPendingTask(qc: QueryClient, sessionId: string): void {
+  if (qc.getQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId))?.task_id) return;
+  void qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
+}
+
 function settleChatPendingTask(qc: QueryClient, sessionId: string, taskId: string): void {
   qc.setQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId), old => {
     if (!old) return old;
-    const queued = old.queued_tasks?.filter(task => task.task_id !== taskId);
-    if (old.task_id !== taskId) return queued ? { ...old, queued_tasks: queued } : old;
-    // Another device may have reprioritized the queue. Preserve its known
-    // contents, but let the authoritative refetch choose the next head.
-    return old.supports_queue ? { supports_queue: true, queued_tasks: queued ?? [] } : {};
+    if (old.task_id !== taskId) return old;
+    return { supports_queue: true };
+
   });
+}
+
+/**
+ * Whether the cached `["task-trace", id]` value (`TurnTraceCache` in views) is
+ * a trace that read ok and that the stream already sealed: nothing newer can
+ * arrive for it. A read that was not ok (a live view's read can land before
+ * the daemon claims the attempt) is read again.
+ */
+function holdsClosedTrace(data: unknown): boolean {
+  const cache = data as { state?: { closed?: unknown }; read?: { state?: unknown } | null } | null | undefined;
+  return !!cache && cache.state?.closed === true && cache.read?.state === "ok";
 }
 
 export function applyChatDoneToCache(
@@ -41,58 +65,16 @@ export function applyChatDoneToCache(
 ) {
   const sessionId = payload.chat_session_id;
   const taskId = payload.task_id;
-  const messageId = payload.message_id;
-  const content = payload.content;
-  if (messageId && content !== undefined) {
-    const assistant: ChatMessage = {
-      id: messageId,
-      chat_session_id: sessionId,
-      role: "assistant",
-      content,
-      task_id: taskId,
-      created_at: payload.created_at ?? new Date().toISOString(),
-      elapsed_ms: payload.elapsed_ms ?? null,
-    };
-    qc.setQueryData<ChatMessage[] | undefined>(
-      chatKeys.messages(sessionId),
-      (old) => {
-        if (!old) return old; // first fetch will pick it up
-        // Idempotent against reconnect replay.
-        if (old.some((m) => m.id === messageId)) return old;
-        return [...old, assistant];
-      },
-    );
-    qc.setQueryData<InfiniteData<ChatMessagesPage> | undefined>(
-      chatKeys.messagesPage(sessionId),
-      (old) => patchLatestChatMessagePage(old, assistant),
-    );
-  }
-  // The reply is persisted; advance only its matching queue head.
+  // SessionLog owns the reply; advance only its matching queue head.
   settleChatPendingTask(qc, sessionId, taskId);
-  // Authoritative refetch reconciles redaction / migrations / clients
-  // that took the fallback branch above.
-  qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
-  qc.invalidateQueries({ queryKey: chatKeys.messagesPage(sessionId) });
   qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
-}
-
-function patchLatestChatMessagePage(
-  old: InfiniteData<ChatMessagesPage> | undefined,
-  message: ChatMessage,
-): InfiniteData<ChatMessagesPage> | undefined {
-  if (!old?.pages.length) return old;
-  const seen = old.pages.some((page) => page.messages.some((m) => m.id === message.id));
-  if (seen) return old;
-  return {
-    ...old,
-    pages: old.pages.map((page, index) => {
-      if (index !== 0) return page;
-      return {
-        ...page,
-        messages: [...page.messages, message],
-      };
-    }),
-  };
+  // A sealed trace is complete: opening the finished turn's fold reads it from
+  // the cache. Otherwise mark it stale without rereading it now: a live reader
+  // has the final frames already (its stream's close writes the cache, which
+  // clears the mark), and a later reader rereads an unsealed snapshot when it
+  // mounts. Refetching here would page the whole trace again.
+  const traceKey = ["task-trace", taskId];
+  if (!holdsClosedTrace(qc.getQueryData(traceKey))) qc.invalidateQueries({ queryKey: traceKey, refetchType: "none" });
 }
 
 /**
@@ -101,11 +83,25 @@ function patchLatestChatMessagePage(
  * Server state lives in Query cache. Only selection/draft cleanup after a
  * confirmed session deletion touches the client store.
  *
- * chat:message / chat:done / task:completed / task:failed invalidate
- * messages + pending-task so the DB remains authoritative.
+ * Chat and task lifecycle frames update the pending-task cache. SessionLog
+ * owns message content and its realtime subscription.
  */
 export function createChatHandlers({ qc }: SyncContext): SyncModule {
+  const invalidateIssueDecisionSurfaces = () => {
+    const wsId = getCurrentWsId();
+    if (!wsId) return;
+    void qc.invalidateQueries({ queryKey: issueKeys.detailAll(wsId) });
+    void qc.invalidateQueries({ queryKey: issueKeys.decisionsAll(wsId) });
+    void qc.invalidateQueries({ queryKey: [...issueKeys.all(wsId), "questions"] });
+    void qc.invalidateQueries({ queryKey: ["question", wsId] });
+  };
   // Helpers reused by chat lifecycle handlers.
+  const invalidateUnified = () => {
+    const wsId = getCurrentWsId();
+    if (!wsId) return;
+    void qc.invalidateQueries({ queryKey: ["turns", wsId] });
+    void qc.invalidateQueries({ queryKey: ["inbox", wsId] });
+  };
   const invalidatePendingAggregate = () => {
     const id = getCurrentWsId();
     if (id) qc.invalidateQueries({ queryKey: chatKeys.pendingTasks(id) });
@@ -118,62 +114,69 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
     const id = getCurrentWsId();
     if (id) qc.invalidateQueries({ queryKey: chatKeys.session(id, sessionId) });
   };
+  // ADR 0025: a finished attempt reports the agent's latest command catalogue.
+  // Its own Chat and every preview may change, so the whole prefix goes stale;
+  // only the menu on screen reads again.
+  const invalidateSlashCommands = () => {
+    const id = getCurrentWsId();
+    if (id) void qc.invalidateQueries({ queryKey: chatKeys.slashCommandsAll(id) });
+  };
   const invalidateQueue = (sessionId: string) => {
     qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
-    qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
-    qc.invalidateQueries({ queryKey: chatKeys.messagesPage(sessionId) });
     invalidatePendingAggregate();
     invalidateSessionLists();
     invalidateSession(sessionId);
   };
+  const invalidateWorkSessionTask = (payload: {
+    issue_session_id?: string;
+    chat_session_id?: string;
+  }): boolean => {
+    if (!payload.issue_session_id) return false;
+
+    const wsId = getCurrentWsId();
+    if (wsId && payload.chat_session_id) {
+      void qc.invalidateQueries({
+        queryKey: chatWorkSessionKeys.tasks(wsId, payload.chat_session_id, payload.issue_session_id),
+      });
+    }
+
+    // A SessionTask may also identify its owning Chat. It never belongs to
+    // the ordinary Chat queue, including when no workspace is selected.
+    return true;
+  };
 
   return {
     handlers: {
-      "chat:message": (p) => {
-        const payload = p as { chat_session_id: string };
-        chatWsLogger.info("chat:message (global)", { chat_session_id: payload.chat_session_id });
-        qc.invalidateQueries({ queryKey: chatKeys.messages(payload.chat_session_id) });
-        qc.invalidateQueries({ queryKey: chatKeys.messagesPage(payload.chat_session_id) });
-        qc.invalidateQueries({ queryKey: chatKeys.pendingTask(payload.chat_session_id) });
-        invalidatePendingAggregate();
-        invalidateSessionLists();
-        invalidateSession(payload.chat_session_id);
-      },
-
+      // Every follow-up queue change (enqueue, edit, delete, steer, release,
+      // pause) arrives here. Released rows come in through the log stream.
       "chat:queue_updated": (p) => {
+        invalidateUnified();
         const payload = p as { chat_session_id: string };
+        const wsId = getCurrentWsId();
+        if (wsId) void qc.invalidateQueries({ queryKey: chatKeys.queue(wsId, payload.chat_session_id) });
         invalidateQueue(payload.chat_session_id);
       },
 
       "chat:done": (p) => {
+        invalidateUnified();
         const payload = p as ChatDonePayload;
         chatWsLogger.info("chat:done (global)", {
           task_id: payload.task_id,
           chat_session_id: payload.chat_session_id,
           has_message: !!payload.message_id,
         });
-        // Inline-insert the assistant message into the messages cache BEFORE
-        // clearing pending-task. Both writes land in the same React render
-        // tick, so ChatMessageList sees `pendingAlreadyPersisted === true`
-        // and the live TimelineView unmounts only after AssistantMessage has
-        // mounted — no flicker window. This applies TkDodo's "combine
-        // setQueryData (active query) + invalidateQueries (others)" pattern
-        // (https://tkdodo.eu/blog/using-web-sockets-with-react-query).
-        //
-        // Falls back to invalidate-only when the server omits the message
-        // payload (older builds). Older clients hitting a newer server also
-        // work: they ignore the extra fields and rely on the invalidate
-        // below, which keeps the old behavior alive.
+        // The SessionLog stream delivers the persisted assistant turn.
         applyChatDoneToCache(qc, payload);
         invalidatePendingAggregate();
         // Assistant message just landed → has_unread may have flipped to true.
         invalidateSessionLists();
         invalidateSession(payload.chat_session_id);
+        invalidateSlashCommands();
       },
 
       // Chat task lifecycle writethrough: keep `chatKeys.pendingTask(sessionId)`
       // synchronized with the server state machine via setQueryData rather than
-      // invalidate-refetch. Same pattern as task:message — the WS payload
+      // invalidate-refetch. The WS payload
       // carries everything we need, and an HTTP roundtrip just to read what we
       // already know would add latency to every stage transition.
       //
@@ -181,7 +184,9 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // chat-window.tsx may have already populated the cache with a temporary
       // id; this handler upgrades it without replacing a running queue head.
       "task:queued": (p) => {
+        invalidateUnified();
         const payload = p as TaskQueuedPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -199,11 +204,13 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // immediately follows with StartTask, so dispatched→running is sub-second.
       // We collapse that window by writing "running" directly — the pill jumps
       // from "Queued" straight to "Thinking", skipping a meaningless "Starting"
-      // frame. Stage decision in TaskStatusPill maps "running" + empty
-      // taskMessages → "Thinking · Ns".
+      // frame.
       "task:dispatch": (p) => {
+        invalidateUnified();
         const payload = p as TaskDispatchPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
@@ -219,8 +226,19 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // clear a stale `waiting_local_directory` pill — without it, the pill
       // would stay parked even after the daemon resumed work.
       "task:running": (p) => {
+        invalidateUnified();
         const payload = p as TaskRunningPayload;
+        // A subtree human request resolving also changes its parent Issue's
+        // pending_decision_count. The task event only identifies the source
+        // Issue, so invalidate active detail/decision surfaces in this
+        // workspace and let their authoritative endpoints resolve ancestry.
+        invalidateIssueDecisionSurfaces();
+        if (invalidateWorkSessionTask(payload)) {
+          void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
+          return;
+        }
         if (!payload.chat_session_id) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
@@ -236,13 +254,46 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       "task:progress": (p) => {
         if (!p || typeof p !== "object") return;
         const payload = p as TaskProgressPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (typeof payload.chat_session_id !== "string" || typeof payload.task_id !== "string"
           || (typeof payload.progress_summary !== "string" && payload.progress_summary !== null)) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           old => old?.task_id === payload.task_id
             ? { ...old, progress_summary: payload.progress_summary } : old,
         );
+      },
+
+      // A Chat attempt's running-subagent count changed (PR 5): patch the
+      // pending-task list the sidebar badge reads, without a refetch. The
+      // count only changes the badge; nothing else depends on it.
+      "task:subagents": (p) => {
+        if (!p || typeof p !== "object") return;
+        const payload = p as TaskSubagentsPayload;
+        if (typeof payload.task_id !== "string" || !("running_subagents" in payload)) return;
+        const countOf = (raw: unknown) => typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+        const count = countOf(payload.running_subagents);
+        // PR 6: the same report may carry the attempt's background tasks.
+        const tasks = "running_background_tasks" in payload ? countOf(payload.running_background_tasks) : undefined;
+        const wsId = getCurrentWsId();
+        if (!wsId) return;
+        const changed = (task: PendingChatTasksResponse["tasks"][number]) => task.task_id === payload.task_id
+          && (task.running_subagents !== count || (tasks !== undefined && task.running_background_tasks !== tasks));
+        qc.setQueryData<PendingChatTasksResponse>(chatKeys.pendingTasks(wsId), (old) => {
+          if (!old?.tasks.some(changed)) return old;
+          return { ...old, tasks: old.tasks.map((task) => task.task_id === payload.task_id
+            ? { ...task, running_subagents: count, ...(tasks !== undefined ? { running_background_tasks: tasks } : {}) } : task) };
+        });
+      },
+
+      // A Chat's background tasks changed (PR 6 §7): merge the registry rows
+      // into a list a reader has loaded and move the sidebar's count. Nothing
+      // is read for a chat no one shows (MUL-472).
+      "chat:background_tasks": (p) => {
+        const wsId = getCurrentWsId();
+        if (!wsId) return;
+        if (!applyBackgroundTasksEvent(qc, wsId, p)) chatWsLogger.warn("chat:background_tasks: unreadable payload");
       },
 
       // task:waiting_local_directory fires when the daemon dequeues a task but
@@ -251,13 +302,17 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // can render the "Waiting for local directory" stage instead of pinning
       // a stale "Starting / Thinking" frame.
       "task:waiting_local_directory": (p) => {
+        invalidateUnified();
         const payload = p as TaskWaitingLocalDirectoryPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
             if (!old || old.task_id !== payload.task_id) return old;
-            return { ...old, status: "waiting_local_directory" };
+            // The reason may name a parked lane of another Chat holding the folder (PR 6 §2.8).
+            return { ...old, status: "waiting_local_directory",
+              ...(typeof payload.wait_reason === "string" ? { wait_reason: payload.wait_reason } : {}) };
           },
         );
       },
@@ -266,9 +321,13 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // or AskUserQuestion. Write the status for TaskStatusPill and refetch the
       // request list so HumanRequestDock renders the interactive card.
       "task:awaiting_human": (p) => {
+        invalidateUnified();
         const payload = p as TaskAwaitingHumanPayload;
         void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
+        invalidateIssueDecisionSurfaces();
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
@@ -278,9 +337,11 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         );
       },
 
-      // Cancellation can target the head or a follow-up. Retain every other task.
+      // Cancellation settles only its matching turn. Unread messages refetch separately.
       "task:cancelled": (p) => {
+        invalidateUnified();
         const payload = p as TaskCancelledPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         chatWsLogger.info("task:cancelled (global, chat)", {
           task_id: payload.task_id,
@@ -291,7 +352,9 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       },
 
       "task:completed": (p) => {
+        invalidateUnified();
         const payload = p as TaskCompletedPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return; // issue tasks handled elsewhere
         chatWsLogger.info("task:completed (global, chat)", {
           task_id: payload.task_id,
@@ -303,7 +366,9 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       },
 
       "task:failed": (p) => {
+        invalidateUnified();
         const payload = p as TaskFailedPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         chatWsLogger.warn("task:failed (global, chat)", {
           task_id: payload.task_id,
@@ -317,6 +382,8 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         // was true then, but FailTask now persists a row.
         settleChatPendingTask(qc, payload.chat_session_id, payload.task_id);
         invalidateQueue(payload.chat_session_id);
+        // A failed attempt reports the catalogue too.
+        invalidateSlashCommands();
       },
 
       "chat:session_read": (p) => {
@@ -371,6 +438,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
 
         const chatState = useChatStore.getState?.();
         chatState?.clearInputDraft(payload.chat_session_id);
+        chatState?.clearQueueState(payload.chat_session_id);
         if (chatState && chatState.activeSessionId === payload.chat_session_id) {
           chatState.setActiveSession(null);
         }

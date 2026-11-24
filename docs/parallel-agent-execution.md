@@ -2,35 +2,34 @@
 
 ## Scheduling
 
-- A continuous Agent context is serialized by Issue Session and Agent. Leader
+- A continuous Agent context is serialized by Session and Agent. Each Session is
+  owned by exactly one Chat or Issue. A Chat-owned Session may optionally associate
+  with an Issue without changing its owner. Leader
   turns and delegation-return turns use this continuous context.
 - Each independent delegation has its own execution scope, derived from the
   existing delegation ID. Different delegations can run together, including
-  multiple delegations to the same Agent. Retries keep their delegation scope.
-- A rich mention continues the delegation that teammate already owns in the
-  Session. It reuses that delegation's scope, provider session, cursor and
-  runtime affinity, so an established teammate receives a delta instead of a
-  cold bootstrap; a teammate that has never been delegated to, or whose lane
-  was reset, still starts cold. The server resolves the target from the
-  delegator, Agent, Issue and Session — never from prose.
-- Continued Tasks in one execution scope are serialized, so mentioning a
-  teammate that is still working queues behind it instead of running beside it.
-  Queued rich mentions may coalesce only with ordinary mention-created work; an
-  explicit continuation is marked by `continued_from_task_id` and is never a
-  coalescing candidate for an independent mention.
-- Independent work needs an independent lane. `remi task create` starts a new
-  scope that can run in parallel with the teammate's current conversation, and
-  `remi task continue <task-id> --prompt <request>` reaches a specific earlier
-  lane instead of the most recent one. If the prior provider session or
-  execution fingerprint is no longer resumable, the existing lane reset path
-  cold-bootstraps only that scope and records a `session_agent_lane_reset` Issue
-  activity with the recovery reason.
+  multiple delegations to the same Agent, subject to workspace leases and the
+  shared Chat checkout rule below. Retries keep their delegation scope.
+- Directed messages use `remi message send <conversation> --to <agent> --kind request`.
+  The running turn receives immediate messages; pending messages merge into one
+  pending turn per lane. Provider context, cursor and scope belong to that lane.
+  Use a separate Session for independent work and `remi turn get <turn> --input`
+  to inspect an authorized input range. Retries create attempts inside the same turn.
 - Issue-free one-shot tasks (including Wiki builds) are independent. Private
   Chat turns remain serialized. Existing Agent and Runtime capacity limits,
   project device routing, permissions and workspace affinity still apply.
-- Tasks bound to the same [Runtime workspace](dev/runtime-workspaces.md) remain
+- Attempts bound to the same [Runtime workspace](dev/runtime-workspaces.md) remain
   serialized across Agents and Sessions. Explicit Chat project selections keep
   their device routing even though Chat tasks do not hold an Issue workspace.
+- Ordinary Chat attempts, including Topic transport, and Chat-owned Session attempts
+  without an Issue projection share that Chat's checkout. Claims serialize this
+  directory across Agents and Sessions while their message queues remain separate.
+  An unknown offer with `offered_at` still reserves the directory; rejection
+  releases it. An already reserved ordinary Chat offer may be reclaimed and resent
+  while canonical input continues to follow message sequence order. Pending input
+  and interruptions stay in their own conversation; the unified model has no
+  prioritize command. Issue-owned and Issue-projected Session work use
+  their corresponding execution directories; Runtime workspaces keep their own lease.
 - A child result can immediately queue a Leader turn; other children do not
   delay it. Unclaimed returns coalesce, but a frozen prompt gets a later turn.
 - Scheduled Wiki targets fill available Agent slots. Builds for the same
@@ -59,18 +58,34 @@ turn does not hide a compatible frozen retry from the same Agent.
 
 ## Shared code, private execution state
 
-Repository checkouts remain under the existing `issues/<issue-key>` root and
-`agent/<issue-key>` branch. This change does not introduce per-task worktrees,
+Repository checkouts live in the subject's single workspace `work/<subject>/`
+(see [storage and retention](dev/storage-retention.md)) on the `agent/<issue-key>`
+branch. This change does not introduce per-task worktrees,
 branches, automatic merges, or a single-writer restriction. Concurrent code
 edits can conflict; Agents must coordinate edits and preserve peers' changes.
 
-Task configuration, skills, Wiki working copies and provider caches use a
-private execution directory under `.runtime/<session>/<agent>/.../work`.
-Delegations add `delegations/<delegation-id>` to the provider generation path.
+Provider homes and plugin runtime files use a private execution directory under
+`env/<subject>/<conversation>/<agent>/<scope>/<generation>/`; discussion sessions
+also get a read-only work set there. An Issue holder starts in its own
+`<generation>/work/` directory, which holds only that execution's
+`.multiremi/task.json`, skill directories and attachments, so concurrent holders
+never overwrite each other. Repositories and the Wiki working copy stay in the
+shared `work/<issue>/` workspace (`MULTIREMI_WORKSPACE_ROOT`), and Wiki
+materialization for one subject is serialized by an exclusive per-subject lock.
+Delegations use their own `<scope>` directory (the delegation ID instead of `main`).
 Prompts report absolute repository and session-history paths; the platform
 continues to report the shared code workspace as the Issue workspace.
+Provider-history discovery follows the actual product Session owner: Issue-owned
+work sees only the same Issue's owned Sessions, while Chat-owned work sees only
+the same Chat's owned Sessions. An Issue work projection does not grant another
+owner's provider history. Issue archive and deletion do not collect or remove
+Chat-owned projection provider homes.
+Provider roots with missing `gc.json.chat_session_id` have unknown ownership:
+they are retained, excluded from prompt history, and excluded from Issue
+archive/GC. Explicit null marks an Issue-owned root; an explicit Chat ID marks
+that Chat's root. Database Session migrations have their own known-owner rules.
 
-Executions hold shared lifecycle locks. Final archive, cleanup and workspace
+Executions hold shared lifecycle locks. Reclaim (cleanup) and workspace
 migration still require exclusive ownership. Only repository preparation is
 serialized briefly; the lock is not held exclusively while the model runs.
 

@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { createResponsibleTestIssue } from './helpers.js';
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { MultiremiStore } from "@multiremi/store.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createSnapshotStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -22,13 +24,13 @@ function seed(store: MultiremiStore) {
     provider: "claude",
     maxConcurrentTasks: 10,
   });
-  const issue = store.createIssue({ title: "Workspace lease", workspaceId: "local" });
+  const issue = createResponsibleTestIssue(store, { title: "Workspace lease", workspaceId: "local" });
   return { runtime, firstAgent, secondAgent, issue };
 }
 
-describe("Issue Session workspace leases", () => {
+describe("Session workspace leases", () => {
   it("claims tasks from two discussion Sessions concurrently", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const { runtime, firstAgent, secondAgent, issue } = seed(store);
     const firstSession = store.createIssueSession(issue.id, { title: "Discussion A", holdsWorkspace: false });
     const secondSession = store.createIssueSession(issue.id, { title: "Discussion B", holdsWorkspace: false });
@@ -53,7 +55,7 @@ describe("Issue Session workspace leases", () => {
   });
 
   it("claims a workspace Task and a discussion Task concurrently", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const { runtime, firstAgent, secondAgent, issue } = seed(store);
     const workSession = store.createIssueSession(issue.id, { title: "Work" });
     const discussionSession = store.createIssueSession(issue.id, { title: "Discussion", holds_workspace: false });
@@ -78,7 +80,7 @@ describe("Issue Session workspace leases", () => {
   });
 
   it("allows two workspace-holding Sessions to run concurrently", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const { runtime, firstAgent, secondAgent, issue } = seed(store);
     const firstSession = store.createIssueSession(issue.id, { title: "Work A" });
     const secondSession = store.createIssueSession(issue.id, { title: "Work B" });
@@ -101,8 +103,8 @@ describe("Issue Session workspace leases", () => {
     expect(store.claimTask(runtime.id)?.id).toBe(second.id);
   });
 
-  it("reports the blocker for a dispatched task that has not started", () => {
-    const store = createStore();
+  it("coalesces unread requests before a dispatched turn starts", () => {
+    const store = createSnapshotStore();
     const { runtime, firstAgent, issue } = seed(store);
     const session = store.createIssueSession(issue.id, { title: "One discussion", holdsWorkspace: false });
     const first = store.createTask({
@@ -120,25 +122,16 @@ describe("Issue Session workspace leases", () => {
     });
 
     expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    // Simulate the daemon having claimed the second task before its execution
-    // lock is free; it must still report what it is waiting on.
-    db!.run(
-      "UPDATE multiremi_tasks SET status = 'dispatched', runtime_id = ?, dispatched_at = ?, updated_at = ? WHERE id = ?",
-      [runtime.id, new Date().toISOString(), new Date().toISOString(), second.id],
-    );
-
-    expect(store.getTaskQueueBlocker(second.id)).toMatchObject({
-      taskId: first.id,
-      agentId: firstAgent.id,
-      agentName: "First",
-      issueSessionId: session.id,
-      issueSessionTitle: "One discussion",
-      reason: "session",
-    });
+    expect(second.id).toBe(first.id);
+    expect(store.getTask(second.id)?.status).toBe("dispatched");
+    expect(store.getTaskQueueBlocker(second.id)).toBeNull();
+    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(store.listConversationLogEntries(session.id).filter(row => row.kind === "message")
+      .map(row => row.body_md)).toEqual(["First", "Second"]);
   });
 
   it("keeps the same Agent context in one Session serialized", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const { runtime, firstAgent, secondAgent, issue } = seed(store);
     const session = store.createIssueSession(issue.id, { title: "One discussion", holdsWorkspace: false });
     const first = store.createTask({
@@ -157,17 +150,13 @@ describe("Issue Session workspace leases", () => {
 
     expect(store.claimTask(runtime.id)?.id).toBe(first.id);
     expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.getTask(second.id)?.status).toBe("queued");
-    expect(store.getTaskQueueBlocker(second.id)).toMatchObject({
-      taskId: first.id,
-      issueSessionId: session.id,
-      issueSessionTitle: "One discussion",
-      reason: "session",
-    });
+    expect(second.id).toBe(first.id);
+    expect(store.getTask(second.id)?.status).toBe("dispatched");
+    expect(store.getTaskQueueBlocker(second.id)).toBeNull();
   });
 
-  it("keeps historical Issue Tasks serialized within the same Agent", () => {
-    const store = createStore();
+  it("binds issue requests without an explicit Session to one default conversation", () => {
+    const store = createSnapshotStore();
     const { runtime, firstAgent, secondAgent, issue } = seed(store);
     const first = store.createTask({
       agentId: firstAgent.id,
@@ -180,10 +169,16 @@ describe("Issue Session workspace leases", () => {
       issueId: issue.id,
       prompt: "Legacy B",
     });
-    db!.run("UPDATE multiremi_tasks SET issue_session_id = NULL WHERE id IN (?, ?)", [first.id, second.id]);
-
+    expect(first.issueSessionId).toBe(store.getOrCreateDefaultIssueSession(issue.id).id);
+    expect(second.issueSessionId).toBe(first.issueSessionId);
+    expect(second.id).toBe(first.id);
     expect(store.claimTask(runtime.id)?.id).toBe(first.id);
     expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.getTask(second.id)?.status).toBe("queued");
+    expect(store.getTask(second.id)?.status).toBe("dispatched");
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

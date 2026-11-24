@@ -1,0 +1,144 @@
+#!/usr/bin/env bun
+/**
+ * MUL-473: capture the first-screen hotspot response golden.
+ *
+ * Run this on the commit whose responses are the contract — the harness is
+ * implementation-agnostic, so running it here on the optimized route produces
+ * the same bytes whenever the response shape did not drift.
+ *
+ * Reproduce the checked-in `first-screen-hotspots-golden.json` using this
+ * revision's canonical Turn API, fixture and normalization:
+ *
+ *   bun run tests/fixtures/multiremi/capture-first-screen-hotspots-golden.ts \
+ *     --baseline --out tests/fixtures/multiremi/first-screen-hotspots-golden.json
+ *
+ * The Turn list includes current Attempt metadata and Chat ownership. Issue
+ * responses omit the retired parent_done_grant_* and responsible_member_id
+ * fields. Capture from a revision with these canonical shapes; `--source
+ * <label>` overrides the header for an independent comparison.
+ *
+ * The golden records only the routes PR1 touches. `GET /api/inbox/summary` and
+ * `GET /api/attachments/:id/content` are captured by their own PR2 files.
+ */
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { createMultiremiApp } from "@multiremi/api.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import {
+  installFirstScreenHotspotIds,
+  normalizeFirstScreenHotspotResponse,
+} from "./first-screen-hotspots-normalize.js";
+import { seedFirstScreenHotspotsFixture, type FirstScreenHotspotsFixture } from "./first-screen-hotspots-fixture.js";
+
+const DEFAULT_OUT = join(import.meta.dir, "first-screen-hotspots-golden.json");
+const AUTH_TOKEN = "mul473-hotspot-token";
+
+const FIRST_SCREEN_GOLDEN_SOURCE =
+  "Canonical Turn metadata and Chat ownership; ADR 0017 Issue execution and escalation fields";
+
+export interface FirstScreenHotspotGolden {
+  name: string;
+  capturedAt: string;
+  source: string;
+  fixture: {
+    sessions: number;
+    agents: number;
+    inboxRows: number;
+    issues: number;
+    skillBodyBytes: number;
+  };
+  chatPendingTasks: unknown;
+  issuesMyAssignee: unknown;
+  issuesByMemberRowId: unknown;
+  issuesByAgentName: unknown;
+}
+
+export async function captureFirstScreenHotspotGolden(source: string): Promise<FirstScreenHotspotGolden> {
+  const restoreIds = installFirstScreenHotspotIds();
+  const reportRoot = mkdtempSync(join(tmpdir(), "mul473-golden-reports-"));
+  const previousReportDir = process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+  process.env.MULTIREMI_MIGRATION_REPORT_DIR = reportRoot;
+  const db = openSqliteDatabase(":memory:");
+  try {
+    const store = new MultiremiStore(db);
+    const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
+    // The fixture pins timestamps through raw SQL; the counting store is not
+    // needed here because this capture only records response bytes.
+    const fixture: FirstScreenHotspotsFixture = seedFirstScreenHotspotsFixture(store, {
+      run: (sql, params) => { db.run(sql, ...(params as never[])); },
+    });
+    const credential = await store.createAccessToken({
+      name: "MUL-473 hotspot golden",
+      type: "pat",
+      userId: fixture.readerUserId,
+      workspaceId: fixture.workspaceId,
+      purpose: "session",
+    });
+    const headers = {
+      Authorization: `Bearer ${credential.token}`,
+      "X-Workspace-ID": fixture.workspaceId,
+    };
+    const get = async (path: string): Promise<unknown> => {
+      const response = await app.request(path, { headers });
+      const text = await response.text();
+      if (response.status !== 200) throw new Error(`${path}: HTTP ${response.status} ${text.slice(0, 300)}`);
+      return JSON.parse(text) as unknown;
+    };
+    return {
+      name: "MUL-473 first-screen hotspot responses",
+      capturedAt: "<timestamp>",
+      source,
+      fixture: {
+        sessions: fixture.counts.sessions,
+        agents: fixture.counts.agents,
+        inboxRows: fixture.counts.inboxRows,
+        issues: fixture.counts.issues,
+        skillBodyBytes: fixture.counts.skillBodyBytes,
+      },
+      chatPendingTasks: normalizeFirstScreenHotspotResponse(
+        await get("/api/turns?status=pending&limit=500"),
+        fixture,
+      ),
+      issuesMyAssignee: normalizeFirstScreenHotspotResponse(
+        await get(`/api/issues?assignee_id=${fixture.readerUserId}&limit=50`),
+        fixture,
+      ),
+      issuesByMemberRowId: normalizeFirstScreenHotspotResponse(
+        await get(`/api/issues?assignee_id=${fixture.readerMemberId}&limit=50`),
+        fixture,
+      ),
+      issuesByAgentName: normalizeFirstScreenHotspotResponse(
+        await get(`/api/issues?assignee_id=${encodeURIComponent("Hotspot agent 5")}&limit=50`),
+        fixture,
+      ),
+    };
+  } finally {
+    restoreIds();
+    db.close();
+    if (previousReportDir === undefined) delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+    else process.env.MULTIREMI_MIGRATION_REPORT_DIR = previousReportDir;
+    rmSync(reportRoot, { recursive: true, force: true });
+  }
+}
+
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  const outIndex = args.indexOf("--out");
+  const outPath = outIndex >= 0 ? args[outIndex + 1]! : DEFAULT_OUT;
+  const sourceIndex = args.indexOf("--source");
+  const explicitSource = sourceIndex >= 0 ? args[sourceIndex + 1] : undefined;
+  const golden = await captureFirstScreenHotspotGolden(
+    explicitSource
+      ?? (args.includes("--baseline") ? FIRST_SCREEN_GOLDEN_SOURCE : "current implementation"),
+  );
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, `${JSON.stringify(golden, null, 2)}\n`);
+  console.log(`wrote ${outPath}`);
+  console.log(`pending-tasks: ${(golden.chatPendingTasks as { turns: unknown[] }).turns.length} tasks`);
+  for (const key of ["issuesMyAssignee", "issuesByMemberRowId", "issuesByAgentName"] as const) {
+    const body = golden[key] as { issues: unknown[]; total: number };
+    console.log(`${key}: ${body.issues.length} issues, total=${body.total}`);
+  }
+}

@@ -1,15 +1,13 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { api } from "../api";
-import { parseWithFallback } from "../api/schema";
 import { chatKeys } from "./queries";
 
 // ─── Types ───────────────────────────────────────────────────────────────
 //
-// A human request is an agent-side pause routed through the server: either a
-// tool-permission prompt ("permission") or an AskUserQuestion form
-// ("question"). The worker holds the ACP promise open until someone responds
-// here (or the request times out), so responding resumes the task.
+// Native permission and AskUserQuestion payloads feed the persistent Q view.
+// A worker may still be waiting or may have ended its provider call; answering
+// alone does not prove consumption. The Q projection owns that state.
 
 export type TaskHumanRequestKind = "permission" | "question";
 export type TaskHumanRequestStatus = "pending" | "responded" | "timeout" | "cancelled";
@@ -35,6 +33,7 @@ export interface HumanRequestQuestion {
 export interface TaskHumanRequest {
   id: string;
   taskId: string;
+  sessionId?: string;
   kind: TaskHumanRequestKind;
   payload: {
     tool_call?: { title?: string } | null;
@@ -59,16 +58,21 @@ const permissionOptionSchema = z.object({
   name: z.string(),
 });
 
-const questionSchema = z.object({
+const questionPayloadSchema = z.object({
+  question: z.string(),
+  header: z.string().optional(),
+  options: z.array(z.object({ label: z.string(), description: z.string().optional() })).default([]),
+  multiSelect: z.boolean().optional(),
+});
+const questionSchema = z.union([z.object({
   fieldKey: z.string(),
   otherFieldKey: z.string().optional(),
-  question: z.object({
-    question: z.string(),
-    header: z.string().optional(),
-    options: z.array(z.object({ label: z.string(), description: z.string().optional() })).default([]),
-    multiSelect: z.boolean().optional(),
-  }),
-});
+  question: questionPayloadSchema,
+}), questionPayloadSchema.transform(question => ({
+  // SDK direct AUQ accepts a custom answer without an ACP other-field key.
+  // These keys belong only to the form projection; the original Q stays intact.
+  fieldKey: question.question, otherFieldKey: `${question.question}__other`, question,
+}))]);
 
 const questionContextSchema = z
   .object({
@@ -81,6 +85,7 @@ const questionContextSchema = z
 const humanRequestSchema = z.object({
   id: z.string(),
   taskId: z.string(),
+  sessionId: z.string().optional(),
   kind: z.enum(["permission", "question"]),
   payload: z
     .object({
@@ -98,21 +103,69 @@ const humanRequestSchema = z.object({
   respondedAt: z.string().nullable(),
 });
 
-const humanRequestListSchema = z.object({ requests: z.array(humanRequestSchema) });
+
+/**
+ * A native question's `payload.options` are its decision message's flattened
+ * choices (`{label, value}`, written by the daemon's `turn.decision`); the
+ * answers come from `payload.questions`. Only a permission request carries
+ * permission options, so only there may they reject the request.
+ */
+function withoutQuestionChoices(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const record = value as { kind?: unknown; payload?: unknown };
+  if (record.kind !== "question" || !record.payload || typeof record.payload !== "object") return value;
+  const { options: _choices, ...payload } = record.payload as Record<string, unknown>;
+  return { ...record, payload };
+}
+
+export function parseTaskHumanRequest(value: unknown): TaskHumanRequest | null {
+  const parsed = humanRequestSchema.safeParse(withoutQuestionChoices(value));
+  return parsed.success ? parsed.data as TaskHumanRequest : null;
+}
 
 // ─── Queries ─────────────────────────────────────────────────────────────
 
-export function humanRequestsOptions(taskId: string) {
+export interface HumanRequestsScope {
+  /** The in-flight turn: its permissions and questions, answered ones included. */
+  turnId?: string | null;
+  /**
+   * Also every question of the session still waiting for an answer, whatever
+   * turn asked it. A Chat reads this so its own open Q stays answerable when
+   * there is no in-flight turn, or not the one that asked.
+   */
+  open?: boolean;
+}
+
+/**
+ * The permission and AskUserQuestion requests of one conversation. The key sits
+ * under the Q key space (`["question", wsId]`): a new Q (`decision:created`) and
+ * a resumed turn invalidate that prefix, so the list follows Qs the daemon
+ * creates mid-turn without a task event of its own.
+ */
+export function humanRequestsOptions(wsId: string, sessionId: string | null | undefined, { turnId = null, open = false }: HumanRequestsScope = {}) {
   return queryOptions({
-    queryKey: chatKeys.humanRequests(taskId),
+    queryKey: ["question", wsId, "requests", sessionId ?? "", turnId ?? "", open ? "open" : "turn"] as const,
     queryFn: async (): Promise<TaskHumanRequest[]> => {
-      const raw = await api.listTaskHumanRequests(taskId);
-      const parsed = parseWithFallback(raw, humanRequestListSchema, { requests: [] as TaskHumanRequest[] }, {
-        endpoint: `/api/tasks/${taskId}/human-requests`,
+      if (!sessionId) return [];
+      const messages: Awaited<ReturnType<typeof api.listMessages>>["messages"] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await api.listMessages(sessionId, { message_kind: "decision", cursor });
+        messages.push(...page.messages); cursor = page.next_cursor ?? undefined;
+      } while (cursor);
+      const included = (message: (typeof messages)[number]) => open
+        ? !message.resolved_at || (!!turnId && message.task_id === turnId)
+        : !turnId || message.task_id === turnId;
+      return messages.filter(included).flatMap(message => {
+        const record = message.metadata.human_request;
+        if (!record || typeof record !== "object") return [];
+        const request = parseTaskHumanRequest({ ...record, id: message.id, taskId: message.task_id ?? "", sessionId,
+          status: message.resolved_at ? "responded" : "pending", response: null, respondedBy: null,
+          createdAt: message.created_at, respondedAt: message.resolved_at });
+        return request ? [request] : [];
       });
-      return parsed.requests as TaskHumanRequest[];
     },
-    enabled: taskId.length > 0,
+    enabled: !!wsId && !!sessionId,
   });
 }
 
@@ -121,6 +174,7 @@ export function humanRequestsOptions(taskId: string) {
 export interface RespondHumanRequestInput {
   taskId: string;
   requestId: string;
+  sessionId?: string;
   /** `{ option_id }` for permission requests, `{ answers }` for questions. */
   response: Record<string, unknown>;
 }
@@ -128,8 +182,12 @@ export interface RespondHumanRequestInput {
 export function useRespondHumanRequest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ taskId, requestId, response }: RespondHumanRequestInput) =>
-      api.respondTaskHumanRequest(taskId, requestId, response),
+    mutationFn: async ({ requestId, sessionId, response }: RespondHumanRequestInput) => {
+      if (!sessionId) throw new Error("Decision conversation is missing");
+      const text = typeof response.answers === "object" && response.answers
+        ? Object.values(response.answers).map(String).join("; ") : String(response.option_id ?? "");
+      return api.sendMessage(sessionId, { body_md: text, message_kind: "reply", reply_to_id: requestId, response });
+    },
     onSettled: (_data, _error, { taskId }) => {
       // First-write-wins on the server; refetch settles both the winner and
       // any client that lost the race (409 → refetch shows who resolved it).

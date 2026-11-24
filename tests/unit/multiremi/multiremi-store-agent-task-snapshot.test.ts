@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { MultiremiTask, MultiremiTaskStatus } from "@multiremi/contracts/types.js";
 import { isActiveTaskStatus } from "@multiremi/store/helpers.js";
 import type { MultiremiStore } from "@multiremi/store.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createSnapshotStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -33,12 +34,9 @@ function setTaskState(input: {
   completedAt?: string | null;
   failedAt?: string | null;
 }): void {
-  db!.run(
-    `UPDATE multiremi_tasks
+  runTurnExecutionMutation(db!, `UPDATE multiremi_turn_execution_records
      SET status = ?, created_at = ?, updated_at = ?, completed_at = ?, failed_at = ?
-     WHERE id = ?`,
-    [input.status, input.createdAt, input.updatedAt, input.completedAt ?? null, input.failedAt ?? null, input.id],
-  );
+     WHERE id = ?`, [input.status, input.createdAt, input.updatedAt, input.completedAt ?? null, input.failedAt ?? null, input.id]);
 }
 
 function expectSnapshotMatchesLegacy(store: MultiremiStore, workspaceId: string): void {
@@ -47,7 +45,7 @@ function expectSnapshotMatchesLegacy(store: MultiremiStore, workspaceId: string)
 
 describe("listWorkspaceAgentTaskSnapshot", () => {
   it("returns every active task in updated order", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Active agent", provider: "codex" });
     const statuses = [
       "queued",
@@ -71,7 +69,7 @@ describe("listWorkspaceAgentTaskSnapshot", () => {
   });
 
   it("returns one terminal outcome per agent and excludes cancelled tasks", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const completedAgent = store.createAgent({ name: "Completed agent", provider: "codex" });
     const failedAgent = store.createAgent({ name: "Failed agent", provider: "codex" });
     const completed = store.createTask({ agentId: completedAgent.id, prompt: "completed" });
@@ -86,7 +84,7 @@ describe("listWorkspaceAgentTaskSnapshot", () => {
   });
 
   it("uses outcome time to select the latest terminal task for an agent", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Outcome agent", provider: "codex" });
     const earlierOutcome = store.createTask({ agentId: agent.id, prompt: "earlier outcome" });
     const laterOutcome = store.createTask({ agentId: agent.id, prompt: "later outcome" });
@@ -98,7 +96,7 @@ describe("listWorkspaceAgentTaskSnapshot", () => {
   });
 
   it("does not mix tasks from another workspace", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const otherWorkspace = store.createWorkspace({ name: "Other workspace", slug: "other-workspace" });
     const localAgent = store.createAgent({ name: "Local agent", provider: "codex" });
     const otherAgent = store.createAgent({ name: "Other agent", provider: "codex", workspaceId: otherWorkspace.id });
@@ -114,14 +112,14 @@ describe("listWorkspaceAgentTaskSnapshot", () => {
   });
 
   it("returns an empty result when the workspace has no tasks", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
 
     expectSnapshotMatchesLegacy(store, "local");
     expect(store.listWorkspaceAgentTaskSnapshot("local")).toEqual([]);
   });
 
   it("looks up autopilot runs in batches when the snapshot exceeds 500 tasks", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Large snapshot agent", provider: "codex" });
     const tasks = Array.from({ length: 501 }, (_, index) => store.createTask({
       agentId: agent.id,
@@ -130,8 +128,8 @@ describe("listWorkspaceAgentTaskSnapshot", () => {
     const runId = "apr_large_snapshot";
     db!.run(
       `INSERT INTO multiremi_autopilot_runs (
-        id, autopilot_id, source, status, task_id, triggered_at, created_at
-      ) VALUES (?, ?, 'api', 'running', ?, ?, ?)`,
+        id, autopilot_id, source, turn_id, triggered_at, created_at
+      ) VALUES (?, ?, 'api', ?, ?, ?)`,
       [runId, "apl_large_snapshot", tasks.at(-1)!.id, "2026-09-10T00:00:00.000Z", "2026-09-10T00:00:00.000Z"],
     );
 
@@ -139,5 +137,11 @@ describe("listWorkspaceAgentTaskSnapshot", () => {
 
     expect(snapshot).toHaveLength(501);
     expect(snapshot.find((task) => task.id === tasks.at(-1)!.id)?.autopilotRunId).toBe(runId);
-  });
+  // Includes construction of 501 real tasks before exercising the batched read.
+  }, 20_000);
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

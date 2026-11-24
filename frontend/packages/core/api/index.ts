@@ -14,10 +14,11 @@ export {
   setSchemaLogger,
 } from "./schema";
 export type { ParseOptions } from "./schema";
-export { DuplicateIssueErrorBodySchema } from "./schemas";
+export { DuplicateIssueErrorBodySchema, IssueStatusHeldErrorSchema } from "./schemas";
 export type { DuplicateIssueErrorBody } from "./schemas";
 export type {
   RelayConfigResponse,
+  RelayEngine,
   RelayEngineConfig,
   RelayEngineProbe,
   RelayReasoningLevelEffective,
@@ -27,19 +28,15 @@ export type {
   RelayReasoningLevelModel,
   RelayReasoningLevelsResponse,
   RelayReasoningLevelSaveResult,
+  RelayReasoningEngine,
 } from "./schemas";
-export type {
-  IssueSessionArchivesResponse,
-  SessionArchive,
-  SessionArchiveRetryResponse,
-  SessionArchiveVerifyResponse,
-  WorkspaceSessionArchiveStatus,
-} from "./schemas/session-archives";
 export type {
   TaskSteerListResponse,
   TaskSteerMessage,
   TaskSteerResponse,
+  TaskTraceRead,
 } from "./schemas/tasks";
+export { TraceEventSchema, TraceTurnPageSchema, parseTraceEvent, parseTraceFrames } from "./schemas/tasks";
 export { WSClient } from "./ws-client";
 
 import type { ApiClient as ApiClientType } from "./client";

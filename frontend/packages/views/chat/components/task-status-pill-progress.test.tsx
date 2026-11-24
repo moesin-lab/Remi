@@ -1,14 +1,17 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { AgentAvailability } from "@multiremi/core/agents";
-import type { ChatPendingTask, TaskMessagePayload } from "@multiremi/core/types";
+import type { ChatPendingTask } from "@multiremi/core/types";
+import type { TraceItem } from "@multiremi/contracts/trace";
 import enChat from "../../locales/en/chat.json";
+import { message, permission, userMessage } from "../../test/trace-fixtures";
 import { TaskStatusPill } from "./task-status-pill";
 
-function pill(pendingTask: ChatPendingTask, taskMessages: TaskMessagePayload[] = [], availability: AgentAvailability = "online") {
+function pill(pendingTask: ChatPendingTask, items: TraceItem[] = [], availability: AgentAvailability = "online",
+  resolveChat?: (sessionId: string) => { title: string; open: () => void } | null) {
   return <I18nProvider locale="en" resources={{ en: { chat: enChat } }}>
-    <TaskStatusPill pendingTask={pendingTask} taskMessages={taskMessages} availability={availability} />
+    <TaskStatusPill pendingTask={pendingTask} items={items} availability={availability} resolveChat={resolveChat} />
   </I18nProvider>;
 }
 
@@ -54,7 +57,7 @@ describe("Chat preparation status", () => {
     expect(screen.getByText("正在准备项目仓库…")).toBeInTheDocument();
     view.rerender(pill({ ...pending, progress_summary: "项目仓库准备完成，正在启动智能体…" }));
     expect(screen.getByText("项目仓库准备完成，正在启动智能体…")).toBeInTheDocument();
-    view.rerender(pill(pending, [{ task_id: "task-1", issue_id: "", seq: 1, type: "text", content: "Reply" }]));
+    view.rerender(pill(pending, [message("msg:1", "Reply", "unknown", { status: "in_progress", completed_at: null })]));
     expect(screen.queryByText("正在准备项目仓库…")).not.toBeInTheDocument();
     expect(screen.getByText(enChat.status_pill.stages.typing)).toBeInTheDocument();
   });
@@ -70,11 +73,54 @@ describe("Chat preparation status", () => {
     }
   });
 
+  it("keeps a static waiting label even though the trace already holds the turn's input", () => {
+    const input = userMessage("in:1", "deploy it");
+    const view = render(pill({ task_id: "task-1", status: "awaiting_human" }, [input]));
+    expect(screen.getByText(enChat.status_pill.stages.awaiting_human)).toBeInTheDocument();
+    expect(view.container.querySelector(".animate-chat-text-shimmer")).toBeNull();
+    // A permission the trace shows open reads the same before the server status catches up.
+    const open = { ...permission("perm:1", "Bash"), status: "in_progress" as const, completed_at: null, outcome: null };
+    view.rerender(pill({ task_id: "task-1", status: "running" }, [input, open]));
+    expect(screen.getByText(enChat.status_pill.stages.awaiting_human)).toBeInTheDocument();
+  });
+
+  it("calls a task parked on a question waiting for an answer, not for approval", () => {
+    render(pill({ task_id: "task-1", status: "awaiting_human" }));
+    expect(screen.getByText("Waiting for an answer")).toBeInTheDocument();
+    expect(screen.queryByText(/approval/i)).not.toBeInTheDocument();
+  });
+
   it("uses the normal stage for absent, blank, or malformed optional summaries", () => {
     for (const progress_summary of [null, "   ", 17]) {
       const view = render(pill({ task_id: "task-1", status: "running", progress_summary } as ChatPendingTask));
       expect(screen.getByText(enChat.status_pill.stages.thinking)).toBeInTheDocument();
       view.unmount();
     }
+  });
+
+  it("names another chat's background tasks holding the local folder, and opens that chat (PR 6 §2.8)", () => {
+    const wait_reason = "local_directory /Users/me/repo (held by background tasks of chat chat_other)";
+    const open = vi.fn();
+    const resolveChat = vi.fn((id: string) => id === "chat_other" ? { title: "Dev server", open } : null);
+    const pending = { task_id: "task-1", status: "waiting_local_directory", wait_reason };
+    const view = render(pill(pending, [], "online", resolveChat));
+    expect(screen.getByText(enChat.bg_tasks.folder_held)).toBeInTheDocument();
+    expect(screen.queryByText(enChat.status_pill.stages.waiting_local_directory)).not.toBeInTheDocument();
+    // Never the raw reason: no path, no ids.
+    expect(screen.queryByText(/Users\/me|chat_other/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open the background tasks of “Dev server”" }));
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(resolveChat).toHaveBeenCalledWith("chat_other");
+    // Another member's chat is not in the list: the copy alone, with no chat id and no link.
+    for (const resolve of [() => null, undefined]) {
+      view.rerender(pill(pending, [], "online", resolve));
+      expect(screen.getByText(enChat.bg_tasks.folder_held)).toBeInTheDocument();
+      expect(screen.queryByRole("button")).not.toBeInTheDocument();
+      expect(view.container.textContent).not.toMatch(/chat_other|Users\/me/);
+    }
+    // A folder held by a running turn keeps the plain label.
+    view.rerender(pill({ ...pending, wait_reason: "local_directory /Users/me/repo (held by task tsk_abcd)" }, [], "online", resolveChat));
+    expect(screen.getByText(enChat.status_pill.stages.waiting_local_directory)).toBeInTheDocument();
+    expect(screen.queryByText(enChat.bg_tasks.folder_held)).not.toBeInTheDocument();
   });
 });

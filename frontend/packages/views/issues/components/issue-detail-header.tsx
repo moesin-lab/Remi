@@ -20,18 +20,18 @@ import {
 import { cn } from "@multiremi/ui/lib/utils";
 import type { Issue, Project, UpdateIssueRequest } from "@multiremi/core/types";
 import { useWorkspacePaths } from "@multiremi/core/paths";
-import { AppLink } from "../../navigation";
 import { BreadcrumbHeader, type BreadcrumbSegment } from "../../layout/breadcrumb-header";
 import { useT } from "../../i18n";
 import { ProjectIcon } from "../../projects/components/project-icon";
 import { IssueActionsDropdown } from "../actions";
 import { IssueShareDialog } from "./issue-share-dialog";
+import { IssueTitle } from "./issue-title";
 
 interface IssueDetailHeaderProps {
   issue: Issue;
   parentIssue: Issue | null;
   breadcrumbProject: Project | null;
-  onUpdateField: (updates: Partial<UpdateIssueRequest>) => void;
+  onUpdateField: (updates: Partial<UpdateIssueRequest>, onSuccess?: () => void) => void;
   /** Present when the shell wants to close/advance the surface itself. */
   onDone?: () => void;
   /**
@@ -95,16 +95,10 @@ export function IssueDetailHeader({
   return (
     <>
     <BreadcrumbHeader
+      className="issue-detail-header"
       segments={segments}
       leaf={
-        <AppLink
-          href={paths.issueDetail(issue.id)}
-          className="flex min-w-0 transition-opacity hover:opacity-80"
-        >
-          <span className="truncate font-medium text-foreground">
-            {issue.identifier} {issue.title}
-          </span>
-        </AppLink>
+        <IssueTitle issue={issue} onUpdateField={onUpdateField} />
       }
       actions={
         <>
@@ -116,7 +110,7 @@ export function IssueDetailHeader({
                   variant="ghost"
                   size="icon-sm"
                   className="text-muted-foreground"
-                  onClick={() => { onUpdateField({ status: "done" }); onDone?.(); }}
+                  onClick={() => onUpdateField({ status: "done" }, onDone)}
                 >
                   <CircleCheck />
                 </Button>

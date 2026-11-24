@@ -1,6 +1,10 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { historicalWriters } from "./unified-model-test-backends.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import type { MultiremiSessionEvent } from "@multiremi/contracts/types.js";
-import { runMigrations } from "@multiremi/store/migrations.js";
+import { runMigrations, bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
 import { buildSessionProjection } from "@multiremi/store/session-projection.js";
 import { resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -17,29 +21,34 @@ function event(seq: number, authorType = "agent", authorId: string | null = "age
 
 describe("side Session snapshots", () => {
   it("upgrades old Session rows with defaults and can rerun the migration", () => {
-    const store = createStore();
-    const issue = store.createIssue({ title: "Legacy Sessions" });
+    const legacyDb = openSqliteDatabase(":memory:");
+    bootstrapPreUnifiedSchema(legacyDb);
+    const historical = historicalWriters(legacyDb);
+    const issue = historical.createIssue({ title: "Legacy Sessions" });
+    const store = historical;
     const main = store.getOrCreateDefaultIssueSession(issue.id);
-    db!.exec(`ALTER TABLE multiremi_issue_sessions DROP COLUMN parent_session_id;
+    legacyDb.exec(`ALTER TABLE multiremi_issue_sessions DROP COLUMN parent_session_id;
       ALTER TABLE multiremi_issue_sessions DROP COLUMN inherit_mode;
       ALTER TABLE multiremi_issue_sessions DROP COLUMN inherit_cutoff_seq;`);
-    runMigrations(db!);
-    runMigrations(db!);
+    runMigrations(legacyDb);
+    runMigrations(legacyDb);
+    const migrated = new MultiremiStore(legacyDb);
 
-    expect(db!.query("PRAGMA table_info(multiremi_issue_sessions)").all()).toEqual(expect.arrayContaining([
+    expect(legacyDb.query("PRAGMA table_info(multiremi_issue_sessions)").all()).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "parent_session_id", type: "TEXT" }),
       expect.objectContaining({ name: "inherit_mode", type: "TEXT", notnull: 1, dflt_value: "'none'" }),
       expect.objectContaining({ name: "inherit_cutoff_seq", type: "INTEGER" }),
     ]));
-    expect(store.getIssueSession(main.id)).toMatchObject({
+    expect(migrated.getIssueSession(main.id)).toMatchObject({
       parentSessionId: null, parent_session_id: null, inheritMode: "none", inherit_mode: "none",
       inheritCutoffSeq: null, inherit_cutoff_seq: null, inheritedEventCount: 0, holdsWorkspace: true,
     });
+    legacyDb.close();
   });
 
   it("freezes the cutoff and event count, implies discussion, and keeps inheritance immutable", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Snapshot boundary" });
+    const issue = createResponsibleTestIssue(store, { title: "Snapshot boundary" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     store.appendSessionEvent(main.id, { authorType: "member", body: "First" });
     const last = store.appendSessionEvent(main.id, { authorType: "member", body: "Before snapshot" });
@@ -71,20 +80,22 @@ describe("side Session snapshots", () => {
 
   it("rejects missing or cross-Issue parents and chained forks without creating a Session", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Parent" });
-    const other = store.createIssue({ title: "Other issue" });
+    const issue = createResponsibleTestIssue(store, { title: "Parent" });
+    const other = createResponsibleTestIssue(store, { title: "Other issue" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const side = store.createIssueSession(issue.id, { parentSessionId: main.id });
     const before = store.listIssueSessions(issue.id).length;
+    const otherBefore = store.listIssueSessions(other.id).length;
     expect(() => store.createIssueSession(issue.id, { parentSessionId: "missing" })).toThrow("Parent session not found");
-    expect(() => store.createIssueSession(other.id, { parentSessionId: main.id })).toThrow("same issue");
+    expect(() => store.createIssueSession(other.id, { parentSessionId: main.id })).toThrow("same Issue owner");
     expect(() => store.createIssueSession(issue.id, { parentSessionId: side.id })).toThrow("chained forks");
     expect(store.listIssueSessions(issue.id)).toHaveLength(before);
+    expect(store.listIssueSessions(other.id)).toHaveLength(otherBefore);
   });
 
   it("uses cutoff zero for an empty parent and never inherits later events", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Empty parent" });
+    const issue = createResponsibleTestIssue(store, { title: "Empty parent" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const side = store.createIssueSession(issue.id, { parentSessionId: main.id });
     expect(side.inheritCutoffSeq).toBe(0);
@@ -105,7 +116,7 @@ describe("side Session snapshots", () => {
       events: [event(1), event(2, "agent", "agent_b"), event(3, "member", "member_a"), event(4, "system", null)],
     });
     expect(projection.jsonl).not.toContain("assistant_history");
-    expect(projection.jsonl.split("\n").slice(1).map((line) => JSON.parse(line).perspective)).toEqual([
+    expect(projection.jsonl.split("\n").slice(2).map((line) => JSON.parse(line).perspective)).toEqual([
       "inherited_agent", "inherited_agent", "inherited_user", "inherited_operator",
     ]);
   });
@@ -123,10 +134,10 @@ describe("side Session snapshots", () => {
     expect(projection.toSeq).toBe(1);
     expect(projection.jsonl).not.toContain("Message 2");
     expect(projection.jsonl).not.toContain("private-value");
-    expect(JSON.parse(projection.jsonl.split("\n")[1]!).metadata).toEqual({ result_available: true, status: "completed" });
+    expect(JSON.parse(projection.jsonl.split("\n")[2]!).metadata).toEqual({ result_available: true, status: "completed" });
   });
 
-  it("keeps default and explicit own projections byte-identical to the existing format", () => {
+  it("keeps default and explicit own projections byte-identical with the inbox directory", () => {
     const first = event(1);
     first.metadata = { z: 1, arbitrary: { b: true, a: "preserved" } };
     const input = {
@@ -134,14 +145,15 @@ describe("side Session snapshots", () => {
       tokenBudget: 4_096, events: [first],
     };
     const expected = '{"type":"session_projection","version":1,"mode":"bootstrap","session_id":"parent","target_agent_id":"agent_a","from_seq":0,"to_seq":1}\n'
+      + '{"type":"inbox_toc","entries":[]}\n'
       + '{"type":"session_event","seq":1,"kind":"message","perspective":"assistant_history","author_type":"agent","author_id":"agent_a","author_name":null,"body":"Message 1","task_id":null,"source_comment_id":null,"metadata":{"arbitrary":{"a":"preserved","b":true},"z":1},"created_at":"2026-09-17T00:00:00.000Z"}';
     expect(buildSessionProjection(input).jsonl).toBe(expected);
     expect(buildSessionProjection({ ...input, perspectiveMode: "own" }).jsonl).toBe(expected);
   });
 
-  it("splits the existing budget 40/60 and truncates both logs within that total", () => {
+  it("splits the existing budget 40/60 and folds long bodies within that total", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Projection budgets" });
+    const issue = createResponsibleTestIssue(store, { title: "Projection budgets" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const agent = store.createAgent({ name: "Budgeted reader", provider: "claude" });
     for (let i = 0; i < 24; i++) {
@@ -158,8 +170,8 @@ describe("side Session snapshots", () => {
     expect(inherited.estimatedTokens).toBeLessThanOrEqual(Math.floor(total * 0.4));
     expect(own.estimatedTokens).toBeLessThanOrEqual(total - Math.floor(total * 0.4));
     expect(own.estimatedTokens + inherited.estimatedTokens).toBeLessThanOrEqual(total);
-    expect(own.truncated).toBe(true);
-    expect(inherited.truncated).toBe(true);
+    expect(own.jsonl).toContain('"body_folded":true');
+    expect(inherited.jsonl).toContain('"body_folded":true');
     expect(inherited.jsonl).not.toContain("assistant_history");
     expect(inherited.toSeq).toBe(side.inheritCutoffSeq!);
   });
@@ -171,7 +183,7 @@ describe("side Session snapshots", () => {
       process.env.MULTIREMI_SESSION_PROJECTION_CONTEXT_WINDOWS = '{"claude":10}';
       process.env.MULTIREMI_SESSION_PROJECTION_MIN_TOKENS = "2";
       const store = createStore();
-      const issue = store.createIssue({ title: "Small budget" });
+      const issue = createResponsibleTestIssue(store, { title: "Small budget" });
       const main = store.getOrCreateDefaultIssueSession(issue.id);
       const side = store.createIssueSession(issue.id, { parentSessionId: main.id });
       const agent = store.createAgent({ name: "Reader", provider: "claude" });
@@ -192,7 +204,7 @@ describe("side Session snapshots", () => {
       metadata: { parallel_agent_execution: 1, cli_version: "0.2.73" },
     });
     const agent = store.createAgent({ name: "Parallel agent", provider: "claude", maxConcurrentTasks: 3 });
-    const issue = store.createIssue({ title: "Independent Session execution" });
+    const issue = createResponsibleTestIssue(store, { title: "Independent Session execution" });
     const parent = store.getOrCreateDefaultIssueSession(issue.id);
     const main = store.createSessionTask(parent.id, { agentId: agent.id, prompt: "Work" });
     expect(store.claimTask(runtime.id)?.id).toBe(main.id);
@@ -205,6 +217,7 @@ describe("side Session snapshots", () => {
     expect(store.getTask(main.id)?.status).toBe("running");
     expect(store.getTask(discussion.id)?.status).toBe("running");
     expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.getTaskQueueBlocker(next.id)?.taskId).toBe(main.id);
+    expect(next.id).toBe(main.id);
+    expect(store.listTasksForIssue(issue.id).filter(task => task.agentId === agent.id)).toHaveLength(2);
   });
 });

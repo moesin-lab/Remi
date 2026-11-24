@@ -17,6 +17,7 @@ services:
       retries: 20
 
   api:
+    stop_grace_period: 30s
     image: ${REMI_API_IMAGE:?set REMI_API_IMAGE}
     pull_policy: never
     build:
@@ -24,6 +25,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.api
       args:
         MULTIREMI_VERSION: ${REMI_APP_VERSION:?set REMI_APP_VERSION}
+        REMI_APPLICATION_BASE_REF: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
       labels:
         org.opencontainers.image.revision: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
     init: true
@@ -44,7 +46,6 @@ services:
       MULTIREMI_ALLOW_EMAIL_CODE_LOGIN: "0"
       MULTIREMI_PROJECT_KNOWLEDGE_MODE: sql
       MULTIREMI_UPLOAD_DIR: /srv/multiremi/uploads
-      MULTIREMI_SESSION_ARCHIVE_ROOT: /srv/multiremi/session-archives
       MULTIREMI_BACKGROUND_JOBS: ${REMI_BACKGROUND_JOBS:-1}
       MULTIREMI_SSH_MESH_CONTROL_PLANE: "0"
       MULTIREMI_SSH_MESH_CONTROL_PLANE_ROOT: /srv/multiremi/ssh-mesh
@@ -56,8 +57,8 @@ services:
       - /bin/sh
       - -ec
       - |
-        mkdir -p /srv/multiremi/uploads /srv/multiremi/session-archives /srv/multiremi/ssh-mesh
-        chown 1000:1000 /srv/multiremi /srv/multiremi/uploads /srv/multiremi/session-archives /srv/multiremi/ssh-mesh
+        mkdir -p /srv/multiremi/uploads /srv/multiremi/ssh-mesh
+        chown 1000:1000 /srv/multiremi /srv/multiremi/uploads /srv/multiremi/ssh-mesh
         exec /app/deploy/docker/api-entrypoint.sh "$$@"
       - remi-local-api
     command: ["bun", "run", "apps/server/main.ts", "serve"]
@@ -83,6 +84,8 @@ services:
       args:
         REMOTE_API_URL: http://api:6120
         REMI_APP_VERSION: ${REMI_APP_VERSION:?set REMI_APP_VERSION}
+        REMI_APPLICATION_BASE_REF: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
+        NEXT_BUILD_CPUS: ${REMI_NEXT_BUILD_CPUS:-2}
         NEXT_PUBLIC_SITE_URL: ${REMI_PUBLIC_URL:?set REMI_PUBLIC_URL to this environment's browser origin}
         NEXT_PUBLIC_LOCAL_PROFILE: ${REMI_PROFILE:?set REMI_PROFILE to stable or dev}
         NEXT_PUBLIC_WS_URL: ${REMI_PUBLIC_WS_URL:?set REMI_PUBLIC_WS_URL to this environment's reachable API}

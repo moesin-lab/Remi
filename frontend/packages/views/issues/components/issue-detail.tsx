@@ -2,7 +2,10 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
+import { api, ApiError } from "@multiremi/core/api";
+import { defaultStorage } from "@multiremi/core/platform";
 import { ChevronLeft } from "lucide-react";
+import { useFloatingPanelLayout } from "../../layout/floating-panel-layout";
 import { useNavigation } from "../../navigation";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@multiremi/ui/components/ui/resizable";
@@ -10,18 +13,20 @@ import { Sheet, SheetContent } from "@multiremi/ui/components/ui/sheet";
 import { useIsMobile } from "@multiremi/ui/hooks/use-mobile";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useScmSettings } from "@multiremi/core/scm";
-import { useAuthStore } from "@multiremi/core/auth";
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+import { useIssueLog } from "@multiremi/core/session-log/use-issue-log";
+import { issueKeys } from "@multiremi/core/issues/queries";
+import type { IssueLogBootstrap } from "@multiremi/core/api/schemas/session-log";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { useActorName } from "@multiremi/core/workspace/hooks";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useRecentContextStore } from "@multiremi/core/chat";
 import {
+  childIssuesOptions,
   findCachedIssue,
   issueDetailOptions,
-  issueTimelinePrimerOptions,
   issueUsageOptions,
 } from "@multiremi/core/issues/queries";
-import { seedIssueTimelinePage } from "@multiremi/core/issues/timeline-cache";
 import { projectDetailOptions } from "@multiremi/core/projects/queries";
 import { issueLabelsOptions } from "@multiremi/core/labels";
 import { memberListOptions, agentListOptions } from "@multiremi/core/workspace/queries";
@@ -37,6 +42,7 @@ import { IssueDetailMain } from "./issue-detail-main";
 import { IssueDetailSidebar } from "./issue-detail-sidebar";
 import { IssueDetailSkeleton } from "./issue-detail-skeleton";
 import { useT } from "../../i18n";
+import { useAfterFirstScreen, useRouteContentReady } from "@multiremi/core/platform/use-after-first-screen";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -44,6 +50,7 @@ import { useT } from "../../i18n";
 
 interface IssueDetailProps {
   issueId: string;
+  initialLog?: IssueLogBootstrap;
   onDelete?: () => void;
   /** Called after the issue is marked as done via the toolbar button. */
   onDone?: () => void;
@@ -68,6 +75,7 @@ interface IssueDetailProps {
  */
 export function IssueDetail({
   issueId,
+  initialLog,
   onDelete,
   onDone,
   defaultSidebarOpen = true,
@@ -78,47 +86,92 @@ export function IssueDetail({
 }: IssueDetailProps) {
   const { t } = useT("issues");
   const id = issueId;
+  const { registerRightRail } = useFloatingPanelLayout();
   const router = useNavigation();
-  const user = useAuthStore((s) => s.user);
+  const { pathname } = router;
+  const user = workspaceOperatorUser;
   const paths = useWorkspacePaths();
 
   const wsId = useWorkspaceId();
   const queryClient = useQueryClient();
-  const timelinePrimerStartRef = useRef({ issueId: id, startedAt: Date.now() });
-  if (timelinePrimerStartRef.current.issueId !== id) {
-    timelinePrimerStartRef.current = { issueId: id, startedAt: Date.now() };
-  }
-  const timelinePrimer = useQuery({
-    ...issueTimelinePrimerOptions(id),
-    enabled: !initialIssueSessionId,
-  });
-  useEffect(() => {
-    if (timelinePrimer.data) {
-      seedIssueTimelinePage(
-        queryClient,
-        id,
-        timelinePrimer.data,
-        timelinePrimerStartRef.current.startedAt,
-      );
-    }
-  }, [id, queryClient, timelinePrimer.data]);
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
-  const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  const membersQuery = useQuery(memberListOptions(wsId));
+  const members = membersQuery.data ?? [];
+  const routeAfterFirstScreen = useAfterFirstScreen({ routeKey: pathname });
+  // Inbox changes its selected detail without changing the pathname. The
+  // already-open route gate cannot stand in for this detail's own reveal.
+  const visit = `${id}:${initialIssueSessionId ?? ""}:${highlightCommentId ?? ""}`;
+  const [revealedVisit, setRevealedVisit] = useState({ visit, ready: false });
+  if (revealedVisit.visit !== visit) setRevealedVisit({ visit, ready: false });
+  const afterFirstScreen = routeAfterFirstScreen && revealedVisit.visit === visit && revealedVisit.ready;
+  const onDetailRevealed = useCallback(() => {
+    setRevealedVisit(current => current.visit === visit && !current.ready ? { visit, ready: true } : current);
+  }, [visit]);
+  const { data: agents = [] } = useQuery(agentListOptions(wsId, { enabled: afterFirstScreen }));
+  const resolveDeepLinkSession = Boolean(highlightCommentId && !initialIssueSessionId
+    && initialLog?.missingCommentId !== highlightCommentId
+    && initialLog?.targetCommentId !== highlightCommentId);
   const sessions = useIssueSessionSelection(
     id,
     initialIssueSessionId,
     onIssueSessionChange,
+    resolveDeepLinkSession,
   );
+  const [locatedSession, setLocatedSession] = useState<{ issueId: string; commentId: string; sessionId: string; missing: boolean } | null>(null);
+  const resolution = locatedSession?.issueId === id
+    && locatedSession.commentId === highlightCommentId ? locatedSession : null;
+  const matchedSession = resolution?.sessionId ?? null;
+  useEffect(() => {
+    if (!resolveDeepLinkSession || !highlightCommentId || sessions.list.length === 0 || matchedSession !== null) return;
+    let active = true;
+    void Promise.allSettled(sessions.list.map(async session => {
+      try {
+        const location = await api.locateSessionLogEntry(session.id, highlightCommentId);
+        if (location.id !== highlightCommentId) throw new Error("Located entry does not match the requested comment");
+        return session.id;
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) return null;
+        throw error;
+      }
+    })).then(results => {
+      if (!active) return;
+      const found = results.find(result => result.status === "fulfilled" && result.value !== null);
+      const failed = !found && results.some(result => result.status === "rejected");
+      const missing = !found && !failed;
+      const sessionId = found?.status === "fulfilled" ? found.value! : failed ? ""
+        : sessions.list.find(session => session.owner_type === "issue" && session.owner_id === id && session.is_default)?.id
+          ?? sessions.list.find(session => session.is_default)?.id ?? sessions.list[0]!.id;
+      setLocatedSession({ issueId: id, commentId: highlightCommentId, sessionId, missing });
+      if (sessionId) sessions.select(sessionId);
+    });
+    return () => { active = false; };
+  }, [id, highlightCommentId, matchedSession, resolveDeepLinkSession, sessions.list, sessions.select]);
+  const activitySessions = resolveDeepLinkSession
+    ? { ...sessions, activeId: matchedSession ?? "", active: sessions.list.find(s => s.id === matchedSession) ?? null,
+        pending: (matchedSession === null && sessions.list.length > 0 && !sessions.error) || sessions.pending,
+        error: sessions.error || matchedSession === "",
+        refetch: () => { setLocatedSession(null); sessions.refetch(); } }
+    : sessions;
+  // Begin the window as soon as sessions resolve, including while member or
+  // children queries still hold the existing render gates closed.
+  const log = useIssueLog(activitySessions.activeId, initialLog,
+    resolution?.missing || initialLog?.missingCommentId === highlightCommentId ? undefined : highlightCommentId,
+    false, true, activitySessions.active?.owner_type === "issue"
+      && activitySessions.active.owner_id === id && activitySessions.active.is_default === true);
+  // Same key/policy as the sidebar: one request independent of the log read.
+  useQuery({ queryKey: issueKeys.tasks(id), queryFn: () => api.listTasksByIssue(id),
+    staleTime: 30_000, refetchOnWindowFocus: true });
   // Workspace owners and admins moderate any comment authored by anyone
   // (mirrors backend `comment.go:507-512`). Computed here so per-comment
   // rendering doesn't have to re-derive it for every row.
-  const currentUserRole =
-    members.find((m) => m.user_id === user?.id)?.role ?? null;
+  const currentMember = members.find((m) => m.user_id === user?.id) ?? null;
+  const currentUserRole = currentMember?.role ?? null;
+  const isMember = currentMember !== null;
   const canModerateComments =
     currentUserRole === "owner" || currentUserRole === "admin";
   const { getActorName } = useActorName();
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: layoutId,
+    storage: defaultStorage,
   });
   const sidebarRef = usePanelRef();
   const isMobile = useIsMobile();
@@ -151,16 +204,23 @@ export function IssueDetail({
   // that: setState triggers the re-render that hands Virtuoso the element.
   const [scrollContainerEl, setScrollContainerEl] = useState<HTMLDivElement | null>(null);
 
-  // Issue data from TQ — uses detail query, seeded from list cache if available.
-  // Only seed when description is present; list API omits it, and ContentEditor
-  // reads defaultValue on mount only — seeding null description shows an empty editor.
+  // Issue data from TQ. A list row is not a valid detail seed: the global query
+  // staleTime is infinite, so accepting one would suppress the detail request
+  // that carries pending_decision_count.
   const { data: issue = null, isLoading: issueLoading } = useQuery({
     ...issueDetailOptions(wsId, id),
     initialData: () => {
       const cached = findCachedIssue(queryClient, wsId, id);
-      return cached?.description != null ? cached : undefined;
+      return cached?.description != null && cached.pending_decision_count !== undefined
+        ? cached
+        : undefined;
     },
   });
+  const childIssuesQuery = useQuery({
+    ...childIssuesOptions(wsId, id),
+    enabled: !!issue,
+  });
+  const childIssues = childIssuesQuery.data ?? [];
 
   // Record recent visit
   const recordVisit = useRecentIssuesStore((s) => s.recordVisit);
@@ -204,7 +264,7 @@ export function IssueDetail({
 
   // Token usage — sidebar only, but queried here so the mobile sheet doesn't
   // have to be opened before the numbers start loading.
-  const { data: usage } = useQuery(issueUsageOptions(id));
+  const { data: usage } = useQuery({ ...issueUsageOptions(id), enabled: afterFirstScreen });
 
   // Sub-issue queries
   const parentIssueId = issue?.parent_issue_id;
@@ -232,7 +292,10 @@ export function IssueDetail({
     return clearSelection;
   }, [id, clearSelection]);
 
-  const loading = issueLoading;
+  const loading = issueLoading
+    || membersQuery.isPending
+    || (!!issue && childIssuesQuery.isPending);
+  useRouteContentReady(pathname, !issueLoading && !issue);
 
   // Shared issue actions (mutations, pin, copy-link, modal dispatch, etc.).
   // Called before the `if (!issue)` early return so hook order stays stable.
@@ -241,7 +304,7 @@ export function IssueDetail({
   // Labels live in their own query (not on the issue body) — fetch the count
   // here so seeding can decide whether the "Labels" optional row should be
   // shown for an issue that already has labels attached.
-  const { data: attachedLabels = [] } = useQuery(issueLabelsOptions(wsId, id));
+  const { data: attachedLabels = [] } = useQuery({ ...issueLabelsOptions(wsId, id), enabled: afterFirstScreen });
   const optionalProps = useOptionalProps(issue, attachedLabels.length);
 
   const handleToggleSidebar = useCallback(() => {
@@ -296,6 +359,7 @@ export function IssueDetail({
     <IssueDetailSidebar
       issue={issue}
       issueId={id}
+      queriesEnabled={afterFirstScreen}
       sections={sections}
       optionalProps={optionalProps}
       onUpdateField={actions.updateField}
@@ -304,12 +368,15 @@ export function IssueDetail({
       getActorName={getActorName}
       issueSessions={sessions.list}
       usage={usage}
-      canManageArchives={canModerateComments}
+      childIssues={childIssues}
+      onCreateSubIssue={actions.openCreateSubIssue}
     />
   );
 
   const detailContent = (
     <IssueDetailMain
+      onRevealed={onDetailRevealed}
+      log={log}
       issue={issue}
       issueId={id}
       parentIssue={parentIssue}
@@ -324,15 +391,18 @@ export function IssueDetail({
       isMobile={isMobile}
       sessionSidebarOpen={visibleSessionSidebarOpen}
       onToggleSessionSidebar={handleToggleSessionSidebar}
-      sessions={sessions}
+      sessions={activitySessions}
       members={members}
       agents={agents}
       currentUserId={user?.id}
       canModerateComments={canModerateComments}
-      highlightCommentId={highlightCommentId}
+      getActorName={getActorName}
+      highlightCommentId={resolution?.missing || initialLog?.missingCommentId === highlightCommentId ? undefined : highlightCommentId}
+      initialLog={initialLog}
       onShowKeyResults={handleShowKeyResults}
       onScrollContainerRef={setScrollContainerEl}
       scrollContainerEl={scrollContainerEl}
+      canForceStart={isMember}
     />
   );
 
@@ -365,7 +435,7 @@ export function IssueDetail({
         panelRef={sidebarRef}
         onResize={(size) => setDesktopSidebarOpen(size.inPixels > 0)}
       >
-      <div className="overflow-y-auto border-l h-full">
+      <div ref={registerRightRail} data-issue-detail-sidebar="" className="overflow-y-auto border-l h-full">
         <div className="p-4">
           {sidebarContent}
         </div>

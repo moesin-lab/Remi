@@ -1,18 +1,20 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { join } from "node:path";
+import * as nodeFs from "node:fs";
+import { parse as parseToml } from "smol-toml";
 import {
-  cleanupTemporaryTaskProviderHome,
   cleanupTaskPrivateTempDirectory,
-  prepareIssueSessionProviderHome,
+  listIssueConversationRoots,
   prepareIssueExecutionDirectory,
+  prepareIssueSessionProviderHome,
   prepareTaskPrivateTempDirectory,
   loadIssueSessionProviderEnv,
-  resolveIssueRuntimeStateRoot,
-  resolveIssueSessionProviderHome,
   resolveTaskProviderHome,
 } from "@daemon/agent-runtime/workspace/session-home.js";
+import { executionLaneForTask, subjectForTask, workDirectory } from "@daemon/agent-runtime/workspace/layout.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
 
 const roots: string[] = [];
@@ -21,7 +23,11 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function task(provider: "claude" | "codex", generation = 3): AgentTask {
+function workspaceOf(workspaces: string): string {
+  return workDirectory(workspaces, subjectForTask(task("claude")));
+}
+
+function task(provider: "claude" | "codex" | "grok", generation = 3): AgentTask {
   return {
     id: "tsk_home",
     workspaceId: "ws_1",
@@ -35,13 +41,35 @@ function task(provider: "claude" | "codex", generation = 3): AgentTask {
 }
 
 describe("Issue Session provider home", () => {
+  it("allocates daemon-owned Grok task state without copying machine credentials", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-grok-home-"));
+    roots.push(root);
+    const resolved = resolveTaskProviderHome({
+      ...task("grok"),
+      id: "tsk_grok",
+      issueId: null,
+      issueSessionId: null,
+    } as AgentTask, join(root, "workspaces"))!;
+
+    expect(resolved.provider).toBe("grok");
+    expect(await loadIssueSessionProviderEnv(resolved)).toEqual({});
+    await prepareIssueSessionProviderHome(resolved);
+    expect(JSON.parse(readFileSync(join(resolved.root, "meta.json"), "utf8"))).toMatchObject({
+      provider: "grok",
+      providerHome: "home",
+    });
+    expect(existsSync(join(resolved.home, "auth.json"))).toBe(false);
+    expect(existsSync(join(resolved.home, ".credentials.json"))).toBe(false);
+  });
+
   it("allocates a fresh private temp per execution and cleans only its own directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-task-private-tmp-"));
     roots.push(root);
     const workspaces = join(root, "workspaces");
-    const home = resolveTaskProviderHome(task("claude"), join(root, "issue-runtime"), workspaces)!;
-    const first = await prepareTaskPrivateTempDirectory(home, "tsk_same");
-    const second = await prepareTaskPrivateTempDirectory(home, "tsk_same");
+    const home = resolveTaskProviderHome(task("claude"), workspaces)!;
+    const subject = subjectForTask(task("claude"));
+    const first = await prepareTaskPrivateTempDirectory(home.storageRoot, subject, "tsk_same");
+    const second = await prepareTaskPrivateTempDirectory(home.storageRoot, subject, "tsk_same");
     expect(first.path).not.toBe(second.path);
     writeFileSync(join(first.path, "first.txt"), "first");
     writeFileSync(join(second.path, "second.txt"), "second");
@@ -53,37 +81,147 @@ describe("Issue Session provider home", () => {
     expect(existsSync(second.path)).toBe(false);
   });
 
-  it("isolates delegation working directories and refuses a symlinked directory", async () => {
+  // MUL-449: macOS caps a unix socket path at 104 bytes, while a delegation's
+  // real task temp directory runs past 220. Each execution therefore gets a
+  // short `/tmp/remi-XXXXXXXX` alias, and TMPDIR/TMP/TEMP point at that alias.
+  it("allocates a short /tmp alias for the task temp directory on darwin", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-task-tmp-alias-"));
+    roots.push(root);
+    const home = resolveTaskProviderHome(task("claude"), join(root, "workspaces"))!;
+    const subject = subjectForTask(task("claude"));
+    const directory = await prepareTaskPrivateTempDirectory(home.storageRoot, subject, "tsk_alias", "darwin");
+    if (directory.aliasPath) roots.push(directory.aliasPath);
+
+    expect(directory.aliasPath).toBeDefined();
+    // Short enough that a socket inside it stays under the 104-byte cap.
+    expect(Buffer.byteLength(directory.aliasPath!)).toBeLessThanOrEqual(24);
+    expect(directory.aliasPath!.startsWith("/tmp/remi-")).toBe(true);
+    // The alias names the real directory; the real directory does not move.
+    expect(lstatSync(directory.aliasPath!).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(directory.aliasPath!)).toBe(directory.path);
+    expect(directory.path).toContain("task-tmp");
+
+    await cleanupTaskPrivateTempDirectory(directory);
+    expect(existsSync(directory.aliasPath!)).toBe(false);
+    expect(existsSync(directory.path)).toBe(false);
+  });
+
+  it("keeps the alias usable for a unix socket when the real path is too long", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-task-tmp-socket-"));
+    roots.push(root);
+    // A provider home deep enough to blow macOS's 104-byte `sun_path` cap,
+    // shaped like the delegation path the MBP actually uses.
+    const deep = join(
+      root, "w".repeat(80), "delegations", "d".repeat(60), "executions", "e".repeat(64),
+    );
+    mkdirSync(deep, { recursive: true });
+    const home = resolveTaskProviderHome(task("claude"), join(deep, "workspaces"))!;
+    const subject = subjectForTask(task("claude"));
+    const directory = await prepareTaskPrivateTempDirectory(home.storageRoot, subject, "tsk_socket", "darwin");
+    if (directory.aliasPath) roots.push(directory.aliasPath);
+
+    expect(directory.aliasPath).toBeDefined();
+    // The real directory is unusable as a socket directory on macOS: its own
+    // path already exceeds the cap before any socket name is appended. Linux
+    // accepts longer paths, so assert the length contract rather than trying to
+    // reproduce the macOS kernel error here.
+    const realSocket = join(directory.path, "probe.sock");
+    const aliasSocket = join(directory.aliasPath!, "probe.sock");
+    expect(Buffer.byteLength(realSocket)).toBeGreaterThan(104);
+    expect(Buffer.byteLength(aliasSocket)).toBeLessThanOrEqual(64);
+
+    // A listener really can bind through the alias, and the node lands in the
+    // real directory (the alias is a link, not a copy).
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(aliasSocket, resolve);
+    });
+    expect(existsSync(join(directory.path, "probe.sock"))).toBe(true);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await cleanupTaskPrivateTempDirectory(directory);
+  });
+
+  it("never deletes an alias that is not the one this execution created", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-task-tmp-foreign-"));
+    roots.push(root);
+    const home = resolveTaskProviderHome(task("claude"), join(root, "workspaces"))!;
+    const subject = subjectForTask(task("claude"));
+    const directory = await prepareTaskPrivateTempDirectory(home.storageRoot, subject, "tsk_foreign", "darwin");
+    expect(directory.aliasPath).toBeDefined();
+    // Someone else's directory now occupies the alias name.
+    rmSync(directory.aliasPath!, { force: true });
+    const foreignTarget = join(root, "foreign");
+    mkdirSync(foreignTarget, { recursive: true });
+    symlinkSync(foreignTarget, directory.aliasPath!);
+    roots.push(directory.aliasPath!);
+
+    await cleanupTaskPrivateTempDirectory({ ...directory, aliasPath: directory.aliasPath });
+    // The foreign link and its target survive; only the owned directory goes.
+    expect(existsSync(directory.aliasPath!)).toBe(true);
+    expect(existsSync(foreignTarget)).toBe(true);
+    expect(existsSync(directory.path)).toBe(false);
+  });
+
+  it("falls back to the long real path when the alias cannot be created", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-task-tmp-fallback-"));
+    roots.push(root);
+    const home = resolveTaskProviderHome(task("claude"), join(root, "workspaces"))!;
+    const subject = subjectForTask(task("claude"));
+    // Force every candidate name to collide, which is the same code path as an
+    // unwritable /tmp: the execution keeps the long path and still succeeds.
+    const aliasSpy = spyOn(nodeFs, "symlinkSync").mockImplementation(() => {
+      throw Object.assign(new Error("EEXIST: file already exists"), { code: "EEXIST" });
+    });
+    try {
+      const directory = await prepareTaskPrivateTempDirectory(home.storageRoot, subject, "tsk_fallback", "darwin");
+      expect(directory.aliasPath).toBeUndefined();
+      expect(existsSync(directory.path)).toBe(true);
+      await cleanupTaskPrivateTempDirectory(directory);
+      expect(existsSync(directory.path)).toBe(false);
+    } finally {
+      aliasSpy.mockRestore();
+    }
+  });
+
+  it("does not create an alias on non-darwin platforms", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-task-tmp-linux-"));
+    roots.push(root);
+    const home = resolveTaskProviderHome(task("claude"), join(root, "workspaces"))!;
+    const subject = subjectForTask(task("claude"));
+    const directory = await prepareTaskPrivateTempDirectory(home.storageRoot, subject, "tsk_linux", "linux");
+    expect(directory.aliasPath).toBeUndefined();
+    await cleanupTaskPrivateTempDirectory(directory);
+  });
+
+  it("isolates delegation homes below the lane's execution scope", () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-delegation-home-"));
     roots.push(root);
-    const first = resolveIssueSessionProviderHome({ ...task("claude"), execution_scope: "dlg_one" }, root, root)!;
-    const second = resolveIssueSessionProviderHome({ ...task("claude"), execution_scope: "dlg_two" }, root, root)!;
-    expect(first.home).not.toBe(second.home);
-    expect(await prepareIssueExecutionDirectory(first)).toBe(join(first.root, "work"));
-    mkdirSync(second.root, { recursive: true });
-    symlinkSync(join(first.root, "work"), join(second.root, "work"));
-    await expect(prepareIssueExecutionDirectory(second)).rejects.toThrow("real directory");
+    const main = resolveTaskProviderHome(task("claude"), root)!;
+    const first = resolveTaskProviderHome({ ...task("claude"), execution_scope: "dlg_one" }, root)!;
+    const second = resolveTaskProviderHome({ ...task("claude"), execution_scope: "dlg_two" }, root)!;
+    expect(new Set([main.home, first.home, second.home]).size).toBe(3);
+    expect(first.root).toBe(join(root, "env", "iss_1", "ises_1", "agt_1", "dlg_one", "3"));
+    expect(second.root).toBe(join(root, "env", "iss_1", "ises_1", "agt_1", "dlg_two", "3"));
   });
 
   it("uses the stable session/agent/lane-generation layout", () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-session-home-"));
     roots.push(root);
 
-    const workspace = join(root, "MUL-1");
     const workspaces = join(root, "daemon-workspaces");
-    expect(resolveIssueSessionProviderHome(task("claude"), workspace, workspaces)).toEqual({
+    expect(resolveTaskProviderHome(task("claude"), workspaces)).toEqual({
       storageRoot: workspaces,
-      root: join(workspaces, ".runtime", "ises_1", "agt_1", "3"),
-      home: join(workspaces, ".runtime", "ises_1", "agt_1", "3", "home"),
+      root: join(workspaces, "env", "iss_1", "ises_1", "agt_1", "main", "3"),
+      home: join(workspaces, "env", "iss_1", "ises_1", "agt_1", "main", "3", "home"),
       sessionId: "ises_1",
       agentId: "agt_1",
       generation: 3,
       provider: "claude",
-      runtimeStateRoot: join(workspaces, ".runtime", "ises_1"),
     });
   });
 
-  it("uses a daemon-owned task-scoped home for one-shot non-Issue tasks", () => {
+  it("uses a daemon-owned home under the task's own subject for one-shot tasks", () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-task-home-"));
     roots.push(root);
     const workspaces = join(root, "workspaces");
@@ -94,16 +232,14 @@ describe("Issue Session provider home", () => {
       issueSessionId: null,
     } as AgentTask;
 
-    expect(resolveTaskProviderHome(nonIssueTask, join(root, "user-cwd"), workspaces)).toEqual({
+    expect(resolveTaskProviderHome(nonIssueTask, workspaces)).toEqual({
       storageRoot: workspaces,
-      root: join(workspaces, ".runtime", "tsk_quick_1", "agt_1", "1"),
-      home: join(workspaces, ".runtime", "tsk_quick_1", "agt_1", "1", "home"),
+      root: join(workspaces, "env", "tsk_quick_1", "tsk_quick_1", "agt_1", "main", "3"),
+      home: join(workspaces, "env", "tsk_quick_1", "tsk_quick_1", "agt_1", "main", "3", "home"),
       sessionId: "tsk_quick_1",
       agentId: "agt_1",
-      generation: 1,
+      generation: 3,
       provider: "claude",
-      runtimeStateRoot: join(workspaces, ".runtime", "tsk_quick_1"),
-      temporaryTaskRoot: join(workspaces, ".runtime", "tsk_quick_1"),
     });
 
     const automationTask = {
@@ -111,15 +247,11 @@ describe("Issue Session provider home", () => {
       id: "tsk_automation_1",
       autopilotRunId: "run_1",
     } as AgentTask;
-    expect(resolveTaskProviderHome(automationTask, join(root, "user-cwd"), workspaces))
-      .toMatchObject({
-        root: join(workspaces, ".runtime", "tsk_automation_1", "agt_1", "1"),
-        runtimeStateRoot: join(workspaces, ".runtime", "tsk_automation_1"),
-        temporaryTaskRoot: join(workspaces, ".runtime", "tsk_automation_1"),
-      });
+    expect(resolveTaskProviderHome(automationTask, workspaces))
+      .toMatchObject({ root: join(workspaces, "env", "tsk_automation_1", "tsk_automation_1", "agt_1", "main", "3") });
   });
 
-  it("reuses one Chat provider home across tasks and leaves it for Chat GC", async () => {
+  it("reuses one Chat provider home across tasks", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-chat-home-"));
     roots.push(root);
     const workspaces = join(root, "workspaces");
@@ -131,27 +263,24 @@ describe("Issue Session provider home", () => {
       chatSessionId: "chat_1",
     } as AgentTask;
     const second = { ...first, id: "tsk_chat_2" } as AgentTask;
-    const firstHome = resolveTaskProviderHome(first, join(root, "cwd"), workspaces)!;
-    const secondHome = resolveTaskProviderHome(second, join(root, "cwd"), workspaces)!;
+    const firstHome = resolveTaskProviderHome(first, workspaces)!;
+    const secondHome = resolveTaskProviderHome(second, workspaces)!;
 
     expect(secondHome).toEqual(firstHome);
     expect(firstHome).toMatchObject({
       storageRoot: workspaces,
-      root: join(workspaces, ".runtime", "chat_1", "agt_1", "1"),
+      root: join(workspaces, "env", "chat_1", "chat_1", "agt_1", "main", "3"),
       sessionId: "chat_1",
-      runtimeStateRoot: join(workspaces, ".runtime", "chat_1"),
     });
-    expect(firstHome.temporaryTaskRoot).toBeUndefined();
 
     await prepareIssueSessionProviderHome(firstHome, {
       baseClaudeConfigDir: join(root, "base"),
       linkClaudeCredentials: false,
     });
-    await cleanupTemporaryTaskProviderHome(firstHome, workspaces);
     expect(existsSync(firstHome.home)).toBe(true);
   });
 
-  it("keeps an Issue-bound Chat in the Chat provider home", () => {
+  it("keeps an ordinary Issue-bound Chat Task in the Chat provider home", () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-bound-chat-home-"));
     roots.push(root);
     const workspaces = join(root, "workspaces");
@@ -159,57 +288,59 @@ describe("Issue Session provider home", () => {
       ...task("claude"),
       id: "tsk_bound_chat",
       chatSessionId: "chat_1",
+      issueSessionId: null,
     } as AgentTask;
 
-    expect(resolveTaskProviderHome(boundChat, join(root, "issue-runtime"), workspaces))
+    expect(resolveTaskProviderHome(boundChat, workspaces))
       .toMatchObject({
-        root: join(workspaces, ".runtime", "chat_1", "agt_1", "1"),
+        root: join(workspaces, "env", "chat_1", "chat_1", "agt_1", "main", "3"),
         sessionId: "chat_1",
-        runtimeStateRoot: join(workspaces, ".runtime", "chat_1"),
       });
   });
 
-  it("cleans the whole temporary non-Issue task runtime", async () => {
-    const root = mkdtempSync(join(tmpdir(), "multiremi-task-home-cleanup-"));
+  it("keeps a Chat-owned Session Task in the product Session provider lane", () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-chat-session-home-"));
     roots.push(root);
     const workspaces = join(root, "workspaces");
-    const nonIssueTask = {
-      ...task("codex"),
-      id: "tsk_quick_1",
-      issueId: null,
-      issueSessionId: null,
+    const sessionTask = {
+      ...task("claude"),
+      chatSessionId: "chat_1",
     } as AgentTask;
-    const resolved = resolveTaskProviderHome(nonIssueTask, join(root, "cwd"), workspaces)!;
-    await prepareIssueSessionProviderHome(resolved, {
-      baseCodexHome: join(root, "base"),
-      linkCodexAuth: false,
-    });
-    const sibling = join(resolved.temporaryTaskRoot!, ".remi-runtime", "execution.json");
-    mkdirSync(join(sibling, ".."), { recursive: true });
-    writeFileSync(sibling, "{}\n");
 
-    await cleanupTemporaryTaskProviderHome(resolved, workspaces);
-
-    expect(existsSync(resolved.root)).toBe(false);
-    expect(existsSync(sibling)).toBe(false);
-    expect(existsSync(resolved.temporaryTaskRoot!)).toBe(false);
+    expect(resolveTaskProviderHome(sessionTask, workspaces))
+      .toMatchObject({
+        root: join(workspaces, "env", "chat_1", "ises_1", "agt_1", "main", "3"),
+        sessionId: "ises_1",
+        generation: 3,
+      });
   });
 
-  it("uses a deterministic archiveable lineage for legacy Issue tasks", () => {
+  it("falls back to the Issue id when a task carries no Issue session", () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-task-home-invalid-"));
     roots.push(root);
     const missingSession = { ...task("claude"), issueSessionId: null } as AgentTask;
-    expect(resolveTaskProviderHome(missingSession, join(root, "MUL-1"), join(root, "workspaces")))
-      .toEqual({
-        storageRoot: join(root, "workspaces"),
-        root: join(root, "workspaces", ".runtime", "legacy-iss_1", "agt_1", "1"),
-        home: join(root, "workspaces", ".runtime", "legacy-iss_1", "agt_1", "1", "home"),
-        sessionId: "legacy-iss_1",
-        agentId: "agt_1",
-        generation: 1,
-        provider: "claude",
-        runtimeStateRoot: join(root, "workspaces", ".runtime", "legacy-iss_1"),
+    expect(resolveTaskProviderHome(missingSession, join(root, "workspaces")))
+      .toMatchObject({
+        root: join(root, "workspaces", "env", "iss_1", "iss_1", "agt_1", "main", "3"),
+        sessionId: "iss_1",
+        generation: 3,
       });
+  });
+
+  it("lists the conversations of an Issue without following links or counting temp directories", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-conversation-roots-"));
+    roots.push(root);
+    const workspaces = join(root, "workspaces");
+    expect(listIssueConversationRoots(workspaces, "iss_1")).toEqual([]);
+    const home = resolveTaskProviderHome(task("claude"), workspaces)!;
+    await prepareIssueSessionProviderHome(home, { baseClaudeConfigDir: join(root, "base"), linkClaudeCredentials: false });
+    await prepareTaskPrivateTempDirectory(workspaces, subjectForTask(task("claude")), "tsk_home");
+    mkdirSync(join(workspaces, "env", "iss_1", "ises_2"));
+    symlinkSync(root, join(workspaces, "env", "iss_1", "ises_linked"));
+    expect(listIssueConversationRoots(workspaces, "iss_1")).toEqual([
+      join(workspaces, "env", "iss_1", "ises_1"),
+      join(workspaces, "env", "iss_1", "ises_2"),
+    ]);
   });
 
   it("isolates Codex Chat homes when the execution fingerprint changes", () => {
@@ -231,18 +362,20 @@ describe("Issue Session provider home", () => {
       executionFingerprint: "b".repeat(64),
     } as AgentTask;
 
-    const firstHome = resolveTaskProviderHome(first, join(root, "cwd"), workspaces)!;
-    const sameHome = resolveTaskProviderHome(same, join(root, "cwd"), workspaces)!;
-    const changedHome = resolveTaskProviderHome(changed, join(root, "cwd"), workspaces)!;
+    const firstHome = resolveTaskProviderHome(first, workspaces)!;
+    const sameHome = resolveTaskProviderHome(same, workspaces)!;
+    const changedHome = resolveTaskProviderHome(changed, workspaces)!;
 
     expect(sameHome.home).toBe(firstHome.home);
     expect(changedHome.home).not.toBe(firstHome.home);
     expect(firstHome.root).toBe(join(
       workspaces,
-      ".runtime",
+      "env",
+      "chat_1",
       "chat_1",
       "agt_1",
-      "1",
+      "main",
+      "3",
       "executions",
       "a".repeat(64),
     ));
@@ -255,55 +388,90 @@ describe("Issue Session provider home", () => {
     const workspaces = join(root, "workspaces");
     const first = {
       ...task("claude"),
-      ...(kind === "chat" ? { chatSessionId: "chat_claude" } : {}),
+      ...(kind === "chat" ? { chatSessionId: "chat_claude", issueSessionId: null } : {}),
       claudeProfile: { name: "private", base_url: "https://example.test", model: "custom", env_key: "REMI_CLAUDE_API_KEY" },
     } as AgentTask;
-    const resolve = (input: AgentTask) => resolveTaskProviderHome(input, join(root, "cwd"), workspaces)!;
+    const resolve = (input: AgentTask) => resolveTaskProviderHome(input, workspaces)!;
     const home = resolve(first);
     expect(resolve({ ...first, id: "tsk_same" }).home).toBe(home.home);
     expect(resolve({ ...first, executionFingerprint: "b".repeat(64) }).home).not.toBe(home.home);
     expect(resolve({ ...first, claudeProfile: null }).home).not.toBe(home.home);
-    expect(home.runtimeStateRoot).toBe(join(workspaces, ".runtime", kind === "chat" ? "chat_claude" : "ises_1"));
+    expect(home.sessionId).toBe(kind === "chat" ? "chat_claude" : "ises_1");
   });
 
-  it("keeps Issue archive lineage while isolating failed cold starts and generations", () => {
+  it("keeps one lane while isolating failed cold starts and generations", () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-issue-fingerprint-"));
     roots.push(root);
-    const workspace = join(root, "MUL-1");
     const first = { ...task("codex", 3), executionFingerprint: "a".repeat(64) } as AgentTask;
     // A provider can fail before a lane is promoted, so the server generation
     // remains 3 even though a freshly claimed task now carries fingerprint B.
     const failedThenChanged = { ...first, id: "tsk_b", executionFingerprint: "b".repeat(64) } as AgentTask;
     const resetGeneration = { ...first, id: "tsk_a_gen4", issueSessionGeneration: 4 } as AgentTask;
 
-    const firstHome = resolveIssueSessionProviderHome(first, workspace, join(root, "workspaces"))!;
-    const changedHome = resolveIssueSessionProviderHome(failedThenChanged, workspace, join(root, "workspaces"))!;
-    const resetHome = resolveIssueSessionProviderHome(resetGeneration, workspace, join(root, "workspaces"))!;
+    const firstHome = resolveTaskProviderHome(first, join(root, "workspaces"))!;
+    const changedHome = resolveTaskProviderHome(failedThenChanged, join(root, "workspaces"))!;
+    const resetHome = resolveTaskProviderHome(resetGeneration, join(root, "workspaces"))!;
 
     expect(changedHome.home).not.toBe(firstHome.home);
     expect(resetHome.home).not.toBe(firstHome.home);
-    expect(firstHome.root).toStartWith(join(root, "workspaces", ".runtime", "ises_1", "agt_1", "3"));
-    expect(changedHome.root).toStartWith(join(root, "workspaces", ".runtime", "ises_1", "agt_1", "3"));
-    expect(resetHome.root).toStartWith(join(root, "workspaces", ".runtime", "ises_1", "agt_1", "4"));
+    const lane = join(root, "workspaces", "env", "iss_1", "ises_1", "agt_1", "main");
+    expect(firstHome.root).toStartWith(join(lane, "3"));
+    expect(changedHome.root).toStartWith(join(lane, "3"));
+    expect(resetHome.root).toStartWith(join(lane, "4"));
   });
 
   it("rejects a symlinked Issue Provider Home parent without writing outside", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-issue-home-symlink-"));
     roots.push(root);
-    const workspace = join(root, "MUL-1");
     const workspaces = join(root, "workspaces");
     const outside = join(root, "outside");
-    mkdirSync(workspace, { recursive: true });
     mkdirSync(workspaces, { recursive: true });
     mkdirSync(outside, { recursive: true });
-    symlinkSync(outside, join(workspaces, ".runtime"), "dir");
-    const resolved = resolveIssueSessionProviderHome(task("codex"), workspace, workspaces)!;
+    symlinkSync(outside, join(workspaces, "env"), "dir");
+    const resolved = resolveTaskProviderHome(task("codex"), workspaces)!;
 
     await expect(prepareIssueSessionProviderHome(resolved, {
       baseCodexHome: join(root, "missing-base"),
       linkCodexAuth: false,
     })).rejects.toThrow("must be a real directory");
-    expect(existsSync(join(outside, "ises_1"))).toBe(false);
+    expect(existsSync(join(outside, "iss_1"))).toBe(false);
+  });
+
+  it("gives each Issue lane a private execution directory beside its home, apart from the shared workspace", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-issue-execution-dir-"));
+    roots.push(root);
+    const workspaces = join(root, "workspaces");
+    const main = executionLaneForTask(task("claude"))!;
+    const delegated = executionLaneForTask({ ...task("claude"), execution_scope: "dlg_one" } as AgentTask)!;
+
+    const mainDirectory = await prepareIssueExecutionDirectory(workspaces, main);
+    const delegatedDirectory = await prepareIssueExecutionDirectory(workspaces, delegated);
+
+    expect(mainDirectory).toBe(join(workspaces, "env", "iss_1", "ises_1", "agt_1", "main", "3", "work"));
+    expect(delegatedDirectory).toBe(join(workspaces, "env", "iss_1", "ises_1", "agt_1", "dlg_one", "3", "work"));
+    expect(lstatSync(mainDirectory).isDirectory()).toBe(true);
+    expect(lstatSync(delegatedDirectory).isDirectory()).toBe(true);
+    expect(mainDirectory).not.toBe(workspaceOf(workspaces));
+    // The directory is created again, untouched, by the next execution of the same lane generation.
+    writeFileSync(join(mainDirectory, "marker"), "kept");
+    expect(await prepareIssueExecutionDirectory(workspaces, main)).toBe(mainDirectory);
+    expect(readFileSync(join(mainDirectory, "marker"), "utf8")).toBe("kept");
+    // The shared workspace is not created by preparing a private directory.
+    expect(existsSync(workspaceOf(workspaces))).toBe(false);
+  });
+
+  it("refuses an execution directory below a symlinked env root without writing outside", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-issue-execution-symlink-"));
+    roots.push(root);
+    const workspaces = join(root, "workspaces");
+    const outside = join(root, "outside");
+    mkdirSync(workspaces, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, join(workspaces, "env"), "dir");
+
+    await expect(prepareIssueExecutionDirectory(workspaces, executionLaneForTask(task("claude"))!))
+      .rejects.toThrow("must be a real directory");
+    expect(existsSync(join(outside, "iss_1"))).toBe(false);
   });
 
   it("rejects a symlinked Chat Provider Home parent without writing outside", async () => {
@@ -313,14 +481,14 @@ describe("Issue Session provider home", () => {
     const outside = join(root, "outside");
     mkdirSync(workspaces, { recursive: true });
     mkdirSync(outside, { recursive: true });
-    symlinkSync(outside, join(workspaces, ".runtime"), "dir");
+    symlinkSync(outside, join(workspaces, "env"), "dir");
     const chatTask = {
       ...task("claude"),
       issueId: null,
       issueSessionId: null,
       chatSessionId: "chat_1",
     } as AgentTask;
-    const resolved = resolveTaskProviderHome(chatTask, join(root, "cwd"), workspaces)!;
+    const resolved = resolveTaskProviderHome(chatTask, workspaces)!;
 
     await expect(prepareIssueSessionProviderHome(resolved, {
       baseClaudeConfigDir: join(root, "base"),
@@ -329,27 +497,18 @@ describe("Issue Session provider home", () => {
     expect(existsSync(join(outside, "chat_1"))).toBe(false);
   });
 
-  it("fails closed before cleaning through a symlinked task runtime parent", async () => {
-    const root = mkdtempSync(join(tmpdir(), "multiremi-task-cleanup-symlink-"));
+  it("refuses a private temp directory below a symlinked env root without writing outside", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-task-tmp-symlink-"));
     roots.push(root);
     const workspaces = join(root, "workspaces");
     const outside = join(root, "outside");
     mkdirSync(workspaces, { recursive: true });
-    mkdirSync(join(outside, "tsk_quick_1"), { recursive: true });
-    const victim = join(outside, "tsk_quick_1", "victim.txt");
-    writeFileSync(victim, "keep\n");
-    symlinkSync(outside, join(workspaces, ".runtime"), "dir");
-    const quickTask = {
-      ...task("codex"),
-      id: "tsk_quick_1",
-      issueId: null,
-      issueSessionId: null,
-    } as AgentTask;
-    const resolved = resolveTaskProviderHome(quickTask, join(root, "cwd"), workspaces)!;
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, join(workspaces, "env"), "dir");
 
-    await expect(cleanupTemporaryTaskProviderHome(resolved, workspaces))
+    await expect(prepareTaskPrivateTempDirectory(workspaces, { kind: "task", id: "tsk_quick_1" }, "tsk_quick_1"))
       .rejects.toThrow("must be a real directory");
-    expect(readFileSync(victim, "utf8")).toBe("keep\n");
+    expect(existsSync(join(outside, "tsk_quick_1"))).toBe(false);
   });
 
   it("seeds a Codex home without requiring auth when runtime credentials come from env", async () => {
@@ -368,15 +527,45 @@ describe("Issue Session provider home", () => {
     ].join("\n"));
     writeFileSync(join(baseHome, "auth.json"), "{\"token\":\"secret\"}\n");
 
-    const workspace = join(root, "MUL-1");
-    const resolved = resolveIssueSessionProviderHome(task("codex"), workspace, join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
     await prepareIssueSessionProviderHome(resolved, { baseCodexHome: baseHome, linkCodexAuth: false });
 
     expect(existsSync(join(resolved.home, ".multiremi-session-home.json"))).toBe(true);
     const taskConfig = readFileSync(join(resolved.home, "config.toml"), "utf8");
+    expect((parseToml(taskConfig).features as Record<string, unknown>).plugins).toBe(false);
     expect(taskConfig).toContain('model = "gpt-test"');
     expect(taskConfig).not.toContain("must-never-enter-task-home");
     expect(existsSync(join(resolved.home, "auth.json"))).toBe(false);
+  });
+
+  it("enables Codex Default-mode request_user_input in every generated home", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-session-home-"));
+    const baseHome = join(root, "base");
+    roots.push(root);
+    mkdirSync(baseHome, { recursive: true });
+    writeFileSync(join(baseHome, "auth.json"), JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { access_token: "oauth-secret" },
+    }), { mode: 0o600 });
+    writeFileSync(join(baseHome, "config.toml"), 'model = "gpt-test"\n');
+
+    // Plain Issue Session lane.
+    const native = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
+    await prepareIssueSessionProviderHome(native, { baseCodexHome: baseHome, linkCodexAuth: false });
+    const nativeConfig = parseToml(readFileSync(join(native.home, "config.toml"), "utf8")) as Record<string, any>;
+    expect(nativeConfig.features.default_mode_request_user_input).toBe(true);
+
+    // Side conversation lane: reconcile also appends its developer_instructions,
+    // which must not displace the features table.
+    const side = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
+    await prepareIssueSessionProviderHome(side, {
+      baseCodexHome: baseHome,
+      linkCodexAuth: false,
+      sideConversation: true,
+    });
+    const sideConfig = parseToml(readFileSync(join(side.home, "config.toml"), "utf8")) as Record<string, any>;
+    expect(sideConfig.features.default_mode_request_user_input).toBe(true);
+    expect(sideConfig.developer_instructions).toContain("Sub-agents are off-limits");
   });
 
   it("copies only whitelisted Claude execution settings", async () => {
@@ -398,7 +587,7 @@ describe("Issue Session provider home", () => {
       mcpServers: { private: { command: "private-server" } },
     }));
 
-    const resolved = resolveIssueSessionProviderHome(task("claude"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("claude"), join(root, "workspaces"))!;
     await prepareIssueSessionProviderHome(resolved, { baseClaudeConfigDir: baseHome, linkClaudeCredentials: false });
 
     expect(JSON.parse(readFileSync(join(resolved.home, "settings.json"), "utf8"))).toEqual({
@@ -416,7 +605,7 @@ describe("Issue Session provider home", () => {
   it("reconciles non-secret Claude Relay settings on every start", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-session-home-"));
     roots.push(root);
-    const resolved = resolveIssueSessionProviderHome(task("claude"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("claude"), join(root, "workspaces"))!;
     mkdirSync(resolved.home, { recursive: true });
     writeFileSync(join(resolved.home, "settings.json"), JSON.stringify({
       enabledPlugins: { "wiki@example": true },
@@ -485,7 +674,7 @@ describe("Issue Session provider home", () => {
     mkdirSync(baseHome, { recursive: true });
     writeFileSync(join(baseHome, ".credentials.json"), "{\"oauthToken\":\"secret\"}\n", { mode: 0o600 });
 
-    const resolved = resolveIssueSessionProviderHome(task("claude"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("claude"), join(root, "workspaces"))!;
     await prepareIssueSessionProviderHome(resolved, { baseClaudeConfigDir: baseHome });
 
     const credentialsLink = join(resolved.home, ".credentials.json");
@@ -501,7 +690,7 @@ describe("Issue Session provider home", () => {
     mkdirSync(baseHome, { recursive: true });
     writeFileSync(join(baseHome, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-static" }));
 
-    const resolved = resolveIssueSessionProviderHome(task("codex"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
     await prepareIssueSessionProviderHome(resolved, { baseCodexHome: baseHome, linkCodexAuth: false });
 
     expect(await loadIssueSessionProviderEnv(resolved, { baseCodexHome: baseHome })).toEqual({
@@ -513,7 +702,6 @@ describe("Issue Session provider home", () => {
   it("links subscription OAuth while provider-native history stays in the Issue lineage", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-session-home-"));
     const baseHome = join(root, "base");
-    const workspace = join(root, "MUL-1");
     const workspaces = join(root, "workspaces");
     roots.push(root);
     mkdirSync(baseHome, { recursive: true });
@@ -522,7 +710,7 @@ describe("Issue Session provider home", () => {
       tokens: { access_token: "oauth-secret", account_id: "acct_1" },
     }), { mode: 0o600 });
 
-    const resolved = resolveIssueSessionProviderHome(task("codex"), workspace, workspaces)!;
+    const resolved = resolveTaskProviderHome(task("codex"), workspaces)!;
     expect(await loadIssueSessionProviderEnv(resolved, { baseCodexHome: baseHome })).toEqual({});
     await prepareIssueSessionProviderHome(resolved, { baseCodexHome: baseHome });
 
@@ -546,7 +734,7 @@ describe("Issue Session provider home", () => {
     mkdirSync(baseHome, { recursive: true });
     writeFileSync(join(baseHome, "auth.json"), "{\"tokens\":{\"access_token\":\"oauth\"}}\n", { mode: 0o600 });
 
-    const resolved = resolveIssueSessionProviderHome(task("codex"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
     await prepareIssueSessionProviderHome(resolved, { baseCodexHome: baseHome, linkCodexAuth: false });
     expect(existsSync(join(resolved.home, "auth.json"))).toBe(false);
 
@@ -562,7 +750,7 @@ describe("Issue Session provider home", () => {
     mkdirSync(baseHome, { recursive: true });
     writeFileSync(join(baseHome, "auth.json"), "{\"tokens\":{\"access_token\":\"oauth\"}}\n", { mode: 0o600 });
 
-    const resolved = resolveIssueSessionProviderHome(task("codex"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
     mkdirSync(resolved.home, { recursive: true });
     writeFileSync(join(resolved.home, ".remi-plugins.json"), "{}\n", { mode: 0o600 });
     await prepareIssueSessionProviderHome(resolved, {
@@ -578,7 +766,7 @@ describe("Issue Session provider home", () => {
   it("reconciles Relay routing into an existing Codex Plugin home without persisting its token", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-session-home-"));
     roots.push(root);
-    const resolved = resolveIssueSessionProviderHome(task("codex"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
     mkdirSync(resolved.home, { recursive: true });
     writeFileSync(join(resolved.home, ".remi-plugins.json"), "{}\n", { mode: 0o600 });
     writeFileSync(join(resolved.home, "config.toml"), 'model = "gpt-test"\n', { mode: 0o600 });
@@ -601,6 +789,7 @@ describe("Issue Session provider home", () => {
     });
 
     const configText = readFileSync(join(resolved.home, "config.toml"), "utf8");
+    expect((parseToml(configText).features as Record<string, unknown>).plugins).toBeUndefined();
     expect(configText).toContain('env_key = "OPENAI_API_KEY"');
     expect(configText).toContain("requires_openai_auth = false");
     expect(configText).toContain('model = "gpt-test"');
@@ -661,7 +850,7 @@ describe("Issue Session provider home", () => {
     writeFileSync(join(baseHome, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "old-relay-token" }), {
       mode: 0o600,
     });
-    const resolved = resolveIssueSessionProviderHome(task("codex"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
     mkdirSync(resolved.home, { recursive: true });
     writeFileSync(join(resolved.home, ".remi-plugins.json"), "{}\n", { mode: 0o600 });
     writeFileSync(join(resolved.home, "config.toml"), [
@@ -699,22 +888,10 @@ describe("Issue Session provider home", () => {
     mkdirSync(baseHome, { recursive: true });
     writeFileSync(join(baseHome, "auth.json"), "{\"tokens\":{}}\n", { mode: 0o644 });
 
-    const resolved = resolveIssueSessionProviderHome(task("codex"), join(root, "MUL-1"), join(root, "workspaces"))!;
+    const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
     await expect(prepareIssueSessionProviderHome(resolved, { baseCodexHome: baseHome })).rejects.toThrow(
       "must be a private regular file",
     );
-  });
-
-  it("redirects defensive local-directory Issue state into a daemon sidecar", () => {
-    const root = mkdtempSync(join(tmpdir(), "multiremi-session-home-"));
-    roots.push(root);
-    const source = join(root, "user-checkout");
-    const workspaces = join(root, "workspaces");
-
-    expect(resolveIssueRuntimeStateRoot(task("claude"), source, workspaces, true)).toBe(
-      join(workspaces, "issues", "legacy-iss_1"),
-    );
-    expect(resolveIssueRuntimeStateRoot(task("claude"), source, workspaces, false)).toBe(source);
   });
 });
 
@@ -724,7 +901,7 @@ it("installs side developer instructions in the private Codex config exactly onc
   const baseHome = join(root, "base");
   mkdirSync(baseHome);
   writeFileSync(join(baseHome, "config.toml"), 'model = "gpt-test"\ndeveloper_instructions = "Existing developer rules"\n');
-  const resolved = resolveIssueSessionProviderHome(task("codex"), root, join(root, "workspaces"))!;
+  const resolved = resolveTaskProviderHome(task("codex"), join(root, "workspaces"))!;
   // Plugin/native lane configuration is preserved; host-wide arbitrary
   // instructions are intentionally excluded by the seed allowlist.
   mkdirSync(resolved.home, { recursive: true });

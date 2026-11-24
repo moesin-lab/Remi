@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildTaskPrompt } from "@daemon/agent-runtime/prompts/ephemeral.js";
+import { buildAgentInstructions as buildTaskPrompt, buildTaskPromptArtifact } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
 
 function chatTask(overrides: Partial<AgentTask> = {}): AgentTask {
@@ -15,12 +15,13 @@ function chatTask(overrides: Partial<AgentTask> = {}): AgentTask {
 }
 
 describe("Chat Project prompts", () => {
-  for (const mode of ["bootstrap", "delta"] as const) {
-    it(`preserves the unbound Chat ${mode} prompt byte for byte`, () => {
-      const task = chatTask({ sessionProjection: { mode, jsonl: '{"type":"session_event","body":"Earlier conversation"}' } });
-      expect(buildTaskPrompt(task)).toMatchSnapshot();
-    });
-  }
+  it("writes the same AGENTS.md notes for a fresh and a resumed provider session", () => {
+    const fresh = buildTaskPrompt(chatTask({ sessionProjection: { mode: "bootstrap", jsonl: '{"type":"session_event","body":"Earlier conversation"}' } }));
+    const resumed = buildTaskPrompt(chatTask({ sessionProjection: { mode: "delta", jsonl: '{"type":"session_event","body":"Earlier conversation"}' } }));
+    expect(resumed).toBe(fresh);
+    expect(fresh).not.toContain("Earlier conversation");
+    expect(fresh).toMatchSnapshot();
+  });
 
   const project = {
     id: "project_bound", title: "Bound Project", description: "Project description",
@@ -55,8 +56,11 @@ describe("Chat Project prompts", () => {
       expect(prompt).toContain("https://github.com/example/bound-project");
       expect(prompt).toContain("remi memory search");
       expect(prompt).toContain("remi memory get");
-      expect(prompt).toContain("Project Wiki is materialized in `./wiki`");
-      expect(prompt).toContain("Selected Project Wiki warning");
+      expect(prompt).toContain("Project Wiki is materialized in `$MULTIREMI_WORKSPACE_ROOT/wiki`");
+      expect(prompt).not.toContain("`./wiki`");
+      // ADR 0023: what this turn could not provide is turn input; AGENTS.md stays the same for the session.
+      expect(prompt).not.toContain("Selected Project Wiki warning");
+      expect(buildTaskPromptArtifact(task, { wikiMaterialized: true }).prompt).toContain("(Knowledge warnings: Selected Project Wiki warning)");
       expect(prompt).not.toContain("This issue belongs to project");
       expect(prompt).not.toContain("## Issue");
       expect(prompt).not.toContain("Stale Issue");
@@ -133,38 +137,40 @@ describe("Chat Project prompts", () => {
 
   for (const mode of ["bootstrap", "delta"] as const) {
     it(`reports preparation failures and explicit checkout fallback in Project Chat ${mode}`, () => {
-      const prompt = buildTaskPrompt(chatTask({
+      const task = chatTask({
         ...projectContext, chatProjectId: project.id,
         sessionProjection: { mode, jsonl: '{"type":"session_event"}' },
-      }), {
+      });
+      const options = {
         chatRepoAutoCheckout: true,
         repoWarnings: [
-          { repoUrl: "https://example.test/timeout", kind: "unavailable", message: "git clone timed out after 30000ms" },
-          { repoUrl: "https://example.test/auth", kind: "unavailable", message: "Authentication failed\nfor remote" },
-          { repoUrl: "https://example.test/network", kind: "stale_cache", message: "Could not resolve host" },
+          { repoUrl: "https://example.test/timeout", kind: "unavailable" as const, message: "git clone timed out after 30000ms" },
+          { repoUrl: "https://example.test/auth", kind: "unavailable" as const, message: "Authentication failed\nfor remote" },
+          { repoUrl: "https://example.test/network", kind: "stale_cache" as const, message: "Could not resolve host" },
         ],
-      });
-      expect(prompt).toContain("## Repository Availability Warnings");
-      expect(prompt).toContain("git clone timed out after 30000ms");
-      expect(prompt).toContain("Authentication failed for remote");
-      expect(prompt).toContain("Could not resolve host");
-      expect(prompt).toContain("Chat can continue without these repositories");
-      expect(prompt).toContain("run `remi repo checkout <repo-id>` explicitly");
-      expect(prompt).toContain("Do not claim that you inspected its source code");
+      };
+      // ADR 0023: one line of this turn's input; AGENTS.md is the same with or without the failures.
+      expect(buildTaskPrompt(task, options)).toBe(buildTaskPrompt(task, { chatRepoAutoCheckout: true }));
+      const prompt = buildTaskPromptArtifact(task, options).prompt;
+      expect(prompt).toContain("(Repository warnings, diagnostic only: `https://example.test/timeout` is unavailable, preparation failed: `git clone timed out after 30000ms`");
+      expect(prompt).toContain("`Authentication failed for remote`");
+      expect(prompt).toContain("`https://example.test/network` may be stale, remote refresh failed: `Could not resolve host`");
+      expect(prompt).toContain("`remi repo checkout <repo-id>` retries a failed checkout");
+      expect(prompt).toContain("Don't claim to have inspected code that isn't available");
     });
   }
 
   it("reports checkout path collisions and preserves existing user edits", () => {
-    const prompt = buildTaskPrompt(chatTask({ ...projectContext, chatProjectId: project.id }), {
+    const prompt = buildTaskPromptArtifact(chatTask({ ...projectContext, chatProjectId: project.id }), {
       chatRepoAutoCheckout: true,
       repoWarnings: [{
         repoUrl: "https://example.test/bound-project", kind: "unavailable",
         message: "Automatic checkout skipped: /tmp/chats/chat_project/repo is reserved for another repository. Resolve the directory collision without overwriting existing files.",
       }],
-    });
+    }).prompt;
     expect(prompt).toContain("/tmp/chats/chat_project/repo is reserved for another repository");
-    expect(prompt).toContain("run `remi repo checkout <repo-id>` explicitly");
-    expect(prompt).toContain("Preserve any existing worktree with uncommitted changes");
+    expect(prompt).toContain("`remi repo checkout <repo-id>` retries a failed checkout");
+    expect(prompt).toContain("an existing worktree with uncommitted changes must be preserved");
   });
 
   it("uses actual preparation mode to avoid promising automatic writes in a user directory", () => {
@@ -177,24 +183,38 @@ describe("Chat Project prompts", () => {
     expect(prompt).toContain("Inspect existing files directly");
     expect(prompt).not.toContain("New worktrees use the Chat session branch");
     expect(prompt).not.toContain("already checked out");
-    expect(prompt).not.toContain("Wiki is materialized in `./wiki`");
+    expect(prompt).not.toContain("Wiki is materialized in");
   });
 
-  it("keeps bound Project delta instructions without repeating bootstrap context", () => {
+  it("merges the delta half an older server still sends into the Project instructions", () => {
     const prompt = buildTaskPrompt(chatTask({
       ...projectContext, chatProjectId: project.id,
       sessionProjection: { mode: "delta", jsonl: '{"type":"session_event"}' },
     }));
-    expect(prompt).toContain("## Project Delta Instructions\nContinue selected Project work.");
-    expect(prompt).not.toContain("## Project Context");
-    expect(prompt).not.toContain("## Available Repositories");
+    expect(prompt).toContain("## Project Instructions\nFollow the selected Project rules.\n\nContinue selected Project work.");
+    expect(prompt).not.toContain("Delta");
+    expect(prompt).toContain("## Project Context");
+    expect(prompt).toContain("## Available Repositories");
+  });
+
+  it("addresses the materialized Wiki through the workspace root, with its absolute path when the workspace is known", () => {
+    const task = chatTask({ ...projectContext, chatProjectId: project.id });
+    const known = buildTaskPrompt(task, { wikiMaterialized: true, workspacePath: "/data/work/chat_project" });
+    expect(known).toContain("Project Wiki is materialized in `$MULTIREMI_WORKSPACE_ROOT/wiki` (absolute path `/data/work/chat_project/wiki`)");
+    expect(known).toContain("`$MULTIREMI_WORKSPACE_ROOT/wiki/repositories/<repository>/`");
+    expect(known).toContain("`$MULTIREMI_WORKSPACE_ROOT/.multiremi/wiki-base` is a read-only merge baseline");
+    expect(known).toContain("resolve any reported conflicts in `$MULTIREMI_WORKSPACE_ROOT/wiki`");
+    const unknown = buildTaskPrompt(task, { wikiMaterialized: true });
+    expect(unknown).toContain("Project Wiki is materialized in `$MULTIREMI_WORKSPACE_ROOT/wiki`.");
+    expect(unknown).not.toContain("absolute path");
+    for (const prompt of [known, unknown]) expect(prompt).not.toContain("./wiki");
   });
 
   it("uses Wiki CLI guidance when workspace preparation did not materialize Wiki", () => {
     const prompt = buildTaskPrompt(chatTask({ ...projectContext, chatProjectId: project.id }), { wikiMaterialized: false });
     expect(prompt).toContain("Project Wiki has not been materialized in this working directory");
     expect(prompt).toContain("`remi wiki search` and `remi wiki get`");
-    expect(prompt).not.toContain("Wiki is materialized in `./wiki`");
+    expect(prompt).not.toContain("Wiki is materialized in");
     expect(prompt).not.toContain("`remi wiki status` and `remi wiki push`");
   });
 });

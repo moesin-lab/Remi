@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import {
   importWorkspaceRepository,
@@ -6,7 +8,7 @@ import {
   removeWorkspaceRepository,
   updateWorkspaceRepository,
 } from "@multiremi/api/helpers/repositories.js";
-import { configureRepositoryWikiAutomation, createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, configureRepositoryWikiAutomation, createSnapshotStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -33,7 +35,7 @@ function deferred<T>() {
 
 describe("Multiremi API - workspace repositories", () => {
   it("builds a repository Wiki from normal Agent, plugin, and automation configuration", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspaceRepositories(workspace.id, [{
       id: "repo_wiki",
@@ -72,7 +74,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("does not treat display names as Repository Wiki capability", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspaceRepositories(workspace.id, [{
       id: "repo_unconfigured",
@@ -94,7 +96,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("dedupes repository Wiki builds and derives the per-repository build status", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     const plugin = store.importAgentPlugin({
       provider: "claude",
@@ -233,7 +235,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("keeps repository Wiki builds unavailable to daemon tokens", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspaceRepositories(workspace.id, [{
       id: "repo_guarded",
@@ -260,7 +262,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("strips server-only repository build scope from public autopilot run routes", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspaceRepositories(workspace.id, [{
       id: "repo_private",
@@ -271,7 +273,7 @@ describe("Multiremi API - workspace repositories", () => {
     }]);
     store.createAgent({ name: "Atlas · LLM Wiki", provider: "claude" });
     const userAgent = store.createAgent({ name: "User Wiki", provider: "claude" });
-    const sameTitle = store.createAutopilot({
+    const sameTitle = createResponsibleTestAutopilot(store, {
       title: "Atlas · Repository Wiki",
       workspaceId: workspace.id,
       assigneeId: userAgent.id,
@@ -338,7 +340,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("serves repository-scoped Wiki CRUD and summaries without crossing repository boundaries", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspace(workspace.id, {
       repos: [
@@ -363,7 +365,12 @@ describe("Multiremi API - workspace repositories", () => {
     const created = (await createdResponse.json() as any).doc;
     expect(created).toMatchObject({ repository_id: "repo_alpha", path: "architecture/overview.md", version: 1 });
 
-    expect((await (await app.request(root)).json() as any).docs).toMatchObject([{ id: created.id, body: "Alpha facts" }]);
+    // MUL-387: the list carries metadata only; bodies are an explicit request.
+    const listed = (await (await app.request(root)).json() as any).docs;
+    expect(listed).toMatchObject([{ id: created.id, path: "architecture/overview.md", version: 1 }]);
+    expect(listed[0]).not.toHaveProperty("body");
+    expect((await (await app.request(`${root}?include_body=true&ids=${created.id}`)).json() as any).docs)
+      .toMatchObject([{ id: created.id, body: "Alpha facts" }]);
     expect((await app.request(`/api/workspaces/${workspace.id}/repos/repo_beta/wiki/${created.id}`)).status).toBe(404);
 
     const updatedResponse = await app.request(`${root}/${created.id}`, {
@@ -384,7 +391,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("validates direct Repository Wiki links and returns resolver-backed backlinks", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspaceRepositories(workspace.id, [{
       id: "repo_links",
@@ -448,7 +455,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("publishes a coherent Repository Wiki graph atomically through the batch route", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspaceRepositories(workspace.id, [{
       id: "repo_batch_links",
@@ -499,7 +506,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("preserves scoped task reads while routing repository Wiki writes to Raw", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspaceRepositories(workspace.id, [{
       id: "repo_task_wiki",
@@ -529,7 +536,7 @@ describe("Multiremi API - workspace repositories", () => {
       workspaceId: workspace.id,
       resources: [{ resourceType: "github_repo", resourceRef: { url: "git@github.com:acme/task-wiki.git" } }],
     });
-    const issue = store.createIssue({ title: "Publish repository Wiki", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Publish repository Wiki", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: workspace.id, prompt: "Publish repository Wiki" });
     const credential = await store.createTaskAccessToken(task, "local");
     const auth = { Authorization: `Bearer ${credential.token}` };
@@ -586,7 +593,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("rejects repository writes through generic workspace update routes", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspace(workspace.id, {
       repos: [{ id: "repo_existing", name: "existing", url: "git@github.com:acme/existing.git", source: "github" }],
@@ -611,7 +618,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("repairs default connection bindings when a prior repository write was interrupted", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     const connection = store.createScmConnection({
       workspaceId: workspace.id,
@@ -643,7 +650,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("removes orphaned bindings when repository reconciliation repairs an interrupted write", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     store.updateWorkspace(workspace.id, {
       repos: [{
@@ -672,7 +679,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("rolls back repository import, update, and deletion when binding persistence fails", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const workspace = store.ensureLocalWorkspace();
     const connection = store.createScmConnection({
       workspaceId: workspace.id,
@@ -743,7 +750,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("merges concurrent repository imports instead of replacing a stale workspace snapshot", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.ensureLocalWorkspace();
     const firstStarted = deferred<void>();
     const secondStarted = deferred<void>();
@@ -788,7 +795,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("patches and deletes against the latest repository list", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.ensureLocalWorkspace();
     const target = await importWorkspaceRepository(
       store,
@@ -826,7 +833,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("inspects, imports, updates, lists, and removes Git repositories", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.ensureLocalWorkspace();
     const githubConnection = store.createScmConnection({
       workspaceId: "local",
@@ -1032,7 +1039,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("only lets project creation attach repositories already imported into the workspace", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.ensureLocalWorkspace();
     const app = createMultiremiApp({ store, inspectGitRemoteRepository });
 
@@ -1103,7 +1110,7 @@ describe("Multiremi API - workspace repositories", () => {
   });
 
   it("backfills default branches for repositories imported before inspection", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     store.ensureLocalWorkspace();
     store.updateWorkspace("local", {
       repos: [{
@@ -1135,3 +1142,8 @@ describe("Multiremi API - workspace repositories", () => {
     });
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

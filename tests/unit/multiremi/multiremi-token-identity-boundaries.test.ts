@@ -1,12 +1,12 @@
-import { afterEach, expect, it } from "bun:test";
+import { beforeAll, afterAll, afterEach, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { localAuthResponse } from "@multiremi/api/helpers/login.js";
-import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createLocalSnapshotStore, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 it("binds native credentials to the requester across identity aliases and token types", async () => {
-  const store = createLocalStore();
+  const store = createLocalSnapshotStore();
   const alice = store.getOrCreateUser({ email: "alice@example.invalid", name: "Alice" });
   const bob = store.getOrCreateUser({ email: "bob@example.invalid", name: "Bob" });
   const a = store.createWorkspace({ name: "A", slug: "a" }, alice.id);
@@ -25,13 +25,13 @@ it("binds native credentials to the requester across identity aliases and token 
     const { token } = await response.json();
     expect(token.userId).toBe(alice.id);
     if (token.type === "pat") {
-      expect((await app.request(`/api/workspaces/${b.id}`, { headers: { Authorization: `Bearer ${token.token}` } })).status).toBe(404);
+      expect((await app.request(`/api/workspaces/${b.id}`, { headers: { Authorization: `Bearer ${token.token}` } })).status).toBe(200);
     }
   }
 });
 
-it("lets a historical local login session access only workspaces it belongs to", async () => {
-  const store = createLocalStore();
+it("lets a historical local login session share workspaces while legacy workspace PATs stay bound", async () => {
+  const store = createLocalSnapshotStore();
   const mine = store.createWorkspace({ name: "Mine", slug: "mine" }, "local");
   const other = store.getOrCreateUser({ email: "other@example.invalid", name: "Other" });
   const theirs = store.createWorkspace({ name: "Theirs", slug: "theirs" }, other.id);
@@ -44,14 +44,14 @@ it("lets a historical local login session access only workspaces it belongs to",
       : await store.createAccessToken({ workspaceId: "local", userId: "local", name: purpose, type: "pat", purpose });
     const headers = { Authorization: `Bearer ${token.token}` };
     expect((await app.request(`/api/workspaces/${mine.id}`, { headers })).status).toBe(purpose === "session" ? 200 : 404);
-    expect((await app.request(`/api/workspaces/${theirs.id}`, { headers })).status).toBe(404);
+    expect((await app.request(`/api/workspaces/${theirs.id}`, { headers })).status).toBe(purpose === "session" ? 200 : 404);
     expect((await app.request("/api/multiremi/runtimes/rt_mine", { headers })).status).toBe(purpose === "session" ? 200 : 404);
-    expect((await app.request("/api/multiremi/runtimes/rt_theirs", { headers })).status).toBe(404);
+    expect((await app.request("/api/multiremi/runtimes/rt_theirs", { headers })).status).toBe(purpose === "session" ? 200 : 404);
   }
 });
 
 it("prevents legacy workspace credentials from minting login sessions", async () => {
-  const store = createLocalStore();
+  const store = createLocalSnapshotStore();
   const token = await store.createAccessToken({ name: "Legacy", type: "pat" });
   const app = createMultiremiApp({ store, authToken: "root-secret" });
   const response = await app.request("/api/multiremi/tokens", {
@@ -63,10 +63,10 @@ it("prevents legacy workspace credentials from minting login sessions", async ()
 
 it("preserves explicit ownership for master-token and open-mode provisioning", async () => {
   for (const authToken of ["root-secret", ""]) {
-    const store = createLocalStore();
+    const store = createLocalSnapshotStore();
     const app = createMultiremiApp({ store, authToken });
     const response = await app.request("/api/multiremi/tokens", {
-      method: "POST", headers: { Authorization: `Bearer ${authToken}`, "Content-Type": "application/json" },
+      method: "POST", headers: { ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}), "Content-Type": "application/json" },
       body: JSON.stringify({ name: "Provisioned", user_id: "provisioned-user", type: "daemon" }),
     });
     expect(response.status).toBe(201);
@@ -75,7 +75,7 @@ it("preserves explicit ownership for master-token and open-mode provisioning", a
 });
 
 it("keeps legacy workspace credentials scoped when provisioning native tokens", async () => {
-  const store = createLocalStore();
+  const store = createLocalSnapshotStore();
   const workspace = store.createWorkspace({ name: "Legacy", slug: "legacy" }, "local");
   const token = await store.createAccessToken({ workspaceId: workspace.id, name: "Legacy", type: "pat" });
   const app = createMultiremiApp({ store, authToken: "root-secret" });
@@ -87,7 +87,7 @@ it("keeps legacy workspace credentials scoped when provisioning native tokens", 
 });
 
 it("scopes native token listing and revocation for legacy credentials", async () => {
-  const store = createLocalStore();
+  const store = createLocalSnapshotStore();
   const workspace = store.createWorkspace({ name: "Scoped", slug: "scoped" }, "local");
   const caller = await store.createAccessToken({ workspaceId: workspace.id, name: "Caller", type: "pat" });
   const victim = await store.createAccessToken({ workspaceId: "local", name: "Victim", type: "pat" });
@@ -105,17 +105,17 @@ it("scopes native token listing and revocation for legacy credentials", async ()
 
 it("retains native token listing and revocation for master-token and open mode", async () => {
   for (const authToken of ["root-secret", ""]) {
-    const store = createLocalStore();
+    const store = createLocalSnapshotStore();
     const token = await store.createAccessToken({ name: "Managed", type: "pat" });
     const app = createMultiremiApp({ store, authToken });
-    const headers = { Authorization: `Bearer ${authToken}` };
+    const headers: Record<string, string> = authToken ? { Authorization: `Bearer ${authToken}` } : {};
     expect((await app.request("/api/multiremi/tokens?workspaceId=local", { headers })).status).toBe(200);
     expect((await app.request(`/api/multiremi/tokens/${token.id}`, { method: "DELETE", headers })).status).toBe(200);
   }
 });
 
 it("preserves human local identity and legacy workspace scope during CLI exchange", async () => {
-  const store = createLocalStore();
+  const store = createLocalSnapshotStore();
   const workspace = store.createWorkspace({ name: "CLI", slug: "cli" }, "local");
   const login = await localAuthResponse(store, { email: store.getCurrentUser("local").email });
   const legacy = await store.createAccessToken({ workspaceId: workspace.id, name: "Machine", type: "pat" });
@@ -133,7 +133,7 @@ it("preserves human local identity and legacy workspace scope during CLI exchang
 });
 
 it("cannot promote or impersonate through native and compatibility purpose/type inputs", async () => {
-  const store = createLocalStore();
+  const store = createLocalSnapshotStore();
   const alice = store.getOrCreateUser({ email: "mint-alice@example.invalid", name: "Alice" });
   const workspace = store.createWorkspace({ name: "Mint", slug: "mint" }, alice.id);
   const login = await store.createAccessToken({ workspaceId: "local", userId: alice.id, name: "Login", type: "pat", purpose: "session" });
@@ -157,3 +157,8 @@ it("cannot promote or impersonate through native and compatibility purpose/type 
     }
   }
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

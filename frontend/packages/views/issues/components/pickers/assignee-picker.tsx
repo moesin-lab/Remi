@@ -1,14 +1,17 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState } from "react";
-import { Lock, UserMinus } from "lucide-react";
+import { UserMinus } from "lucide-react";
 import type { Agent, IssueAssigneeType, UpdateIssueRequest } from "@multiremi/core/types";
 import { useQuery } from "@tanstack/react-query";
-import { useAuthStore } from "@multiremi/core/auth";
 import { canAssignAgentToIssue } from "@multiremi/core/permissions";
 import { useActorName } from "@multiremi/core/workspace/hooks";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { memberListOptions, agentListOptions, squadListOptions, assigneeFrequencyOptions } from "@multiremi/core/workspace/queries";
+import { useAfterFirstScreen } from "@multiremi/core/platform/use-after-first-screen";
+import { useNavigation } from "../../../navigation";
 import { ActorAvatar } from "../../../common/actor-avatar";
 import {
   PropertyPicker,
@@ -19,7 +22,7 @@ import {
 import { useT } from "../../../i18n";
 import { matchesPinyin } from "../../../editor/extensions/pinyin-match";
 
-const DEFAULT_ALLOWED_TYPES: IssueAssigneeType[] = ["member", "agent", "squad"];
+const DEFAULT_ALLOWED_TYPES: IssueAssigneeType[] = ["agent", "squad"];
 
 /**
  * Legacy boolean shape kept around for callers (e.g. `use-issue-actions.ts`)
@@ -67,14 +70,20 @@ export function AssigneePicker({
   const open = controlledOpen ?? internalOpen;
   const setOpen = controlledOnOpenChange ?? setInternalOpen;
   const [filter, setFilter] = useState("");
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const wsId = useWorkspaceId();
+  const { pathname } = useNavigation();
+  const afterFirstScreen = useAfterFirstScreen({ routeKey: pathname });
   const { data: members = [] } = useQuery(memberListOptions(wsId));
-  const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  const { data: squads = [] } = useQuery(squadListOptions(wsId));
+  const { data: agents = [] } = useQuery(agentListOptions(wsId, { enabled: afterFirstScreen }));
+  // MUL-472 b: the picker only offers these once the user opens it, so they wait
+  // for the page gate rather than joining the list's first wave.
+  const { data: squads = [] } = useQuery(
+    squadListOptions(wsId, { enabled: afterFirstScreen }),
+  );
   const { data: frequency = [] } = useQuery(assigneeFrequencyOptions(wsId));
   const { getActorName } = useActorName();
-  const allowedTypeSet = useMemo(() => new Set(allowedTypes), [allowedTypes]);
+  const allowedTypeSet = useMemo(() => new Set(allowedTypes.filter(type => type === "agent" || type === "squad")), [allowedTypes]);
 
   const currentMember = members.find((m) => m.user_id === user?.id);
   const memberRole = currentMember?.role;
@@ -91,9 +100,6 @@ export function AssigneePicker({
   const getFreq = (type: string, id: string) => freqMap.get(`${type}:${id}`) ?? 0;
 
   const query = filter.trim().toLowerCase();
-  const filteredMembers = members
-    .filter((m) => allowedTypeSet.has("member") && (m.name.toLowerCase().includes(query) || matchesPinyin(m.name, query)))
-    .sort((a, b) => getFreq("member", b.user_id) - getFreq("member", a.user_id));
   const filteredAgents = agents
     .filter((a) => allowedTypeSet.has("agent") && !a.archived_at && (a.name.toLowerCase().includes(query) || matchesPinyin(a.name, query)))
     .sort((a, b) => getFreq("agent", b.id) - getFreq("agent", a.id));
@@ -104,10 +110,11 @@ export function AssigneePicker({
   const isSelected = (type: string, id: string) =>
     assigneeType === type && assigneeId === id;
 
+  const unassignedText = unassignedLabel ?? t(($) => $.pickers.assignee.trigger_unassigned);
   const triggerLabel =
     assigneeType && assigneeId
       ? getActorName(assigneeType, assigneeId)
-      : (unassignedLabel ?? t(($) => $.pickers.assignee.trigger_unassigned));
+      : unassignedText;
 
   return (
     <PropertyPicker
@@ -127,6 +134,7 @@ export function AssigneePicker({
           <>
             <ActorAvatar actorType={assigneeType} actorId={assigneeId} size={18} enableHoverCard showStatusDot />
             <span className="truncate">{triggerLabel}</span>
+            {assigneeType === "member" && <span className="text-xs text-amber-700">{t($ => $.responsibility.legacy_execution)}</span>}
           </>
         ) : (
           <span className="text-muted-foreground">{triggerLabel}</span>
@@ -143,30 +151,8 @@ export function AssigneePicker({
           }}
         >
           <UserMinus className="h-3.5 w-3.5 text-muted-foreground" />
-          <span className="text-muted-foreground">{triggerLabel}</span>
+          <span className="text-muted-foreground">{unassignedText}</span>
         </PickerItem>
-      )}
-
-      {/* Members */}
-      {filteredMembers.length > 0 && (
-        <PickerSection label={t(($) => $.pickers.assignee.members_group)}>
-          {filteredMembers.map((m) => (
-            <PickerItem
-              key={m.user_id}
-              selected={isSelected("member", m.user_id)}
-              onClick={() => {
-                onUpdate({
-                  assignee_type: "member",
-                  assignee_id: m.user_id,
-                });
-                setOpen(false);
-              }}
-            >
-              <ActorAvatar actorType="member" actorId={m.user_id} size={18} />
-              <span className="truncate">{m.name}</span>
-            </PickerItem>
-          ))}
-        </PickerSection>
       )}
 
       {/* Agents */}
@@ -200,9 +186,6 @@ export function AssigneePicker({
               >
                 <ActorAvatar actorType="agent" actorId={a.id} size={18} showStatusDot />
                 <span className={`truncate ${allowed ? "" : "text-muted-foreground"}`}>{a.name}</span>
-                {a.visibility === "private" && (
-                  <Lock className="ml-auto h-3 w-3 text-muted-foreground" />
-                )}
               </PickerItem>
             );
           })}
@@ -232,8 +215,7 @@ export function AssigneePicker({
         </PickerSection>
       )}
 
-      {filteredMembers.length === 0 &&
-        filteredAgents.length === 0 &&
+      {filteredAgents.length === 0 &&
         filteredSquads.length === 0 &&
         filter && <PickerEmpty />}
     </PropertyPicker>

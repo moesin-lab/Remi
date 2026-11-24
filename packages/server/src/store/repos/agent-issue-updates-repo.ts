@@ -3,7 +3,7 @@ import type {
   MultiremiChatMessage,
   MultiremiChatSession,
 } from "@multiremi/contracts/types.js";
-import type { StoreContext } from "@multiremi/store/context.js";
+import type { CommitEventQueue, StoreContext, WorkspaceEvent } from "@multiremi/store/context.js";
 import { nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { createLogger } from "@shared/logger.js";
 
@@ -122,6 +122,7 @@ export class AgentIssueUpdatesRepo {
        ORDER BY c.created_at ASC, c.id ASC`,
     ).all(issue.id) as Row[];
     const seenChats = new Set<string>();
+    const targets: Array<{ chat: ReturnType<typeof toBoundChat>; channelId: string }> = [];
     for (const row of chats) {
       const chat = toBoundChat(row);
       if (seenChats.has(chat.id)) continue;
@@ -130,8 +131,15 @@ export class AgentIssueUpdatesRepo {
       if (!channel?.enabled) continue;
       if (!channel.eventTypes.includes("*") && !channel.eventTypes.includes(input.type)) continue;
       if (this.isTargetChatEvent(chat.id, input)) continue;
-      this.upsertPending(chat, channel.id, input);
+      targets.push({ chat, channelId: channel.id });
     }
+    if (targets.length === 0) return;
+    const write = () => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(issue.workspaceId);
+      for (const { chat, channelId } of targets) this.upsertPending(chat, channelId, input);
+    };
+    if (this.ctx.db.inTransaction) write();
+    else this.ctx.db.transaction(write)();
   }
 
   flushDue(nowInput: string | Date = new Date()): AgentIssueUpdateFlushResult {
@@ -162,7 +170,11 @@ export class AgentIssueUpdatesRepo {
   }
 
   /** Caller owns the transaction; used immediately before a leader-round wake. */
-  flushIssueNowWithinTransaction(issueId: string, nowInput: string | Date = new Date()): AgentIssueUpdateFlushResult {
+  flushIssueNowWithinTransaction(
+    issueId: string,
+    deferredEvents: CommitEventQueue,
+    nowInput: string | Date = new Date(),
+  ): AgentIssueUpdateFlushResult {
     const now = nowInput instanceof Date ? nowInput : new Date(nowInput);
     if (!Number.isFinite(now.getTime())) throw new Error("now must be a valid date");
     const rows = this.ctx.db.query(
@@ -176,7 +188,6 @@ export class AgentIssueUpdatesRepo {
       const outcome = this.flushOneWithinTransaction(String(row.chat_session_id), now, true);
       if (outcome.kind === "delivered") delivered += 1;
       else if (outcome.kind === "dropped") dropped += 1;
-      if (outcome.kind === "delivered" && outcome.result) this.publish(outcome.result);
     }
     return { delivered, dropped };
   }
@@ -184,7 +195,6 @@ export class AgentIssueUpdatesRepo {
   private flushOne(chatSessionId: string, now: Date): "delivered" | "dropped" | "skipped" {
     const outcome = this.ctx.db.transaction(() => this.flushOneWithinTransaction(chatSessionId, now, false))();
 
-    if (outcome.kind === "delivered" && outcome.result) this.publish(outcome.result);
     return outcome.kind;
   }
 
@@ -238,7 +248,8 @@ export class AgentIssueUpdatesRepo {
     for (const key of SOURCE_TASK_KEYS) {
       const taskId = nullableString(data[key]);
       if (!taskId) continue;
-      if (this.ctx.tasks().getTask(taskId)?.chatSessionId === chatSessionId) return true;
+      const sourceTask = this.ctx.tasks().getTask(taskId);
+      if (sourceTask?.chatSessionId === chatSessionId && !sourceTask.issueSessionId) return true;
       // The leader-round marker already carries this task's final output. The
       // automatic Issue comment is posted just after the terminal transaction;
       // suppress only that covered copy so it cannot become a second pending
@@ -355,15 +366,6 @@ export class AgentIssueUpdatesRepo {
     );
   }
 
-  private publish(result: { session: MultiremiChatSession; message: MultiremiChatMessage }): void {
-    this.ctx.emitChatEvent(result.session, "chat:message", {
-      message_id: result.message.id,
-      role: "system",
-      content: result.message.body,
-      task_id: null,
-      created_at: result.message.createdAt,
-    }, { actorType: "system", actorId: null });
-  }
 }
 
 interface AgentIssueUpdateState {

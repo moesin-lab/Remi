@@ -1,0 +1,530 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { acceptTestIssueDelivery, createResponsibleTestIssue, testWorkspaceMember } from './helpers.js';
+import { issueMessagesPath, requestMessageBody, taskRequestPath } from "./unified-test-paths.js";
+/** MUL-458 dependency force semantics on real PostgreSQL, including two-connection races. */
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { createMultiremiApp } from "@multiremi/api.js";
+import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { IssuesRepo } from "@multiremi/store/repos/issues-repo.js";
+import { signTestJwt } from "./helpers.js";
+
+const PG_ADMIN_URL = process.env.MULTIREMI_TEST_POSTGRES_URL
+  ?? "postgres://multimira:multimira@localhost:5432/postgres";
+const TEST_DB = `multiremi_mul458_pg_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
+
+function workerEnv(): Record<string, string> {
+  return Object.fromEntries(Object.entries(process.env)
+    .filter((entry): entry is [string, string] => entry[1] !== undefined));
+}
+
+function pgDatabaseUrl(database: string): string {
+  const url = new URL(PG_ADMIN_URL);
+  url.pathname = `/${database}`;
+  return url.toString();
+}
+
+async function probePostgres(): Promise<boolean> {
+  try {
+    const admin = new Bun.SQL(PG_ADMIN_URL, { max: 1 });
+    await admin.unsafe("SELECT 1");
+    await admin.end();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const pgAvailable = await probePostgres();
+if (!pgAvailable) console.warn("[mul458-pg] Postgres unreachable; skipping MUL-458 PG checks.");
+
+interface WorkerResult {
+  phase: string;
+  role: string;
+  responseStatus: number | null;
+  maxTransactionDepth: number;
+  error?: string;
+}
+
+function workerPhase<T extends { phase?: string; error?: string }>(worker: Worker, phase: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`MUL-458 race worker timed out waiting for ${phase}`));
+    }, 60_000);
+    const onMessage = (event: MessageEvent<T>) => {
+      if (event.data.phase === "error") {
+        cleanup();
+        reject(new Error(event.data.error ?? "MUL-458 race worker failed"));
+      } else if (event.data.phase === phase) {
+        cleanup();
+        resolve(event.data);
+      }
+    };
+    const onError = (event: ErrorEvent) => {
+      cleanup();
+      reject(event.error ?? new Error(event.message));
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("error", onError);
+    };
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", onError);
+  });
+}
+
+describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () => {
+  let admin: Bun.SQL;
+  let db: PostgresSyncDatabase;
+  let store: MultiremiStore;
+  let counter = 0;
+
+  beforeAll(async () => {
+    admin = new Bun.SQL(PG_ADMIN_URL, { max: 1 });
+    await admin.unsafe(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
+    await admin.unsafe(`CREATE DATABASE ${TEST_DB}`);
+    db = new PostgresSyncDatabase(pgDatabaseUrl(TEST_DB));
+    store = new MultiremiStore(db);
+    store.ensureLocalWorkspace();
+  });
+
+  afterAll(async () => {
+    db?.close();
+    await admin?.unsafe(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
+    await admin?.end();
+  });
+
+  async function fixture(kind: "jwt" | "pat", label: string) {
+    counter += 1;
+    const suffix = `${process.pid}-${counter}-${label}`;
+    const user = store.getOrCreateUser({ email: `mul458-pg-${suffix}@example.test`, name: `MUL-458 PG ${label}` });
+    const member = store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: user.name, role: "member" });
+    const runtime = store.registerRuntime({
+      id: `rt_mul458_pg_${counter}`,
+      name: `MUL-458 PG ${label}`,
+      provider: "claude",
+      maxConcurrency: 8,
+    });
+    const agent = store.createAgent({
+      name: `MUL-458 PG worker ${counter}`,
+      provider: "claude",
+      runtimeId: runtime.id,
+      visibility: "workspace",
+    });
+    const prerequisite = createResponsibleTestIssue(store, {
+      title: `PG prerequisite ${suffix}`, status: "in_progress", responsibleMemberId: member.id,
+      assigneeType: "agent", assigneeId: agent.id,
+    });
+    const issue = createResponsibleTestIssue(store, {
+      title: `PG waiting ${suffix}`,
+      status: "backlog",
+      blockedBy: [prerequisite.id],
+      assigneeType: "agent",
+      assigneeId: agent.id,
+    });
+    const token = kind === "pat"
+      ? (await store.createAccessToken({
+          workspaceId: "local", userId: user.id, name: `MUL-458 PG PAT ${counter}`, type: "pat", purpose: "session",
+        })).token
+      : signTestJwt({ sub: user.id, exp: Math.floor(Date.now() / 1000) + 60 });
+    return {
+      store,
+      app: createMultiremiApp({ store, authToken: "mul458-pg-root" }),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      userId: user.id,
+      member,
+      runtime,
+      agent,
+      prerequisite,
+      issue,
+    };
+  }
+
+  const forces = (issueId: string) => store.listIssueActivity(issueId)
+    .filter((entry) => entry.type === "dependency_force_started");
+
+  it.each(["jwt", "pat"] as const)("force-starts from a %s member comment at depth 1", async (kind) => {
+    const f = await fixture(kind, `comment-${kind}`);
+    const emittedInsideTransaction: string[] = [];
+    const stop = store.onWorkspaceEvent((event) => {
+      if (db.inTransaction) emittedInsideTransaction.push(event.type);
+    });
+    db.resetTransactionDepthStats();
+    const response = await f.app.request(issueMessagesPath(store, f.issue.id), {
+      method: "POST", headers: f.headers, body: JSON.stringify(requestMessageBody(store, { body: `PG ${kind} comment` }, { type: "role", ref: "issue_owner" })),
+    });
+    stop();
+    expect(response.status).toBe(200);
+    expect(db.maxTransactionDepth).toBe(1);
+    expect(emittedInsideTransaction).toEqual([]);
+    expect(store.getIssue(f.issue.id)?.status).toBe("todo");
+    const tasks = store.listTasksForIssue(f.issue.id);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.prompt).toContain("unfinished prerequisites");
+    expect(forces(f.issue.id)).toHaveLength(1);
+    expect(forces(f.issue.id)[0]).toMatchObject({ actorType: "member", actorId: "local" });
+    expect(forces(f.issue.id)[0]!.data).toMatchObject({ source: "comment", taskId: tasks[0]!.id });
+    expect(store.getWorkspaceMember(f.member.id)?.userId).toBe(f.userId);
+  });
+
+  it("covers mention, rerun, repeated comments, parent derivation and kill switch on PG", async () => {
+    const ownerMention = await fixture("pat", "mention-owner");
+    expect((await ownerMention.app.request(issueMessagesPath(ownerMention.store, ownerMention.issue.id), {
+      method: "POST", headers: ownerMention.headers,
+      body: JSON.stringify(requestMessageBody(ownerMention.store, { body: `[@Owner](mention://agent/${ownerMention.agent.id}) inspect` }, { type: "role", ref: "issue_owner" })),
+    })).status).toBe(200);
+    expect(store.listTasksForIssue(ownerMention.issue.id)[0]!.agentId).toBe(ownerMention.agent.id);
+    expect(forces(ownerMention.issue.id)[0]!.data).toMatchObject({
+      source: "mention", agentId: ownerMention.agent.id, assigneeDispatched: true,
+    });
+
+    const mention = await fixture("pat", "mention");
+    const specialist = store.createAgent({ name: `PG specialist ${counter}`, provider: "claude", visibility: "workspace" });
+    expect((await mention.app.request(issueMessagesPath(mention.store, mention.issue.id), {
+      method: "POST", headers: mention.headers,
+      body: JSON.stringify(requestMessageBody(mention.store, { body: `[@${specialist.name}](mention://agent/${specialist.id}) inspect` }, { type: "role", ref: "issue_owner" })),
+    })).status).toBe(200);
+    expect(store.listTasksForIssue(mention.issue.id)).toHaveLength(1);
+    expect(store.listTasksForIssue(mention.issue.id)[0]!.agentId).toBe(specialist.id);
+    expect(forces(mention.issue.id)[0]!.data).toMatchObject({
+      source: "mention", agentId: specialist.id, assigneeDispatched: false,
+    });
+
+    const squadMention = await fixture("pat", "mention-squad");
+    const leader = store.createAgent({ name: `PG squad leader ${counter}`, provider: "claude", visibility: "workspace" });
+    const squad = store.createSquad({ name: `PG mention squad ${counter}`, leaderId: leader.id });
+    store.assignIssue(squadMention.issue.id, { assigneeType: "squad", assigneeId: squad.id });
+    expect((await squadMention.app.request(issueMessagesPath(squadMention.store, squadMention.issue.id), {
+      method: "POST", headers: squadMention.headers,
+      body: JSON.stringify(requestMessageBody(squadMention.store, { body: `[@${squad.name}](mention://squad/${squad.id}) inspect` }, { type: "role", ref: "issue_owner" })),
+    })).status).toBe(200);
+    expect(store.listTasksForIssue(squadMention.issue.id)[0]!.agentId).toBe(leader.id);
+    expect(forces(squadMention.issue.id)[0]!.data).toMatchObject({
+      source: "mention", agentId: leader.id, assigneeDispatched: true,
+    });
+
+    const repeated = await fixture("pat", "repeated");
+    for (const body of ["one", "two", "three"]) {
+      expect((await repeated.app.request(issueMessagesPath(repeated.store, repeated.issue.id), {
+        method: "POST", headers: repeated.headers, body: JSON.stringify(requestMessageBody(repeated.store, { body }, { type: "role", ref: "issue_owner" })),
+      })).status).toBe(200);
+    }
+    expect(store.listTasksForIssue(repeated.issue.id)).toHaveLength(1);
+    expect(store.listIssueActivity(repeated.issue.id).filter(activity => activity.type === "turn_merged"))
+      .toHaveLength(2);
+    expect(forces(repeated.issue.id)).toHaveLength(1);
+
+    const parentCase = await fixture("pat", "parent");
+    const parent = createResponsibleTestIssue(store, { title: `PG parent ${counter}`, status: "in_review" });
+    const child = createResponsibleTestIssue(store, {
+      title: `PG child ${counter}`, status: "backlog", parentIssueId: parent.id,
+      blockedBy: [parentCase.prerequisite.id], assigneeType: "agent", assigneeId: parentCase.agent.id,
+    });
+    expect((await parentCase.app.request(issueMessagesPath(parentCase.store, child.id), {
+      method: "POST", headers: parentCase.headers, body: JSON.stringify(requestMessageBody(parentCase.store, { body: "Start child" }, { type: "role", ref: "issue_owner" })),
+    })).status).toBe(200);
+    expect(store.getIssue(parent.id)?.status).toBe("in_progress");
+    expect(store.listIssueActivity(parent.id).some((entry) => entry.type === "parent_status_derived")).toBe(true);
+
+    const kill = await fixture("pat", "kill");
+    const previous = process.env.MULTIREMI_DEPENDENCY_GATE;
+    process.env.MULTIREMI_DEPENDENCY_GATE = "0";
+    try {
+      expect((await kill.app.request(issueMessagesPath(kill.store, kill.issue.id), {
+        method: "POST", headers: kill.headers, body: JSON.stringify(requestMessageBody(kill.store, { body: "Gate disabled" }, { type: "role", ref: "issue_owner" })),
+      })).status).toBe(200);
+      expect(store.listTasksForIssue(kill.issue.id)).toHaveLength(1);
+      expect(forces(kill.issue.id)).toHaveLength(0);
+    } finally {
+      if (previous === undefined) delete process.env.MULTIREMI_DEPENDENCY_GATE;
+      else process.env.MULTIREMI_DEPENDENCY_GATE = previous;
+    }
+  });
+
+  it("#2-C2: force-starts a member request to the rerun override", async () => {
+    const rerun = await fixture("jwt", "rerun");
+    const override = store.createAgent({ name: `PG override ${counter}`, provider: "claude", visibility: "workspace" });
+    expect((await rerun.app.request(issueMessagesPath(rerun.store, rerun.issue.id), {
+      method: "POST", headers: rerun.headers, body: JSON.stringify(requestMessageBody(rerun.store, { agent_id: override.id, body_md: "Continue Issue work" }, { type: "role", ref: "issue_owner" })),
+    })).status).toBe(200);
+    expect(store.listTasksForIssue(rerun.issue.id)[0]!.agentId).toBe(override.id);
+    expect(store.getIssue(rerun.issue.id)?.status).toBe("todo");
+    expect(forces(rerun.issue.id)).toHaveLength(1);
+    expect(forces(rerun.issue.id)[0]).toMatchObject({ actorType: "member", actorId: "local" });
+    expect(forces(rerun.issue.id)[0]!.data).toMatchObject({ source: "comment", agentId: override.id, assigneeDispatched: false });
+  });
+
+  it("canonical retry keeps the existing Turn without recording another human dependency force", async () => {
+    const f = await fixture("pat", "retry-no-force");
+    const started = await f.app.request(issueMessagesPath(store, f.issue.id), {
+      method: "POST", headers: f.headers,
+      body: JSON.stringify(requestMessageBody(store, { body: "Start despite unfinished prerequisites" }, { type: "role", ref: "issue_owner" })),
+    });
+    expect(started.status).toBe(200);
+    const original = store.getTurnForAttempt(store.listTasksForIssue(f.issue.id)[0]!.id)!;
+    const originalForce = forces(f.issue.id);
+    expect(originalForce).toHaveLength(1);
+    expect(originalForce[0]).toMatchObject({ actorType: "member", actorId: "local" });
+
+    store.updateIssue(f.issue.id, { status: "backlog" });
+    expect(store.getIssue(f.issue.id)?.status).toBe("backlog");
+    expect(store.listUnmetPrerequisites(f.issue.id).map(row => row.dependsOnIssueId)).toEqual([f.prerequisite.id]);
+    const supervisorAgent = store.createAgent({ name: `PG retry supervisor ${counter}`, provider: "claude", visibility: "workspace" });
+    store.setAgentRole(supervisorAgent.id, "supervisor");
+    const patrol = store.createIssue({ title: `PG retry patrol ${counter}`, assigneeType: "agent", assigneeId: supervisorAgent.id,
+      responsibleMemberId: f.member.id });
+    const supervisorTask = store.createTask({ agentId: supervisorAgent.id, issueId: patrol.id, prompt: "Supervise the existing Turn" });
+    const supervisor = await store.createTaskAccessToken(supervisorTask, f.userId);
+    store.updateWorkspace("local", { settings: { ...store.getWorkspace("local")!.settings, organizer: { mode: "act" } } });
+
+    const retried = await f.app.request(`/api/turns/${original.id}/retry`, {
+      method: "POST", headers: { Authorization: `Bearer ${supervisor.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ cold: true }),
+    });
+    const result = await retried.json();
+    expect(retried.status, JSON.stringify(result)).toBe(200);
+    const replacement = store.getTurn(original.id)!;
+    expect(replacement).toMatchObject({ id: original.id, session_id: original.session_id, trigger_message_id: original.trigger_message_id });
+    expect(replacement.current_attempt_id).not.toBe(original.current_attempt_id);
+    expect(store.getTask(original.current_attempt_id!)?.status).toBe("cancelled");
+    expect(store.getTask(replacement.current_attempt_id!)?.status).toBe("queued");
+    expect(store.listTurns({ workspace_id: "local", issue_id: f.issue.id })).toHaveLength(1);
+    expect(store.listTurnAttempts(original.id)).toHaveLength(2);
+    expect(forces(f.issue.id)).toEqual(originalForce);
+    const exemptions = store.listIssueActivity(f.issue.id).filter(entry => entry.type === "dependency_gate_exempted");
+    expect(exemptions).toHaveLength(1);
+    expect(exemptions[0]!.data).toMatchObject({ source: "redispatch", taskId: replacement.current_attempt_id,
+      previousTaskId: original.current_attempt_id, unmet: [{ dependsOnIssueId: f.prerequisite.id }] });
+    expect(store.listMessages(original.session_id).filter(message => message.sender_type === "member" && message.message_kind === "request"))
+      .toHaveLength(1);
+  });
+
+  it("rejects task identity and strips both public force marker spellings on PG", async () => {
+    const f = await fixture("pat", "identity");
+    const leader = store.createAgent({ name: `PG leader ${counter}`, provider: "claude", visibility: "workspace" });
+    const teammate = store.createAgent({ name: `PG teammate ${counter}`, provider: "claude", visibility: "workspace" });
+    const squad = store.createSquad({ name: `PG squad ${counter}`, leaderId: leader.id, memberIds: [teammate.id] });
+    const sourceIssue = createResponsibleTestIssue(store, {
+      title: `PG source ${counter}`, status: "in_progress", assigneeType: "squad", assigneeId: squad.id,
+    });
+    const source = store.createTask({ agentId: leader.id, issueId: sourceIssue.id, prompt: "Lead" });
+    store.createIssueDependency(sourceIssue.id, { dependsOnIssueId: f.prerequisite.id, type: "blocked_by" });
+    store.updateIssue(sourceIssue.id, { status: "backlog" });
+    const taskToken = await store.createTaskAccessToken(source, f.userId);
+    const taskHeaders = { Authorization: `Bearer ${taskToken.token}`, "Content-Type": "application/json" };
+
+    const spoofed = await f.app.request(issueMessagesPath(store, sourceIssue.id), {
+      method: "POST", headers: taskHeaders,
+      body: JSON.stringify(requestMessageBody(store, { body: "Pretend member", author_type: "member", author_id: f.userId }, { type: "role", ref: "issue_owner" })),
+    });
+    expect(spoofed.status).toBe(200);
+    expect((await spoofed.json()).message).toMatchObject({sender_type:"agent",sender_id:leader.id,task_id:source.id});
+
+    const mention = await f.app.request(issueMessagesPath(store, sourceIssue.id), {
+      method: "POST", headers: taskHeaders,
+      body: JSON.stringify(requestMessageBody(store, { body: `[@${teammate.name}](mention://agent/${teammate.id}) help` }, { type: "role", ref: "issue_owner" })),
+    });
+    expect(mention.status).toBe(200);
+    expect(await mention.json()).toMatchObject({wake_applied:"next_turn",wake_reason:"dependencies_unmet"});
+
+    const agentRerun = await f.app.request(issueMessagesPath(store, sourceIssue.id), {
+      method: "POST", headers: taskHeaders, body: JSON.stringify(requestMessageBody(store, { agent_id: leader.id, body_md: "Continue Issue work" }, { type: "role", ref: "issue_owner" })),
+    });
+    expect(agentRerun.status).toBe(200);
+    expect(await agentRerun.json()).toMatchObject({wake_applied:"inbox_only",wake_reason:"self"});
+
+    const agentCreate = await f.app.request(taskRequestPath(store, { issueId: sourceIssue.id }), {
+      method: "POST", headers: taskHeaders,
+      body: JSON.stringify(requestMessageBody(store, { agentId: teammate.id, issueId: sourceIssue.id, prompt: "Delegate" })),
+    });
+    expect(agentCreate.status).toBe(200);
+    expect(await agentCreate.json()).toMatchObject({wake_applied:"next_turn",wake_reason:"dependencies_unmet"});
+    expect(store.listTasksForIssue(sourceIssue.id)).toHaveLength(1);
+    expect(forces(sourceIssue.id)).toHaveLength(0);
+
+    for (const spelling of ["dependencyForce", "dependency_force"]) {
+      const target = await fixture("pat", `strip-${spelling}`);
+      const response = await target.app.request(taskRequestPath(target.store, { issueId: target.issue.id }), {
+        method: "POST", headers: target.headers,
+        body: JSON.stringify(requestMessageBody(target.store, {
+          agentId: target.agent.id, issueId: target.issue.id, prompt: "Forged",
+          [spelling]: { source: "rerun", actorMemberId: "forged-member" },
+        })),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ wake_applied: "now", wake_reason: "human_sender" });
+      const tasks = store.listTasksForIssue(target.issue.id);
+      expect(tasks).toHaveLength(1);
+      expect(store.getIssue(target.issue.id)?.status).toBe("todo");
+      expect(forces(target.issue.id)).toHaveLength(1);
+      expect(forces(target.issue.id)[0]).toMatchObject({ actorType: "member", actorId: "local" });
+      expect(forces(target.issue.id)[0]!.data).toMatchObject({
+        source: "comment", agentId: target.agent.id, taskId: tasks[0]!.id,
+        assigneeDispatched: true, unmet: [{ dependsOnIssueId: target.prerequisite.id }],
+      });
+    }
+  });
+
+  it("keeps autopilot blocked and rolls back the transactional force path on PG", async () => {
+    const f = await fixture("pat", "autopilot-rollback");
+    const autopilot = createResponsibleTestAutopilot(store, {
+      workspaceId: "local", title: `PG gated autopilot ${counter}`, assigneeId: f.agent.id,
+      createdById: f.userId, createdByType: "member", executionMode: "trigger_issue",
+    });
+    const run = store.runAutopilot(autopilot.id, { triggerIssueId: f.issue.id, source: "manual" });
+    expect(run).toMatchObject({ status: "skipped", failureReason: "dependencies_unmet" });
+
+    const injected = spyOn(IssuesRepo.prototype, "recordDependencyForceStarted")
+      .mockImplementation(() => { throw new Error("injected PG force audit failure"); });
+    try {
+      const response = await f.app.request(issueMessagesPath(store, f.issue.id), {
+        method: "POST", headers: f.headers, body: JSON.stringify(requestMessageBody(store, { body: "Durable PG comment" }, { type: "role", ref: "issue_owner" })),
+      });
+      expect(response.status).toBe(400);
+      expect(store.getIssue(f.issue.id)?.status).toBe("backlog");
+      expect(store.listTasksForIssue(f.issue.id)).toHaveLength(0);
+      expect(forces(f.issue.id)).toHaveLength(0);
+      expect(store.listIssueComments(f.issue.id).some((comment) => comment.body === "Durable PG comment")).toBe(false);
+    } finally {
+      injected.mockRestore();
+    }
+  });
+
+  async function runRace(
+    issueId: string,
+    prerequisiteId: string,
+    agentId: string,
+    roles: Array<"comment" | "owner_request" | "auto">,
+  ): Promise<WorkerResult[]> {
+    const barrierDir = mkdtempSync(join(tmpdir(), "mul458b-two-connection-"));
+    const barrierPath = join(barrierDir, "go");
+    const workerUrl = new URL("./fixtures/postgres-two-connection-race-worker.ts", import.meta.url);
+    // Role `auto` closes the prerequisite as a real member.
+    const memberId = roles.includes("auto") ? testWorkspaceMember(store, store.getIssue(prerequisiteId)!.workspaceId).id : undefined;
+    const entries = roles.map((role) => {
+      const worker = new Worker(workerUrl, { type: "module", env: workerEnv() });
+      const ready = workerPhase(worker, "ready");
+      const done = workerPhase<WorkerResult>(worker, "done");
+      // A ready-stage failure also rejects done; handle it until both are awaited.
+      void done.catch(() => {});
+      worker.postMessage({
+        databaseUrl: pgDatabaseUrl(TEST_DB), issueId, prerequisiteId, agentId, barrierPath, role, memberId,
+      });
+      return { worker, ready, done };
+    });
+    try {
+      await Promise.all(entries.map((entry) => entry.ready));
+      writeFileSync(barrierPath, "go");
+      return await Promise.all(entries.map((entry) => entry.done));
+    } finally {
+      entries.forEach((entry) => entry.worker.terminate());
+      rmSync(barrierDir, { recursive: true, force: true });
+    }
+  }
+
+  it("serializes concurrent human comments and explicit owner requests across two PG connections", async () => {
+    const f = await fixture("pat", "race-comment-rerun");
+    const results = await runRace(f.issue.id, f.prerequisite.id, f.agent.id, ["comment", "owner_request"]);
+    expect(results.map((result) => result.responseStatus).sort()).toEqual([200, 200]);
+    expect(results.every((result) => result.maxTransactionDepth === 1)).toBe(true);
+    const tasks = store.listTasksForIssue(f.issue.id);
+    const merges = store.listIssueActivity(f.issue.id).filter(entry => entry.type === "turn_merged");
+    expect(merges.length).toBeLessThanOrEqual(1);
+    expect(tasks).toHaveLength(2 - merges.length);
+    expect(tasks.some((task) => task.status === "cancelled")).toBe(false);
+    expect(forces(f.issue.id)).toHaveLength(1);
+    expect(store.getIssue(f.issue.id)?.status).toBe("todo");
+  });
+
+  function assertSingleStart(f: Awaited<ReturnType<typeof fixture>>, forceCount: number, autoCount: number) {
+    const tasks = store.listTasksForIssue(f.issue.id);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.status).toBe("queued");
+    const turns = db.query("SELECT id, status, trigger_message_id FROM multiremi_turns WHERE issue_id = ?")
+      .all(f.issue.id) as Array<{ id: string; status: string; trigger_message_id: string }>;
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.status).toBe("pending");
+    const attempts = db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id = ?").all(turns[0]!.id);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.id).toBe(tasks[0]?.id);
+    const activity = store.listIssueActivity(f.issue.id);
+    expect(forces(f.issue.id)).toHaveLength(forceCount);
+    expect(activity.filter((entry) => entry.type === "dependency_auto_started")).toHaveLength(autoCount);
+    expect(activity.filter((entry) => entry.type === "turn_created")).toHaveLength(1);
+    expect(activity.filter((entry) => entry.type === "turn_merged")).toHaveLength(autoCount);
+    const trigger = db.query("SELECT sender_type, wake_applied, wake_reason FROM multiremi_conversation_log WHERE id = ?")
+      .get(turns[0]!.trigger_message_id);
+    expect(trigger).toMatchObject({ sender_type: autoCount ? "platform" : "member", wake_applied: "now",
+      wake_reason: autoCount ? "platform_to_owner" : "human_sender" });
+    expect(store.getIssue(f.issue.id)?.status).toBe("todo");
+  }
+
+  it.each(["force_first", "auto_first", "member_after_commit"] as const)(
+    "records only the actual start for %s across two PG connections", async (order) => {
+      const f = await fixture("pat", order);
+      testWorkspaceMember(store, f.prerequisite.workspaceId);
+      const completePrerequisite = () => acceptTestIssueDelivery(store, f.prerequisite.id);
+      const peerDb = new PostgresSyncDatabase(pgDatabaseUrl(TEST_DB));
+      try {
+        const peerStore = new MultiremiStore(peerDb);
+        const peerApp = createMultiremiApp({ store: peerStore, authToken: "mul458-pg-root" });
+        const memberRequest = async () => {
+          const response = await peerApp.request(issueMessagesPath(peerStore, f.issue.id), {
+            method: "POST", headers: f.headers,
+            body: JSON.stringify(requestMessageBody(peerStore, { body: `Ordered PG ${order}` }, { type: "role", ref: "issue_owner" })),
+          });
+          expect(response.status).toBe(200);
+        };
+        if (order === "force_first") {
+          await memberRequest();
+          completePrerequisite();
+          assertSingleStart(f, 1, 0);
+        } else if (order === "auto_first") {
+          completePrerequisite();
+          await memberRequest();
+          assertSingleStart(f, 0, 1);
+        } else {
+          // Pause only the post-COMMIT hook: the prerequisite and durable check are committed.
+          const issues = (store as unknown as { issues: IssuesRepo }).issues;
+          const hook = spyOn(issues, "runIssueUpdatePostCommit").mockImplementation(() => {});
+          try { completePrerequisite(); } finally { hook.mockRestore(); }
+          const row = db.query("SELECT id FROM multiremi_system_events WHERE resource_id = ? AND event = 'dependency_auto_start_check'")
+            .get(f.prerequisite.id);
+          expect(row).toBeDefined();
+          const check = store.getSystemEvent(row!.id)!;
+          await memberRequest();
+          assertSingleStart(f, 0, 0);
+          // Earlier cases share this database and their status events
+          // remain pending. Drain the supported batch size so this case's exact
+          // committed recovery event is included, rather than the oldest 25.
+          store.dispatchPendingSystemEvents(new Date(check.availableAt), 100);
+          expect(store.getSystemEvent(check.id)?.status).toBe("processed");
+          assertSingleStart(f, 0, 0);
+        }
+        expect(store.getIssue(f.prerequisite.id)?.status).toBe("done");
+      } finally {
+        peerDb.close();
+      }
+    },
+  );
+
+  it("serializes concurrent human comment and automatic start across two PG connections", async () => {
+    const f = await fixture("pat", "race-comment-auto");
+    const results = await runRace(f.issue.id, f.prerequisite.id, f.agent.id, ["comment", "auto"]);
+    expect(results.every((result) => result.responseStatus !== 409)).toBe(true);
+    expect(results.every((result) => result.maxTransactionDepth === 1)).toBe(true);
+    const forceCount = forces(f.issue.id).length;
+    const autoCount = store.listIssueActivity(f.issue.id)
+      .filter((entry) => entry.type === "dependency_auto_started").length;
+    // If the prerequisite commits before the member request but its post-commit
+    // check loses the race, this is a normal member start with neither audit.
+    expect([[1, 0], [0, 1], [0, 0]]).toContainEqual([forceCount, autoCount]);
+    expect(store.getIssue(f.prerequisite.id)?.status).toBe("done");
+    assertSingleStart(f, forceCount, autoCount);
+  });
+});

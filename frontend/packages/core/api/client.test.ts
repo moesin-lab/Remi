@@ -1,6 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient, ApiError } from "./client";
 import { toSafeErrorDetails } from "./http";
+import { messageFixture, turnFixture } from "./unified.fixture";
+
+function chatSendFetch() {
+  return vi.fn(async (url: string, init?: RequestInit) => {
+    const body = url.endsWith("/api/chat/sessions/session-1") ? {
+      id: "session-1", workspace_id: "ws-1", creator_id: "u-1", agent_id: "agent_1",
+      title: "Chat", status: "active", created_at: "2026-10-04T00:00:00Z", updated_at: "2026-10-04T00:00:00Z",
+    } : url.endsWith("/api/sessions/session-1/messages") && init?.method === "POST" ? {
+      message: messageFixture({ id: "m1", session_id: "session-1" }),
+      wake_applied: "now", wake_reason: "human_request", turn_id: "t1",
+    } : url.endsWith("/api/turns/t1") ? {
+      turn: turnFixture({ id: "t1", session_id: "session-1", current_attempt_id: "attempt-1", status: "pending" }),
+    } : undefined;
+    if (!body) throw new Error(`Unexpected chat request: ${init?.method ?? "GET"} ${url}`);
+    return new Response(JSON.stringify(body), { status: init?.method === "POST" ? 201 : 200,
+      headers: { "Content-Type": "application/json" } });
+  });
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -49,7 +67,7 @@ describe("toSafeErrorDetails", () => {
 describe("ApiClient", () => {
   it("sends the parent session in snake case and preserves side-chat metadata", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      id: "sess_side",
+      id: "sess_side", owner_type: "issue", owner_id: "issue_1",
       issue_id: "issue_1",
       workspace_id: "ws_1",
       title: "Review",
@@ -589,68 +607,6 @@ describe("ApiClient", () => {
     });
   });
 
-  describe("listChatMessagesPage deployment-order fallback", () => {
-    const jsonResponse = (body: unknown, status: number, statusText = "") =>
-      new Response(JSON.stringify(body), {
-        status,
-        statusText,
-        headers: { "Content-Type": "application/json" },
-      });
-
-    it("falls back to the legacy full-list endpoint when the paged route 404s", async () => {
-      const legacy = [
-        { id: "m1", role: "user", content: "hi", created_at: "2026-06-01T00:00:00Z" },
-        { id: "m2", role: "assistant", content: "yo", created_at: "2026-06-01T00:00:01Z" },
-      ];
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValueOnce(jsonResponse({ error: "not found" }, 404, "Not Found"))
-        .mockResolvedValueOnce(jsonResponse(legacy, 200));
-      vi.stubGlobal("fetch", fetchMock);
-
-      const client = new ApiClient("https://api.example.test");
-      const page = await client.listChatMessagesPage("session-1", { limit: 50 });
-
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(fetchMock.mock.calls[0]![0]).toBe(
-        "https://api.example.test/api/chat/sessions/session-1/messages/page?limit=50",
-      );
-      expect(fetchMock.mock.calls[1]![0]).toBe(
-        "https://api.example.test/api/chat/sessions/session-1/messages",
-      );
-      expect(page).toEqual({ messages: legacy, limit: 50, has_more: false, next_cursor: null });
-    });
-
-    it("does NOT fall back on a cursor request — a 404 there propagates", async () => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValue(jsonResponse({ error: "not found" }, 404, "Not Found"));
-      vi.stubGlobal("fetch", fetchMock);
-
-      const client = new ApiClient("https://api.example.test");
-      await expect(
-        client.listChatMessagesPage("session-1", {
-          before: { created_at: "2026-06-01T00:00:00Z", id: "m1" },
-        }),
-      ).rejects.toBeInstanceOf(ApiError);
-      // Only the paged request fires; no legacy full-list call that would duplicate messages.
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-
-    it("propagates non-404 errors instead of masking them with the legacy list", async () => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValue(jsonResponse({ error: "boom" }, 500, "Internal Server Error"));
-      vi.stubGlobal("fetch", fetchMock);
-
-      const client = new ApiClient("https://api.example.test");
-      await expect(client.listChatMessagesPage("session-1")).rejects.toMatchObject({
-        status: 500,
-      });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-  });
-
   describe("chat attachment wiring", () => {
     it("uploadFile includes chat_session_id in the FormData body", async () => {
       const fetchMock = vi.fn().mockResolvedValue(
@@ -677,41 +633,33 @@ describe("ApiClient", () => {
     });
 
     it("sendChatMessage serialises attachment_ids onto the JSON body when present", async () => {
-      const fetchMock = vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ message_id: "m1", task_id: "t1", created_at: "", supports_queue: true, queued: false }), {
-          status: 201,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+      const fetchMock = chatSendFetch();
       vi.stubGlobal("fetch", fetchMock);
 
       const client = new ApiClient("https://api.example.test");
-      await client.sendChatMessage("session-1", "hello", ["att-1", "att-2"]);
+      await expect(client.sendChatMessage("session-1", "hello", ["att-1", "att-2"]))
+        .resolves.toMatchObject({ message_id: "m1", turn_id: "t1" });
 
-      const [, init] = fetchMock.mock.calls[0]!;
+      const [url, init] = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
+      expect(url).toBe("https://api.example.test/api/sessions/session-1/messages");
       expect(JSON.parse(init?.body as string)).toEqual({
-        content: "hello",
+        body_md: "hello", message_kind: "request", to: { type: "agent", ref: "agent_1" }, wake_requested: "now",
         attachment_ids: ["att-1", "att-2"],
       });
     });
 
     it("sendChatMessage omits attachment_ids when the list is empty or undefined", async () => {
-      const fetchMock = vi.fn().mockImplementation(() =>
-        Promise.resolve(
-          new Response(JSON.stringify({ message_id: "m1", task_id: "t1", created_at: "", supports_queue: true, queued: false }), {
-            status: 201,
-            headers: { "Content-Type": "application/json" },
-          }),
-        ),
-      );
+      const fetchMock = chatSendFetch();
       vi.stubGlobal("fetch", fetchMock);
 
       const client = new ApiClient("https://api.example.test");
       await client.sendChatMessage("session-1", "hello");
       await client.sendChatMessage("session-1", "again", []);
 
-      expect(JSON.parse(fetchMock.mock.calls[0]![1]?.body as string)).toEqual({ content: "hello" });
-      expect(JSON.parse(fetchMock.mock.calls[1]![1]?.body as string)).toEqual({ content: "again" });
+      const sends = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+      expect(sends).toHaveLength(2);
+      expect(JSON.parse(sends[0]![1]?.body as string)).toEqual({ body_md: "hello", message_kind: "request", to: { type: "agent", ref: "agent_1" }, wake_requested: "now" });
+      expect(JSON.parse(sends[1]![1]?.body as string)).toEqual({ body_md: "again", message_kind: "request", to: { type: "agent", ref: "agent_1" }, wake_requested: "now" });
     });
   });
 });

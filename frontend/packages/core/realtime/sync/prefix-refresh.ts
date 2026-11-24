@@ -1,3 +1,4 @@
+import { platformLifecycleKeys } from "../../platform-lifecycle/queries";
 import type { QueryClient } from "@tanstack/react-query";
 import type { WSMessage } from "../../types/events";
 import { getCurrentWsId } from "../../platform/workspace-storage";
@@ -20,6 +21,7 @@ import { agentPluginKeys } from "../../plugins/queries";
 import { chatKeys } from "../../chat/queries";
 import { onInboxInvalidate } from "../../inbox/ws-updaters";
 import { workspaceKeys } from "../../workspace/queries";
+import { usageKeys } from "../../usage/queries";
 import type { SyncContext } from "./types";
 
 const PREFIX_REFRESH_DELAY_MS = 100;
@@ -56,6 +58,7 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
     qc.invalidateQueries({ queryKey: agentTaskSnapshotKeys.list(wsId) });
     qc.invalidateQueries({ queryKey: agentActivityKeys.last30d(wsId) });
     qc.invalidateQueries({ queryKey: agentRunCountsKeys.last30d(wsId) });
+    qc.invalidateQueries({ queryKey: usageKeys.all(wsId) });
   };
 
   const refreshMap: Record<string, () => void> = {
@@ -67,6 +70,9 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
       const wsId = getCurrentWsId();
       if (wsId) {
         qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
+        // An execution owner's availability re-routes the questions it holds.
+        qc.invalidateQueries({ queryKey: [...issueKeys.all(wsId), "questions"] });
+        qc.invalidateQueries({ queryKey: ["question", wsId] });
         qc.invalidateQueries({ queryKey: agentPluginKeys.all(wsId) });
         // Squad members status is derived per agent, so any agent
         // change (status flip, archive, runtime swap) needs to refresh the
@@ -77,7 +83,11 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
     },
     member: () => {
       const wsId = getCurrentWsId();
-      if (wsId) qc.invalidateQueries({ queryKey: workspaceKeys.members(wsId) });
+      if (wsId) {
+        qc.invalidateQueries({ queryKey: workspaceKeys.members(wsId) });
+        // Membership decides who may act at a question's human stage.
+        qc.invalidateQueries({ queryKey: ["question", wsId] });
+      }
     },
     // workspace:updated is handled by the specific handler below
     // (compares prefixes to decide whether to also invalidate issues).
@@ -116,6 +126,7 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
         qc.invalidateQueries({ queryKey: workspaceKeys.squads(wsId) });
         // squad:deleted triggers assignee transfer — refresh issues too.
         qc.invalidateQueries({ queryKey: issueKeys.all(wsId) });
+        qc.invalidateQueries({ queryKey: ["question", wsId] });
       }
     },
     label: () => {
@@ -188,6 +199,7 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
       // shape as the tasks invalidation above — any task lifecycle
       // event shifts the aggregated usage numbers.
       qc.invalidateQueries({ queryKey: ["issues", "usage"] });
+      qc.invalidateQueries({ queryKey: usageKeys.all(wsId) });
       // Squad members-status reads the same task lifecycle to flip
       // working ↔ idle for each agent member.
       invalidateSquadMemberStatusQueries(qc, wsId);
@@ -209,6 +221,16 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
 
   return {
     onAny: (msg) => {
+      if (msg.type === "daemon:maintenance_changed") {
+        void qc.invalidateQueries({ queryKey: platformLifecycleKeys.status() });
+        return;
+      }
+      if (msg.type === "agent:archived" || msg.type === "agent:restored") {
+        // A re-routed question can enter or leave the human stage, which is
+        // what the detail's pending_decision_count counts.
+        const wsId = getCurrentWsId();
+        if (wsId) void qc.invalidateQueries({ queryKey: issueKeys.detailAll(wsId) });
+      }
       if (SPECIFIC_EVENTS.has(msg.type)) return;
       const prefix = msg.type.split(":")[0] ?? "";
       const refresh = refreshMap[prefix];
@@ -233,7 +255,11 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
 const SPECIFIC_EVENTS = new Set([
   "repository:activity_changed",
   "workspace:updated",
-  "issue:updated", "issue:created", "issue:deleted", "issue_labels:changed", "issue_metadata:changed", "inbox:new",
+  "issue:updated", "issue:created", "issue:deleted", "issue_labels:changed", "issue_metadata:changed",
+  // Both item and index-only new signals are consumed by createInboxHandlers.
+  // read/batch-read continue through the debounced inbox prefix below.
+  "inbox:new",
+  "decision:created", "decision:updated",
   "comment:created", "comment:updated", "comment:deleted",
   "comment:resolved", "comment:unresolved",
   "activity:created",
@@ -242,13 +268,13 @@ const SPECIFIC_EVENTS = new Set([
   "subscriber:added", "subscriber:removed",
   "daemon:heartbeat",
   // Chat events are handled explicitly below; do not double-invalidate.
-  "chat:message", "chat:done", "chat:session_read", "chat:session_deleted",
+  "chat:done", "chat:session_read", "chat:session_deleted",
   "chat:session_updated", "chat:queue_updated",
-  // task:message stays out of the prefix path because it fires per
-  // streamed message during a long run — invalidating the snapshot on
-  // every message would flood the network. Specific chat handlers below
-  // still receive it via ws.on() (a separate subscription channel).
-  "task:message",
+  // A running-subagent count only patches the Chat pending list (PR 5); it is
+  // no task lifecycle change, so the task lists stay as they are.
+  "task:subagents",
+  // A Chat's background tasks (PR 6) patch their own list and the session count.
+  "chat:background_tasks",
   // task:completed / task:failed deliberately NOT here. They go through
   // both the task-prefix invalidate (refreshes the agent-task-snapshot
   // cache) AND the chat-specific ws.on() handlers below. The two

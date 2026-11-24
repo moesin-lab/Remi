@@ -12,7 +12,7 @@ import {
   requireWorkspaceAdmin,
 } from "../helpers.js";
 import {
-  authenticatedRequestUserId,
+  currentRequestUserId,
   currentTaskAccessToken,
   currentWorkspaceMember,
   currentWorkspaceRoleStrict,
@@ -35,10 +35,8 @@ type ChannelBody = {
 
 const DELIVERY_STATUSES = new Set<MultiremiNotificationDeliveryStatus>(["pending", "sent", "failed"]);
 
-// A channel is owned either by the workspace (admin managed, mirrors every member's
-// matching inbox item) or by exactly one member (mirrors only their own). Ownership is
-// derived from the authenticated caller, never read off the request body — that is what
-// stops anyone from pointing someone else's notifications at a group of their choosing.
+// Channels belong to the workspace. The old `member` scope is accepted as an
+// alias, but cannot create a separate operator or override a channel's workspace.
 const CHANNEL_SCOPES = new Set(["member", "workspace"]);
 const OWNER_FIELDS = ["memberId", "member_id", "ownerId", "owner_id"] as const;
 
@@ -66,7 +64,7 @@ export function registerNotificationChannelRoutes(app: Hono, deps: RouterDeps): 
     // Only a real string counts: String(["workspace"]) is "workspace", and a scope that
     // survives by coercion is a scope nobody wrote down.
     const scope = body.scope === undefined
-      ? "member"
+      ? "workspace"
       : typeof body.scope === "string"
       ? body.scope.trim().toLowerCase()
       : "";
@@ -85,7 +83,7 @@ export function registerNotificationChannelRoutes(app: Hono, deps: RouterDeps): 
         target: body.target,
         eventTypes: body.eventTypes ?? body.event_types,
         minSeverity: body.minSeverity ?? body.min_severity,
-        createdBy: authenticatedRequestUserId(c),
+        createdBy: currentRequestUserId(c),
       });
       return c.json({ channel }, 201);
     } catch (error) {
@@ -214,29 +212,16 @@ function requireChannelOwnership(
 }
 
 /**
- * Ownership for a new channel. `workspace` needs admin; `member` binds the channel to
- * the caller's own membership and fails closed when there is no membership to bind to.
+ * Both spellings create a shared workspace channel. Task credentials cannot
+ * configure external notification destinations.
  */
 function resolveChannelOwner(
   c: Context,
   store: RouterDeps["store"],
   workspaceId: string,
-  scope: string,
+  _scope: string,
 ): string | null | Response {
-  if (scope === "workspace") {
-    const denied = requireNotificationAdmin(c, store, workspaceId);
-    return denied ?? null;
-  }
-  if (currentTaskAccessToken(c)) {
-    return c.json({ error: "forbidden for task token", code: "task_token_hard_denied" }, 403);
-  }
-  const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
-  if (denied) return denied;
-  const member = currentWorkspaceMember(c, store, workspaceId);
-  if (!member) {
-    return c.json({ error: "no workspace membership to own a personal notification channel" }, 403);
-  }
-  return member.id;
+  return requireNotificationAdmin(c, store, workspaceId) ?? null;
 }
 
 function rejectOwnerOverride(c: Context, body: ChannelBody): Response | null {

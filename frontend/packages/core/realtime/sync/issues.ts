@@ -1,4 +1,5 @@
 import { getCurrentWsId } from "../../platform/workspace-storage";
+import { issueKeys } from "../../issues/queries";
 import {
   onIssueCreated,
   onIssueUpdated,
@@ -6,11 +7,12 @@ import {
   onIssueLabelsChanged,
   onIssueMetadataChanged,
 } from "../../issues/ws-updaters";
-import { onInboxIssueStatusChanged, onInboxIssueDeleted } from "../../inbox/ws-updaters";
+import { onInboxIssueStatusChanged, onInboxIssueDeleted, onInboxInvalidate } from "../../inbox/ws-updaters";
 import type {
   IssueUpdatedPayload,
   IssueCreatedPayload,
   IssueDeletedPayload,
+  IssueDecisionChangedPayload,
   IssueLabelsChangedPayload,
   IssueMetadataChangedPayload,
 } from "../../types";
@@ -24,6 +26,19 @@ import type { SyncContext, SyncModule } from "./types";
  * Instead, both mutations and WS handlers use dedup checks to be idempotent.
  */
 export function createIssueHandlers({ qc }: SyncContext): SyncModule {
+  const invalidateDecisionState = (payload: unknown) => {
+    const { issue_id: issueId } = payload as IssueDecisionChangedPayload;
+    const wsId = getCurrentWsId();
+    if (!wsId) return;
+    qc.invalidateQueries({ queryKey: ["question", wsId] });
+    if (!issueId) { onInboxInvalidate(qc, wsId); return; }
+    qc.invalidateQueries({ queryKey: issueKeys.detail(wsId, issueId) });
+    qc.invalidateQueries({ queryKey: issueKeys.decisions(wsId, issueId) });
+    // Every ancestor's drawer lists its subtree's questions; only open ones refetch.
+    qc.invalidateQueries({ queryKey: [...issueKeys.all(wsId), "questions"] });
+    onInboxInvalidate(qc, wsId);
+  };
+
   return {
     handlers: {
       "issue:updated": (p) => {
@@ -32,11 +47,18 @@ export function createIssueHandlers({ qc }: SyncContext): SyncModule {
         const wsId = getCurrentWsId();
         if (wsId) {
           onIssueUpdated(qc, wsId, issue);
+          // Parent or assignee changes re-route the questions of every
+          // descendant on the server; their stage and handler follow.
+          qc.invalidateQueries({ queryKey: [...issueKeys.all(wsId), "questions"] });
+          qc.invalidateQueries({ queryKey: ["question", wsId] });
           if (issue.status) {
             onInboxIssueStatusChanged(qc, wsId, issue.id, issue.status);
           }
         }
       },
+
+      "decision:created": invalidateDecisionState,
+      "decision:updated": invalidateDecisionState,
 
       "issue:created": (p) => {
         const { issue } = p as IssueCreatedPayload;

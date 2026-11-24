@@ -132,7 +132,7 @@
   "fallback": {
     "model_label": "예비 모델",
     "thinking_label": "예비 모델 추론 강도",
-    "description": "기본 모델의 게이트웨이 리소스를 사용할 수 없을 때만 현재 작업을 이어받습니다.",
+    "description": "기본 모델, 모델 서비스 또는 실행 가능한 Runtime을 사용할 수 없을 때 현재 작업을 이어받습니다.",
     "unconfigured": "설정되지 않음",
     "same_as_primary": "기본 모델과 다른 모델을 선택하세요",
     "clear": "예비 모델 제거",
@@ -141,6 +141,9 @@
     "switch_count": "전환 {{count}}회",
     "reason_gateway": "게이트웨이 리소스 사용 불가",
     "reason_no_account": "사용 가능한 게이트웨이 계정 없음",
+    "reason_model_unavailable": "기본 모델 사용 불가",
+    "reason_server": "모델 제공자 서버 오류",
+    "reason_queued": "기본 모델을 지원하는 Runtime 없음",
     "reason_unknown": "리소스 사용 불가"
   },
   "inspector": {
@@ -204,7 +207,8 @@
     "label": "모델",
     "default_provider": "기본값(제공자)",
     "discovery_failed": "검색 실패",
-    "clear_full": "선택 지우기(제공자 기본값 사용)"
+    "clear_full": "선택 지우기(제공자 기본값 사용)",
+    "blocked_by_policy": "그룹 정책에 의해 차단된 모델입니다. 다른 모델을 선택하세요."
   },
   "tabs": {
     "activity": "활동",
@@ -284,7 +288,7 @@
       "unsaved_changes": "저장하지 않은 변경사항"
     },
     "instructions": {
-      "intro": "이 에이전트의 정체성과 작업 방식을 정의하세요. 모든 작업에서 에이전트 컨텍스트에 포함됩니다. Markdown을 지원합니다.",
+      "intro": "이 에이전트의 정체성과 작업 방식을 정의하세요. 이 에이전트가 실행하는 모든 세션(Chat 및 Issue)의 AGENTS.md 맨 앞에 기록되며 매 턴 적용됩니다. Markdown을 지원합니다.",
       "placeholder": "이 에이전트의 역할, 전문성, 작업 방식을 정의하세요.\n\n# 예시\n당신은 React와 TypeScript에 특화된 프런트엔드 엔지니어입니다.\n\n## 작업 방식\n- 작고 집중된 PR을 작성합니다. 논리적 변경 단위마다 커밋 하나를 사용합니다\n- 상속보다 조합을 선호합니다\n- 새 컴포넌트에는 항상 단위 테스트를 추가합니다\n\n## 제약\n- 명시적인 승인 없이 shared/ 타입을 수정하지 않습니다\n- features/의 기존 컴포넌트 패턴을 따릅니다"
     },
     "env": {
@@ -352,7 +356,7 @@
     },
     "integrations": {
       "intro": "이 에이전트를 외부 채팅 플랫폼에 연결해 팀원이 평소 사용하는 도구에서 바로 함께 작업할 수 있도록 합니다.",
-      "members_note": "에이전트에 Lark 봇을 연결할 수 있는 사람은 워크스페이스 소유자와 관리자뿐입니다. 연결된 봇은 설정 → 연동에서 확인할 수 있습니다."
+      "members_note": "에이전트에 Lark 봇을 연결할 수 있는 사람은 워크스페이스 소유자와 관리자뿐입니다. 연결된 봇은 IM 플랫폼 → Feishu → 봇에서 확인할 수 있습니다."
     },
     "activity": {
       "section_now": "현재",
@@ -430,6 +434,17 @@
   },
   "transcript": {
     "dialog_title": "에이전트 실행 트랜스크립트",
+    "view_live": "실시간 실행 과정 보기",
+    "view_finished": "완료된 실행 과정 보기",
+    "trace_loading": "실행 과정을 불러오는 중…",
+    "trace_live": "실시간 업데이트 중",
+    "trace_finished": "실행 종료 · 이벤트 {{count}}개",
+    "trace_unreachable": "실행 환경 {{name}}이 오프라인입니다. 기록을 일시적으로 읽을 수 없습니다",
+    "trace_last_seen": "마지막 접속 {{time}}",
+    "trace_lost": "실행 기록이 손실되었습니다",
+    "trace_not_found": "사용 가능한 실행 기록이 없습니다",
+    "trace_failed": "실행 기록을 불러오지 못했습니다",
+    "trace_retry": "다시 시도",
     "execution_view": "실행 과정",
     "prompt_view": "입력 프롬프트",
     "copy_prompt": "프롬프트 복사",
@@ -437,11 +452,16 @@
     "prompt_loading": "입력 프롬프트를 불러오는 중...",
     "prompt_not_recorded": "입력 프롬프트가 기록되지 않았습니다. 이전 런타임 버전에서 실행된 작업일 수 있습니다.",
     "prompt_load_failed": "입력 프롬프트를 불러오지 못했습니다. 잠시 후 다시 시도하세요.",
+    "prompt_sent_title": "이번 턴에 에이전트에게 보낸 내용",
+    "prompt_messages_fallback": "이 실행에서는 보낸 원문이 기록되지 않아 이번 턴의 메시지를 표시합니다.",
+    "prompt_steers": "턴 중에 보냄",
+    "session_instructions": "세션 설정",
+    "session_instructions_note": "이 실행 당시 세션 AGENTS.md 중 Remi가 기록한 부분입니다. 로컬 워크스페이스의 지침 파일은 기기에만 있으며 여기에 표시되지 않습니다.",
     "status_queued": "대기 중",
     "status_dispatched": "대기 중",
     "status_waiting_local_directory": "로컬 디렉터리 대기 중",
     "status_running": "실행 중",
-    "status_awaiting_human": "검토 대기 중",
+    "status_awaiting_human": "답변 대기 중",
     "status_completed": "완료됨",
     "status_failed": "실패함",
     "status_cancelled": "취소됨",
@@ -458,22 +478,21 @@
     "final_answer": "최종 답변",
     "copy_answer": "복사",
     "tokens_context": "{{value}} 컨텍스트",
+    "context_usage": "컨텍스트 {{value}}",
     "waiting_dispatch": "사용 가능한 런타임을 기다리는 중...",
     "waiting_start": "작업 시작을 기다리는 중...",
     "waiting_local_directory": "로컬 디렉터리를 사용할 수 있을 때까지 기다리는 중...",
-    "waiting_human": "검토 대기 중...",
+    "waiting_human": "답변 대기 중...",
     "waiting_events": "이벤트를 기다리는 중...",
     "no_data": "기록된 실행 데이터가 없습니다.",
     "sort_label": "정렬",
     "sort_chronological": "오래된 순",
     "sort_newest_first": "최신 순",
     "plan": "계획",
-    "command_not_recorded": "명령이 기록되지 않았습니다(이전 버전 작업)",
-    "tool_running": "실행 중…",
     "nested_steps_one": "{{count}}단계",
     "nested_steps_other": "{{count}}단계",
-    "collab_activity_hidden": "서브에이전트의 내부 작업은 기록되지 않습니다",
     "step_not_finished": "미완료",
+    "steer_not_delivered": "전달되지 않음",
     "human_answer_label": "답변:",
     "human_status": "상태: {{value}}",
     "human_responded_by": "응답자: {{value}}"

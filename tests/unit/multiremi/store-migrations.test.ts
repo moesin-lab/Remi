@@ -4,9 +4,12 @@
 // three legacy migrations that MUST run on every startup (8f20d1c8: losing them
 // breaks old-database upgrades).
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
-import { runMigrations } from "@multiremi/store/migrations.js";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase, deserializeSqliteDatabase, markSqliteDialect } from "@multiremi/store/db/sqlite.js";
+import { resolveSqlDialect, runMigrations, bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { historicalWriters } from "./unified-model-test-backends.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { expectArchiveEraMigrated, installArchiveEraSchema } from "./archive-era-schema.js";
 
 import {
   CHAT_ISSUE_CLASSIFICATION_CASES, classificationChatId, CHAT_ISSUE_MIGRATION,
@@ -16,12 +19,12 @@ import {
 let db: Database | null = null;
 
 function freshDb(): Database {
-  db = new Database(":memory:");
+  db = openSqliteDatabase(":memory:");
   return db;
 }
 
 function migrate(database: Database): void {
-  runMigrations(database as unknown as SqlDatabase);
+  bootstrapPreUnifiedSchema(database as unknown as SqlDatabase);
 }
 
 function tableNames(database: Database): string[] {
@@ -44,6 +47,48 @@ afterEach(() => {
 });
 
 describe("store migrations", () => {
+  it("adds nullable unread state for lazy initialization and preserves it on restart", () => {
+    const database = freshDb(); migrate(database);
+    database.exec(`ALTER TABLE multiremi_conversation_heads DROP COLUMN agent_read_state;
+      DELETE FROM multiremi_schema_migrations WHERE id = '20261004_session_agent_read_progress';`);
+    database.run("INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at) VALUES (?, 7, 3, ?)",
+      ["legacy-session", "2026-10-04T00:00:00Z"]);
+    migrate(database);
+    expect(database.query("SELECT head_seq, log_version, agent_read_state FROM multiremi_conversation_heads WHERE session_id = ?").get("legacy-session"))
+      .toEqual({ head_seq: 7, log_version: 3, agent_read_state: null });
+    const progress = JSON.stringify({ agent: { seq: 2, offset: 32_000 } });
+    database.run("UPDATE multiremi_conversation_heads SET agent_read_state = ? WHERE session_id = ?", [progress, "legacy-session"]);
+    migrate(database); migrate(database);
+    expect(database.query("SELECT agent_read_state FROM multiremi_conversation_heads WHERE session_id = ?").get("legacy-session"))
+      .toEqual({ agent_read_state: progress });
+    expect(database.query("PRAGMA table_info(multiremi_conversation_heads)").all()).toContainEqual(expect.objectContaining({ name: "agent_read_state", notnull: 0 }));
+  });
+
+  it("upgrades gateway context declarations with no presets and preserves them across restarts", () => {
+    const database = freshDb();
+    migrate(database);
+    database.exec(`
+      DROP TABLE multiremi_gateway_model_context;
+      DELETE FROM multiremi_schema_migrations WHERE id = '20260928_gateway_model_context';
+    `);
+    migrate(database);
+    expect(database.query("SELECT COUNT(*) AS count FROM multiremi_gateway_model_context").get()).toEqual({ count: 0 });
+    database.run(
+      "INSERT INTO multiremi_gateway_model_context VALUES (?, ?, ?, ?, ?, ?)",
+      ["local", "claude", "claude-opus-5", "1m", "local", "2026-09-28T00:00:00.000Z"],
+    );
+    migrate(database);
+    migrate(database);
+    expect(database.query("SELECT model_id, context_window FROM multiremi_gateway_model_context").all())
+      .toEqual([{ model_id: "claude-opus-5", context_window: "1m" }]);
+    expect(database.query("SELECT COUNT(*) AS count FROM multiremi_schema_migrations WHERE id = ?")
+      .get("20260928_gateway_model_context")).toEqual({ count: 1 });
+    expect(() => database.run(
+      "INSERT INTO multiremi_gateway_model_context VALUES (?, ?, ?, ?, ?, ?)",
+      ["local", "codex", "gpt-5", "1m", null, "2026-09-28T00:00:00.000Z"],
+    )).toThrow();
+  });
+
   it("adds provider-default metadata to existing runtime model tables idempotently", () => {
     const database = freshDb();
     migrate(database);
@@ -91,7 +136,6 @@ describe("store migrations", () => {
       "multiremi_chat_sessions",
       "multiremi_feedback",
       "multiremi_access_tokens",
-      "multiremi_session_archives",
       "multiremi_schema_migrations",
       "multiremi_message_connections",
       "multiremi_message_sources",
@@ -102,6 +146,9 @@ describe("store migrations", () => {
       expect(tables).toContain(table);
     }
     expect(tables.some((name) => name.startsWith("multica_"))).toBe(false);
+    for (const table of ["multiremi_session_archives", "multiremi_session_archive_requests", "multiremi_trace_backfill_progress"]) {
+      expect(tables).not.toContain(table);
+    }
     expect(tables).not.toContain("multiremi_github_settings");
     expect(tables).not.toContain("multiremi_github_pull_requests");
     expect(indexNames(database)).toEqual(expect.arrayContaining([
@@ -121,7 +168,22 @@ describe("store migrations", () => {
       "proposal_payload", "proposal_status", "proposal_resolved_at", "proposal_resolved_by",
     ]));
     expect(columnNames(database, "multiremi_tasks")).toContain("task_kind");
+    expect(database.query("PRAGMA foreign_key_list(multiremi_issue_sessions)").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "chat_id", table: "multiremi_chat_sessions", on_delete: "CASCADE" }),
+        expect.objectContaining({ from: "issue_id", table: "multiremi_issues", on_delete: "SET NULL" }),
+      ]),
+    );
+    expect(database.query("PRAGMA foreign_key_list(multiremi_session_results)").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "chat_id", table: "multiremi_chat_sessions", on_delete: "CASCADE" }),
+        expect.objectContaining({ from: "issue_id", table: "multiremi_issues", on_delete: "SET NULL" }),
+      ]),
+    );
     expect(columnNames(database, "multiremi_tasks")).toContain("delegation_return_task_id");
+    expect(columnNames(database, "multiremi_tasks")).toEqual(expect.arrayContaining([
+      "delegated_from_issue_session_id", "delegation_skip_reason", "wake_source",
+    ]));
     expect(columnNames(database, "multiremi_tasks")).toContain("continued_from_task_id");
     expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
     expect(columnNames(database, "multiremi_feishu_bot_chat_bindings")).toContain("issue_id");
@@ -140,9 +202,10 @@ describe("store migrations", () => {
     expect(columnNames(database, "multiremi_issues")).toEqual(expect.arrayContaining([
       "issue_kind", "source_issue_id", "lifecycle_state", "completed_at", "archived_at",
     ]));
-    expect(columnNames(database, "multiremi_issue_workspaces")).toEqual(expect.arrayContaining([
-      "cleaned_archive_id", "cleaned_archive_source_revision", "cleaned_archive_sha256",
-    ]));
+    expect(columnNames(database, "multiremi_issue_workspaces")).not.toContain("cleaned_archive_id");
+    expect(columnNames(database, "multiremi_task_traces")).toEqual([
+      "task_id", "location", "runtime_id", "event_count", "head_seq", "closed", "updated_at",
+    ]);
     expect(columnNames(database, "multiremi_agent_plugin_bindings")).not.toContain("task_kind");
     expect(columnNames(database, "multiremi_project_docs")).toEqual(expect.arrayContaining([
       "path", "storage_backend", "content_uri", "content_sha256", "sync_status", "sync_error", "snapshot_oid",
@@ -164,9 +227,6 @@ describe("store migrations", () => {
       "updated_by",
       "updated_at",
     ]);
-    expect(columnNames(database, "multiremi_session_archives")).toEqual(expect.arrayContaining([
-      "source_revision", "sha256", "relative_path", "status", "uploaded_size_bytes",
-    ]));
     expect(columnNames(database, "multiremi_notification_deliveries")).toEqual(expect.arrayContaining([
       "claim_seq", "leased_until",
     ]));
@@ -179,9 +239,44 @@ describe("store migrations", () => {
     ]));
   });
 
+  it("preserves Issue Session ownership when removing the old Chat Issue binding", () => {
+    const database = freshDb();
+    migrate(database);
+    const store = historicalWriters(database as unknown as SqlDatabase);
+    const agent = store.createAgent({ name: "Migration worker", provider: "claude" });
+    const issue = store.createIssue({ title: "Legacy Session owner" });
+    const chat = store.createChatSession({ agentId: agent.id });
+    const session = store.getOrCreateDefaultIssueSession(issue.id);
+    const task = store.createTask({ issueId: issue.id, issueSessionId: session.id, agentId: agent.id, prompt: "Preserve ownership" });
+    const result = { id: "sres_owner_migration" };
+    database.run(`INSERT INTO multiremi_session_results (id, source_session_id, issue_id, body, created_at)
+      VALUES (?, ?, ?, ?, ?)`, [result.id, session.id, issue.id, "Preserve result ownership", "2026-10-01T00:00:00.000Z"]);
+
+    database.exec("ALTER TABLE multiremi_chat_sessions ADD COLUMN issue_id TEXT");
+    database.run("UPDATE multiremi_chat_sessions SET issue_id = ? WHERE id = ?", [issue.id, chat.id]);
+    database.run("UPDATE multiremi_session_results SET chat_id = NULL WHERE id = ?", [result.id]);
+    database.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id = ?", [task.id]);
+    database.run(
+      "DELETE FROM multiremi_schema_migrations WHERE id IN (?, ?, ?)",
+      ["20260913_chat_owned_sessions", "20260916_chat_issue_decoupling", "20261008_dual_owned_sessions"],
+    );
+
+    migrate(database);
+
+    expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
+    expect(database.query("SELECT chat_id, issue_id FROM multiremi_issue_sessions WHERE id = ?").get(session.id))
+      .toEqual({ chat_id: null, issue_id: issue.id });
+    expect(database.query("SELECT chat_session_id, issue_session_id, issue_id FROM multiremi_tasks WHERE id = ?").get(task.id))
+      .toEqual({ chat_session_id: null, issue_session_id: session.id, issue_id: issue.id });
+    expect(database.query("SELECT chat_id, issue_id FROM multiremi_session_results WHERE id = ?").get(result.id))
+      .toEqual({ chat_id: null, issue_id: issue.id });
+  });
+
   it("adds continuation lineage to an existing task table idempotently without losing rows", () => {
     const database = freshDb();
     migrate(database);
+    database.exec("DROP INDEX idx_multiremi_tasks_one_pending_turn_session");
+    database.exec("DROP INDEX idx_multiremi_tasks_one_pending_turn_chat");
     database.exec("ALTER TABLE multiremi_tasks DROP COLUMN continued_from_task_id");
     const timestamp = "2026-09-18T00:00:00.000Z";
     database.run(
@@ -617,83 +712,6 @@ describe("store migrations", () => {
     expect(database.query(
       "SELECT auto_update_time, auto_update_timezone FROM multiremi_platform_state WHERE id = 'platform'",
     ).get()).toEqual({ auto_update_time: "05:00", auto_update_timezone: "Asia/Shanghai" });
-  });
-
-  it("backfills retry budgets for legacy failures and stalled uploads", () => {
-    const database = freshDb();
-    database.exec(`
-      CREATE TABLE multiremi_session_archives (
-        id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL DEFAULT 'local',
-        issue_id TEXT NOT NULL,
-        runtime_id TEXT NOT NULL,
-        daemon_id TEXT NOT NULL,
-        source_revision TEXT NOT NULL,
-        sha256 TEXT NOT NULL,
-        size_bytes BIGINT NOT NULL,
-        uploaded_size_bytes BIGINT NOT NULL DEFAULT 0,
-        file_count INTEGER,
-        status TEXT NOT NULL DEFAULT 'pending',
-        relative_path TEXT NOT NULL,
-        metadata TEXT NOT NULL DEFAULT '{}',
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        completed_at TEXT,
-        UNIQUE(issue_id, source_revision, sha256)
-      );
-      INSERT INTO multiremi_session_archives (
-        id, issue_id, runtime_id, daemon_id, source_revision, sha256,
-        size_bytes, status, relative_path, attempt_count, last_error,
-        created_at, updated_at
-      ) VALUES
-        ('sar_failed', 'iss_failed', 'rt_1', 'dmn_1', 'rev-failed', '${"1".repeat(64)}',
-         1, 'failed', 'failed/sessions.tar.gz', 6, 'network failed',
-         '2000-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z'),
-        ('sar_stalled', 'iss_stalled', 'rt_1', 'dmn_1', 'rev-stalled', '${"2".repeat(64)}',
-         1, 'uploading', 'stalled/sessions.tar.gz', 2, NULL,
-         '2000-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z'),
-        ('sar_active', 'iss_active', 'rt_1', 'dmn_1', 'rev-active', '${"3".repeat(64)}',
-         1, 'uploading', 'active/sessions.tar.gz', 1, NULL,
-         '2999-01-01T00:00:00.000Z', '2999-01-01T00:00:00.000Z');
-    `);
-
-    migrate(database);
-
-    expect(columnNames(database, "multiremi_session_archives")).toEqual(expect.arrayContaining([
-      "next_retry_at", "retry_exhausted_at",
-    ]));
-    const rows = database.query(
-      `SELECT id, status, attempt_count, last_error, next_retry_at, retry_exhausted_at
-       FROM multiremi_session_archives ORDER BY id`,
-    ).all() as Array<Record<string, unknown>>;
-    expect(rows).toEqual([
-      {
-        id: "sar_active",
-        status: "uploading",
-        attempt_count: 1,
-        last_error: null,
-        next_retry_at: null,
-        retry_exhausted_at: null,
-      },
-      {
-        id: "sar_failed",
-        status: "failed",
-        attempt_count: 6,
-        last_error: "network failed",
-        next_retry_at: expect.any(String),
-        retry_exhausted_at: expect.any(String),
-      },
-      {
-        id: "sar_stalled",
-        status: "failed",
-        attempt_count: 2,
-        last_error: "upload stalled",
-        next_retry_at: expect.any(String),
-        retry_exhausted_at: null,
-      },
-    ]);
   });
 
   it("adds the notification delivery lease to a pre-lease table", () => {
@@ -1550,9 +1568,9 @@ describe("store migrations", () => {
       seedLegacyChatWakeFixture(database);
     seedWakeInvariantMatrix(database);
     seedLegacyProactiveRetryMatrix(database);
-    const tokens = await mintLegacyWakeTokens(database);
+    const tokens = await mintLegacyWakeTokens(database, false);
       assertLegacyChatWakeRollback(database);
-    await assertLegacyWakeTokens(database, tokens, true);
+    await assertLegacyWakeTokens(database, tokens, true, false);
       migrate(database);
       assertLegacyChatWakeSettlement(database);
       migrate(database);
@@ -1608,7 +1626,7 @@ describe("store migrations", () => {
         expect(database.query("SELECT enabled FROM multiremi_notification_channels WHERE id = ?").get(`nch_agent_chat_${chatId}`))
           .toEqual(entry.preserve ? { enabled: 0 } : null);
       }
-      await assertLegacyWakeTokens(database, tokens);
+      await assertLegacyWakeTokens(database, tokens, false, false);
     assertLegacyProactiveRetryMatrix(database);
     assertWakeInvariantMatrix(database);
     assertCancelledLegacyWakesCannotRun(database);
@@ -1660,6 +1678,7 @@ describe("store migrations", () => {
         // SQLite preserves the new binding FK and its delete semantics.
         database.exec("PRAGMA foreign_keys = ON");
         database.run("UPDATE multiremi_tasks SET issue_id = NULL WHERE issue_id = 'iss_chat_migration'");
+        database.run("DELETE FROM multiremi_issue_sessions WHERE chat_id IS NULL AND issue_id = 'iss_chat_migration'");
         database.run("DELETE FROM multiremi_issues WHERE id = 'iss_chat_migration'");
         expect(database.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_chat_bindings WHERE issue_id IS NOT NULL").get()).toEqual({ count: 0 });
       });
@@ -1699,7 +1718,7 @@ describe("store migrations", () => {
     const backup = database.serialize();
     migrate(database);
     expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
-    const restored = Database.deserialize(backup);
+    const restored = deserializeSqliteDatabase(backup);
     try {
       expect(columnNames(restored, "multiremi_chat_sessions")).toContain("issue_id");
       expect(restored.query("SELECT issue_id, session_id, work_dir FROM multiremi_chat_sessions WHERE id = 'chat_web_migration'").get())
@@ -1729,7 +1748,7 @@ describe("store migrations", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    expect(() => runMigrations(wrapped)).toThrow("changed Chat or dependent row counts");
+    expect(() => bootstrapPreUnifiedSchema(wrapped)).toThrow("changed Chat or dependent row counts");
     expect(columnNames(database, "multiremi_chat_sessions")).toContain("issue_id");
     expect(database.query("SELECT COUNT(*) AS count FROM multiremi_chat_messages").get()).toEqual({ count: 12 });
     expect(database.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_issue_link_audit").get()).toEqual({ count: 0 });
@@ -2535,5 +2554,533 @@ describe("store migrations", () => {
       `INSERT INTO multiremi_squad_members (id, squad_id, member_type, member_id, role, created_at)
        VALUES ('sqm_extra', 'sqd_1', 'agent', 'agt_extra', 'leader', '2026-01-01T00:00:02.000Z')`,
     )).toThrow();
+  });
+});
+
+/**
+ * MUL-407 migration: `multiremi_feishu_bot_human_request_pushes` is rebuilt so
+ * `wake_task_id` accepts NULL. These cover the four ways that can go wrong — an
+ * old database, a repeated run, a crash halfway through, and the stranded
+ * `_legacy` table a previous version's crash left behind.
+ */
+describe("MUL-407 human-request push table rebuild", () => {
+  const LEGACY = "multiremi_feishu_bot_human_request_pushes_legacy";
+  const LIVE = "multiremi_feishu_bot_human_request_pushes";
+
+  /** The pre-MUL-407 shape: `wake_task_id` NOT NULL, no `delivery_id`. */
+  function seedOldPushTable(database: Database): void {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ${LIVE} (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        source_task_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id)
+      );
+      INSERT INTO ${LIVE}
+        (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+      VALUES
+        ('fhrp_1','local','fcb_1','iss_1','tsk_1','hrq_1','wake_1','2026-09-01T00:00:00.000Z','2026-09-01T00:00:00.000Z'),
+        ('fhrp_2','local','fcb_2','iss_2','tsk_2','hrq_2','wake_2','2026-09-02T00:00:00.000Z','2026-09-02T00:00:00.000Z');
+    `);
+  }
+
+  const rows = (database: Database) =>
+    database.query(`SELECT id, wake_task_id, delivery_id, created_at FROM ${LIVE} ORDER BY id`).all();
+
+  it("upgrades an old database without losing a row or a constraint", () => {
+    const database = freshDb();
+    seedOldPushTable(database);
+    migrate(database);
+
+    // Every row survives, with the new column NULL (the lanes never had a delivery id).
+    expect(rows(database)).toEqual([
+      { id: "fhrp_1", wake_task_id: "wake_1", delivery_id: null, created_at: "2026-09-01T00:00:00.000Z" },
+      { id: "fhrp_2", wake_task_id: "wake_2", delivery_id: null, created_at: "2026-09-02T00:00:00.000Z" },
+    ]);
+    const columns = database.query(`PRAGMA table_info(${LIVE})`).all() as Array<{ name: string; notnull: number }>;
+    expect(columns.find((c) => c.name === "wake_task_id")?.notnull).toBe(0);
+    expect(columns.find((c) => c.name === "delivery_id")).toBeTruthy();
+    // The constraints the old table carried are still enforced after the rebuild:
+    // UNIQUE(binding_id, request_id) still rejects a second push for the same
+    // request, and UNIQUE(wake_task_id) still rejects a reused wake Task.
+    expect(() => database.run(
+      `INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+       VALUES ('dup_pair','local','fcb_1','iss_9','tsk_9','hrq_1','wake_9','x','x')`,
+    )).toThrow();
+    expect(() => database.run(
+      `INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+       VALUES ('dup_wake','local','fcb_9','iss_9','tsk_9','hrq_9','wake_1','x','x')`,
+    )).toThrow();
+    // NULL wake_task_id is now allowed, which is the point of the rebuild.
+    database.run(
+      `INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, delivery_id, created_at, updated_at)
+       VALUES ('fhrp_3','local','fcb_3','iss_3','tsk_3','hrq_3',NULL,'fbo_3','x','x')`,
+    );
+    expect(database.query(`SELECT COUNT(*) AS n FROM ${LIVE}`).get()).toEqual({ n: 3 });
+  });
+
+  it("is idempotent across repeated runs", () => {
+    const database = freshDb();
+    seedOldPushTable(database);
+    migrate(database);
+    const afterFirst = rows(database);
+    migrate(database);
+    migrate(database);
+    expect(rows(database)).toEqual(afterFirst);
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(LEGACY))
+      .toEqual({ n: 0 });
+  });
+
+  it("rolls the whole rebuild back when a step fails", () => {
+    // The old implementation ran RENAME → CREATE → copy → DROP as separate
+    // statements, so a crash after the RENAME left rows stranded forever. A
+    // transaction must undo all of it together.
+    const database = freshDb();
+    seedOldPushTable(database);
+    const before = database.query(`SELECT * FROM ${LIVE} ORDER BY id`).all();
+    expect(() => database.transaction(() => {
+      database.exec(`ALTER TABLE ${LIVE} RENAME TO ${LEGACY}`);
+      database.exec(`CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT UNIQUE, delivery_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+      database.exec(`INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, delivery_id, created_at, updated_at)
+        VALUES ('fhrp_1','local','fcb_1','iss_1','tsk_1','hrq_1','wake_1',NULL,'x','x')`);
+      throw new Error("injected failure");
+    })()).toThrow();
+
+    // The old table is intact, still NOT NULL, with no leftover copy beside it.
+    expect(database.query(`SELECT * FROM ${LIVE} ORDER BY id`).all()).toEqual(before);
+    expect((database.query(`PRAGMA table_info(${LIVE})`).all() as Array<{ name: string; notnull: number }>)
+      .find((c) => c.name === "wake_task_id")?.notnull).toBe(1);
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(LEGACY))
+      .toEqual({ n: 0 });
+  });
+
+  it("heals the stranded _legacy table a crashed rebuild left behind", () => {
+    const database = freshDb();
+    seedOldPushTable(database);
+    // Exactly the state the shipped version could leave: renamed, new table
+    // created empty, nothing copied, then the process died.
+    database.exec(`
+      ALTER TABLE ${LIVE} RENAME TO ${LEGACY};
+      CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT UNIQUE, delivery_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id)
+      );
+    `);
+    expect(rows(database)).toEqual([]);
+
+    migrate(database);
+
+    // The rows come back, and the orphan copy is gone.
+    expect(rows(database)).toEqual([
+      { id: "fhrp_1", wake_task_id: "wake_1", delivery_id: null, created_at: "2026-09-01T00:00:00.000Z" },
+      { id: "fhrp_2", wake_task_id: "wake_2", delivery_id: null, created_at: "2026-09-02T00:00:00.000Z" },
+    ]);
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(LEGACY))
+      .toEqual({ n: 0 });
+    // Healing is safe to repeat.
+    migrate(database);
+    expect(rows(database)).toHaveLength(2);
+  });
+
+  it("rebuilds a live table that is still the old shape beside a leftover", () => {
+    // A crash can also leave the *original* DDL back in place next to the
+    // renamed copy (an older binary recreated it after the rename). Copying into
+    // that shape would fail, so the heal replaces it first.
+    const database = freshDb();
+    seedOldPushTable(database);
+    database.exec(`
+      ALTER TABLE ${LIVE} RENAME TO ${LEGACY};
+      CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id)
+      );
+    `);
+    migrate(database);
+    expect(rows(database)).toEqual([
+      { id: "fhrp_1", wake_task_id: "wake_1", delivery_id: null, created_at: "2026-09-01T00:00:00.000Z" },
+      { id: "fhrp_2", wake_task_id: "wake_2", delivery_id: null, created_at: "2026-09-02T00:00:00.000Z" },
+    ]);
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(LEGACY))
+      .toEqual({ n: 0 });
+    expect((database.query(`PRAGMA table_info(${LIVE})`).all() as Array<{ name: string; notnull: number }>)
+      .find((c) => c.name === "wake_task_id")?.notnull).toBe(0);
+  });
+
+  it("does not rebuild an already-migrated table on the next startup", () => {
+    // The steady state must be a no-op: rebuilding costs a read plus an insert
+    // per row on every startup (QA measured ~122ms at 10k rows). The check is
+    // that no statement touches the rows at all, which is stricter than
+    // comparing contents — rowids would move even if the data came back equal.
+    const database = freshDb();
+    seedOldPushTable(database);
+    migrate(database);
+    const rowids = database.query(`SELECT id, rowid FROM ${LIVE} ORDER BY id`).all();
+
+    const statements: string[] = [];
+    const counted = new Proxy(database, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if ((key === "query" || key === "prepare" || key === "run" || key === "exec") && typeof value === "function") {
+          return (...args: unknown[]) => { statements.push(String(args[0])); return value.apply(target, args); };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as SqlDatabase & { dialect: "sqlite" };
+    markSqliteDialect(counted);
+
+    // `runMigrations` takes the `SqlDatabase` surface, which is exactly what the
+    // proxy above pretends to be (`migrate()` is the `Database`-typed helper).
+    bootstrapPreUnifiedSchema(counted);
+
+    // The bootstrap schema block is one big `CREATE TABLE IF NOT EXISTS`
+    // statement that names every table, so the interesting statements are the
+    // ones that touch this table on their own.
+    const touching = statements.filter((sql) => sql.includes(LIVE) && !/^\s*CREATE TABLE IF NOT EXISTS multiremi_schema_migrations/u.test(sql));
+    expect(touching.filter((sql) => /drop table|create table|insert into/i.test(sql))).toEqual([]);
+    expect(touching.filter((sql) => sql.trim().startsWith("CREATE TABLE"))).toEqual([]);
+    expect(touching.filter((sql) => sql.trim().startsWith("DROP TABLE"))).toEqual([]);
+    expect(touching.filter((sql) => /INSERT INTO/iu.test(sql))).toEqual([]);
+    // What remains is the one idempotent index assertion.
+    expect(touching.filter((sql) => sql.includes("CREATE INDEX")).length).toBeGreaterThan(0);
+    expect(touching.every((sql) => sql.includes("CREATE INDEX") || sql.includes("PRAGMA table_info"))).toBe(true);
+    // And the rows did not move.
+    expect(database.query(`SELECT id, rowid FROM ${LIVE} ORDER BY id`).all()).toEqual(rowids);
+  });
+
+  it("still rebuilds when a stranded copy exists beside an already-migrated table", () => {
+    // The early return must not swallow a crashed heal: an old-shape live table
+    // and a `_legacy` copy both have to keep working.
+    const database = freshDb();
+    seedOldPushTable(database);
+    migrate(database);
+    database.exec(`ALTER TABLE ${LIVE} RENAME TO ${LEGACY}; CREATE TABLE ${LIVE} (`
+      + "id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL, "
+      + "issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL, "
+      + "wake_task_id TEXT UNIQUE, delivery_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+      + "UNIQUE(binding_id, request_id))");
+    migrate(database);
+    expect((rows(database) as Array<{ id: string }>).map((row) => row.id)).toEqual(["fhrp_1", "fhrp_2"]);
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(LEGACY))
+      .toEqual({ n: 0 });
+  });
+
+  it("restores the wake index when a crash dropped the table but not the index", () => {
+    const database = freshDb();
+    seedOldPushTable(database);
+    migrate(database);
+    database.exec(`DROP INDEX IF EXISTS idx_${LIVE}_wake`);
+    migrate(database);
+    // The index the old table relied on is back.
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name=?`)
+      .get(`idx_${LIVE}_wake`)).toEqual({ n: 1 });
+  });
+
+  it("completes a partially copied rebuild without duplicating rows", () => {
+    const database = freshDb();
+    seedOldPushTable(database);
+    database.exec(`
+      ALTER TABLE ${LIVE} RENAME TO ${LEGACY};
+      CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT UNIQUE, delivery_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id)
+      );
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, delivery_id, created_at, updated_at)
+      SELECT id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, NULL, created_at, updated_at
+      FROM ${LEGACY} WHERE id = 'fhrp_1';
+    `);
+    migrate(database);
+    // The half that had already landed is not copied twice.
+    expect(rows(database)).toEqual([
+      { id: "fhrp_1", wake_task_id: "wake_1", delivery_id: null, created_at: "2026-09-01T00:00:00.000Z" },
+      { id: "fhrp_2", wake_task_id: "wake_2", delivery_id: null, created_at: "2026-09-02T00:00:00.000Z" },
+    ]);
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(LEGACY))
+      .toEqual({ n: 0 });
+  });
+
+  it("keeps rows the live table alone holds when a stranded copy exists", () => {
+    // QA's case: live had already received a row the renamed copy never saw.
+    // The old heal dropped the live table outright and lost it.
+    const database = freshDb();
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id));
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+      VALUES ('old1','w','fb1','fi1','ft1','fr1','fw1','c1','u1'),
+             ('old2','w','fb2','fi2','ft2','fr2','fw2','c2','u2');
+      ALTER TABLE ${LIVE} RENAME TO ${LEGACY};
+      CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id));
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+      VALUES ('live3','w','fb3','fi3','ft3','fr3','fw3','c3','u3');
+    `);
+    migrate(database);
+    expect((database.query(`SELECT id FROM ${LIVE} ORDER BY id`).all() as Array<{ id: string }>).map((row) => row.id))
+      .toEqual(["live3", "old1", "old2"]);
+    expect(database.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(LEGACY))
+      .toEqual({ n: 0 });
+    // The merged rows keep their values, not just their ids. Order is whatever
+    // the merge visited, which is not part of the contract.
+    expect((rows(database) as Array<{ id: string; wake_task_id: string | null }>)
+      .map((row) => [row.id, row.wake_task_id]).sort()).toEqual([
+      ["live3", "fw3"], ["old1", "fw1"], ["old2", "fw2"],
+    ]);
+  });
+
+  it("collapses identical rows that appear on both sides of a half-finished copy", () => {
+    const database = freshDb();
+    seedOldPushTable(database);
+    database.exec(`
+      ALTER TABLE ${LIVE} RENAME TO ${LEGACY};
+      CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT UNIQUE, delivery_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id));
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, delivery_id, created_at, updated_at)
+      SELECT id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, NULL, created_at, updated_at
+      FROM ${LEGACY} WHERE id = 'fhrp_1';
+    `);
+    migrate(database);
+    // fhrp_1 was on both sides and is stored once; fhrp_2 comes from the copy.
+    expect(rows(database)).toEqual([
+      { id: "fhrp_1", wake_task_id: "wake_1", delivery_id: null, created_at: "2026-09-01T00:00:00.000Z" },
+      { id: "fhrp_2", wake_task_id: "wake_2", delivery_id: null, created_at: "2026-09-02T00:00:00.000Z" },
+    ]);
+  });
+
+  it("refuses to guess when the two sides disagree on a unique key", () => {
+    // Different contents under the same key is genuine ambiguity: silently
+    // keeping either row would drop a real push or resurrect a superseded one.
+    const database = freshDb();
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id));
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+      VALUES ('same','w','fbX','fi1','ft1','fr1','fw1','c1','u1');
+      ALTER TABLE ${LIVE} RENAME TO ${LEGACY};
+      CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id));
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+      VALUES ('same','w','fbX','fiX','ftX','frX','fwX','cX','uX');
+    `);
+    const beforeLive = database.query(`SELECT * FROM ${LIVE} ORDER BY id`).all();
+    const beforeLegacy = database.query(`SELECT * FROM ${LEGACY} ORDER BY id`).all();
+    expect(() => migrate(database)).toThrow(/rebuild conflict/);
+    // The message names the keys that clash, and both tables survive untouched.
+    expect(() => migrate(database)).toThrow(/id=same/);
+    expect(database.query(`SELECT * FROM ${LIVE} ORDER BY id`).all()).toEqual(beforeLive);
+    expect(database.query(`SELECT * FROM ${LEGACY} ORDER BY id`).all()).toEqual(beforeLegacy);
+  });
+
+  it("restores foreign_keys after a refused merge", () => {
+    const database = freshDb();
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id));
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+      VALUES ('same','w','fbX','fi1','ft1','fr1','fw1','c1','u1');
+      ALTER TABLE ${LIVE} RENAME TO ${LEGACY};
+      CREATE TABLE ${LIVE} (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL, source_task_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        wake_task_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(binding_id, request_id));
+      INSERT INTO ${LIVE} (id, workspace_id, binding_id, issue_id, source_task_id, request_id, wake_task_id, created_at, updated_at)
+      VALUES ('same','w','fbX','fiX','ftX','frX','fwX','cX','uX');
+    `);
+    database.exec("PRAGMA foreign_keys = ON");
+    expect(() => migrate(database)).toThrow(/rebuild conflict/);
+    // The conflict must not leave enforcement switched off.
+    expect((database.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
+  });
+
+  it("resolves the dialect without touching the database at all", () => {
+    // The old probe ran `SELECT … FROM sqlite_master` and read a failure as "this
+    // is Postgres". On Postgres that logs an ERROR every startup and aborts the
+    // surrounding transaction if one is open; on SQLite it misfires whenever the
+    // query fails for an unrelated reason. The resolver now consults only
+    // declared facts, so it issues no statement — this counts them.
+    const statements: string[] = [];
+    const handle = new Proxy(openSqliteDatabase(":memory:"), {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if ((key === "query" || key === "prepare" || key === "run" || key === "exec") && typeof value === "function") {
+          return (...args: unknown[]) => { statements.push(String(args[0])); return value.apply(target, args); };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as SqlDatabase & { dialect: "sqlite" };
+    markSqliteDialect(handle);
+
+    expect(resolveSqlDialect(handle)).toBe("sqlite");
+    expect(resolveSqlDialect(handle, "postgres")).toBe("postgres");
+    expect(resolveSqlDialect(handle, "sqlite")).toBe("sqlite");
+    // A second proxy forwards the factory's marker without an explicit dialect
+    // or any database query.
+    const anonymous = new Proxy(openSqliteDatabase(":memory:"), {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if ((key === "query" || key === "prepare" || key === "run" || key === "exec") && typeof value === "function") {
+          return (...args: unknown[]) => { statements.push(String(args[0])); return value.apply(target, args); };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as SqlDatabase;
+    expect(resolveSqlDialect(anonymous)).toBe("sqlite");
+    // No SQL ran, on any path.
+    expect(statements).toEqual([]);
+  });
+
+  it("treats an explicit dialect as authoritative over the handle marker", () => {
+    // `runMigrations(db, { dialect })` is how a caller that already knows says
+    // so — the seam the Postgres wrappers use, and why a wrapper that forgets to
+    // forward `dialect` is no longer a correctness problem.
+    const sqlite = openSqliteDatabase(":memory:");
+    runMigrations(sqlite as unknown as SqlDatabase, { dialect: "sqlite" });
+    // A SQLite handle asked to migrate as Postgres would try `ALTER COLUMN … DROP
+    // NOT NULL`; the explicit value must win and keep it on the SQLite path.
+    const columns = sqlite.query(
+      "PRAGMA table_info(multiremi_feishu_bot_human_request_pushes)",
+    ).all() as Array<{ name: string; notnull: number }>;
+    expect(columns.find((column) => column.name === "wake_task_id")?.notnull).toBe(0);
+    expect(columns.find((column) => column.name === "delivery_id")).toBeTruthy();
+  });
+});
+
+describe("ADR 0018 local records migration", () => {
+  const run = (database: Database) => runMigrations(database as unknown as SqlDatabase, { historicalMaintenance: true });
+  const sql = (database: Database) => database as unknown as SqlDatabase;
+  const schema = (database: Database) => {
+    const out: Record<string, string[]> = {};
+    for (const table of tableNames(database)) {
+      if (table.startsWith("multiremi_legacy_") || table.startsWith("sqlite_")) continue;
+      out[table] = columnNames(database, table).sort();
+    }
+    return out;
+  };
+  const LOCAL_RECORDS = "20261013_local_records_recyclable_workspaces";
+
+  function upgraded(): Database {
+    const database = freshDb();
+    bootstrapPreUnifiedSchema(sql(database));
+    installArchiveEraSchema(sql(database));
+    run(database);
+    return database;
+  }
+
+  it("turns an archive-era database into the local-records schema and keeps the legacy tables", () => {
+    const database = upgraded();
+    expectArchiveEraMigrated(sql(database));
+    expect(database.query("SELECT id FROM multiremi_schema_migrations WHERE id = ?").get(LOCAL_RECORDS)).toEqual({ id: LOCAL_RECORDS });
+  });
+
+  it("ends a fresh database and an upgraded one in the same schema", () => {
+    const fresh = freshDb();
+    run(fresh);
+    expect(schema(upgraded())).toEqual(schema(fresh));
+    expect(tableNames(fresh).filter((name) => name.startsWith("multiremi_legacy_"))).toEqual([]);
+    const indexes = (database: Database) => (database.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'").all() as Array<{ name: string }>)
+      .map((row) => row.name).sort();
+    expect(indexes(upgraded())).toEqual(indexes(fresh));
+  });
+
+  it("resets native sessions exactly once", () => {
+    const database = upgraded();
+    const lane = (reader: string, type: string, providerSession: string | null, generation: number) => database.run(
+      `INSERT INTO multiremi_session_lanes (session_id, reader_type, reader_id, execution_scope, provider_session_id, runtime_id, provider,
+         work_dir, provider_cursor_seq, parent_cursor_seq, generation, last_attempt_id, created_at, updated_at)
+       VALUES ('ises_1', ?, ?, '', ?, ?, ?, ?, 7, 3, ?, ?, '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z')`,
+      [type, reader, providerSession, providerSession ? "rt_1" : null, providerSession ? "claude" : null,
+        providerSession ? "/work" : null, generation, providerSession ? "tsk_last" : null]);
+    const seed = () => {
+      database.run("DELETE FROM multiremi_session_lanes");
+      lane("agt_live", "agent", "provider-session", 2);
+      lane("agt_cold", "agent", null, 5);
+      database.run("INSERT INTO multiremi_chat_sessions (id, workspace_id, agent_id, title, status, session_id, work_dir, session_runtime_id, session_provider, session_execution_fingerprint, created_at, updated_at) VALUES ('chat_1', 'local', 'agt_live', 'Chat', 'active', 'native', '/w', 'rt_1', 'claude', 'fp', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z') ON CONFLICT(id) DO UPDATE SET session_id = 'native', work_dir = '/w', session_runtime_id = 'rt_1', session_provider = 'claude', session_execution_fingerprint = 'fp'");
+    };
+    const read = () => ({
+      lanes: database.query("SELECT reader_id, provider_session_id, runtime_id, work_dir, provider_cursor_seq, parent_cursor_seq, generation, last_attempt_id FROM multiremi_session_lanes ORDER BY reader_id").all(),
+      chat: database.query("SELECT session_id, work_dir, session_runtime_id, session_provider, session_execution_fingerprint, updated_at FROM multiremi_chat_sessions WHERE id = 'chat_1'").get(),
+    });
+
+    seed();
+    database.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [LOCAL_RECORDS]);
+    run(database);
+    expect(read()).toEqual({
+      lanes: [
+        { reader_id: "agt_cold", provider_session_id: null, runtime_id: null, work_dir: null, provider_cursor_seq: 7, parent_cursor_seq: 3, generation: 5, last_attempt_id: null },
+        { reader_id: "agt_live", provider_session_id: null, runtime_id: null, work_dir: null, provider_cursor_seq: 0, parent_cursor_seq: 0, generation: 3, last_attempt_id: null },
+      ],
+      chat: { session_id: null, work_dir: null, session_runtime_id: null, session_provider: null, session_execution_fingerprint: null, updated_at: "2026-10-01T00:00:00.000Z" },
+    });
+
+    // A later restart must not void the sessions the new generation has since started.
+    seed();
+    const live = read();
+    run(database);
+    run(database);
+    expect(read()).toEqual(live);
+  });
+
+  it("voids the session of an attempt queued before the upgrade and clears a leftover deletion fence", () => {
+    const database = upgraded();
+    const at = "2026-10-01T00:00:00.000Z";
+    for (const [turn, attempt, status] of [["trn_queued", "tsk_queued", "offered"], ["trn_running", "tsk_running", "running"]] as const) {
+      database.run(
+        "INSERT INTO multiremi_turns (id, session_id, seq, agent_id, status, workspace_id, created_at) VALUES (?, 'chat_1', ?, 'agt_1', ?, 'local', ?)",
+        [turn, turn === "trn_queued" ? 1 : 2, turn === "trn_queued" ? "pending" : "running", at],
+      );
+      database.run(
+        `INSERT INTO multiremi_turn_attempts (id, turn_id, attempt_no, status, session_id, work_dir, created_at, updated_at)
+         VALUES (?, ?, 1, ?, 'old-native', '/old/layout', ?, ?)`,
+        [attempt, turn, status, at, at],
+      );
+    }
+    database.run("UPDATE multiremi_issues SET lifecycle_state = 'deleting' WHERE id = 'iss_1'");
+    database.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [LOCAL_RECORDS]);
+    run(database);
+
+    expect(database.query("SELECT id, session_id, work_dir FROM multiremi_turn_attempts ORDER BY id").all()).toEqual([
+      { id: "tsk_queued", session_id: null, work_dir: null },
+      { id: "tsk_running", session_id: "old-native", work_dir: "/old/layout" },
+    ]);
+    expect(database.query("SELECT lifecycle_state FROM multiremi_issues WHERE id = 'iss_1'").get()).toEqual({ lifecycle_state: "active" });
+    expect(database.query("SELECT name FROM sqlite_master WHERE name = 'idx_multiremi_autopilot_runs_chat'").get())
+      .toEqual({ name: "idx_multiremi_autopilot_runs_chat" });
   });
 });

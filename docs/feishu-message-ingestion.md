@@ -8,14 +8,27 @@ summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Mess
 
 本页分别说明机器人对话和 [Messaging Core](../packages/server/src/messaging/index.ts)的 Lark CLI 采集。机器人连接器在[packages/connectors/src/feishu](../packages/connectors/src/feishu)，由[工作区 bot 配置与 Runtime 分配](deploy/66-8-remi-environment.md)驱动；两者的凭据、消息处理和验证不能混用。
 
+Web 入口为主侧栏「IM 平台 → 飞书」，页面划分、连接层级、权限和旧设置地址迁移见 [IM 平台管理](dev/im-platforms.md)。
+
+## 多机器人与兼容边界
+
+同一工作区可保存多个机器人，每个机器人有独立应用、Agent、Runtime、路由、访问策略和审计。机器人类型仍是飞书；企业分组和平台实例在后续扩展。当前一个 Runtime 只承载一个机器人，应用与 Runtime 不能被同一工作区的两个机器人重复分配。
+
+原配置迁移为 `default`。管理集合为 `GET/POST /api/workspaces/:id/feishu-bots`，原 `/feishu-bot` 子资源接受可选 `bot_id` 查询参数；省略时始终指向 `default`。未知机器人不回退。迁移保留凭据密文、发送者授权、Chat/Task/投递关系和历史审计；相同外部消息 ID 在不同机器人下独立去重。后台从已鉴权 Runtime 的绑定解析机器人身份，不使用浏览器的选择。
+
+工作区级菜单和自动 Issue 话题暂由默认机器人发布。新增机器人支持普通私聊/群聊、独立会话路由、发送者授权及持久回复，不自动继承默认机器人的群话题设置。删除或切换仍需旧 Runtime 停止确认，未回报的启动也保留停止确认记录。
+
+CLI 使用 `remi workspace feishu-bot list|create <workspace>`，读写、启停、删除和发送者命令增加 `--bot <id>`；群路由与群列表为 `remi feishu route list|set|unset --bot <id>`、`remi feishu chat list --bot <id>`。不传 `--bot` 保持原行为。浏览器入口见 [IM 平台管理](dev/im-platforms.md)。
+
 ## 机器人对话、Issue 话题与更新
 
 [FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护飞书传输会话及群 Issue 话题归属。普通 Web Chat 和飞书私聊与 Issue 独立，在其中创建 Issue 不绑定会话，也不继承新 Issue 的项目、仓库、附件或 Wiki。Chat 的 Issue 绑定和订阅 API/CLI 已移除，见[命令迁移](cli-command-migration.md#removed-chat-issue-binding-mul-301)。
 
 - **自动话题**：[工作区配置](../packages/server/src/issue-topics/config.ts)默认关闭，启用需目标群 `chat_id`，可按 `project_ids` 限制；空项目列表表示不限制项目。配置写入要求人类工作区管理员，[workspace CLI](../apps/remi/cli/commands/workspace.ts)提供 `remi workspace issue-topics get/set`。话题创建还需 bot 在线，根消息进入持久化 outbox；缺少条件不代表以后会自动补建。群消息自动建单另受发送者与 Agent 提议策略约束。
 - **增量上下文**：[AgentIssueUpdatesRepo](../packages/server/src/store/repos/agent-issue-updates-repo.ts)仅对有效飞书 Issue 话题及已启用的通知通道合并活动，过滤目标会话自己的回声。更新写成待投递消息，不逐条唤醒 Agent；[claim wire](../packages/server/src/api/wire/tasks.ts)按预算附加该话题的 Issue 与摘要。普通私聊不接收这些播报，摘要不能替代 Issue 详情与评论查询。
-- **轮次推送**：负责人 Issue Session 任务完成并满足活跃任务条件时，[TasksRepo](../packages/server/src/store/repos/tasks-repo.ts)准备话题总结；需要人工输入时也可准备话题提醒。领取、投递与完成均核对绑定、Issue、工作区、Chat 和 Agent 的一致性，失配不继续发送。话题总结本身不自动修改 Issue 状态或追加 Issue 评论。
-- **出站投递**：daemon 心跳领取带租约的 delivery，经 [concierge host](../apps/remi/cli/multiremi.ts)发送并回报；失败按持久化 outbox 规则重试。[send.ts](../packages/connectors/src/feishu/send.ts)使用 delivery 幂等键，根消息成功后以返回的消息 ID 固定话题目标；这不等于真实飞书端已验证恰好一次投递。
+- **轮次推送**：[TasksRepo](../packages/server/src/store/repos/tasks-repo.ts)在非 Chat 轮进入终态时，对它绑定的 Issue Session 单及它通过消息 `task_id`（源轮 ID）写过评论的其他单，逐单检查没有活跃 Issue 轮后准备话题总结。两条路径在结束事务内复用 relay 信封与话题推送，信封按 `relay:<issue_id>:<turn_id>` 在各绑定的 Chat 中去重；同一单的多条消息在每个有效绑定各推一次，同群不同话题也分别投递。round push 的 `leader_task_id` 保存源 turn ID，以 `(binding_id,leader_task_id)` 去重；尝试失败后等待同轮的替换尝试结束才报告。Chat 轮不触发，避免话题回复循环叫醒。需要人工输入时也可准备话题提醒。领取、投递与完成均核对绑定、Issue、工作区、Chat 和 Agent 的一致性，失配不继续发送。话题总结本身不自动修改 Issue 状态或追加 Issue 评论。
+- **出站投递**：控制面只在已落库的 bot 状态为 `online` 且 revision 匹配时领取带租约的 delivery，通过 daemon 下发，经 [concierge host](../apps/remi/cli/multiremi.ts)发送并回报；失败按持久化 outbox 规则重试。bot 状态改为确认落库的 RPC 上报并独立随心跳补报，防止丢失 `online` 后无人领取。[send.ts](../packages/connectors/src/feishu/send.ts)使用 delivery 幂等键，根消息成功后以返回的消息 ID 固定话题目标；这不等于真实飞书端已验证恰好一次投递。
+- **决策卡片**：[共享卡片构造器](../packages/shared/src/feishu-task-card.ts)的输入框 `max_length` 不超过飞书上限 1000，Issue 决策的自定义回答上限为 1000。Issue 决策与任务人工请求已有有效收件人时，仅在不可重试的卡片拒收后降级文字（`send_failed`），文字开头保留该人的 @。缺少或未能解析收件人时直接降级文字且不 @；可重试错误继续交给 outbox 退避，不提前发文字。正常提交与原卡片终态更新规则见[话题回复契约](feishu-topic-replies.md)。
 
 ### 斜杠命令与「结束任务」
 
@@ -40,7 +53,7 @@ summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Mess
 
 取消经已有内部路由 `POST /api/daemon/runtimes/:runtimeId/feishu-bot/session/cancel` 落到 `TasksRepo.cancelTask`：同一事务、同一 workspace 生命周期锁。内部路由与 `FeishuBotCancelResult` wire 契约未变。
 
-反馈以服务端 task 状态为唯一事实源：命令卡只说「已请求停止」，CoT 卡片的 `RUN_FINISHED{status:"interrupted"}` 仍由既有 `pollFeishuTask` 在看到 `cancelled` 快照后触发（见[原生任务呈现](feishu-native-task-presentation.md)）。服务端未确认前不会出现「已停止」字样。
+反馈以服务端 task 状态为唯一事实源：命令卡只说「已请求停止」，CoT 订阅收到 `closed` 后读取一次最终快照，确认 `cancelled` 才发送 `RUN_FINISHED{status:"interrupted"}`（见[原生任务呈现](feishu-native-task-presentation.md)）。服务端未确认前不会出现「已停止」字样。
 
 Issue 话题不出现在 Web/CLI 私聊和待处理列表中。旧关联按确定归属证据迁移，无法确认的关联暂停 Issue 通知，保留管理员审计记录；修复流程及数据回滚条件见[迁移手册](migrations/chat-issue-decoupling.md)。不得通过旧 Chat Issue 字段或历史任务重新恢复普通私聊的 Issue 上下文。
 
@@ -79,17 +92,53 @@ remi messaging source status <source>
 
 Connection 的 Provider 配置走结构化输入，具体字段以 API 和 CLI help 为准。现有 profile 与 managed profile 的清理行为不同：删除 managed Connection 会调用 lark-cli logout/remove profile；不直接编辑凭据文件。旧 `remi feishu` 命令仍有兼容路由，新接入使用上述 Messaging 入口。
 
+## 计划内重启后的补收
+
+daemon 以服务端既有 `multiremi_feishu_bot_chat_bindings.chat_id`（含话题）和
+`multiremi_feishu_bot_agent_routes.chat_id` 为已知会话种子，不另建会话目录。
+启用此配置的连接器将实时事件先原子写入本地 app/domain 隔离的 pending 日志，
+业务 callback 成功后确认；失败保留 pending，启动及每 30 秒重放并分页读取历史。
+同一 message_id 的实时副本优先于历史副本；旧回调完成时保留其间后到的副本，避免吞掉实时通知。
+历史 sender/mention 转为同一接收事件，沿用发送者授权、群准入及附件链路。
+历史准入拒绝不发送用户卡片，避免重叠回扫重复通知；实时拒绝提示按 message_id 本地去重一次。
+Task 去重仍只由服务端 `multiremi_feishu_bot_deliveries.external_message_id` 负责；
+提交成功而本地未确认的事件可再次提交，解析到原 Task。
+
+journal 使用统一 `multiremiStateDir`（可通过 `MULTIREMI_STATE_DIR` 隔离）的 app/domain 哈希路径。
+每个 app/chat 游标采用已确认消息的 `create_time`，回看保留 60 秒重叠。
+未完成的历史扫描另留水位，防止较新的实时事件跨过重启缺口。
+单次最多回看 10 分钟、每会话 5 页（每页 50 条），先取最新消息，再按时间升序处理；
+超出的区间记录本地 `skipped` 并告警，不突发处理全部旧消息。
+读取历史需要飞书相应权限；权限或网络失败会告警并重试，不能视为补收成功。
+
+已知限制：停机期间首次出现、此前从未绑定或路由的会话不补收。
+历史中被实时 command router 在入站 Task 幂等口之前拦截的命令也不执行；
+双方复用 [共享命令识别](../packages/shared/src/feishu-commands.ts)。
+这些消息记为 `skipped`，游标继续前进，并记录 app、chat、message 和命令名的结构化告警，
+不给用户发提示。停机期间发出的 `/stop`、`/new` 需要用户重发；普通路径及带参数的未知斜杠请求仍正常提交。
+
+出站重领沿用 outbox 行 ID 对应的 stable UUID。对于认领后未确认的普通创建消息，
+仅在行创建后 55 分钟内重发（飞书 1 小时 UUID 去重窗口扣除 5 分钟余量）。
+过期 lease 且超过此期限时以 `dedupe_window_expired` 终止并告警，沿用原有批次级联失败规则；
+未发送或已明确拒收的 pending 行不受此期限影响，持久化发送收据不会重发。
+只在真正的 message.create/reply 请求边界把网络无响应标为发送不明，保留 sending；
+附件下载、上传或 mention 准备失败仍作为明确失败重试。socket offer 暂存为 pending 时，
+通过内部 `last_error=send_outcome_unknown` 保留原发送不明的来源，offer 与实际 ACK/claim
+均重新检查窗口；明确拒收的报告覆盖该标记，不能仅凭 attempt_count 拒绝 pending。native CoT 的 `creating/writePending`
+保持既有不重发策略；反应和原消息 patch 使用各自的幂等更新路径。
+一小时后才恢复的未知发送结果可能无法自动补发；此限制不能称为真实飞书恰好一次验证。
+
 ## 机器人发送者白名单
 
-机器人默认使用 `sender_access_policy=agent`：能与机器人聊天的人，都可以使用回复 Agent 已开放的能力，无需绑定空间成员或单独审批发送人。Agent 自身的提议审批要求以及独立的任务策略仍然有效。升级后已有机器人同样默认采用此规则；已记录账号的 `allowed=false` 不再限制现有 Chat、子任务或由其触发的自动化建单。无需把 owner 或其他账号补进白名单。
+机器人默认使用 `sender_access_policy=allowlist`：只有加入白名单的账号可以使用机器人。未授权账号发来的消息只记录发送者，不创建 Chat 或任务，守护进程回复「无权限，请联系空间管理员」。服务端以 409 `sender_not_allowed` 拒绝（不用 403，因为守护进程把 401/403/410 视为运行时凭证失效）。升级时已有机器人一次性切换为白名单，不预先授权任何账号，包括 owner；需由空间管理者在「IM 平台 → 飞书 → 访问控制」中逐个加入。
 
-需要额外限制发送人时，空间管理者可在设置的「集成」中主动开启白名单（`sender_access_policy=allowlist`）。只有此模式下才检查下面的账号授权。修改访问策略会在下一次 API 请求生效；任务凭证不能修改此配置。普通配置保存省略此字段时保留已选策略。
+空间管理者可主动改回 `sender_access_policy=agent`：能与机器人聊天的人都可以使用回复 Agent 已开放的能力。Agent 自身的提议审批要求以及独立的任务策略仍然有效。修改访问策略会在下一次 API 请求生效；任务凭证不能修改此配置。普通配置保存省略此字段时保留已选策略，一次性迁移不会覆盖之后手动选择的 `agent`。
 
-机器人收到请求时，按当前应用的 `(app_id, open_id)` 自动记录发送者并去重，保存显示名称、首次和最近请求时间；账号记录不等于建单权限。白名单模式下，新账号默认「待授权」。空间管理者可「加入白名单」或「移出白名单」，不需要关联 Remi 用户，也不创建空间成员。更换机器人应用后按新应用的账号范围重新管理。
+机器人收到请求时（包括被拒绝的请求），按当前应用的 `(app_id, open_id)` 自动记录发送者并去重，保存显示名称、首次和最近请求时间；账号记录不等于使用权限。白名单模式下，新账号默认「待授权」。空间管理者可「加入白名单」或「移出白名单」，不需要关联 Remi 用户，也不创建空间成员。更换机器人应用后按新应用的账号范围重新管理。
 
-账号列表会从机器人已接收消息的发送者信息补全姓名和英文名（`with_sender_name=true`），不要求额外的通讯录资料权限。Web 展示姓名、英文名、Open ID，并可展开查看 Union ID；CLI `sender list` 同步返回这些资料。列表每次最多刷新 10 个账号，单次网络查询最多 4 秒，同一账号 10 分钟内复用结果；查询失败保留已知姓名及原有授权。刷新只更新资料，不改变授权、首次或最近请求时间。无法读取姓名时，页面用账号 ID 后缀区分用户。
+账号列表先从机器人已接收消息的发送者信息补全姓名和英文名（`with_sender_name=true`）；消息未带姓名或账号从未被接纳（没有已投递消息）时，回退到 `contact/v3/users/basic_batch` 按 open_id 读取基础资料，需要应用具备对应的通讯录基础信息权限。Web 展示姓名、英文名、Open ID，并可展开查看 Union ID；CLI `sender list` 同步返回这些资料。列表每次最多刷新 10 个账号，单次网络查询最多 4 秒，同一账号 10 分钟内复用结果；查询失败保留已知姓名及原有授权。刷新只更新资料，不改变授权、首次或最近请求时间。无法读取姓名时，页面用账号 ID 后缀区分用户。
 
-白名单控制该账号通过机器人 Chat 创建 Issue 的权限，未允许的账号仍可对话。Issue 创建时重新检查来源账号；允许后可继续当前 Chat，移出后该 Chat 及其子任务的下一次创建会被拒绝。同一 Chat 已收到多名发送者的请求时，全部来源账号都需允许。Agent 自身的提议审批策略仍独立生效；白名单不会将普通聊天中的「同意」当作审批，也不会追溯撤销已经建立的独立定时自动化。
+白名单控制该账号能否使用机器人，以及通过机器人 Chat 创建 Issue 的权限。Issue 创建时重新检查来源账号；允许后可继续当前 Chat，移出后该 Chat 及其子任务的下一次创建会被拒绝。同一 Chat 已收到多名发送者的请求时，全部来源账号都需允许。Agent 自身的提议审批策略仍独立生效；白名单不会将普通聊天中的「同意」当作审批，也不会追溯撤销已经建立的独立定时自动化。
 
 已配置群话题的自动 Issue 创建同样检查白名单和 Agent 提议策略；已有 Chat 必须满足全部来源账号均已允许，才会在后续群消息到达时创建并绑定 Issue。群聊路由仍决定负责该 Issue 的 Agent。
 
@@ -108,6 +157,14 @@ remi workspace feishu-bot sender revoke <workspace> <sender>
 这份账号白名单属于机器人对话链路，与下面 Messaging Source 的会话采集 allowlist 分开维护。
 
 ## 机器人消息回应
+
+MUL-440 为声明 `feishu_outbound_kinds: 1` 的守护进程把回执拆成独立服务端
+outbox 行；每个原消息及状态独立 lease、退避和最多六次尝试。结果卡
+投递行结束后才领取终态回执；回执永久失败只写审计与日志，不连坐结果、卡片或绑定。
+未声明能力的守护进程继续使用原来的整条任务投递，升级与交接不切换已领取
+任务的模式。迁移与回滚见 [C5 迁移说明](feishu-outbound-kind-migration.md)。
+
+普通入站消息和轮次收尾复用现有 wakeTask 时，[FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)调用 `createTaskSteerMessageWithinTransaction`，由外层事务统一提交 Chat 消息、steer、投递与收尾记录。steer primitive 保留 workspace → issue-session 锁顺序与终态拒绝，不开内层事务，也不发事件。轮次收尾的通知 flush 接收外层必填 `deferredEvents`；`chat:message` 保持消息内容和 Chat 间顺序，在提交后先于同一队列的终态广播发出，回滚则丢弃。真实 PG 回滚与锁检查见 [事务边界用例](../tests/unit/multiremi/multiremi-existing-pg-transaction-boundaries.test.ts)，SQLite 对照见 [Issue topics 用例](../tests/unit/multiremi/multiremi-feishu-issue-topics.test.ts)。
 
 - **消息回应**：原消息收到后保留 🤔（`THINKING`）；任务正常完成且结果卡已确认发送后移除本机器人的处理中回应，不再添加 `DONE`；失败或取消仍替换为 ❌（`CROSSMARK`）。入队和 steer 返回不清除回应；最终任务快照携带全部原消息 ID，确保执行期间追加的消息也能更新。失败替换先添加新回应，再删除旧状态；成功清理也兼容旧版本的 `DONE`，保留其他人、其他应用及非回执类表情。本进程记录最近完成的消息，避免迟到的 received 回调恢复处理中；跨重启的入站事件由接收去重处理，投递重试则依据已持久化的结果卡 ID 跳过处理中回应。终态回应清理的可重试错误由持久化 outbox 重试，已确认的结果卡不重复发送，Runtime 交接不标记失败。实现见[回应状态](../packages/connectors/src/feishu/message-receipt.ts)与[任务投递](../packages/connectors/src/feishu/task-presentation.ts)。本次回执修复需要升级承载机器人的 Runtime。
 

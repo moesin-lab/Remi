@@ -4,7 +4,7 @@ import type { RepositoryActivityItem, RepositoryActivityResponse } from "@multir
 const text = z.string().nullish().transform((value) => value ?? null);
 const id = z.string().min(1);
 const item = z.object({
-  task_id: id, status: id, relation: id,
+  task_id: id, turn_id: id.optional(), status: id, relation: id,
   agent: z.object({ id, name: text }).nullish(),
   issue: z.object({ id, key: text, title: text }).nullish(),
   issue_session: z.object({ id, title: text }).nullish(),

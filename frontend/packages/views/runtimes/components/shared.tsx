@@ -30,6 +30,7 @@ export function ProviderChip({ provider }: { provider: string }) {
 // Maps each derived 4-state runtime health to a semantic colour class.
 // Labels flow through useT — see useHealthLabel below.
 const HEALTH_VISUAL: Record<RuntimeHealth, { dot: string; tone: string }> = {
+  degraded: { dot: "bg-warning", tone: "bg-warning/10 text-warning" },
   online: { dot: "bg-success", tone: "bg-success/10 text-success" },
   recently_lost: { dot: "bg-warning", tone: "bg-warning/10 text-warning" },
   offline: { dot: "bg-muted-foreground/40", tone: "bg-muted text-muted-foreground" },
@@ -70,6 +71,7 @@ const HEALTH_ICON: Record<
   RuntimeHealth,
   { Icon: typeof Wifi; tone: string }
 > = {
+  degraded: { Icon: WifiHigh, tone: "text-warning" },
   online: { Icon: Wifi, tone: "text-success" },
   recently_lost: { Icon: WifiHigh, tone: "text-warning" },
   offline: { Icon: WifiOff, tone: "text-muted-foreground" },
@@ -94,6 +96,7 @@ export function HealthIcon({
 // (e.g. column factory builders). Translated call sites should use the
 // `useHealthLabel` hook below instead.
 const HEALTH_LABEL_EN: Record<RuntimeHealth, string> = {
+  degraded: "Degraded",
   online: "Online",
   recently_lost: "Recently lost",
   offline: "Offline",
@@ -177,11 +180,13 @@ export function KpiCard({
   value,
   hint,
   accent,
+  compact = false,
 }: {
   label: string;
   value: string;
   hint?: React.ReactNode;
   accent?: "brand" | "success" | "default";
+  compact?: boolean;
 }) {
   const valueClass =
     accent === "brand"
@@ -190,11 +195,11 @@ export function KpiCard({
         ? "text-success"
         : "";
   return (
-    <div className="flex flex-col gap-2 p-5">
+    <div className={`flex min-w-0 flex-col gap-2 ${compact ? "p-3 sm:p-5" : "p-5"}`}>
       <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
-      <div className={`text-3xl font-semibold leading-none tabular-nums ${valueClass}`}>
+      <div className={`${compact ? "text-xl sm:text-3xl" : "text-3xl"} font-semibold leading-none tabular-nums ${valueClass}`}>
         {value}
       </div>
       {hint != null && (

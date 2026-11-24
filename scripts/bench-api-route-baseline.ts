@@ -7,7 +7,8 @@
  * No production service or database is contacted.
  */
 
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { SqlStatement } from "@multiremi/store/db/postgres.js";
@@ -160,7 +161,6 @@ const FOCUSED_PROBES: Probe[] = [
   { router: "remi-releases", method: "GET", path: () => "/api/remi/releases/latest/version", representative: true },
   { router: "runtimes", method: "GET", path: () => "/api/multiremi/runtimes", representative: true },
   { router: "scm", method: "GET", path: () => "/api/workspaces/local/scm/connections", representative: true },
-  { router: "session-archives", method: "GET", path: (r) => `/api/issues/${r.issueId}/session-archives`, representative: true },
   { router: "skills", method: "GET", path: () => "/api/multiremi/skills?workspaceId=local", representative: true },
   { router: "squads", method: "GET", path: () => "/api/multiremi/squads?workspaceId=local", representative: true },
   { router: "tasks", method: "GET", path: () => "/api/multiremi/tasks", representative: true },
@@ -573,7 +573,7 @@ async function main(): Promise<void> {
     headers: { "Content-Type": "application/json" },
   })) as typeof fetch;
 
-  const rawDb = new Database(":memory:");
+  const rawDb = openSqliteDatabase(":memory:");
   const tracker = new SqlTracker();
   const db = trackedDatabase(rawDb, tracker);
   try {

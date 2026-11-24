@@ -21,8 +21,21 @@ const state = vi.hoisted(() => ({
   issuesError: false,
   issuesErrorValue: null as unknown,
   members: [] as unknown[],
+  agentRunningFilter: false,
+  snapshotPending: false,
+  snapshot: [] as unknown[],
+  gateOpen: false,
 }));
 
+beforeEach(() => {
+  state.agentRunningFilter = false;
+  state.snapshotPending = false;
+  state.snapshot = [];
+  state.gateOpen = false;
+  pinObserver.mockClear();
+});
+
+const pinObserver = vi.hoisted(() => vi.fn());
 const refetchIssues = vi.hoisted(() => vi.fn());
 const updateProject = vi.hoisted(() => vi.fn());
 const updateProjectAsync = vi.hoisted(() => vi.fn());
@@ -30,7 +43,7 @@ const archiveProject = vi.hoisted(() => vi.fn());
 const restoreProject = vi.hoisted(() => vi.fn());
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: (options?: { queryKey?: readonly unknown[] }) => {
+  useQuery: (options?: { queryKey?: readonly unknown[]; enabled?: boolean }) => {
     const key = Array.isArray(options?.queryKey) ? options.queryKey[0] : null;
     switch (key) {
       case "project":
@@ -45,10 +58,20 @@ vi.mock("@tanstack/react-query", () => ({
         };
       case "members":
         return { data: state.members };
+      case "snapshot":
+        return { data: state.snapshot, isPending: state.snapshotPending };
+      case "pins":
+        pinObserver(options?.enabled);
+        return { data: undefined };
       default:
         return { data: undefined };
     }
   },
+}));
+
+vi.mock("@multiremi/core/platform/use-after-first-screen", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@multiremi/core/platform/use-after-first-screen")>(),
+  useAfterFirstScreen: () => state.gateOpen,
 }));
 
 vi.mock("@multiremi/core/projects/queries", () => ({
@@ -137,7 +160,7 @@ vi.mock("@multiremi/core/issues/stores/view-store-context", () => ({
       includeNoAssignee: false,
       creatorFilters: [],
       labelFilters: [],
-      agentRunningFilter: false,
+      agentRunningFilter: state.agentRunningFilter,
     }),
 }));
 
@@ -192,10 +215,10 @@ vi.mock("./project-instructions-section", () => ({
   ProjectInstructionsSection: ({
     onSave,
   }: {
-    onSave: (instructions: string, deltaInstructions: string, expectedRevision: number) => Promise<void>;
+    onSave: (instructions: string, expectedRevision: number) => Promise<void>;
   }) => (
     <section data-testid="project-instructions">
-      <button type="button" onClick={() => void onSave("Always test first.", "Check updates.", 3)}>Save instructions</button>
+      <button type="button" onClick={() => void onSave("Always test first.", 3)}>Save instructions</button>
     </section>
   ),
 }));
@@ -275,7 +298,7 @@ function makeProject(overrides: Partial<Project> = {}): Project {
 function renderDetail(
   props: { contentTab?: "issues" | "wiki"; wikiSlug?: string } = {},
 ) {
-  render(
+  return render(
     <I18nProvider locale="en" resources={TEST_RESOURCES}>
       <ProjectDetail projectId="proj-1" {...props} />
     </I18nProvider>,
@@ -295,6 +318,27 @@ describe("ProjectDetail issues surface", () => {
     updateProject.mockClear();
     updateProjectAsync.mockReset();
     updateProjectAsync.mockResolvedValue(undefined);
+  });
+
+  it.each([false, true])("shows historical member defaults as needing execution configuration (archived=%s)", (archived) => {
+    state.project = makeProject({ default_assignee_type: "member", default_assignee_id: "mem_old", ...(archived ? { archived_at: "2026-07-01T00:00:00Z" } : {}) });
+    renderDetail();
+    expect(screen.getByText("member:mem_old")).toBeTruthy();
+    expect(screen.getByText("Needs Agent or Squad configuration")).toBeTruthy();
+    expect(updateProject).not.toHaveBeenCalled();
+    expect(updateProjectAsync).not.toHaveBeenCalled();
+  });
+
+  it("defers the project toolbar pin observer until the page gate opens", () => {
+    const view = renderDetail();
+    expect(pinObserver).toHaveBeenLastCalledWith(false);
+    state.gateOpen = true;
+    view.rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ProjectDetail projectId="proj-1" />
+      </I18nProvider>,
+    );
+    expect(pinObserver).toHaveBeenLastCalledWith(true);
   });
 
   it("shows a skeleton while the issue query is loading, not the empty-project CTA", () => {
@@ -322,6 +366,20 @@ describe("ProjectDetail issues surface", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(refetchIssues).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the snapshot before showing the running-agent filtered rows", () => {
+    state.agentRunningFilter = true;
+    state.snapshotPending = true;
+    state.issues = [{ id: "issue-filtered", status: "todo" }];
+    renderDetail();
+    expect(document.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("list-view")).not.toBeInTheDocument();
+    cleanup();
+    state.snapshotPending = false;
+    state.snapshot = [{ status: "running", issue_id: "issue-filtered" }];
+    renderDetail();
+    expect(screen.getByTestId("list-view")).toHaveTextContent("1");
   });
 
   it("falls back to the generic hint when the error carries no message", () => {
@@ -409,77 +467,20 @@ describe("ProjectDetail instructions", () => {
       expect(updateProjectAsync).toHaveBeenCalledWith({
         id: "proj-1",
         instructions: "Always test first.",
-        delta_instructions: "Check updates.",
         expected_instructions_revision: 3,
       });
     });
   });
 });
 
-describe("ProjectDetail lead picker", () => {
-  beforeEach(() => {
-    state.project = makeProject();
-    state.projectLoading = false;
-    state.issues = [];
-    state.issuesLoading = false;
-    state.issuesError = false;
-    state.issuesErrorValue = null;
-    state.members = [{ user_id: "user-2", name: "张三" }];
+describe("ProjectDetail shared operator", () => {
+  it("does not offer human project owner assignment or mutate historical contacts", () => {
+    state.project = makeProject({ lead_type: "member", lead_id: "user-2" });
     updateProject.mockClear();
-  });
-
-  it("uses the shared picker shell — search box, grouped sections, checked current lead", () => {
-    state.project = makeProject({ lead_type: "member", lead_id: "user-2" });
-
     renderDetail();
-    fireEvent.click(screen.getByText("member:user-2"));
-
-    // The shared shell's search input carries the picker's own aria-label —
-    // the hand-rolled <input> it replaced had none.
-    expect(
-      screen.getByRole("textbox", { name: "Filter options" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Members")).toBeInTheDocument();
-    expect(screen.queryByText("Agents")).not.toBeInTheDocument();
-  });
-
-  it("assigns a member as lead and closes", () => {
-    renderDetail();
-    fireEvent.click(screen.getByText("No owner"));
-
-    fireEvent.click(screen.getByText("张三"));
-
-    expect(updateProject).toHaveBeenCalledWith({
-      id: "proj-1",
-      lead_type: "member",
-      lead_id: "user-2",
-    });
-  });
-
-  it("filters by pinyin and falls back to the shared empty state", () => {
-    renderDetail();
-    fireEvent.click(screen.getByText("No owner"));
-
-    const search = screen.getByRole("textbox", { name: "Filter options" });
-    fireEvent.change(search, { target: { value: "zhang" } });
-    expect(screen.getByText("张三")).toBeInTheDocument();
-
-    fireEvent.change(search, { target: { value: "nobody-here" } });
-    expect(screen.getByText("No results")).toBeInTheDocument();
-  });
-
-  it("clears the lead", () => {
-    state.project = makeProject({ lead_type: "member", lead_id: "user-2" });
-
-    renderDetail();
-    fireEvent.click(screen.getByText("member:user-2"));
-    fireEvent.click(screen.getByText("No owner"));
-
-    expect(updateProject).toHaveBeenCalledWith({
-      id: "proj-1",
-      lead_type: null,
-      lead_id: null,
-    });
+    expect(screen.queryByText("No owner")).not.toBeInTheDocument();
+    expect(screen.queryByText("Members")).not.toBeInTheDocument();
+    expect(updateProject).not.toHaveBeenCalled();
   });
 });
 

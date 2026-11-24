@@ -3,7 +3,7 @@
  *
  * A command that is documented in prompts/skills but never registered fails at
  * the very first hop — `dispatch()` prints "Unknown command: <name>" and exits
- * 1 — so these tests drive the real dispatcher rather than the multiremi layer
+ * 1 after draining output — so these tests drive the real dispatcher rather than the multiremi layer
  * behind it. `process.exit` is stubbed so an unregistered command surfaces as a
  * test failure instead of killing the test runner.
  *
@@ -12,8 +12,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { delimiter, join } from "node:path";
-import { cliCommandInventory, dispatch } from "../../../apps/remi/cli/index.js";
+import { cliCommandHelp, cliCommandInventory, dispatch } from "../../../apps/remi/cli/index.js";
 import { detectMultiremiProviders } from "../../../apps/remi/cli/multiremi.js";
+import { RETIRED_CLI_COMMANDS } from "../../../apps/remi/cli/core/retired-commands.js";
 
 interface DispatchResult {
   error: unknown;
@@ -50,12 +51,16 @@ async function runDispatch(args: string[]): Promise<DispatchResult> {
   console.error = (...parts: unknown[]) => { stderr.push(parts.map(String).join(" ")); };
   console.log = () => {};
   process.exit = ((code?: number) => { throw new ProcessExitError(code ?? 0); }) as typeof process.exit;
+  const previousExitCode = process.exitCode;
+  process.exitCode = 0;
   try {
     await dispatch(args);
-    return { error: null, exitCode: null, stderr };
+    return { error: null, exitCode: process.exitCode ? Number(process.exitCode) : null, stderr };
   } catch (err) {
     if (err instanceof ProcessExitError) return { error: null, exitCode: err.code, stderr };
     return { error: err, exitCode: null, stderr };
+  } finally {
+    process.exitCode = previousExitCode ?? 0;
   }
 }
 
@@ -80,20 +85,17 @@ describe("remi CLI dispatcher", () => {
     expect(inventory.filter((entry) => entry.path.length === 1).map((entry) => entry.path.join(" "))).toEqual([
       "context",
       "workspace",
-      "member",
-      "invite",
+      "account",
       "token",
       "project",
       "repo",
       "knowledge",
       "memory",
       "wiki",
-      "comment",
       "session",
       "share",
       "label",
       "chat",
-      "task",
       "agent",
       "squad",
       "skill",
@@ -101,16 +103,20 @@ describe("remi CLI dispatcher", () => {
       "runtime",
       "daemon",
       "autopilot",
+      "automation",
       "scm",
       "messaging",
       "feishu",
-      "inbox",
       "notification",
       "pin",
       "dashboard",
       "platform",
       "billing",
       "lark",
+      "message",
+      "turn",
+      "inbox",
+      "invite",
       "start",
       "stop",
       "restart",
@@ -144,15 +150,60 @@ describe("remi CLI dispatcher", () => {
   it("removes Chat Issue commands while retaining conversation and queue commands", () => {
     const inventory = cliCommandInventory();
     expect(inventory.filter((entry) => entry.id.startsWith("chat.issue"))).toEqual([]);
-    for (const id of ["chat.create", "chat.message.create", "chat.queue.list", "chat.pin", "chat.archive", "chat.restore"]) {
+    for (const id of ["chat.create", "message.send", "turn.list", "chat.pin", "chat.archive", "chat.restore"]) {
       expect(inventory.some((entry) => entry.id === id), id).toBe(true);
     }
   });
 
-  it("routes `remi project` into the native resource group", async () => {
+  it("registers Issue-owned Sessions as executable commands with owner-specific help", async () => {
+    const inventory = cliCommandInventory();
+    const actions = ["list", "create", "get", "update", "participant.list", "participant.add", "participant.remove", "result.list", "result.publish"];
+    for (const action of actions) {
+      const entry = inventory.find((candidate) => candidate.id === `issue.session.${action}`)!;
+      expect(entry, action).toBeDefined();
+      expect(entry.path, action).toEqual(["issue", "session", ...action.split(".")]);
+      expect(entry.aliases, action).toEqual([]);
+      expect(entry.positionals[0]?.name, action).toBe("issue");
+      const chatEntry = inventory.find((candidate) => candidate.id === `session.${action}`);
+      expect(chatEntry, action).toBeDefined();
+      expect(entry.auth, action).toEqual(chatEntry!.auth);
+      const help = cliCommandHelp(entry.path);
+      expect(help, action).toContain("<issue>");
+      expect(help, action).not.toContain("<chat>");
+    }
+    for (const action of ["event list", "message create", "task list", "task create"]) {
+      const path = ["issue", "session", ...action.split(" ")];
+      const entry = inventory.find(candidate => candidate.path.join(" ") === path.join(" "))!;
+      expect(entry.retired?.replacement, action).toBe(RETIRED_CLI_COMMANDS[path.join(" ")]);
+      expect(entry.capability, action).toBeNull();
+    }
+    expect(cliCommandHelp(["session", "create"])).toContain("<chat>");
+
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/cli/capabilities") {
+        return Response.json({ commands: [{ id: "issue.session.create", allowed: true }] });
+      }
+      calls.push({ method: request.method, path, body: await request.json() });
+      return Response.json({ id: "ises_issue", owner_type: "issue", owner_id: "MUL-1" });
+    }) as typeof fetch;
+    try {
+      const result = await runDispatch(["issue", "session", "create", "MUL-1", "--title", "Design", "--discussion", "--server", "https://cli.example.test", "--token", "fixture", "--json"]);
+      expect(result.error).toBeNull();
+      expect(result.stderr).toEqual([]);
+      expect(calls).toEqual([{ method: "POST", path: "/api/issues/MUL-1/sessions", body: { title: "Design", holds_workspace: false } }]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("shows help successfully for the bare native project group", async () => {
     const result = await runDispatch(["project"]);
 
-    expect(String((result.error as Error | null)?.message ?? "")).toContain("usage: remi project list|get|search");
+    expect(result.error).toBeNull();
     expect(result.exitCode).toBeNull();
     expect(result.stderr.join("\n")).not.toContain("Unknown command");
   });
@@ -193,9 +244,12 @@ describe("remi CLI dispatcher", () => {
 });
 
 describe("remi CLI provider detection", () => {
-  it("detects the native agy executable as Antigravity", () => {
+  it("detects Antigravity through a local agy or the pinned gateway install", () => {
     expect(detectMultiremiProviders({
-      pathEnv: "/mock/bin", canExecute: path => path === join("/mock/bin", "agy"),
+      pathEnv: "/mock/bin", canExecute: path => path === join("/mock/bin", "agy"), antigravityInstalled: () => false,
+    })).toEqual(["antigravity"]);
+    expect(detectMultiremiProviders({
+      pathEnv: "/mock/bin", canExecute: () => false, antigravityInstalled: () => true,
     })).toEqual(["antigravity"]);
   });
   it("detects supported daemon providers from PATH", () => {
@@ -203,12 +257,16 @@ describe("remi CLI provider detection", () => {
 
     expect(detectMultiremiProviders({
       pathEnv,
-      canExecute: (path) => path === join("/mock/bin", "claude") || path === join("/other/bin", "codex"),
-    })).toEqual(["claude", "codex"]);
+      canExecute: (path) => path === join("/mock/bin", "claude")
+        || path === join("/other/bin", "codex")
+        || path === join("/mock/bin", "grok"),
+      antigravityInstalled: () => false,
+    })).toEqual(["claude", "codex", "grok"]);
 
     expect(detectMultiremiProviders({
       pathEnv,
       canExecute: (path) => path === "/mock/bin/gemini",
+      antigravityInstalled: () => false,
     })).toEqual([]);
   });
 });

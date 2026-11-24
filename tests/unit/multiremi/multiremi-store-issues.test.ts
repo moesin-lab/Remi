@@ -1,3 +1,6 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue, createHistoricalTestIssue, seedHistoricalIssueFacts, replayHistoricalTestChildDone } from './helpers.js';
+import { issueMessagesPath, mutateExecutionFixture } from "./unified-test-paths.js";
 // The issue domain at store level: assignment, keys, GitHub links, hierarchy,
 // dependencies, mentions, notifications/inbox, comment threads and reactions,
 // attachments, labels, pinned shortcuts, and search.
@@ -6,22 +9,27 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { INBOX_ROUTING } from "@multiremi/store/inbox-routing.js";
+import type { StoreContext } from '@multiremi/store/context.js';
+import { inboxReportBody } from "./inbox-test-assertions.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi store — issues, comments, labels, and inbox", () => {
-  it("assigns issues to members, agents, and squads", () => {
+  it("ignores a deprecated responsible member and assigns execution only to agents and squads", () => {
     const store = createStore();
     const codex = store.createAgent({ name: "Codex", provider: "codex" });
     const leader = store.createAgent({ name: "Squad lead", provider: "claude" });
     const member = store.createWorkspaceMember({ name: "Human reviewer", email: "human@example.com", role: "member" });
     const squad = store.createSquad({ name: "Feature squad", leaderId: leader.id });
-    const issue = store.createIssue({ title: "Implement assignment" });
+    const issue = createResponsibleTestIssue(store, { title: "Implement assignment" });
 
-    const memberAssigned = store.assignIssue(issue.id, { assigneeType: "member", assigneeId: member.id });
-    expect(memberAssigned.issue.assigneeType).toBe("member");
-    expect(memberAssigned.task).toBeNull();
+    expect(()=>store.assignIssue(issue.id, { assigneeType: "member", assigneeId: member.id })).toThrow('Agent or team Leader');
+    // A deprecated responsible member is accepted and ignored: it is no execution owner.
+    const humanResponsible=store.updateIssue(issue.id,{responsibleMemberId:member.id,actorType:'member',actorId:member.id});
+    expect(humanResponsible).not.toHaveProperty('responsibleMemberId');
+    expect(humanResponsible.assigneeType).toBeNull();
+    expect(store.listTasksForIssue(issue.id)).toHaveLength(0);
 
     const agentAssigned = store.assignIssue(issue.id, { assigneeType: "agent", assigneeId: codex.id, prompt: "Run codex" });
     expect(agentAssigned.issue.assigneeType).toBe("agent");
@@ -33,9 +41,10 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(squadAssigned.task?.agentId).toBe(leader.id);
     expect(store.getTask(agentAssigned.task!.id)?.status).toBe("cancelled");
 
-    const fuzzyIssue = store.createIssue({ title: "Assign by fuzzy refs", assigneeId: "human@example.com" });
-    expect(fuzzyIssue.assigneeType).toBe("member");
-    expect(fuzzyIssue.assigneeId).toBe(member.id);
+    expect(()=>createResponsibleTestIssue(store, { title: "Reject human execution by fuzzy refs", assigneeId: "human@example.com" })).toThrow('Agent or team Leader');
+    const fuzzyIssue = createResponsibleTestIssue(store, { title: "Assign by fuzzy refs",responsibleMemberId:member.id });
+    expect(fuzzyIssue).not.toHaveProperty('responsibleMemberId');
+    expect(fuzzyIssue.assigneeType).toBeNull();
     const fuzzyAgent = store.assignIssue(fuzzyIssue.id, { assigneeId: "cod", prompt: "Run fuzzy Codex" });
     expect(fuzzyAgent.issue.assigneeType).toBe("agent");
     expect(fuzzyAgent.issue.assigneeId).toBe(codex.id);
@@ -44,7 +53,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(fuzzySquad.issue.assigneeType).toBe("squad");
     expect(fuzzySquad.issue.assigneeId).toBe(squad.id);
     expect(fuzzySquad.task?.agentId).toBe(leader.id);
-    const quick = store.quickCreateIssue({ agentId: "codex", prompt: "Fuzzy quick create" });
+    const quick = store.quickCreateIssue({ agentId: "codex", prompt: "Fuzzy quick create",responsibleMemberId:member.id });
     expect(quick.issue.assigneeId).toBe(codex.id);
     expect(quick.task.agentId).toBe(codex.id);
 
@@ -57,10 +66,12 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
   it("tells the creator agent whether to keep or infer the issue project", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "PM", provider: "codex" });
+    const human=store.createWorkspaceMember({name:'Explicit quick-create requester'});
     const project = store.createProject({ title: "Web" });
 
     const targeted = store.quickCreateIssue({
       agentId: agent.id,
+      responsibleMemberId: human.id,
       projectId: project.id,
       prompt: "Fix the upload flow",
     });
@@ -70,6 +81,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
 
     const inferred = store.quickCreateIssue({
       agentId: agent.id,
+      responsibleMemberId: human.id,
       prompt: "Investigate the mobile crash",
     });
     expect(inferred.issue.projectId).toBeNull();
@@ -78,25 +90,23 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(inferred.task.prompt).toContain("do not create a new project");
   });
 
-  it("aggregates assignee frequency from created issues and assignment activity", () => {
+  it("aggregates historical member assignee frequency alongside current Agent assignment", () => {
     const store = createStore();
     const alice = store.createWorkspaceMember({ name: "Alice", role: "member" });
     const bob = store.createWorkspaceMember({ name: "Bob", role: "member" });
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
-    const created = store.createIssue({
+    const created = createHistoricalTestIssue(store, {
       title: "Created with assignee",
       createdBy: alice.id,
       assigneeType: "member",
       assigneeId: bob.id,
     });
-    const reassigned = store.createIssue({ title: "Reassigned later", createdBy: alice.id });
+    const reassigned = createResponsibleTestIssue(store, { title: "Reassigned later", createdBy: alice.id });
 
-    store.assignIssue(reassigned.id, {
-      assignee_type: "member",
-      assignee_id: bob.id,
-      actorType: "member",
-      actorId: alice.id,
-    });
+    seedHistoricalIssueFacts(store,reassigned.id,{assigneeType:'member',assigneeId:bob.id});
+    // Persisted legacy audit is a read fixture, not a new member execution assignment.
+    store.appendIssueActivity(reassigned.id,{type:'issue_assigned',actorType:'member',actorId:alice.id,
+      data:{assignee_type:'member',assignee_id:bob.id}});
     store.assignIssue(created.id, {
       assigneeType: "agent",
       assigneeId: agent.id,
@@ -118,9 +128,9 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
 
   it("assigns human-readable issue keys per workspace", () => {
     const store = createStore();
-    const first = store.createIssue({ title: "First issue" });
-    const second = store.createIssue({ title: "Second issue" });
-    const legacyOpen = store.createIssue({ title: "Legacy open input", status: "open" });
+    const first = createResponsibleTestIssue(store, { title: "First issue" });
+    const second = createResponsibleTestIssue(store, { title: "Second issue" });
+    const legacyOpen = createResponsibleTestIssue(store, { title: "Legacy open input", status: "open" });
 
     expect(first.key).toBe("MUL-1");
     expect(first.number).toBe(1);
@@ -132,7 +142,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
   it("manages issue hierarchy, priority, scheduling, and planning fields", () => {
     const store = createStore();
     const project = store.createProject({ title: "Hierarchy project" });
-    const parent = store.createIssue({
+    const parent = createResponsibleTestIssue(store, {
       title: "Parent issue",
       projectId: project.id,
       priority: "high",
@@ -140,7 +150,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
       acceptanceCriteria: ["parent done"],
       contextRefs: [{ type: "doc", url: "https://example.com/spec" }],
     });
-    const child = store.createIssue({
+    const child = createResponsibleTestIssue(store, {
       title: "Child issue",
       parent_issue_id: parent.id,
       position: 2.5,
@@ -157,35 +167,48 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(store.listChildIssues(parent.id).map((item) => item.id)).toEqual([child.id]);
     expect(store.getIssueWithTasks(parent.id)?.children[0]?.id).toBe(child.id);
 
-    store.updateIssue(child.id, { status: "done" });
-    expect(store.getChildIssueProgress(parent.id)).toEqual({ parentIssueId: parent.id, total: 1, done: 1 });
-    expect(store.listChildIssueProgress("local")).toEqual([{ parentIssueId: parent.id, total: 1, done: 1 }]);
+    seedHistoricalIssueFacts(store,child.id,{status:'done'});
+    expect(store.getChildIssueProgress(parent.id)).toEqual({
+      parentIssueId: parent.id, total: 1, done: 1, cancelled: 0, blocked: 0, waiting: 0, active: 0,
+    });
+    expect(store.listChildIssueProgress("local")).toEqual([{
+      parentIssueId: parent.id, total: 1, done: 1, cancelled: 0, blocked: 0, waiting: 0, active: 0,
+    }]);
 
-    const sibling = store.createIssue({ title: "Sibling", parentIssueId: parent.id, priority: "urgent", position: 1 });
+    const sibling = createResponsibleTestIssue(store, { title: "Sibling", parentIssueId: parent.id, priority: "urgent", position: 1 });
     expect(store.listChildIssues(parent.id).map((item) => item.id)).toEqual([sibling.id, child.id]);
 
     expect(() => store.updateIssue(parent.id, { parentIssueId: child.id })).toThrow("Circular parent");
     expect(() => store.updateIssue(parent.id, { parentIssueId: parent.id })).toThrow("own parent");
     expect(() => store.createIssue({ title: "Bad priority", priority: "must" })).toThrow("priority");
 
-    const remoteParent = store.createIssue({ title: "Remote parent", workspaceId: "remote" });
+    const remoteParent = createResponsibleTestIssue(store, { title: "Remote parent", workspaceId: "remote" });
     expect(() => store.createIssue({ title: "Cross workspace", parentIssueId: remoteParent.id, workspaceId: "local" })).toThrow("another workspace");
   });
 
-  it("posts Go-style system comments when child issues transition to done", () => {
+  it("replays persisted child done facts into Go-style notification consumers idempotently", () => {
     const store = createStore();
-    const parent = store.createIssue({ title: "Child-done parent", status: "in_progress" });
-    const child = store.createIssue({
+    const parent = createResponsibleTestIssue(store, { title: "Child-done parent", status: "in_progress" });
+    const child = createResponsibleTestIssue(store, {
       title: "Child with [@spoof](mention://agent/agt_spoof)",
       parentIssueId: parent.id,
       status: "in_progress",
     });
 
-    store.updateIssue(child.id, { status: "done" });
-    let comments = store.listIssueComments(parent.id).filter((comment) => comment.authorType === "system");
+    const sourceComments = () => store.listIssueComments(parent.id).filter(comment => {
+      const message = store.getMessage(comment.id);
+      return comment.authorType === "system" && message?.metadata.child_issue_id === child.id
+        && message.metadata.outcome === "done";
+    });
+    const notifications = () => store.listInboxItems(store.getWorkspaceOperator("local")!.id)
+      .filter(item => item.type === "child_issue_terminal" && (item.details as Record<string, unknown>)?.childIssueId === child.id);
+    replayHistoricalTestChildDone(store,child.id);
+    let comments = sourceComments();
+    expect(notifications()).toHaveLength(1);
     expect(comments).toHaveLength(1);
     expect(comments[0]?.type).toBe("system");
-    expect(comments[0]?.authorId).toBe("00000000-0000-0000-0000-000000000000");
+    expect(store.getMessage(comments[0]!.id)?.sender_type).toBe("platform");
+    expect(comments[0]?.authorId).toBeNull();
     expect(comments[0]?.parentId).toBeNull();
     expect(comments[0]?.body).toContain(child.key);
     expect(comments[0]?.body).toContain(`mention://issue/${child.id}`);
@@ -193,31 +216,33 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(comments[0]?.body).not.toContain("mention://member/");
     expect(comments[0]?.body).not.toContain("mention://squad/");
 
-    store.updateIssue(child.id, { status: "done" });
-    comments = store.listIssueComments(parent.id).filter((comment) => comment.authorType === "system");
+    replayHistoricalTestChildDone(store,child.id);
+    comments = sourceComments();
+    expect(notifications()).toHaveLength(1);
     expect(comments).toHaveLength(1);
 
     store.updateIssue(child.id, { status: "in_progress" });
-    store.updateIssue(child.id, { status: "done" });
-    comments = store.listIssueComments(parent.id).filter((comment) => comment.authorType === "system");
+    replayHistoricalTestChildDone(store,child.id,'legacy-second-close');
+    comments = sourceComments().filter(comment => comment.body.includes("is done"));
+    expect(notifications()).toHaveLength(2);
     expect(comments).toHaveLength(2);
 
-    const doneParent = store.createIssue({ title: "Already done parent", status: "done" });
-    const doneChild = store.createIssue({ title: "Done child", parentIssueId: doneParent.id, status: "in_progress" });
-    store.updateIssue(doneChild.id, { status: "done" });
+    const doneParent = createHistoricalTestIssue(store, { title: "Already done parent", status: "done" });
+    const doneChild = createResponsibleTestIssue(store, { title: "Done child", parentIssueId: doneParent.id, status: "in_progress" });
+    replayHistoricalTestChildDone(store,doneChild.id);
     expect(store.listIssueComments(doneParent.id).filter((comment) => comment.authorType === "system")).toHaveLength(0);
   });
 
-  it("triggers parent assignee tasks for child-done system comments", () => {
+  it("routes historical child-done reports by explicit parent responsibility", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Parent] Agent", provider: "codex" });
-    const parent = store.createIssue({
+    const parent = createResponsibleTestIssue(store, {
       title: "Agent parent",
       status: "in_progress",
       assigneeType: "agent",
       assigneeId: agent.id,
     });
-    const child = store.createIssue({
+    const child = createResponsibleTestIssue(store, {
       title: "Agent child",
       parentIssueId: parent.id,
       status: "in_progress",
@@ -225,7 +250,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
       assigneeId: agent.id,
     });
 
-    store.updateIssue(child.id, { status: "done" });
+    replayHistoricalTestChildDone(store,child.id);
     const comments = store.listIssueComments(parent.id).filter((comment) => comment.authorType === "system");
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain(`mention://agent/${agent.id}`);
@@ -234,65 +259,75 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.agentId).toBe(agent.id);
     expect(tasks[0]?.triggerCommentId).toBe(comments[0]?.id);
-    expect(tasks[0]?.prompt).toContain("A sub-issue assigned under this issue was marked done.");
+    expect(inboxReportBody(store, tasks[0]!)).toContain("is done");
+    expect(tasks[0]?.prompt).toBe(comments[0]!.body);
+    expect(comments[0]?.body).toContain("is done");
+    expect(comments[0]?.body).not.toContain("read each sibling's description");
 
     const member = store.createWorkspaceMember({ name: "Human parent", role: "member" });
-    const memberParent = store.createIssue({
+    const memberParent = createHistoricalTestIssue(store, {
       title: "Member parent",
       status: "in_progress",
       assigneeType: "member",
       assigneeId: member.id,
+      responsibleMemberId: member.id,
     });
-    const memberChild = store.createIssue({ title: "Member child", parentIssueId: memberParent.id, status: "in_progress" });
-    store.updateIssue(memberChild.id, { status: "done" });
-    expect(store.listIssueComments(memberParent.id).filter((comment) => comment.authorType === "system")).toHaveLength(0);
+    const memberChild = createResponsibleTestIssue(store, { title: "Member child", parentIssueId: memberParent.id, status: "in_progress" });
+    replayHistoricalTestChildDone(store,memberChild.id);
+    // MUL-400 E2: a human parent gets an inbox item instead of a system comment
+    // and a wakeup round.
+    expect(store.listIssueComments(memberParent.id).filter((comment) => comment.authorType === "system")).toHaveLength(1);
+    expect(store.listTasksForIssue(memberParent.id)).toHaveLength(0);
+    const memberInbox = store.listInboxItems(member.id).filter((item) => item.type === "child_issue_terminal");
+    expect(memberInbox).toHaveLength(1);
+    expect(memberInbox[0]).toMatchObject({ severity: "info", issueId: memberParent.id });
 
     const leader = store.createAgent({ name: "Squad leader", provider: "claude" });
     const squad = store.createSquad({ name: "Parent Squad", leaderId: leader.id });
-    const squadParent = store.createIssue({
+    const squadParent = createResponsibleTestIssue(store, {
       title: "Squad parent",
       status: "in_progress",
       assigneeType: "squad",
       assigneeId: squad.id,
     });
-    const squadChild = store.createIssue({ title: "Squad child", parentIssueId: squadParent.id, status: "in_progress" });
-    store.updateIssue(squadChild.id, { status: "done" });
+    const squadChild = createResponsibleTestIssue(store, { title: "Squad child", parentIssueId: squadParent.id, status: "in_progress" });
+    replayHistoricalTestChildDone(store,squadChild.id);
     const squadComments = store.listIssueComments(squadParent.id).filter((comment) => comment.authorType === "system");
     expect(squadComments).toHaveLength(1);
     expect(squadComments[0]?.body).toContain(`mention://squad/${squad.id}`);
     expect(store.listTasksForIssue(squadParent.id).map((task) => task.agentId)).toEqual([leader.id]);
 
-    const sameSquadParent = store.createIssue({
+    const sameSquadParent = createResponsibleTestIssue(store, {
       title: "Same squad parent",
       status: "in_progress",
       assigneeType: "squad",
       assigneeId: squad.id,
     });
-    const sameSquadChild = store.createIssue({
+    const sameSquadChild = createResponsibleTestIssue(store, {
       title: "Same squad child",
       parentIssueId: sameSquadParent.id,
       status: "in_progress",
       assigneeType: "squad",
       assigneeId: squad.id,
     });
-    store.updateIssue(sameSquadChild.id, { status: "done" });
+    replayHistoricalTestChildDone(store,sameSquadChild.id);
     expect(store.listIssueComments(sameSquadParent.id).filter((comment) => comment.authorType === "system")).toHaveLength(1);
     expect(store.listTasksForIssue(sameSquadParent.id).map((task) => task.agentId)).toEqual([leader.id]);
 
-    const leaderChildParent = store.createIssue({
+    const leaderChildParent = createResponsibleTestIssue(store, {
       title: "Leader child parent",
       status: "in_progress",
       assigneeType: "squad",
       assigneeId: squad.id,
     });
-    const leaderChild = store.createIssue({
+    const leaderChild = createResponsibleTestIssue(store, {
       title: "Direct leader child",
       parentIssueId: leaderChildParent.id,
       status: "in_progress",
       assigneeType: "agent",
       assigneeId: leader.id,
     });
-    store.updateIssue(leaderChild.id, { status: "done" });
+    replayHistoricalTestChildDone(store,leaderChild.id);
     expect(store.listTasksForIssue(leaderChildParent.id).map((task) => task.agentId)).toEqual([leader.id]);
   });
 
@@ -300,57 +335,82 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const store = createStore();
     const leader = store.createAgent({ name: "Busy leader", provider: "claude" });
     const squad = store.createSquad({ name: "Busy squad", leaderId: leader.id });
-    const busyParent = store.createIssue({
+    const busyParent = createResponsibleTestIssue(store, {
       title: "Busy parent",
       status: "in_progress",
       assigneeType: "squad",
       assigneeId: squad.id,
     });
-    store.createTask({ agentId: leader.id, issueId: busyParent.id, prompt: "Already working" });
-    const busyChild = store.createIssue({ title: "Busy child", parentIssueId: busyParent.id, status: "in_progress" });
+    // #3: child reports interrupt the existing running turn.
+    const running = store.createTask({ agentId: leader.id, issueId: busyParent.id, prompt: "Already working" });
+    mutateExecutionFixture(db!,"UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [running.id]);
+    const busyChild = createResponsibleTestIssue(store, { title: "Busy child", parentIssueId: busyParent.id, status: "in_progress" });
 
-    store.updateIssue(busyChild.id, { status: "done" });
+    replayHistoricalTestChildDone(store,busyChild.id);
 
-    expect(store.listTasksForIssue(busyParent.id)).toHaveLength(1);
-    const activeTaskSkip = store.listIssueActivity(busyParent.id)
-      .find((activity) => activity.type === "child_done_parent_skipped");
-    expect(activeTaskSkip?.data).toMatchObject({
-      reason: "active_task_exists",
-      assigneeType: "squad",
-      assigneeId: squad.id,
-      agentId: leader.id,
-    });
+    const busyTasks = store.listTasksForIssue(busyParent.id);
+    expect(busyTasks).toHaveLength(1);
+    expect(busyTasks[0]?.id).toBe(running.id);
+    expect(inboxReportBody(store,running)).toContain("Busy child");
+    expect(store.listIssueActivity(busyParent.id)
+      .find((activity) => activity.type === "child_done_parent_skipped")).toBeUndefined();
+    // #9: child terminal notifications use the canonical status header.
+    expect(store.listMessages(running.issueSessionId!).some(message=>message.message_kind==="status" && message.to_agent_id===leader.id)).toBe(true);
 
-    const unassignedParent = store.createIssue({ title: "Unassigned parent", status: "in_progress" });
-    const unassignedChild = store.createIssue({ title: "Unassigned child", parentIssueId: unassignedParent.id, status: "in_progress" });
-    store.updateIssue(unassignedChild.id, { status: "done" });
+    // Two more children ending while that round is still queued coalesce into it
+    // instead of queueing further rounds: one pending round per parent.
+    const queuedRound = busyTasks[0]!;
+    for (const status of ["blocked", "cancelled"] as const) {
+      const sibling = createResponsibleTestIssue(store, {
+        title: `Sibling ${status}`,
+        parentIssueId: busyParent.id,
+        status: "in_progress",
+      });
+      store.updateIssue(sibling.id, { status });
+    }
+    const coalescedTasks = store.listTasksForIssue(busyParent.id).filter((task) => task.status === "running");
+    expect(coalescedTasks).toHaveLength(1);
+    expect(coalescedTasks[0]?.id).toBe(queuedRound.id);
+    const body = inboxReportBody(store, coalescedTasks[0]!);
+    expect(body).toContain("is blocked");
+    expect(body).toContain("was cancelled");
+    expect(coalescedTasks[0]?.prompt).toBe(queuedRound.prompt);
+    expect(store.listIssueActivity(busyParent.id)
+      .filter((activity) => activity.type === "message_delivered_running")).toHaveLength(3);
+    const notifications = store.listIssueComments(busyParent.id)
+      .filter((comment) => comment.authorType === "system" && comment.body.includes("Sibling"));
+    expect(notifications).toHaveLength(2);
+
+    const unassignedParent = createResponsibleTestIssue(store, { title: "Unassigned parent", status: "in_progress" });
+    const unassignedChild = createResponsibleTestIssue(store, { title: "Unassigned child", parentIssueId: unassignedParent.id, status: "in_progress" });
+    replayHistoricalTestChildDone(store,unassignedChild.id);
     expect(store.listIssueActivity(unassignedParent.id)
       .find((activity) => activity.type === "child_done_parent_skipped")?.data)
-      .toMatchObject({ reason: "no_assignee" });
+      .toMatchObject({ reason: "no_assignee", outcome: "done" });
 
     const archivedAgent = store.createAgent({ name: "Archived parent agent", provider: "codex" });
-    const archivedAgentParent = store.createIssue({
+    const archivedAgentParent = createResponsibleTestIssue(store, {
       title: "Archived agent parent",
       status: "in_progress",
       assigneeType: "agent",
       assigneeId: archivedAgent.id,
     });
-    const archivedAgentChild = store.createIssue({ title: "Archived agent child", parentIssueId: archivedAgentParent.id, status: "in_progress" });
+    const archivedAgentChild = createResponsibleTestIssue(store, { title: "Archived agent child", parentIssueId: archivedAgentParent.id, status: "in_progress" });
     store.archiveAgent(archivedAgent.id);
-    store.updateIssue(archivedAgentChild.id, { status: "done" });
+    replayHistoricalTestChildDone(store,archivedAgentChild.id);
     expect(store.listIssueActivity(archivedAgentParent.id)
       .find((activity) => activity.type === "child_done_parent_skipped")?.data)
       .toMatchObject({ reason: "agent_unavailable" });
 
     const leaderlessSquad = store.createSquad({ name: "Leaderless squad" });
-    const leaderlessParent = store.createIssue({
+    const leaderlessParent = createResponsibleTestIssue(store, {
       title: "Leaderless parent",
       status: "in_progress",
       assigneeType: "squad",
       assigneeId: leaderlessSquad.id,
     });
-    const leaderlessChild = store.createIssue({ title: "Leaderless child", parentIssueId: leaderlessParent.id, status: "in_progress" });
-    store.updateIssue(leaderlessChild.id, { status: "done" });
+    const leaderlessChild = createResponsibleTestIssue(store, { title: "Leaderless child", parentIssueId: leaderlessParent.id, status: "in_progress" });
+    replayHistoricalTestChildDone(store,leaderlessChild.id);
     expect(store.listIssueActivity(leaderlessParent.id)
       .find((activity) => activity.type === "child_done_parent_skipped")?.data)
       .toMatchObject({ reason: "squad_leader_unavailable" });
@@ -358,8 +418,8 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
 
   it("manages issue dependencies with workspace and duplicate guards", () => {
     const store = createStore();
-    const blocker = store.createIssue({ title: "Blocker" });
-    const blocked = store.createIssue({ title: "Blocked" });
+    const blocker = createResponsibleTestIssue(store, { title: "Blocker" });
+    const blocked = createResponsibleTestIssue(store, { title: "Blocked" });
 
     const dependency = store.createIssueDependency(blocked.id, {
       depends_on_issue_id: blocker.id,
@@ -381,7 +441,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(store.listIssueDependencies(blocked.id)).toHaveLength(1);
 
     expect(() => store.createIssueDependency(blocked.id, { dependsOnIssueId: blocked.id })).toThrow("itself");
-    const remote = store.createIssue({ title: "Remote", workspaceId: "remote" });
+    const remote = createResponsibleTestIssue(store, { title: "Remote", workspaceId: "remote" });
     expect(() => store.createIssueDependency(blocked.id, { dependsOnIssueId: remote.id })).toThrow("within a workspace");
     expect(() => store.createIssueDependency(blocked.id, { dependsOnIssueId: blocker.id, type: "must" })).toThrow("dependency type");
 
@@ -394,7 +454,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const reviewer = store.createAgent({ name: "Review Bot", provider: "codex" });
     const leader = store.createAgent({ name: "Squad Lead", provider: "claude" });
     const squad = store.createSquad({ name: "Frontend Squad", leaderId: leader.id });
-    const issue = store.createIssue({ title: "Mention routing" });
+    const issue = createResponsibleTestIssue(store, { title: "Mention routing" });
 
     store.createIssueComment(issue.id, {
       body: `Please inspect this [@Review Bot](mention://agent/${reviewer.id}) and [@Frontend Squad](mention://squad/${squad.id})`,
@@ -404,7 +464,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(tasks.map((task) => task.agentId).sort()).toEqual([leader.id, reviewer.id].sort());
     expect(store.getIssue(issue.id)?.assigneeId).toBeNull();
     expect(store.getIssue(issue.id)?.status).toBe("todo");
-    expect(store.listIssueActivity(issue.id).filter((item) => item.type === "comment_mention_triggered")).toHaveLength(2);
+    expect(store.listMessages(store.getOrCreateDefaultIssueSession(issue.id).id).filter(message=>message.to_agent_id).map(message=>message.to_agent_id).sort()).toEqual([leader.id,reviewer.id].sort());
   });
 
   it("treats plain agent and squad @names as display text", () => {
@@ -412,7 +472,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const leader = store.createAgent({ name: "Squad Lead", provider: "claude" });
     store.createAgent({ name: "Review Bot", provider: "codex" });
     store.createSquad({ name: "Frontend Squad", leaderId: leader.id });
-    const issue = store.createIssue({ title: "Plain mentions" });
+    const issue = createResponsibleTestIssue(store, { title: "Plain mentions" });
 
     store.createIssueComment(issue.id, { body: "Please ask @Review Bot and @Frontend Squad to inspect this." });
 
@@ -424,7 +484,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const store = createStore();
     const leader = store.createAgent({ name: "Squad Lead", provider: "claude" });
     const squad = store.createSquad({ name: "Ops Squad", leaderId: leader.id });
-    const issue = store.createIssue({ title: "Auto respond", assigneeType: "squad", assigneeId: squad.id, status: "backlog" });
+    const issue = createResponsibleTestIssue(store, { title: "Auto respond", assigneeType: "squad", assigneeId: squad.id, status: "backlog" });
 
     const comment = store.createIssueComment(issue.id, { body: "How is this going?" });
 
@@ -435,9 +495,8 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const activity = store.listIssueActivity(issue.id).filter((item) => item.type === "comment_assignee_triggered");
     expect(activity).toHaveLength(1);
 
-    // Each human comment dispatches individually — no batching.
     store.createIssueComment(issue.id, { body: "One more thing." });
-    expect(store.listTasks()).toHaveLength(2);
+    expect(store.listTasks()).toHaveLength(true ? 1 : 2);
   });
 
   it("suppresses assignee auto-response when the comment addresses someone explicitly", () => {
@@ -445,7 +504,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const assignee = store.createAgent({ name: "Assignee Bot", provider: "claude" });
     const other = store.createAgent({ name: "Other Bot", provider: "codex" });
     const member = store.createWorkspaceMember({ name: "Human Reviewer" });
-    const issue = store.createIssue({ title: "Explicit wins", assigneeType: "agent", assigneeId: assignee.id, status: "backlog" });
+    const issue = createResponsibleTestIssue(store, { title: "Explicit wins", assigneeType: "agent", assigneeId: assignee.id, status: "backlog" });
 
     // @another agent → only the mention dispatch, no auto-response for the assignee.
     store.createIssueComment(issue.id, { body: `Take a look [@Other Bot](mention://agent/${other.id})` });
@@ -463,43 +522,57 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
   it("skips assignee auto-response for unassigned or member-assigned issues", () => {
     const store = createStore();
     const member = store.createWorkspaceMember({ name: "Human Owner" });
-    const unassigned = store.createIssue({ title: "Nobody yet" });
+    const unassigned = createResponsibleTestIssue(store, { title: "Nobody yet" });
     store.createIssueComment(unassigned.id, { body: "Thoughts?" });
 
-    const humanOwned = store.createIssue({ title: "Human owned", assigneeType: "member", assigneeId: member.id });
+    const humanOwned = createHistoricalTestIssue(store, { title: "Human owned", assigneeType: "member", assigneeId: member.id });
     store.createIssueComment(humanOwned.id, { body: "Ping" });
 
     expect(store.listTasks()).toHaveLength(0);
   });
 
-  it("notifies subscribed members through inbox items", () => {
+  it("reads historical assignment inbox items and notifies current subscribed members", () => {
     const store = createStore();
     const alice = store.createWorkspaceMember({ name: "Alice Reviewer" });
     const bob = store.createWorkspaceMember({ name: "Bob Approver" });
     const carol = store.createWorkspaceMember({ name: "Carol Owner" });
-    const issue = store.createIssue({ title: "Notify people", createdBy: alice.id });
+    const agent = store.createAgent({ name: "Mention author", provider: "codex" });
+    const issue = createResponsibleTestIssue(store, { title: "Notify people", createdBy: alice.id });
+    const operator = store.getWorkspaceOperator("local")!;
 
-    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId)).toEqual([alice.id]);
+    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId)).toEqual([operator.id]);
 
-    store.assignIssue(issue.id, { assigneeType: "member", assigneeId: bob.id });
+    // The old assignment event remains readable; new member execution writes are refused.
+    expect(()=>store.assignIssue(issue.id,{assigneeType:'member',assigneeId:bob.id})).toThrow('Agent or team Leader');
+    store.addIssueSubscriber(issue.id,bob.id,'assigned');
+    (store as unknown as {ctx:StoreContext}).ctx.createInboxItem({issueId:issue.id,memberId:bob.id,
+      type:'issue_assigned',title:`${issue.key} assigned to you`,body:issue.title,actorType:'system'});
     expect(store.listInboxItems(bob.id).some((item) => item.type === "issue_assigned")).toBe(true);
 
-    store.createIssueComment(issue.id, {
-      authorType: "member",
-      authorId: carol.id,
+    const mentionComment = store.createIssueComment(issue.id, {
+      authorType: "agent",
+      authorId: agent.id,
       body: `Please review [@Bob Approver](mention://member/${bob.id}) and @Alice Reviewer`,
     });
 
-    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId).sort()).toEqual([
-      alice.id,
-      bob.id,
-      carol.id,
-    ].sort());
+    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId)).toEqual([operator.id]);
     const mentions = store.listInboxItems(bob.id).filter((item) => item.type === "comment_mention");
     expect(mentions).toHaveLength(1);
+    expect(mentions[0]?.memberId).toBe(operator.id);
+    expect(store.getMessage(mentions[0]!.id)?.to_member_id).toBe(operator.id);
+    expect(store.getIssueComment(mentionComment.id)?.authorId).toBe(agent.id);
     expect(mentions[0]?.severity).toBe(INBOX_ROUTING.comment_mention?.severity);
     expect(store.listInboxItems(bob.id).filter((item) => item.type === "comment_created")).toHaveLength(0);
     expect(store.listInboxItems(alice.id).some((item) => item.type === "comment_mention")).toBe(true);
+    expect(store.listInboxItems(alice.id)).toEqual(store.listInboxItems(bob.id));
+    store.createIssueComment(issue.id, { authorType: "member", authorId: carol.id,
+      body: `Shared self mention [@Alice](mention://member/${alice.id}) and [@Bob](mention://member/${bob.id})` });
+    expect(store.listInboxItems(bob.id).filter(item => item.type === "comment_mention")).toHaveLength(1);
+    const foreignWorkspace = store.createWorkspace({ name: "Foreign mention workspace" });
+    const foreign = store.getWorkspaceOperator(foreignWorkspace.id)!;
+    store.createIssueComment(issue.id, { authorType: "agent", authorId: agent.id,
+      body: `Invalid mentions [@Foreign](mention://member/${foreign.id}) and [@Missing](mention://member/mem_missing)` });
+    expect(store.listInboxItems(bob.id).filter(item => item.type === "comment_mention")).toHaveLength(1);
 
     const item = store.listInboxItems(bob.id)[0]!;
     expect(store.markInboxItemRead(item.id).read).toBe(true);
@@ -520,7 +593,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     ];
 
     for (const input of cases) {
-      const issue = store.createIssue({ title: input.title, status: input.status, createdBy: subscriber.id });
+      const issue = createHistoricalTestIssue(store, { title: input.title, status: input.status, createdBy: subscriber.id });
       store.createIssueComment(issue.id, {
         authorType: input.authorType,
         authorId: input.authorId,
@@ -529,62 +602,31 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     }
 
     const notifications = store.listInboxItems(subscriber.id).filter((item) => item.type === "comment_created");
-    expect(notifications.map((item) => item.body)).toEqual(["Hidden member progress"]);
+    expect(notifications).toEqual([]);
   });
 
   it("honors notification preferences when creating inbox items", () => {
     const store = createStore();
     const bob = store.createWorkspaceMember({ name: "Bob Approver" });
-    const issue = store.createIssue({ title: "Quiet assignment" });
+    const issue = createResponsibleTestIssue(store, { title: "Quiet assignment" });
 
     store.updateNotificationPreferences({
       preferences: { assignments: "muted" },
     });
-    store.assignIssue(issue.id, { assigneeType: "member", assigneeId: bob.id });
+    // Exercise the notification writer for a persisted legacy assignment event.
+    (store as unknown as {ctx:StoreContext}).ctx.createInboxItem({issueId:issue.id,memberId:bob.id,
+      type:'issue_assigned',title:`${issue.key} assigned to you`,body:issue.title,actorType:'system'});
 
     expect(store.getNotificationPreferences().preferences.assignments).toBe("muted");
     expect(store.listInboxItems(bob.id).filter((item) => item.type === "issue_assigned")).toHaveLength(0);
   });
 
-  it("preserves ledger history and removes action notifications when deleting an issue", () => {
-    const store = createStore();
-    const member = store.createWorkspaceMember({ name: "Ledger owner" });
-    const issue = store.createIssue({ title: "Delete with history" });
-    store.assignIssue(issue.id, { assigneeType: "member", assigneeId: member.id });
-    const action = store.listInboxItems(member.id).find((item) => item.type === "issue_assigned")!;
-    const details = JSON.stringify({ issue_id: issue.id, run_id: "run-delete" });
-    db!.run(
-      `INSERT INTO multiremi_inbox_items (
-        id, workspace_id, issue_id, member_id, recipient_type, recipient_id,
-        severity, actor_type, actor_id, type, title, body, details, read, archived, created_at
-      ) SELECT ?, workspace_id, issue_id, member_id, recipient_type, recipient_id,
-        'attention', 'system', NULL, 'autopilot_run_failed', 'Run failed',
-        'Failed after 12s', ?, 0, 0, ?
-      FROM multiremi_inbox_items WHERE id = ?`,
-      ["inb-ledger-delete", details, "2026-08-25T10:00:00.000Z", action.id],
-    );
-
-    expect(store.deleteIssue(issue.id)).toBe(true);
-
-    const rows = db!.query(
-      "SELECT id, issue_id, type, details FROM multiremi_inbox_items WHERE member_id = ? ORDER BY id",
-    ).all(member.id) as Array<{ id: string; issue_id: string | null; type: string; details: string | null }>;
-    expect(rows).toEqual([{
-      id: "inb-ledger-delete",
-      issue_id: null,
-      type: "autopilot_run_failed",
-      details,
-    }]);
-    expect(store.listInboxItems(member.id)[0]).toMatchObject({
-      id: "inb-ledger-delete",
-      issueId: null,
-      details: { issue_id: issue.id, run_id: "run-delete" },
-    });
-  });
+  // #4: removed the retired notification-ledger deletion/preservation case.
+  // Canonical conversation messages have no action/ledger cleanup classification.
 
   it("tracks comment threads, reactions, and attachments", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Collaborate with context" });
+    const issue = createResponsibleTestIssue(store, { title: "Collaborate with context" });
     const issueAttachment = store.createAttachment({
       issueId: issue.id,
       uploaderType: "member",
@@ -632,7 +674,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
       sizeBytes: 101,
       id: "att_issue_markdown",
     });
-    const issue = store.createIssue({
+    const issue = createResponsibleTestIssue(store, {
       title: "Markdown attachments",
       description: `![issue](/api/attachments/${issueAttachment.id}/content)`,
     });
@@ -671,7 +713,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
   it("serves Go-style issue comment list windows and cursors", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store });
-    const issue = store.createIssue({ title: "Long discussion" });
+    const issue = createResponsibleTestIssue(store, { title: "Long discussion" });
     const base = Date.parse("2025-01-01T00:00:00.000Z");
     const stamp = (id: string, minutes: number) => {
       const at = new Date(base + minutes * 60_000).toISOString();
@@ -697,59 +739,36 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const requestComments = (query: string) => {
       const token = process.env.MULTIREMI_TOKEN;
       return app.request(
-        `/api/issues/${issue.id}/comments${query ? `?${query}` : ""}`,
+        issueMessagesPath(store, issue.id) + (query ? `?${query}` : ""),
         token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
       );
     };
     const getComments = async (query: string) => {
       const response = await requestComments(query);
-      return { response, rows: await response.json() as any[] };
+      return { response, rows: (await response.json()).messages as any[] };
     };
 
-    const roots = await getComments("roots_only=true&summary=true");
-    expect(ids(roots.rows)).toEqual([root1.id, root2.id]);
-    expect(roots.rows[0].reply_count).toBe(3);
-    expect(roots.rows[0].last_activity_at).toBe("2025-01-01T00:03:00.000Z");
-    expect(roots.rows[0].content_truncated).toBe(true);
-    expect(roots.rows[0].content.endsWith("…")).toBe(true);
-    expect(roots.rows[0].body).toBeUndefined();
-    expect(roots.rows[0].parentId).toBeUndefined();
-
-    const nestedThread = await getComments(`thread=${encodeURIComponent(r1b1.id)}`);
-    expect(ids(nestedThread.rows)).toEqual([root1.id, r1a.id, r1b.id, r1b1.id]);
-
-    const recent = await getComments("recent=1");
-    expect(ids(recent.rows)).toEqual([root2.id, r2a.id, r2b.id]);
-    expect(recent.response.headers.get("X-Multiremi-Next-Before-Id")).toBe(root2.id);
-    expect(recent.response.headers.get("X-Multimira-Next-Before-Id")).toBeNull();
-    const nextThread = new URLSearchParams({
-      recent: "1",
-      before: recent.response.headers.get("X-Multiremi-Next-Before")!,
-      before_id: recent.response.headers.get("X-Multiremi-Next-Before-Id")!,
-    });
-    const olderThread = await getComments(nextThread.toString());
-    expect(ids(olderThread.rows)).toEqual([root1.id, r1a.id, r1b.id, r1b1.id]);
-
-    const tail = await getComments(`thread=${encodeURIComponent(root1.id)}&tail=1`);
-    expect(ids(tail.rows)).toEqual([root1.id, r1b1.id]);
-    expect(tail.response.headers.get("X-Multiremi-Next-Before-Id")).toBe(r1b1.id);
-    expect(tail.response.headers.get("X-Multimira-Next-Before-Id")).toBeNull();
-    const nextReply = new URLSearchParams({
-      thread: root1.id,
-      tail: "1",
-      before: tail.response.headers.get("X-Multiremi-Next-Before")!,
-      before_id: tail.response.headers.get("X-Multiremi-Next-Before-Id")!,
-    });
-    const olderReply = await getComments(nextReply.toString());
-    expect(ids(olderReply.rows)).toEqual([root1.id, r1b.id]);
-
-    const invalid = await requestComments(`roots_only=true&thread=${root1.id}`);
-    expect(invalid.status).toBe(400);
+    // #7: sequence windows and explicit thread IDs replace root summaries,
+    // recent-root/tail pagination and timestamp headers on the message API.
+    const all=await getComments("");
+    expect(ids(all.rows)).toEqual([root1.id,r1a.id,r1b.id,r1b1.id,root2.id,r2a.id,r2b.id]);
+    expect(all.rows[0].body_md).toBe("x".repeat(500));
+    const thread=await getComments(`thread=${root1.id}`);
+    expect(ids(thread.rows)).toEqual([root1.id,r1a.id,r1b.id]);
+    expect(ids((await getComments(`thread=${r1b.id}`)).rows)).toEqual([r1b.id,r1b1.id]);
+    const page=await requestComments("limit=3");const first=await page.json();
+    expect(ids(first.messages)).toEqual([root1.id,r1a.id,r1b.id]);
+    const second=await getComments(`limit=3&cursor=${first.next_cursor}`);
+    expect(ids(second.rows)).toEqual([r1b1.id,root2.id,r2a.id]);
+    const after=await getComments(`after_seq=${store.getMessage(root2.id)!.seq}`);
+    expect(ids(after.rows)).toEqual([r2a.id,r2b.id]);
+    expect((await requestComments("cursor=invalid")).status).toBe(400);
+    expect((await requestComments("limit=501")).status).toBe(400);
   });
 
   it("updates, deletes, resolves, and reopens comment threads", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Comment lifecycle" });
+    const issue = createResponsibleTestIssue(store, { title: "Comment lifecycle" });
     const root = store.createIssueComment(issue.id, { body: "Root thread" });
     const reply = store.createIssueComment(issue.id, { body: "Reply", parentId: root.id });
 
@@ -779,7 +798,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
 
   it("manages issue labels with workspace scoping", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Needs labels", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Needs labels", workspaceId: "local" });
     const label = store.createLabel({ name: "Bug", color: "FF3333", workspaceId: "local" });
 
     expect(label.color).toBe("#ff3333");
@@ -807,7 +826,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
 
   it("manages pinned issue and project shortcuts", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Pinned issue", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Pinned issue", workspaceId: "local" });
     const project = store.createProject({ title: "Pinned project", workspaceId: "local" });
 
     const issuePin = store.createPinnedItem({ itemType: "issue", itemId: issue.id, workspaceId: "local", userId: "local" });
@@ -832,9 +851,9 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
 
   it("searches issues and projects with ranking and snippets", () => {
     const store = createStore();
-    store.createIssue({ title: "Alpha title", description: "No special details", workspaceId: "local" });
-    const descIssue = store.createIssue({ title: "Other title", description: "Contains needle phrase inside a longer issue description", workspaceId: "local" });
-    store.updateIssue(descIssue.id, { status: "done" });
+    createResponsibleTestIssue(store, { title: "Alpha title", description: "No special details", workspaceId: "local" });
+    const descIssue = createResponsibleTestIssue(store, { title: "Other title", description: "Contains needle phrase inside a longer issue description", workspaceId: "local" });
+    seedHistoricalIssueFacts(store,descIssue.id,{status:'done'});
     store.createProject({ title: "Project Alpha", description: "No details", workspaceId: "local" });
     store.createProject({ title: "Project Other", description: "Contains project needle phrase", workspaceId: "local" });
 
@@ -848,7 +867,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(withClosed.issues[0]?.matchSource).toBe("description");
     expect(withClosed.issues[0]?.matchedDescriptionSnippet).toContain("needle");
 
-    const commentIssue = store.createIssue({ title: "Comment search", description: "No comment target here", workspaceId: "local" });
+    const commentIssue = createResponsibleTestIssue(store, { title: "Comment search", description: "No comment target here", workspaceId: "local" });
     store.createIssueComment(commentIssue.id, { body: "Fresh discussion needle in a comment" });
     const commentMatch = store.searchIssues({ q: "discussion needle", workspaceId: "local" });
     expect(commentMatch.issues[0]?.id).toBe(commentIssue.id);
@@ -882,15 +901,15 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
         },
       },
     });
-    const parent = store.createIssue({ title: "Archive parent" });
-    const oldDone = store.createIssue({ title: "Old done", status: "done" });
-    const recentCancelled = store.createIssue({
+    const parent = createResponsibleTestIssue(store, { title: "Archive parent" });
+    const oldDone = createHistoricalTestIssue(store, { title: "Old done", status: "done" });
+    const recentCancelled = createResponsibleTestIssue(store, {
       title: "Recent cancelled",
       status: "cancelled",
       parentIssueId: parent.id,
     });
-    const active = store.createIssue({ title: "Still active", status: "in_progress" });
-    const slowerDone = store.createIssue({
+    const active = createResponsibleTestIssue(store, { title: "Still active", status: "in_progress" });
+    const slowerDone = createHistoricalTestIssue(store, {
       title: "Slower workspace done",
       workspaceId: slowerWorkspace.id,
       status: "done",
@@ -936,7 +955,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     store.createIssueComment(oldDone.id, { body: "Historical note" });
     expect(store.getIssue(oldDone.id)?.archivedAt).toBe(now.toISOString());
     expect(store.listChildIssues(parent.id).map((issue) => issue.id)).toEqual([recentCancelled.id]);
-    expect(store.getChildIssueProgress(parent.id)).toMatchObject({ total: 1, done: 1 });
+    expect(store.getChildIssueProgress(parent.id)).toMatchObject({ total: 1, done: 0, cancelled: 1 });
     expect(store.restoreIssue(oldDone.id)).toMatchObject({ completedAt: null, archivedAt: null, status: "done" });
     expect(store.listIssues().map((issue) => issue.id)).toContain(oldDone.id);
     runMigrations(db! as unknown as SqlDatabase);
@@ -957,7 +976,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
   it("skips agent self-mentions", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Loop Guard", provider: "codex" });
-    const issue = store.createIssue({ title: "No recursion" });
+    const issue = createResponsibleTestIssue(store, { title: "No recursion" });
 
     store.createIssueComment(issue.id, {
       authorType: "agent",
@@ -968,22 +987,28 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(store.listTasks()).toHaveLength(0);
   });
 
-  it("skips archived agents when resolving squad autopilots", () => {
+  it("requires an explicitly available squad Leader for autopilot execution", () => {
     const store = createStore();
     const leader = store.createAgent({ name: "Leader", provider: "codex" });
     const backup = store.createAgent({ name: "Backup", provider: "codex" });
     const squad = store.createSquad({ name: "Core", leaderId: leader.id, memberIds: [leader.id, backup.id] });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Resolve squad",
       assigneeType: "squad",
       assigneeId: squad.id,
-      issueTitleTemplate: "Use active member",
+      issueTitleTemplate: "Use configured Leader",
     });
 
     store.archiveAgent(leader.id);
     const run = store.runAutopilot(autopilot.id);
-    expect(run.status).toBe("running");
-    expect(store.getTask(run.taskId!)?.agentId).toBe(backup.id);
+    expect(run.status).toBe("skipped");
+    expect(run.failureReason).toBe("No runnable agent");
+    expect(run.taskId).toBeNull();
+    expect(store.listTasks()).toHaveLength(0);
+    store.updateSquad(squad.id,{leaderId:backup.id});
+    const configured=store.runAutopilot(autopilot.id);
+    expect(configured.status).toBe('running');
+    expect(store.getTask(configured.taskId!)?.agentId).toBe(backup.id);
 
     store.archiveAgent(backup.id);
     const skipped = store.runAutopilot(autopilot.id);

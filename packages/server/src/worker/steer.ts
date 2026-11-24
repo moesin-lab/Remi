@@ -1,9 +1,10 @@
-// Mid-run steering support for the task worker: a per-run feed that polls the
-// server for unconsumed steer messages, the injection prompt the run loop
+// Mid-run steering support for the task worker: a per-run feed of pushed
+// unconsumed steer messages, the injection prompt the run loop
 // sends into the live provider session, and multi-turn usage accumulation.
 import type { MultiremiTaskSteerMessage, TaskUsageEntry } from "@multiremi/contracts/types.js";
 import { materializeChatAttachments } from "@daemon/agent-runtime/workspace/chat-attachments.js";
-import { formatPromptAttachment } from "@daemon/agent-runtime/prompts/ephemeral.js";
+import { splitProjectedInput } from "@multiremi/contracts/session-input.js";
+import { buildSteerInput, steerInputText } from "@daemon/agent-runtime/prompts/turn-input.js";
 
 export const DEFAULT_STEER_POLL_MS = 2500;
 export const DEFAULT_FORCE_ANSWER_GRACE_MS = 3 * 60 * 1000;
@@ -31,45 +32,41 @@ export async function materializeTaskSteerAttachments(
 }
 
 export interface TaskSteerSource {
-  listPendingTaskSteerMessages(taskId: string): Promise<MultiremiTaskSteerMessage[]>;
+  pendingTaskSteerMessages(taskId: string): MultiremiTaskSteerMessage[];
+  subscribeTaskSteerMessages(taskId: string, listener: (message: MultiremiTaskSteerMessage) => void): () => void;
 }
 
 /**
- * Polls the server for unconsumed steer messages during one task run.
+ * Receives unconsumed steer messages during one task run.
  *
  * The run loop drains arrivals with {@link take} between provider turns and
- * registers an interrupt callback while a turn is streaming so a mid-turn
- * steer can soft-cancel the turn (ACP `session/cancel`) and be injected as
- * the next prompt on the same provider session. The feed only observes —
+ * registers an interrupt callback while a turn is streaming. With native
+ * steering the callback kicks the `SteerPump`, which takes batches into the
+ * running prompt and {@link requeue}s any it could not inject; otherwise a
+ * mid-turn steer soft-cancels the turn (ACP `session/cancel`) and is injected
+ * as the next prompt on the same provider session. The feed only observes —
  * marking messages consumed stays with the run loop, after injection.
  */
 export class TaskSteerFeed {
   private queue: MultiremiTaskSteerMessage[] = [];
   private seen = new Set<string>();
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private fetching = false;
+  private unsubscribe: (() => void) | null = null;
   private interrupt: (() => void) | null = null;
 
   constructor(
     private readonly source: TaskSteerSource,
     private readonly taskId: string,
-    private readonly pollMs: number = DEFAULT_STEER_POLL_MS,
-    private readonly onError?: (err: unknown) => void,
   ) {}
 
   start(): void {
-    if (this.timer) return;
-    // Poll immediately: a steer submitted before the run reached this point
-    // must not wait a full interval (or be missed entirely by a short run).
-    void this.poll();
-    this.timer = setInterval(() => {
-      void this.poll();
-    }, Math.max(250, this.pollMs));
+    if (this.unsubscribe) return;
+    this.unsubscribe = this.source.subscribeTaskSteerMessages(this.taskId, message => this.receive(message));
+    for (const message of this.source.pendingTaskSteerMessages(this.taskId)) this.receive(message);
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     this.interrupt = null;
   }
 
@@ -89,9 +86,20 @@ export class TaskSteerFeed {
   }
 
   /**
+   * Put a batch the native steer pump took back at the front, in order, without
+   * firing the interrupt: the pump decides how its own batch falls back
+   * (ADR 0020), and the run loop's next {@link take} re-prompts it.
+   */
+  requeue(messages: MultiremiTaskSteerMessage[]): void {
+    if (!messages.length) return;
+    const queued = new Set(this.queue.map((message) => message.id));
+    this.queue.unshift(...messages.filter((message) => !queued.has(message.id)));
+  }
+
+  /**
    * Mark ids handled outside the feed (the run loop's authoritative fetch
    * observed and processed them directly). Pins them in `seen` and drops any
-   * queued copies, so a poll that was already in flight when the ids were
+   * queued copies, so a replay that arrives after the ids were
    * handled cannot re-enqueue them — a stale duplicate in the queue would
    * fire the next turn's interrupt and cancel it for nothing.
    */
@@ -102,66 +110,46 @@ export class TaskSteerFeed {
     if (this.queue.length) this.queue = this.queue.filter((m) => !handled.has(m.id));
   }
 
+  /** The queued messages, oldest first, without taking them. */
+  peek(): readonly MultiremiTaskSteerMessage[] {
+    return this.queue;
+  }
+
   get hasPending(): boolean {
     return this.queue.length > 0;
   }
 
-  private async poll(): Promise<void> {
-    if (this.fetching) return;
-    this.fetching = true;
-    try {
-      const messages = await this.source.listPendingTaskSteerMessages(this.taskId);
-      let arrived = false;
-      for (const message of messages) {
-        if (this.seen.has(message.id)) continue;
-        this.seen.add(message.id);
-        this.queue.push(message);
-        arrived = true;
-      }
-      if (arrived) this.interrupt?.();
-    } catch (err) {
-      this.onError?.(err);
-    } finally {
-      this.fetching = false;
-    }
+  private receive(message: MultiremiTaskSteerMessage): void {
+    if (this.seen.has(message.id)) return;
+    this.seen.add(message.id);
+    this.queue.push(message);
+    this.interrupt?.();
   }
+}
+
+/** A steer message's text as its injection gave it to the agent: the range record never shows. */
+export function steerMessageText(content: string): string {
+  return steerInputText(content);
 }
 
 /**
  * The prompt injected into the live provider session for a batch of steer
- * messages. The session keeps its full transcript, so the wrapper only has to
- * reframe: apply the user's mid-run directive and keep going — or, for
- * force-answer, stop and deliver.
+ * messages (ADR 0023): the new messages themselves, labelled as the turn input
+ * labels them, with the unread sentence when their range is not complete, or
+ * the wrap-up notice for force-answer.
  */
-export function buildSteerInjectionPrompt(messages: PreparedTaskSteerMessage[]): string {
-  const steers = messages.filter((m) => m.kind !== "force_answer");
-  const force = messages.filter((m) => m.kind === "force_answer");
-  const parts: string[] = [];
-  if (steers.length) {
-    parts.push(
-      "[Mid-run user steering] The user sent new instructions while this task was running:",
-      ...steers.map((m) => [
-        `- ${m.content}`,
-        ...((m.localAttachments ?? m.attachments)?.length
-          ? ["Attachments:", ...(m.localAttachments ?? m.attachments)!.map(formatPromptAttachment)]
-          : []),
-      ].join("\n")),
-    );
-  }
-  if (force.length) {
-    const notes = force.map((m) => m.content.trim()).filter(Boolean);
-    parts.push(
-      "[Deliver now] The user asked for the result immediately. Stop exploring and stop making new changes. "
-        + "Based on the work completed so far, produce your best final conclusion and wrap up the task now.",
-      ...(notes.length ? notes.map((note) => `- ${note}`) : []),
-    );
-  }
-  parts.push(
-    force.length
-      ? "Close out directly: summarize what was done, state your conclusion, and finish."
-      : "Incorporate these instructions and continue the task. Keep and build on the work already completed.",
-  );
-  return parts.join("\n\n");
+/** Keep a range record first so adding identity never bypasses body-read checks. */
+export function withSteerIdentity(content: string, id: string, notice = ""): string {
+  // Wrap-up controls recover through turn.wrap_up, not user-input receipts.
+  if (!/^msg_[A-Za-z0-9_-]+$/.test(id)) return content;
+  const label = `${notice}[Remi steer id: ${id}]\n`;
+  const projected = splitProjectedInput(content);
+  const newline = content.indexOf("\n");
+  return projected.range && newline >= 0 ? content.slice(0, newline + 1) + label + content.slice(newline + 1) : label + content;
+}
+
+export function buildSteerInjectionPrompt(messages: PreparedTaskSteerMessage[], options: { agentId?: string | null; alwaysLabel?: boolean; provider?: string | null } = {}): string {
+  return buildSteerInput(messages, options);
 }
 
 /** Sum usage across turns per provider+model (one run may span several provider turns after steering). */

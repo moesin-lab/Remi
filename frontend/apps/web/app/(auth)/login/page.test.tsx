@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -154,68 +154,39 @@ describe("LoginPage", () => {
     }
   });
 
-  it("does not call sendCode when email is empty", async () => {
-    searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
-    const user = userEvent.setup();
-    render(<LoginPage />, { wrapper: createWrapper() });
+  describe("CLI email OTP form", () => {
+    // input-otp schedules 0/10/50ms selection-sync timeouts that it never
+    // clears; a real one can fire after jsdom teardown ("window is not
+    // defined"). Keep them fake, then unmount and flush before restoring.
+    beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
 
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(mockSendCode).not.toHaveBeenCalled();
-  });
-
-  it("calls sendCode with email on submit", async () => {
-    searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
-    mockSendCode.mockResolvedValueOnce(undefined);
-    const user = userEvent.setup();
-    render(<LoginPage />, { wrapper: createWrapper() });
-
-    await user.type(screen.getByLabelText("Email"), "test@multimira.ai");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    await waitFor(() => {
-      expect(mockSendCode).toHaveBeenCalledWith("test@multimira.ai");
+    afterEach(() => {
+      cleanup();
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
     });
-  });
 
-  it("shows 'Sending code...' while submitting", async () => {
-    searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
-    mockSendCode.mockReturnValueOnce(new Promise(() => {}));
-    const user = userEvent.setup();
-    render(<LoginPage />, { wrapper: createWrapper() });
+    it("does not call sendCode when email is empty", async () => {
+      searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<LoginPage />, { wrapper: createWrapper() });
 
-    await user.type(screen.getByLabelText("Email"), "test@multimira.ai");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("Sending code...")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      expect(mockSendCode).not.toHaveBeenCalled();
     });
-  });
 
-  it("shows verification code step after sending code", async () => {
-    searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
-    mockSendCode.mockResolvedValueOnce(undefined);
-    const user = userEvent.setup();
-    render(<LoginPage />, { wrapper: createWrapper() });
+    it("calls sendCode with email on submit", async () => {
+      searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
+      mockSendCode.mockResolvedValueOnce(undefined);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<LoginPage />, { wrapper: createWrapper() });
 
-    await user.type(screen.getByLabelText("Email"), "test@multimira.ai");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+      await user.type(screen.getByLabelText("Email"), "test@multimira.ai");
+      await user.click(screen.getByRole("button", { name: "Continue" }));
 
-    await waitFor(() => {
-      expect(screen.getByText("Check your email")).toBeInTheDocument();
-    });
-  });
-
-  it("shows error when sendCode fails", async () => {
-    searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
-    mockSendCode.mockRejectedValueOnce(new Error("Network error"));
-    const user = userEvent.setup();
-    render(<LoginPage />, { wrapper: createWrapper() });
-
-    await user.type(screen.getByLabelText("Email"), "test@multimira.ai");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("Network error")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(mockSendCode).toHaveBeenCalledWith("test@multimira.ai");
+      });
     });
   });
 

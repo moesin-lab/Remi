@@ -7,6 +7,7 @@ import type { Workspace, MemberWithUser, Invitation } from "./workspace";
 import type { Project } from "./project";
 import type { ProjectDoc } from "./project-doc";
 import type { Label } from "./label";
+import type { MultiremiIssueDecision } from "@multiremi/contracts";
 
 // WebSocket event types (matching Go server protocol/events.go)
 export type WSEventType =
@@ -14,6 +15,8 @@ export type WSEventType =
   | "issue:created"
   | "issue:updated"
   | "issue:deleted"
+  | "decision:created"
+  | "decision:updated"
   | "comment:created"
   | "comment:updated"
   | "comment:deleted"
@@ -42,9 +45,9 @@ export type WSEventType =
   | "task:running"
   | "task:waiting_local_directory"
   | "task:progress"
+  | "task:subagents"
   | "task:completed"
   | "task:failed"
-  | "task:message"
   | "task:cancelled"
   | "inbox:new"
   | "inbox:read"
@@ -56,6 +59,7 @@ export type WSEventType =
   | "member:added"
   | "member:updated"
   | "member:removed"
+  | "daemon:maintenance_changed"
   | "daemon:heartbeat"
   | "daemon:register"
   | "daemon:retired"
@@ -69,12 +73,12 @@ export type WSEventType =
   | "reaction:removed"
   | "issue_reaction:added"
   | "issue_reaction:removed"
-  | "chat:message"
   | "chat:done"
   | "chat:session_read"
   | "chat:session_deleted"
   | "chat:session_updated"
   | "chat:queue_updated"
+  | "chat:background_tasks"
   | "project:created"
   | "project:updated"
   | "project:deleted"
@@ -118,6 +122,11 @@ export interface IssueDeletedPayload {
   issue_id: string;
 }
 
+export interface IssueDecisionChangedPayload {
+  issue_id: string;
+  decision: MultiremiIssueDecision;
+}
+
 export interface IssueLabelsChangedPayload {
   issue_id: string;
   labels: Label[];
@@ -144,9 +153,7 @@ export interface AgentRestoredPayload {
   agent: Agent;
 }
 
-export interface InboxNewPayload {
-  item: InboxItem;
-}
+export type InboxNewPayload = { item: InboxItem; index_only?: false } | { index_only: true; item?: never };
 
 export interface InboxReadPayload {
   item_id: string;
@@ -231,51 +238,37 @@ export interface ActivityCreatedPayload {
   entry: TimelineEntry;
 }
 
-// Canonical snake_case shape after the normalizer runs. The wire delivers this
-// two ways with different casing — browser GET returns the camelCase store
-// object, the WS frame is snake_case — so both are funnelled through
-// normalizeTaskMessage (task-transcript/normalize.ts) before landing here, or
-// pairing/rendering silently breaks (live has tool_call_id, a refetch has
-// toolCallId). `type` stays an open string so a new daemon message kind
-// (usage / plan / …) degrades to a generic row instead of being dropped.
-export type KnownTaskMessageType =
-  | "text"
-  | "thinking"
-  | "tool_use"
-  | "tool_result"
-  | "usage"
-  | "plan"
-  | "steer"
-  | "error"
-  | "permission_request"
-  | "permission_response"
-  | "question_request"
-  | "question_response";
-
-export interface TaskMessagePayload {
-  task_id: string;
-  issue_id: string;
-  chat_session_id?: string;
-  seq: number;
-  type: KnownTaskMessageType | (string & {});
-  tool?: string;
-  content?: string;
-  input?: Record<string, unknown>;
-  output?: string;
-  /** ACP tool call id — pairs tool_use with its tool_result (Batch 2+). */
-  tool_call_id?: string;
-  /** ACP tool status: pending | in_progress | completed | failed (Batch 2+). */
-  status?: string;
-  /** Low-frequency display semantics: title/kind/locations/content_blocks/duration_ms/entries/usage (Batch 2+). */
-  meta?: Record<string, unknown>;
-  /** Server insert time; present on the wire already (GET as createdAt, WS as created_at). */
-  created_at?: string;
-}
-
 export interface TaskProgressPayload {
   task_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   progress_summary?: string | null;
+}
+
+/**
+ * The running-subagent count of a Chat attempt changed (PR 5). The server
+ * sends it only when the count changes; the payload is the task payload plus
+ * `running_subagents`.
+ */
+export interface TaskSubagentsPayload {
+  task_id: string;
+  chat_session_id?: string;
+  running_subagents?: number | null;
+  /** PR 6: the attempt's running background tasks, when the same report carries them. */
+  running_background_tasks?: number | null;
+}
+
+/**
+ * A chat's background tasks changed (PR 6 §7): the session registry's rows
+ * (the shape `GET /api/chat/sessions/:id/background-tasks` answers) and the
+ * running count the session list reports. Sent to the chat's creator.
+ */
+export interface ChatBackgroundTasksPayload {
+  session_id?: string;
+  /** Accepted as well: other chat events name the session this way. */
+  chat_session_id?: string;
+  running?: number | null;
+  rows?: unknown[];
 }
 
 export interface TaskQueuedPayload {
@@ -283,6 +276,7 @@ export interface TaskQueuedPayload {
   agent_id: string;
   issue_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   status: string;
 }
 
@@ -292,6 +286,7 @@ export interface TaskDispatchPayload {
   issue_id: string;
   runtime_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
 }
 
 export interface TaskRunningPayload {
@@ -299,19 +294,23 @@ export interface TaskRunningPayload {
   agent_id: string;
   issue_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   status: string;
 }
 
 // task:waiting_local_directory fires when the daemon dequeues a task but
 // can't immediately acquire the on-disk path lock — another task on this
-// daemon is already executing in the same local_directory. The optional
-// `wait_reason` mirrors the server-side hint (path / holder task id), but
-// is not yet surfaced end-to-end; the UI today only reads the status.
+// daemon is already executing in the same local_directory, or a parked lane of
+// another Chat keeps it for its background tasks (PR 6 §2.8). It fires again
+// when that reason changes. The optional `wait_reason` mirrors the
+// server-side hint (path, holder task id or holder chat); the Chat reads the
+// holder chat from it.
 export interface TaskWaitingLocalDirectoryPayload {
   task_id: string;
   agent_id: string;
   issue_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   status: string;
   wait_reason?: string;
 }
@@ -325,6 +324,7 @@ export interface TaskAwaitingHumanPayload {
   agent_id: string;
   issue_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   status: string;
   wait_reason?: string;
 }
@@ -334,6 +334,7 @@ export interface TaskCompletedPayload {
   agent_id: string;
   issue_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   status: string;
 }
 
@@ -342,6 +343,7 @@ export interface TaskFailedPayload {
   agent_id: string;
   issue_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   status: string;
 }
 
@@ -350,6 +352,7 @@ export interface TaskCancelledPayload {
   agent_id: string;
   issue_id: string;
   chat_session_id?: string;
+  issue_session_id?: string;
   status: string;
 }
 
@@ -474,6 +477,8 @@ export interface WSEventPayloadMap {
   "issue:created": IssueCreatedPayload;
   "issue:updated": IssueUpdatedPayload;
   "issue:deleted": IssueDeletedPayload;
+  "decision:created": IssueDecisionChangedPayload;
+  "decision:updated": IssueDecisionChangedPayload;
   "issue_labels:changed": IssueLabelsChangedPayload;
   "issue_reaction:added": IssueReactionAddedPayload;
   "issue_reaction:removed": IssueReactionRemovedPayload;
@@ -508,9 +513,9 @@ export interface WSEventPayloadMap {
   "task:awaiting_human": TaskAwaitingHumanPayload;
   "task:completed": TaskCompletedPayload;
   "task:failed": TaskFailedPayload;
-  "task:message": TaskMessagePayload;
   "task:cancelled": TaskCancelledPayload;
   "task:progress": TaskProgressPayload;
+  "task:subagents": TaskSubagentsPayload;
   "inbox:new": InboxNewPayload;
   "inbox:read": InboxReadPayload;
   "inbox:archived": InboxArchivedPayload;
@@ -524,12 +529,12 @@ export interface WSEventPayloadMap {
   "subscriber:added": SubscriberAddedPayload;
   "subscriber:removed": SubscriberRemovedPayload;
   "activity:created": ActivityCreatedPayload;
-  "chat:message": ChatMessageEventPayload;
   "chat:done": ChatDonePayload;
   "chat:session_read": ChatSessionReadPayload;
   "chat:session_deleted": ChatSessionDeletedPayload;
   "chat:session_updated": unknown;
   "chat:queue_updated": { chat_session_id: string };
+  "chat:background_tasks": ChatBackgroundTasksPayload;
   "project:created": ProjectCreatedPayload;
   "project:updated": ProjectUpdatedPayload;
   "project:deleted": ProjectDeletedPayload;
@@ -542,6 +547,7 @@ export interface WSEventPayloadMap {
   "invitation:revoked": InvitationRevokedPayload;
   // No formal payload interfaces yet — server emits domain objects clients
   // currently consume as opaque triggers (refetch on receipt).
+  "daemon:maintenance_changed": unknown;
   "daemon:heartbeat": unknown;
   "daemon:register": unknown;
   "daemon:retired": unknown;

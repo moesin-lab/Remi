@@ -1,5 +1,7 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
@@ -17,7 +19,6 @@ import type {
 } from "@multiremi/core/types";
 import { useQuery } from "@tanstack/react-query";
 import { getCoreRowModel, useReactTable } from "@tanstack/react-table";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import {
@@ -39,6 +40,7 @@ import {
 import { useNavigation } from "../../navigation";
 import { EmptyState } from "../../common/empty-state";
 import { PageHeader } from "../../layout/page-header";
+import { useListPerfMarker } from "../../common/use-list-perf-marker";
 import { canEditSkill } from "../hooks/use-can-edit-skill";
 import { readOrigin } from "../lib/origin";
 import { CreateSkillDialog } from "./create-skill-dialog";
@@ -47,7 +49,7 @@ import { useT } from "../../i18n";
 
 type FilterKey = "all" | "used" | "unused" | "mine";
 
-const SCOPE_KEYS: FilterKey[] = ["all", "used", "unused", "mine"];
+const SCOPE_KEYS: FilterKey[] = ["all", "used", "unused"];
 
 // ---------------------------------------------------------------------------
 // Page header bar — uses shared PageHeader so the mobile sidebar trigger and
@@ -178,14 +180,22 @@ export default function SkillsPage() {
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
   const navigation = useNavigation();
-  const currentUserId = useAuthStore((s) => s.user?.id ?? null);
+  const currentUserId = WORKSPACE_OPERATOR_USER_ID;
 
   const {
     data: skills = [],
     isLoading,
     error: listError,
     refetch: refetchList,
+    status: skillsStatus,
+    isPlaceholderData: skillsIsPlaceholderData,
   } = useQuery(skillListOptions(wsId));
+  // MUL-472 item 5: mark the list container as this page's measured viewport and
+  // publish whether the rows came from this round's own response.
+  const perfMarker = useListPerfMarker({
+    status: skillsStatus,
+    isPlaceholderData: skillsIsPlaceholderData,
+  });
   const { data: agents = [], error: agentsError } = useQuery(
     agentListOptions(wsId),
   );
@@ -240,7 +250,6 @@ export default function SkillsPage() {
       }
       if (filter === "used" && !byAssignment(s)) return false;
       if (filter === "unused" && byAssignment(s)) return false;
-      if (filter === "mine" && s.created_by !== currentUserId) return false;
       return true;
     });
   }, [skills, assignments, search, filter, currentUserId]);
@@ -295,7 +304,7 @@ export default function SkillsPage() {
   // --- Loading ---
   if (isLoading) {
     return (
-      <div className="flex flex-1 min-h-0 flex-col">
+      <div className="flex flex-1 min-h-0 flex-col" {...perfMarker}>
         <PageHeaderBar totalCount={0} onCreate={() => openCreate()} onRuntimeImport={() => openCreate("runtime")} />
         <div className="flex flex-1 min-h-0 flex-col gap-4 p-3 sm:p-6">
           <div className="space-y-3 pl-4">
@@ -324,7 +333,7 @@ export default function SkillsPage() {
   // --- List request error ---
   if (listError) {
     return (
-      <div className="flex flex-1 min-h-0 flex-col">
+      <div className="flex flex-1 min-h-0 flex-col" {...perfMarker}>
         <PageHeaderBar totalCount={0} onCreate={() => openCreate()} onRuntimeImport={() => openCreate("runtime")} />
         <EmptyState
           variant="status"
@@ -358,7 +367,7 @@ export default function SkillsPage() {
     !!agentsError || !!membersError || !!runtimesError;
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col">
+    <div className="flex flex-1 min-h-0 flex-col" {...perfMarker}>
       <PageHeaderBar
         totalCount={totalCount}
         onCreate={() => openCreate()}

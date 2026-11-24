@@ -1,5 +1,8 @@
 "use client";
 
+import { useWorkspacePaths } from "@multiremi/core/paths";
+import { AppLink } from "../../navigation";
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDefaultLayout } from "react-resizable-panels";
 import {
@@ -50,6 +53,7 @@ import { useIsMobile } from "@multiremi/ui/hooks/use-mobile";
 import { cn } from "@multiremi/ui/lib/utils";
 import { EmptyState } from "../../common/empty-state";
 import { PageHeader } from "../../layout/page-header";
+import { useListPerfMarker } from "../../common/use-list-perf-marker";
 import { ConnectRemoteDialog } from "./connect-remote-dialog";
 import { CloudRuntimeDialog } from "./cloud-runtime-dialog";
 import { ProviderLogo } from "./provider-logo";
@@ -119,6 +123,8 @@ export function RuntimesPage({
   cloudRuntimeEnabled = false,
 }: RuntimesPageProps = {}) {
   const isLoading = useAuthStore((s) => s.isLoading);
+  // Account identity is only a fallback for recognizing this physical machine.
+  // Workspace access and management use the shared operator independently.
   const currentUserId = useAuthStore((s) => s.user?.id);
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
@@ -148,9 +154,18 @@ export function RuntimesPage({
   });
   const isMobile = useIsMobile();
 
-  const { data: runtimes = [], isLoading: fetching } = useQuery(
-    runtimeListOptions(wsId),
-  );
+  const {
+    data: runtimes = [],
+    isLoading: fetching,
+    status: runtimesStatus,
+    isPlaceholderData: runtimesIsPlaceholderData,
+  } = useQuery(runtimeListOptions(wsId));
+  // MUL-472 item 5: mark the list container as this page's measured viewport and
+  // publish whether the rows came from this round's own response.
+  const perfMarker = useListPerfMarker({
+    status: runtimesStatus,
+    isPlaceholderData: runtimesIsPlaceholderData,
+  });
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: snapshot = [] } = useQuery(agentTaskSnapshotOptions(wsId));
   // The server returns the full fleet to workspace managers and only the
@@ -290,7 +305,7 @@ export function RuntimesPage({
     showConnectDialog || (cloudRuntimeEnabled && showCloudRuntimeDialog);
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col">
+    <div className="flex flex-1 min-h-0 flex-col" {...perfMarker}>
       <PageHeaderBar
         totalCount={totalCount}
         onConnectRemote={() => setShowConnectDialog(true)}
@@ -428,6 +443,7 @@ function PageHeaderBar({
   onRetireMachine?: () => void;
 }) {
   const { t } = useT("runtimes");
+  const paths = useWorkspacePaths();
   return (
     <PageHeader className="justify-between px-5">
       <div className="flex items-center gap-2">
@@ -440,6 +456,7 @@ function PageHeaderBar({
         )}
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+        <AppLink className="text-xs text-primary underline" href={paths.executionGroups()}>{t($ => $.configuration.title)}</AppLink>
         {mobile ? (
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -697,6 +714,8 @@ function MachineRow({
   });
   return (
     <button
+      data-perf-item="machine"
+      data-perf-key={machine.id}
       type="button"
       onClick={onClick}
       className={cn(

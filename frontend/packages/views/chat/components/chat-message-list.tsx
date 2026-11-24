@@ -1,11 +1,15 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { isMemberQuestionReminder, LinkedQuestion, linkedQuestionId, QuestionReplyReference } from "../../common/linked-question";
+import { questionReplyText } from "../../common/question-answer";
+import { useActorName } from "@multiremi/core/workspace/hooks";
+import { useAfterFirstScreen } from "@multiremi/core/platform/use-after-first-screen";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useWorkspaceId } from "@multiremi/core/hooks";
+import { api } from "@multiremi/core/api";
 import { toast } from "sonner";
-import { useQuery } from "@tanstack/react-query";
-import { Virtuoso } from "react-virtuoso";
 import { cn } from "@multiremi/ui/lib/utils";
-import { Skeleton } from "@multiremi/ui/components/ui/skeleton";
 import { Button } from "@multiremi/ui/components/ui/button";
 import {
   Collapsible,
@@ -17,199 +21,425 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from "@multiremi/ui/components/ui/tooltip";
-import { ChevronRight, ChevronDown, Brain, AlertCircle, AlertTriangle, Copy } from "lucide-react";
-import { useScrollFade } from "@multiremi/ui/hooks/use-scroll-fade";
-import { isTaskMessageTaskId, taskMessagesOptions } from "@multiremi/core/chat/queries";
+import { ChevronRight, ChevronDown, AlertCircle, AlertTriangle, CircleSlash, Copy, LoaderCircle, Check, RotateCcw, ScrollText } from "lucide-react";
+import { AttachmentSchema } from "@multiremi/core/api/schemas";
+import type { SessionLogRow } from "@multiremi/core/api/schemas/session-log";
+import type { SessionLogEntry, SessionReplicaPort } from "@multiremi/core/replica";
 import { Markdown } from "@multiremi/views/common/markdown";
+import { SessionLogList } from "../../common/session-log/session-log-list";
+import { isInboxTurn, metadataRecord } from "../../common/session-log/event-summary";
 import { copyText } from "@multiremi/ui/lib/clipboard";
 import { AttachmentList } from "../../issues/components/comment-card";
 import type { AgentAvailability } from "@multiremi/core/agents";
 import type { ChatMessage, ChatPendingTask, TaskFailureReason } from "@multiremi/core/types";
-import type { ChatTimelineItem } from "@multiremi/core/chat";
 import { failureReasonLabel } from "../../agents/components/tabs/task-failure";
-import { toChatTimeline } from "../lib/chat-timeline";
-import { chatMessageMarkdown, isAgentAttachmentMessage } from "../lib/message-attachments";
 import { TaskStatusPill } from "./task-status-pill";
+import { useCachedTurnTraces, useTurnTrace } from "../../common/task-transcript/use-task-trace";
+import { TaskTraceDialog } from "../../common/task-transcript/task-trace-dialog";
 import { formatElapsedMs } from "../../common/format";
-import { splitTimeline, extractCopyText } from "../lib/copy-text";
+import { extractCopyText } from "../lib/copy-text";
+import { finishedFoldHeader, isAwaitingHuman } from "../lib/turn-steps";
+import { isNonterminalTurn, turnOutcomeShown, type TurnLogRow } from "../lib/turn-card";
+import { FinishedTurnSteps, LiveTurnSteps } from "./turn-steps-fold";
+import { useLiveTurnHandoff } from "./use-live-turn-handoff";
+import { SubagentCompletionRows } from "./subagent-completion-row";
+import { ChatRunningStrip } from "./subagent-running-strip";
+import { DoorbellRow } from "./doorbell-row";
+import { doorbellTaskIds, rowDoorbell } from "../lib/background-tasks";
+import { isTraceLateSubagent, type TraceLateSubagent } from "@multiremi/contracts/trace";
 import { useT } from "../../i18n";
+import { clientIdOf, mergeOptimisticChatRows, type OptimisticChatRow } from "../lib/optimistic-log";
+import { CHAT_COLUMN_CLASS } from "../lib/chat-column";
+import { leadingCommandChipMarkdown } from "../lib/leading-command";
+
+/** Bumped when Chat's row layout changes, so cached row heights from the old layout are misses. */
+const CHAT_LAYOUT_VERSION = ":chat-layout-v3";
+/** The shared Chat column; the composer and the rows above it use the same one. */
+const CHAT_CONTENT_CLASS = `${CHAT_COLUMN_CLASS} py-6`;
+/**
+ * An always-visible scrollbar narrows only the list, which would center its
+ * column half a scrollbar left of the composer's. From 800px of list width
+ * (the column is capped there) the list reserves the same gutter on its left
+ * too, so both keep one center line; narrower, the column fills the width and
+ * the scrollbar keeps to the right edge. Overlay scrollbars reserve nothing.
+ */
+const CHAT_LIST_CLASS = "@container/chat-log @min-[800px]/chat-log:[&>[data-session-log-scroll]]:[scrollbar-gutter:stable_both-edges]";
+/**
+ * Message actions stay out of the way until the row is hovered or holds
+ * keyboard focus; devices without hover always show them. Opacity, not
+ * display, so the row keeps its height and the buttons stay tabbable.
+ */
+const REVEAL_ON_ROW = "opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100";
+const COPY_FEEDBACK_MS = 1500;
+
+/** The canonical turn card behind a reply row: the reply owns the turn's outcome. */
+interface TurnCardRef {
+  turnId: string;
+  attemptId: string | null;
+  status: string | null;
+  failureReason: string | null;
+  steps: TurnStepsRef | null;
+  /** Subagents that ended after the reply started (PR 5), from the card; never from the trace. */
+  lateSubagents: TraceLateSubagent[] | null;
+}
+
+/**
+ * A card's `late_subagents` (PR 5 §6.4): well-formed entries only, null when
+ * absent (older cards and servers) or empty.
+ */
+function lateSubagentsOf(metadata: Record<string, unknown> | undefined): TraceLateSubagent[] | null {
+  const value = metadata?.late_subagents;
+  if (!Array.isArray(value)) return null;
+  const late = value.filter(isTraceLateSubagent);
+  return late.length ? late : null;
+}
+
+/**
+ * What a finished turn's steps fold needs from its card, without its trace:
+ * the card counted process items (PR 2; older cards carry no count and get no
+ * fold) and says how long the agent worked.
+ */
+interface TurnStepsRef {
+  attemptId: string;
+  turnId: string;
+  status: string | null;
+  workedMs: number | null;
+  elapsedMs: number | null;
+}
+
+const metadataNumber = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+
+function turnStepsRef(metadata: Record<string, unknown> | undefined, attemptId: string | null | undefined): TurnStepsRef | null {
+  const count = metadataNumber(metadata?.process_item_count);
+  if (!count || !attemptId || typeof metadata?.turn_id !== "string") return null;
+  return {
+    attemptId,
+    turnId: metadata.turn_id,
+    status: typeof metadata.status === "string" ? metadata.status : null,
+    workedMs: metadataNumber(metadata.worked_ms),
+    elapsedMs: metadataNumber(metadata.elapsed_ms),
+  };
+}
+
+/**
+ * Row heights are cached per render version; an open fold is a different
+ * layout. v2: the execution-log button left the fold for the reply's footer.
+ */
+const STEPS_OPEN_VERSION = ":steps-open-v2";
+
+const endedBadly = (status: string | null | undefined): status is "failed" | "cancelled" =>
+  status === "failed" || status === "cancelled";
+
+/**
+ * A terminal Chat turn writes a card row and a separate reply message row
+ * (`final_entry_id`). The card comes first, so showing both would put the
+ * outcome above the reply and repeat a failure. Map each reply to its card.
+ */
+function turnCardsByReply(entries: readonly SessionLogEntry[]): Map<string, TurnCardRef> {
+  const cards = new Map<string, TurnCardRef>();
+  for (const entry of entries) {
+    const row = entry as SessionLogEntry & { task_id?: string | null; metadata?: Record<string, unknown> };
+    const metadata = row.metadata;
+    if (row.kind !== "turn" || typeof metadata?.turn_id !== "string" || typeof metadata.final_entry_id !== "string") continue;
+    cards.set(metadata.final_entry_id, {
+      turnId: metadata.turn_id,
+      attemptId: row.task_id ?? null,
+      status: typeof metadata.status === "string" ? metadata.status : null,
+      failureReason: typeof metadata.failure_reason === "string" ? metadata.failure_reason : null,
+      steps: turnStepsRef(metadata, row.task_id),
+      lateSubagents: lateSubagentsOf(metadata),
+    });
+  }
+  return cards;
+}
 
 // ─── Public component ────────────────────────────────────────────────────
 
 interface ChatMessageListProps {
-  messages: ChatMessage[];
-  /**
-   * Server-authoritative pending-task snapshot. `null` / undefined means
-   * no in-flight task — list renders without StatusPill.
-   */
+  sessionId: string;
+  visible?: boolean;
+  replica: SessionReplicaPort;
+  optimisticRows: readonly OptimisticChatRow[];
   pendingTask: ChatPendingTask | null | undefined;
-  /** Resolved presence; pass `undefined` while loading to keep the pill copy neutral. */
   availability: AgentAvailability | undefined;
-  firstItemIndex?: number;
   hasOlderMessages?: boolean;
   isFetchingOlderMessages?: boolean;
   onLoadOlderMessages?: () => void;
+  onRetrySend?: (clientId: string) => void;
+  initialPositioned?: boolean;
+  /** Another chat of this reader, for a local folder its background tasks hold (`TaskStatusPill`). */
+  resolveChat?: (sessionId: string) => { title: string; open: () => void } | null;
 }
 
 export function ChatMessageList({
-  messages,
+  sessionId,
+  visible = true,
+  replica,
+  optimisticRows,
   pendingTask,
   availability,
-  firstItemIndex = 0,
   hasOlderMessages = false,
   isFetchingOlderMessages = false,
   onLoadOlderMessages,
+  onRetrySend,
+  initialPositioned = false,
+  resolveChat,
 }: ChatMessageListProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [scrollContainerEl, setScrollContainerEl] = useState<HTMLDivElement | null>(null);
-  const [isNearBottom, setIsNearBottom] = useState(true);
-  const setScrollContainerRef = useCallback((node: HTMLDivElement | null) => {
-    scrollRef.current = node;
-    setScrollContainerEl(node);
-  }, []);
-  const fadeStyle = useScrollFade(scrollRef);
   const { t } = useT("chat");
-
+  const namesReady = useAfterFirstScreen();
+  const { getActorName } = useActorName({ enabled: visible && namesReady });
+  const { t: traceT } = useT("agents");
+  const scrollRoot = useRef<HTMLElement | null>(null);
+  const prependAnchor = useRef<{ id: string; top: number } | null>(null);
+  const snapshot = useSyncExternalStore(
+    useCallback(listener => replica.subscribe(sessionId, listener), [replica, sessionId]),
+    useCallback(() => replica.getSnapshot(sessionId), [replica, sessionId]),
+    useCallback(() => replica.getSnapshot(sessionId), [replica, sessionId]),
+  );
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    const root = scrollRoot.current;
+    if (!anchor || !root) return;
+    const row = [...root.querySelectorAll<HTMLElement>('[data-perf-item="message"]')]
+      .find(item => item.dataset.perfKey === anchor.id);
+    if (!row) return;
+    root.scrollTop += row.getBoundingClientRect().top - anchor.top;
+    prependAnchor.current = null;
+  }, [snapshot.entries]);
+  const loadOlder = useCallback(() => {
+    const root = scrollRoot.current;
+    if (root) {
+      const top = root.getBoundingClientRect().top;
+      const row = [...root.querySelectorAll<HTMLElement>('[data-perf-item="message"]')]
+        .find(item => item.getBoundingClientRect().bottom > top);
+      if (row?.dataset.perfKey) prependAnchor.current = { id: row.dataset.perfKey,
+        top: row.getBoundingClientRect().top };
+    }
+    if (visible) onLoadOlderMessages?.();
+  }, [onLoadOlderMessages, visible]);
+  // Which finished turns have their steps open, by row id. Lifted here so the
+  // row's render version tells the height cache open and closed apart.
+  const [openSteps, setOpenSteps] = useState<ReadonlySet<string>>(() => new Set());
+  const setStepsOpen = useCallback((rowId: string, open: boolean) => {
+    setOpenSteps((current) => {
+      if (current.has(rowId) === open) return current;
+      const next = new Set(current);
+      if (open) next.add(rowId); else next.delete(rowId);
+      return next;
+    });
+  }, []);
+  const transformEntries = useCallback((entries: readonly SessionLogEntry[]) => {
+    const replies = new Set(entries.filter(entry => entry.kind === "message"
+      && !(entry as SessionLogEntry & { deleted_at?: string | null }).deleted_at).map(entry => entry.id));
+    return mergeOptimisticChatRows(entries.filter(entry => {
+      const row = entry as SessionLogEntry & { author_type?: string; sender_type?: string; message_kind?: string; deleted_at?: string | null; metadata?: Record<string, unknown>; to_type?: string | null };
+      if (row.seq === 0 || row.deleted_at) return false;
+      // A card whose reply row is loaded adds nothing of its own: the reply
+      // row shows the outcome, its retry and the execution log.
+      if (row.kind === "turn" && typeof row.metadata?.turn_id === "string"
+        && typeof row.metadata.final_entry_id === "string" && replies.has(row.metadata.final_entry_id)) return false;
+      // A Chat Q's member reminders land in its own session, beside the original
+      // Q row, so the Chat never repeats the question for any reader.
+      if (isMemberQuestionReminder(row)) return false;
+      if (row.kind === "message" && (row.message_kind || row.sender_type)) return true;
+      if (metadataRecord(row.metadata).envelope) return false;
+      if (row.kind === "message" && row.author_type === "system" && !row.sender_type) return false;
+      return row.kind === "turn" ? !isInboxTurn(row.body_md) : row.kind === "message";
+    }).map(entry => {
+      // Q rows became one fixed-height summary line; never reserve the old button height.
+      const row = entry as SessionLogEntry & { metadata?: Record<string, unknown> };
+      const question = row.kind === "message" && linkedQuestionId(row.id, row.metadata) ? ":question-line-v1"
+        // A doorbell is one centered line, not a bubble (PR 6).
+        : rowDoorbell(row) ? ":doorbell-v1" : "";
+      // The Chat column, bubble and turn rows changed size, and the execution-log
+      // button moved into each reply's footer row; old cached heights are misses.
+      const steps = openSteps.has(entry.id) ? STEPS_OPEN_VERSION : "";
+      return { ...entry, render_version: `${entry.render_version ?? ""}${question}${CHAT_LAYOUT_VERSION}${steps}` };
+    }), optimisticRows);
+  }, [optimisticRows, openSteps]);
+  const cardsByReply = useMemo(() => turnCardsByReply(snapshot.entries), [snapshot.entries]);
+  // Tasks the loaded conversation already explains with a doorbell line (PR 6).
+  const doorbells = useMemo(() => doorbellTaskIds(snapshot.entries as ReadonlyArray<SessionLogEntry & { sender_type?: string | null; metadata?: unknown }>), [snapshot.entries]);
+  const entryKey = useCallback((entry: SessionLogEntry) => clientIdOf(entry) ?? entry.id, []);
   const pendingTaskId = pendingTask?.task_id ?? null;
-
-  // Once the assistant message for this pending task has landed in the
-  // messages list, AssistantMessage owns its rendering — suppress the live
-  // timeline (and pill) to avoid rendering the same content in two places
-  // during the invalidate → refetch window.
-  //
-  // Attachments the agent pushes mid-run also land as assistant rows carrying
-  // the running task's id; they are not the reply, so they must not retire the
-  // live timeline or the pill while the task is still working.
-  const pendingAlreadyPersisted = !!pendingTaskId && messages.some(
-    (m) => m.role === "assistant" && m.task_id === pendingTaskId
-      && !isAgentAttachmentMessage(m),
-  );
-
-  // Live timeline for the in-flight task. useRealtimeSync keeps this cache
-  // current via setQueryData on task:message events.
+  const pendingTurnId = pendingTask?.turn_id ?? null;
+  const logRows = snapshot.entries as readonly TurnLogRow[];
+  // The running turn gives way once the log shows its outcome: a finished card
+  // with its reply row, a failure notice, or its completed reply row alone (the
+  // card can land seconds later; ChatWindow then reads the pending task again).
+  const pendingAlreadyPersisted = !!pendingTaskId && turnOutcomeShown(logRows, { taskId: pendingTaskId, turnId: pendingTurnId });
   const showLiveTimeline = !!pendingTaskId && !pendingAlreadyPersisted;
-  const canFetchLiveTimeline = isTaskMessageTaskId(pendingTaskId) && !pendingAlreadyPersisted;
-  const { data: liveTaskMessages } = useQuery({
-    ...taskMessagesOptions(pendingTaskId ?? ""),
-    enabled: canFetchLiveTimeline,
-  });
-  const liveTimeline: ChatTimelineItem[] = toChatTimeline(liveTaskMessages ?? []);
-  const hasLive = showLiveTimeline && liveTimeline.length > 0;
-  const showStatusPill = !!pendingTaskId && !pendingAlreadyPersisted && !!pendingTask;
+  // An optimistic pending id has no trace yet; the real id replaces it on dispatch.
+  const liveTraceId = pendingTaskId?.startsWith("optimistic-") ? null : pendingTaskId;
+  const liveTrace = useTurnTrace(liveTraceId, { enabled: visible && showLiveTimeline, live: true, turnId: pendingTask?.turn_id });
+  // The pending task moves on before the turn's rows land: its live view stays,
+  // frozen on its cached trace, until they do (or the handoff times out).
+  const heldTurns = useLiveTurnHandoff(sessionId, showLiveTimeline && liveTraceId ? { taskId: liveTraceId, turnId: pendingTurnId } : null, logRows);
+  const heldTraces = useCachedTurnTraces(heldTurns.map((turn) => turn.taskId));
+  // One keyed list, so a turn moving from live to held keeps its fold as it is.
+  const liveViews = [
+    ...heldTurns.map((turn, index) => ({ key: turn.taskId, trace: heldTraces[index]!, frozen: true })),
+    ...(showLiveTimeline ? [{ key: liveTraceId ?? "pending", trace: liveTrace, frozen: false }] : []),
+  ];
+  // The pill says only what the steps fold cannot: the wait before the trace
+  // has a turn (queued, dispatched, offline, the directory lock, preparation),
+  // a read that failed or a legacy trace (no fold), and a wait on a person.
+  const foldShown = !!liveTrace.turn && liveTrace.read?.format !== "legacy";
+  const waitingOnHuman = pendingTask?.status === "awaiting_human" || isAwaitingHuman(liveTrace.items);
+  const showStatusPill = !!pendingTaskId && !pendingAlreadyPersisted && !!pendingTask && !liveTrace.closed
+    && (!foldShown || waitingOnHuman);
 
-  const totalCount = messages.length + (hasLive || showStatusPill ? 1 : 0);
-  const firstIndex = totalCount > 0 ? firstItemIndex : 0;
-
-  return (
-    <div
-      ref={setScrollContainerRef}
-      data-tab-scroll-root
-      style={fadeStyle}
-      className="flex-1 overflow-y-auto"
-    >
-      {!scrollContainerEl ? (
-        <div className="mx-auto w-full max-w-4xl px-5 pt-4 space-y-3">
-          <ChatMessageSkeleton />
-        </div>
-      ) : (
-      <Virtuoso
-        customScrollParent={scrollContainerEl}
-        data={messages}
-        firstItemIndex={firstIndex}
-        increaseViewportBy={{ top: 400, bottom: 600 }}
-        atBottomThreshold={120}
-        atBottomStateChange={setIsNearBottom}
-        followOutput={() => (!isFetchingOlderMessages && isNearBottom ? "smooth" : false)}
-        startReached={() => {
-          if (hasOlderMessages && !isFetchingOlderMessages) {
-            onLoadOlderMessages?.();
-          }
-        }}
-        computeItemKey={(_, msg) => msg.id}
-        components={{
-          Header: () => (
-            <div className="mx-auto w-full max-w-4xl px-5 pt-4">
-              {isFetchingOlderMessages && (
-                <div className="text-center text-xs text-muted-foreground">{t(($) => $.message_list.loading_older)}</div>
-              )}
-            </div>
-          ),
-          Footer: () => (
-            <div className="mx-auto w-full max-w-4xl px-5 pb-4 space-y-4">
-              {hasLive && (
-                <div className="w-full space-y-1.5">
-                  <TimelineView items={liveTimeline} isStreaming />
-                </div>
-              )}
-              {showStatusPill && pendingTask && (
-                <TaskStatusPill
-                  pendingTask={pendingTask}
-                  taskMessages={liveTaskMessages ?? []}
-                  availability={availability}
-                />
-              )}
-            </div>
-          ),
-        }}
-        itemContent={(_, msg) => (
-          <div className="mx-auto w-full max-w-4xl px-5 py-2">
-            <MessageBubble
-              message={msg}
-              isPending={!!pendingTaskId && msg.task_id === pendingTaskId}
-            />
-          </div>
-        )}
-      />
-      )}
-    </div>
-  );
+  return <SessionLogList sessionId={sessionId} replica={replica} perfScroll="session-log"
+    className={CHAT_LIST_CLASS} contentClassName={CHAT_CONTENT_CLASS} scrollButton="arrow"
+    onScrollRoot={element => { scrollRoot.current = element; }}
+    initialPositioned={initialPositioned} showPendingSkeleton={false}
+    localDataReady={optimisticRows.length > 0}
+    transformEntries={transformEntries}
+    entryKey={entryKey}
+    header={<>
+      {/* Sticky while a subagent of the running turn (PR 5 §6.5) or a background
+        * task of the chat (PR 6 §8.1, with or without a turn) runs. */}
+      <ChatRunningStrip sessionId={sessionId} doorbells={doorbells}
+        items={showLiveTimeline && liveTraceId ? liveTrace.items : undefined}
+        source={showLiveTimeline && liveTraceId ? { sessionId, attemptId: liveTraceId, turnId: pendingTask?.turn_id, live: true } : null} />
+      {/* Empty at the start of the chat, but kept: the row sets the top spacing. */}
+      <div data-chat-earlier-row className="flex h-10 items-center justify-center text-xs text-muted-foreground max-md:h-12">
+        {hasOlderMessages && <button type="button" data-chat-earlier disabled={!visible || isFetchingOlderMessages}
+          onClick={loadOlder} className="h-full hover:text-foreground">
+          {isFetchingOlderMessages ? t(($) => $.message_list.loading_older) : t(($) => $.message_list.expand_older)}
+        </button>}
+      </div>
+    </>}
+    renderEntry={({ entry }) => {
+      const row = entry as SessionLogEntry & {
+        author_type?: string; sender_type?: string; task_id?: string | null; created_at?: string;
+        message_kind?: SessionLogRow["message_kind"];
+        wake_applied?: SessionLogRow["wake_applied"]; wake_reason?: SessionLogRow["wake_reason"];
+        metadata?: Record<string, unknown>;
+      };
+      const isUser = row.kind === "message" && (row.sender_type ?? row.author_type) === "member";
+      const message: ChatMessage = {
+        id: row.id, chat_session_id: sessionId, role: isUser ? "user" : "assistant",
+        content: questionReplyText(isUser ? row.body_md : String(row.metadata?.final_reply_md ?? row.body_md), row.metadata),
+        task_id: row.kind === "turn" ? row.task_id ?? null : null, turn_id: typeof row.metadata?.turn_id === "string" ? row.metadata.turn_id : undefined, created_at: row.created_at ?? "",
+        failure_reason: typeof row.metadata?.failure_reason === "string" ? row.metadata.failure_reason : null,
+          elapsed_ms: typeof row.metadata?.elapsed_ms === "number" ? row.metadata.elapsed_ms : null,
+          attachments: AttachmentSchema.array().safeParse(row.metadata?.attachments).data as ChatMessage["attachments"],
+      };
+      // The doorbell a parked task's end rang (PR 6 §8.1): a line before the
+      // reply it started, never a bubble.
+      const doorbell = rowDoorbell(row);
+      if (doorbell) return <DoorbellRow doorbell={doorbell} sessionId={sessionId}
+        attempt={showLiveTimeline && liveTraceId ? { attemptId: liveTraceId, turnId: pendingTask?.turn_id, live: true } : undefined} />;
+      const clientId = clientIdOf(entry);
+      const local = optimisticRows.find((item) => item.clientId === clientId);
+      const isPush = row.kind === "turn" && isNonterminalTurn(row.metadata);
+      const questionId = row.kind === "message" ? linkedQuestionId(row.id, row.metadata) : null;
+      const turnId = row.kind === "turn" && typeof row.metadata?.turn_id === "string" ? row.metadata.turn_id : null;
+      const turnStatus = turnId && typeof row.metadata?.status === "string" ? row.metadata.status : null;
+      // A reply row carries its turn's outcome; a reply whose card is outside
+      // the window still reaches the log through its own turn id.
+      const card = row.kind === "message" ? cardsByReply.get(row.id) : undefined;
+      const trace = card ? { taskId: card.attemptId ?? card.turnId, turnId: card.turnId }
+        : row.kind === "message" && !isUser && row.message_kind === "reply" && row.task_id ? { taskId: row.task_id, turnId: row.task_id }
+          : null;
+      // A finished turn whose card counted process items folds its steps above
+      // the reply (or the failure notice); older cards have no count and no fold.
+      const stepsRef = card ? card.steps : row.kind === "turn" && !isPush ? turnStepsRef(row.metadata, row.task_id) : null;
+      // A failed or cancelled turn's notice carries its own execution log.
+      const endNotice = !!(card && endedBadly(card.status)) || !!(turnId && endedBadly(turnStatus));
+      // The execution log is never in the fold: the reply's footer row or the
+      // end notice carries it, in one place whether or not there are steps.
+      const stepsFold = stepsRef ? <FinishedTurnSteps attemptId={stepsRef.attemptId} turnId={stepsRef.turnId} sessionId={sessionId}
+        header={finishedFoldHeader(stepsRef)} visible={visible} open={openSteps.has(row.id)}
+        onOpenChange={(open) => setStepsOpen(row.id, open)} /> : null;
+      // Subagents that finished after the reply started: rows under the reply,
+      // read from the card (MUL-472: no trace until the reader opens one).
+      const lateRef = card ? (card.attemptId && card.lateSubagents ? { attemptId: card.attemptId, turnId: card.turnId, late: card.lateSubagents } : null)
+        : row.kind === "turn" && !isPush && row.task_id && turnId ? (() => {
+          const late = lateSubagentsOf(row.metadata);
+          return late ? { attemptId: row.task_id, turnId, late } : null;
+        })() : null;
+      const lateRows = lateRef && !endNotice ? <SubagentCompletionRows late={lateRef.late}
+        source={{ sessionId, attemptId: lateRef.attemptId, turnId: lateRef.turnId, live: false }} /> : null;
+      return <div className="group/message">
+        {questionId ? <LinkedQuestion id={questionId} getActorName={getActorName} /> : null}
+        {card && endedBadly(card.status)
+          ? <div className="space-y-3">{stepsFold}<TurnEndNotice turnId={card.turnId} attemptId={card.attemptId} status={card.status}
+            failureReason={card.failureReason ?? message.failure_reason ?? null} details={message.content} visible={visible} /></div>
+          : turnId && endedBadly(turnStatus)
+            ? <div className="space-y-3">{stepsFold}<TurnEndNotice turnId={turnId} attemptId={row.task_id ?? null} status={turnStatus}
+              failureReason={message.failure_reason ?? null} details={message.content} visible={visible} /></div>
+            : row.kind === "turn" && row.metadata?.final_entry_id
+              // The reply row is not loaded; a finished card has nothing of its own to show.
+              ? null
+              : <MessageBubble message={message} isPending={!!pendingTaskId && row.task_id === pendingTaskId}
+                isPush={isPush} visible={visible} trace={trace} steps={stepsFold} after={lateRows} />}
+        {isUser && <NotWokenHint wakeApplied={row.wake_applied} wakeReason={row.wake_reason} />}
+        {row.kind === "message" && !questionId && <QuestionReplyReference metadata={row.metadata} />}
+        {isUser && local && <div className="flex justify-end"><SendStatus status={local.status}
+          onRetry={() => onRetrySend?.(local.clientId)} /></div>}
+      </div>;
+    }}
+    footer={<div className="space-y-4 pb-4">
+      {liveViews.map((view) => <LiveTurnSteps key={view.key} trace={view.trace} sessionId={sessionId} frozen={view.frozen} />)}
+      {showLiveTimeline && liveTrace.error && <div role="alert" className="text-xs text-destructive">{traceT(($) => $.transcript.trace_failed)}</div>}
+      {showStatusPill && pendingTask && <TaskStatusPill pendingTask={pendingTask}
+        items={liveTrace.items} availability={availability} resolveChat={resolveChat} />}
+    </div>} />;
 }
 
-/**
- * Placeholder shown while `chat_message` for a session is being fetched
- * (initial refresh, or switching to an un-cached session). Shape roughly
- * mirrors an assistant → user → assistant exchange so the window doesn't
- * shift under the user when real messages arrive.
- */
-export function ChatMessageSkeleton() {
-  return (
-    <div className="flex-1 overflow-hidden">
-      <div className="mx-auto w-full max-w-4xl px-5 py-4 space-y-5">
-        <div className="space-y-2">
-          <Skeleton className="h-3.5 w-3/4" />
-          <Skeleton className="h-3.5 w-1/2" />
-        </div>
-        <div className="flex justify-end">
-          <Skeleton className="h-8 w-48 rounded-2xl" />
-        </div>
-        <div className="space-y-2">
-          <Skeleton className="h-3.5 w-2/3" />
-          <Skeleton className="h-3.5 w-5/6" />
-          <Skeleton className="h-3.5 w-1/3" />
-        </div>
-      </div>
-    </div>
-  );
+function SendStatus({ status, onRetry }: { status: OptimisticChatRow["status"]; onRetry: () => void }) {
+  const { t } = useT("chat");
+  return <div aria-live="polite" className="flex h-5 items-center text-xs text-muted-foreground max-md:h-6"
+    style={status === "hidden" ? { visibility: "hidden" } : undefined}>
+    {status === "sending" && <><LoaderCircle className="mr-1 size-3 animate-spin" aria-hidden="true" />{t(($) => $.message_list.sending)}</>}
+    {(status === "sent" || status === "hidden") && <><Check className="mr-1 size-3" aria-hidden="true" />{t(($) => $.message_list.sent)}</>}
+    {status === "failed" && <><AlertCircle className="mr-1 size-3 text-destructive" aria-hidden="true" />
+      <span className="text-destructive">{t(($) => $.message_list.send_failed)}</span>
+      <button type="button" onClick={onRetry} aria-label={t(($) => $.message_list.retry_send)}
+        className="relative inline-flex h-5 items-center justify-center px-1 text-destructive underline after:absolute after:-inset-y-3 after:inset-x-0">
+        {t(($) => $.message_list.retry)}
+      </button></>}
+    {/* No answer: it may have landed, so this is not a failure; the log is re-read meanwhile. */}
+    {status === "unconfirmed" && <><AlertCircle className="mr-1 size-3" aria-hidden="true" />
+      <span>{t(($) => $.message_list.unconfirmed)}</span>
+      <button type="button" onClick={onRetry} aria-label={t(($) => $.message_list.retry_send)}
+        className="relative inline-flex h-5 items-center justify-center px-1 underline after:absolute after:-inset-y-3 after:inset-x-0">
+        {t(($) => $.message_list.retry)}
+      </button></>}
+  </div>;
 }
 
 // ─── Message bubbles ─────────────────────────────────────────────────────
 
-function MessageBubble({ message, isPending }: { message: ChatMessage; isPending: boolean }) {
+type TraceRef = { taskId: string; turnId?: string } | null;
+
+function MessageBubble({ message, isPending, isPush, visible, trace = null, steps = null, after = null }: {
+  message: ChatMessage; isPending: boolean; isPush: boolean; visible: boolean; trace?: TraceRef;
+  /** The finished turn's steps fold, rendered above the reply. */
+  steps?: React.ReactNode;
+  /** Rendered under the reply, above its footer: the late subagents' completion rows. */
+  after?: React.ReactNode;
+}) {
   if (message.role === "user") {
-    const markdown = chatMessageMarkdown(message);
+    const markdown = message.content;
+    const rendered = leadingCommandChipMarkdown(markdown);
     return (
       <div className="flex justify-end">
-        <div className="rounded-2xl bg-muted px-3.5 py-2 text-sm max-w-[80%] break-words">
+        <div className="max-w-[70%] break-words rounded-[22px] bg-muted px-4 py-2.5 text-sm">
           {/* User messages are authored as markdown in ContentEditor, so
            * render them through the same pipeline as assistant replies.
            * Neutralise prose's leading/trailing margin so single-line
            * bubbles stay as compact as the plain-text version used to. */}
           <div className="prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-            <Markdown attachments={message.attachments}>{markdown}</Markdown>
+            <Markdown attachments={message.attachments}>{rendered}</Markdown>
           </div>
           <AttachmentList
             attachments={message.attachments}
             content={markdown}
+            dedupe="url"
             className="mt-1.5"
           />
         </div>
@@ -217,114 +447,231 @@ function MessageBubble({ message, isPending }: { message: ChatMessage; isPending
     );
   }
 
-  return <AssistantMessage message={message} isPending={isPending} />;
+  return <AssistantMessage message={message} isPending={isPending} isPush={isPush} visible={visible} trace={trace} steps={steps} after={after} />;
 }
 
 function AssistantMessage({
   message,
   isPending,
+  isPush,
+  visible,
+  trace,
+  steps,
+  after,
 }: {
   message: ChatMessage;
   isPending: boolean;
+  isPush: boolean;
+  visible: boolean;
+  trace: TraceRef;
+  steps: React.ReactNode;
+  after: React.ReactNode;
 }) {
-  const taskId = message.task_id;
-  // A mid-run attachment push shares its task id with the terminal reply that
-  // follows. The timeline belongs to that reply: drawing it here would both
-  // displace this row's own caption and, once the reply lands, repeat the
-  // whole timeline a second time.
-  const isAttachmentPush = isAgentAttachmentMessage(message);
-  const canFetchTaskMessages = isTaskMessageTaskId(taskId) && !isAttachmentPush;
+  const traceRef: TraceRef = trace ?? (message.task_id && !isPush ? { taskId: message.task_id, turnId: message.turn_id } : null);
 
-  // Use the shared taskMessagesOptions so this cache entry is the same one
-  // seeded by useRealtimeSync during task execution — zero refetch when the
-  // task finishes, since WS already populated it.
-  const { data: taskMessages } = useQuery({
-    ...taskMessagesOptions(taskId ?? ""),
-    enabled: canFetchTaskMessages,
-  });
-
-  const timeline: ChatTimelineItem[] = isAttachmentPush
-    ? []
-    : toChatTimeline(taskMessages ?? []);
-
-  // Failure bubble path: when the server's FailTask wrote a failure
-  // chat_message (failure_reason set), render a destructive bubble with the
-  // human-readable reason label + collapsible raw errMsg + the same timeline
-  // so the user can see exactly where the run broke.
+  // Legacy failure bubble: an assistant row written by the server's FailTask
+  // fallback before turns carried their own status. Canonical failed turns
+  // render TurnEndNotice instead. Like that notice, a failure keeps its
+  // execution log visible; it sits in the footer row, where a reply has it.
   if (message.failure_reason) {
     return (
       <FailureBubble
         reason={message.failure_reason}
         rawError={message.content}
-        timeline={timeline}
         elapsedMs={message.elapsed_ms}
+        trace={traceRef ? <ChatTraceButton taskId={traceRef.taskId} turnId={traceRef.turnId} visible={visible} /> : null}
       />
     );
   }
 
   return (
     <div className="w-full space-y-1.5">
-      {timeline.length > 0 ? (
-        <TimelineView items={timeline} attachments={message.attachments} />
-      ) : (
-        <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none">
-          <Markdown attachments={message.attachments}>{message.content}</Markdown>
-        </div>
-      )}
+      {steps && <div className="pb-1.5">{steps}</div>}
+      <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none">
+        <Markdown attachments={message.attachments}>{message.content}</Markdown>
+      </div>
       <AttachmentList
         attachments={message.attachments}
         content={message.content}
+        dedupe="url"
       />
+      {after && <div className="pt-1.5">{after}</div>}
       <MessageFooter
         message={message}
-        timeline={timeline}
         isPending={isPending}
+        // Every reply keeps its execution log here, with or without a steps fold.
+        trace={traceRef
+          ? <ChatTraceButton taskId={traceRef.taskId} turnId={traceRef.turnId} visible={visible} quiet /> : null}
       />
     </div>
   );
 }
 
-// Inline footer row beneath the assistant reply: "Replied in 38s · [Copy]".
-// Action icons live here (not as a hover-floating overlay) so they're
-// discoverable on first read and don't shift content. Buttons stay quiet
-// (muted) until hover. Copy is suppressed during streaming because the
-// final text is still being appended.
+/**
+ * Task detail and trace are requested only after the reader opens execution.
+ * `quiet` hides the button until its row is hovered or focused; a pending
+ * load or an error always stays visible.
+ */
+function ChatTraceButton({ taskId, turnId, visible, quiet = false }: { taskId: string; turnId?: string; visible: boolean; quiet?: boolean }) {
+  const { t } = useT("agents");
+  const { t: tc } = useT("chat");
+  const [open, setOpen] = useState(false);
+  const { getActorName } = useActorName({ enabled: visible && open });
+  const { data: task, isFetching, isError, refetch } = useQuery({
+    queryKey: ["task-detail", taskId],
+    enabled: visible && open,
+    queryFn: () => api.getTask(taskId, turnId),
+  });
+  return <>
+    <button type="button" disabled={!visible || isFetching} onClick={() => {
+      setOpen(true);
+      if (isError) void refetch();
+    }} data-chat-trace className={cn("inline-flex h-6 items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+      quiet && !isFetching && !isError && REVEAL_ON_ROW)}>
+      {isFetching ? <LoaderCircle className="size-3 animate-spin" /> : <ScrollText className="size-3" />}
+      {isError ? t(($) => $.transcript.trace_retry) : tc(($) => $.message_list.view_execution_log)}
+    </button>
+    {open && visible && task && <TaskTraceDialog task={task} agentName={getActorName("agent", task.agent_id)} onOpenChange={setOpen} />}
+    {isError && <span role="alert" className="text-xs text-destructive">{t(($) => $.transcript.trace_failed)}</span>}
+  </>;
+}
+
+/**
+ * A failed or cancelled turn: one notice line with the outcome, the retry
+ * choices and the execution log. Retrying keeps the same turn and adds an
+ * attempt, so the queries the old attempts list refreshed are refreshed here.
+ */
+function TurnEndNotice({ turnId, attemptId, status, failureReason, details, visible }: {
+  turnId: string;
+  attemptId: string | null;
+  status: "failed" | "cancelled";
+  failureReason: string | null;
+  details: string;
+  visible: boolean;
+}) {
+  const { t } = useT("chat");
+  const { t: tm } = useT("messages");
+  const wsId = useWorkspaceId();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const retry = useMutation({
+    mutationFn: (cold: boolean) => api.retryTurn(turnId, cold),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["turns", wsId, turnId] });
+      void qc.invalidateQueries({ queryKey: ["issues", wsId] });
+      void qc.invalidateQueries({ queryKey: ["issues", "tasks"] });
+      void qc.invalidateQueries({ queryKey: ["chat", wsId] });
+      void qc.invalidateQueries({ queryKey: ["chat", "pending-task"] });
+    },
+  });
+  const statuses = tm($ => $.statuses, { returnObjects: true }) as Record<string, string> | string;
+  const statusLabel = (typeof statuses === "object" ? statuses[status] : undefined) || status;
+  const reason = failureReason
+    ? failureReasonLabel[failureReason as TaskFailureReason] ?? t(($) => $.message_list.task_failed_fallback)
+    : null;
+  // The server writes `Task failed` when a run reported nothing of its own.
+  const rawError = details.trim() && details.trim() !== `Task ${status}` ? details.trim() : "";
+  const failed = status === "failed";
+  return (
+    <div data-turn-notice={status} className="space-y-1">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+        {failed
+          ? <AlertTriangle className="size-3.5 shrink-0 text-destructive/80" aria-hidden="true" />
+          : <CircleSlash className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
+        <span className={failed ? "text-destructive/90" : "text-muted-foreground"}>
+          {statusLabel}{reason ? ` · ${reason}` : ""}
+        </span>
+        <span className="flex flex-wrap items-center gap-1">
+          <Button size="xs" variant="outline" data-turn-retry="warm" disabled={retry.isPending} onClick={() => retry.mutate(false)}>
+            <RotateCcw className="size-3" />{t(($) => $.message_list.turn_retry)}
+          </Button>
+          <Button size="xs" variant="ghost" data-turn-retry="cold" disabled={retry.isPending} onClick={() => retry.mutate(true)}>
+            {t(($) => $.message_list.turn_retry_new_session)}
+          </Button>
+          {attemptId && <ChatTraceButton taskId={attemptId} turnId={turnId} visible={visible} />}
+        </span>
+      </div>
+      {rawError && (
+        <Collapsible open={open} onOpenChange={setOpen}>
+          <CollapsibleTrigger className="ml-5 flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground">
+            {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            <span>{t(($) => $.message_list.show_details)}</span>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <pre className="mt-1 ml-5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/40 p-2 text-xs text-muted-foreground">
+              {rawError}
+            </pre>
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+      {retry.isError && <p role="alert" className="ml-5 text-xs text-destructive">{tm($ => $.retry_failed)}</p>}
+    </div>
+  );
+}
+
+/**
+ * The envelope header is gone from Chat; the one fact worth a line is a
+ * message that did not wake the agent (it waits for the next turn or the
+ * inbox), explained with the server's wake reason.
+ */
+function NotWokenHint({ wakeApplied, wakeReason }: { wakeApplied?: string | null; wakeReason?: string | null }) {
+  const { t } = useT("chat");
+  const { t: tm } = useT("messages");
+  if (!wakeApplied || wakeApplied === "now") return null;
+  const reasons = tm($ => $.wake_reasons, { returnObjects: true }) as Record<string, string> | string;
+  const wakes = tm($ => $.wakes, { returnObjects: true }) as Record<string, string> | string;
+  const reason = (wakeReason && typeof reasons === "object" ? reasons[wakeReason] : undefined)
+    || wakeReason || (typeof wakes === "object" ? wakes[wakeApplied] : undefined) || wakeApplied;
+  return (
+    <p data-wake-hint={wakeApplied} className="mt-1 truncate text-right text-xs text-muted-foreground" title={reason}>
+      {t(($) => $.message_list.not_woken, { reason })}
+    </p>
+  );
+}
+
+// Inline footer row beneath the assistant reply: "Replied in 38s · [Copy] [Log]".
+// The one place a reply's execution log sits, with or without a steps fold
+// above the reply. The elapsed caption always shows; the actions appear on
+// hover or keyboard focus (see REVEAL_ON_ROW). Copy is suppressed during
+// streaming because the final text is still being appended.
 function MessageFooter({
   message,
-  timeline,
   isPending,
+  trace,
 }: {
   message: ChatMessage;
-  timeline: ChatTimelineItem[];
   isPending: boolean;
+  trace?: React.ReactNode;
 }) {
   const showCopy = !isPending;
-  if (message.elapsed_ms == null && !showCopy) return null;
+  if (message.elapsed_ms == null && !showCopy && !trace) return null;
   return (
-    <div className="flex items-center gap-1.5">
+    <div data-chat-message-footer className="flex min-h-6 items-center gap-1.5">
       {message.elapsed_ms != null && (
         <ElapsedCaption variant="replied" elapsedMs={message.elapsed_ms} />
       )}
-      {showCopy && <MessageCopyButton message={message} timeline={timeline} />}
+      {showCopy && <MessageCopyButton message={message} />}
+      {trace}
     </div>
   );
 }
 
-function MessageCopyButton({
-  message,
-  timeline,
-}: {
-  message: ChatMessage;
-  timeline: ChatTimelineItem[];
-}) {
+function MessageCopyButton({ message }: { message: ChatMessage }) {
   const { t } = useT("chat");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+    return () => clearTimeout(timer);
+  }, [copied]);
   const handleCopy = async () => {
-    if (await copyText(extractCopyText(message, timeline))) {
-      toast.success(t(($) => $.message_list.copied_toast));
+    if (await copyText(extractCopyText(message))) {
+      setCopied(true);
     } else {
       toast.error(t(($) => $.message_list.copy_failed_toast));
     }
   };
+  const label = copied ? t(($) => $.session_log.copied) : t(($) => $.message_list.copy_action);
   return (
     <Tooltip>
       <TooltipTrigger
@@ -332,16 +679,17 @@ function MessageCopyButton({
           <Button
             variant="ghost"
             size="icon-xs"
-            className="text-muted-foreground/70 hover:text-foreground"
+            data-chat-copy={copied ? "copied" : ""}
+            className={cn("text-muted-foreground/70 hover:text-foreground", !copied && REVEAL_ON_ROW)}
             onClick={handleCopy}
-            aria-label={t(($) => $.message_list.copy_action)}
+            aria-label={label}
           />
         }
       >
-        <Copy />
+        {copied ? <Check /> : <Copy />}
       </TooltipTrigger>
       <TooltipContent side="top">
-        {t(($) => $.message_list.copy_action)}
+        {label}
       </TooltipContent>
     </Tooltip>
   );
@@ -376,13 +724,14 @@ function ElapsedCaption({
 function FailureBubble({
   reason,
   rawError,
-  timeline,
   elapsedMs,
+  trace,
 }: {
   reason: string;
   rawError: string;
-  timeline: ChatTimelineItem[];
   elapsedMs?: number | null;
+  /** The execution-log button, after the elapsed caption as in a reply's footer. */
+  trace?: React.ReactNode;
 }) {
   const { t } = useT("chat");
   const [open, setOpen] = useState(false);
@@ -423,276 +772,12 @@ function FailureBubble({
           )}
         </div>
       </div>
-      {timeline.length > 0 && <TimelineView items={timeline} />}
-      {elapsedMs != null && (
-        <ElapsedCaption variant="failed" elapsedMs={elapsedMs} />
-      )}
-    </div>
-  );
-}
-
-// ─── Timeline: outer process fold + final text (Conductor-style) ─────────
-//
-// splitTimeline (lib/copy-text.ts) carves the items into:
-//   preface — text before the first thinking/tool item
-//   middle  — first → last non-text item (inclusive, may sandwich text)
-//   final   — text after the last non-text item
-//
-// We render preface + final outside an outer Collapsible ("X steps") that
-// wraps middle. The inner row Collapsibles (ThinkingRow / ToolCallRow /
-// ToolResultRow) are unchanged — clicking them toggles independently of
-// the outer fold. Copy mirrors what's visible when the outer fold is
-// closed: preface + final, never middle. See extractCopyText for the
-// authoritative copy logic.
-
-function TimelineView({
-  items,
-  isStreaming,
-  attachments,
-}: {
-  items: ChatTimelineItem[];
-  isStreaming?: boolean;
-  attachments?: import("@multiremi/core/types").Attachment[];
-}) {
-  const { preface, middle, final } = splitTimeline(items);
-
-  return (
-    <>
-      {preface.length > 0 && (
-        <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none">
-          <Markdown attachments={attachments}>
-            {preface.map((t) => t.content ?? "").join("")}
-          </Markdown>
+      {(elapsedMs != null || trace) && (
+        <div data-chat-message-footer className="flex min-h-6 items-center gap-1.5">
+          {elapsedMs != null && <ElapsedCaption variant="failed" elapsedMs={elapsedMs} />}
+          {trace}
         </div>
       )}
-      {middle.length > 0 && (
-        <OuterProcessFold
-          items={middle}
-          defaultOpen={!!isStreaming}
-          attachments={attachments}
-        />
-      )}
-      {final.length > 0 && (
-        <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none">
-          <Markdown attachments={attachments}>
-            {final.map((t) => t.content ?? "").join("")}
-          </Markdown>
-        </div>
-      )}
-    </>
-  );
-}
-
-function OuterProcessFold({
-  items,
-  defaultOpen,
-  attachments,
-}: {
-  items: ChatTimelineItem[];
-  defaultOpen?: boolean;
-  attachments?: import("@multiremi/core/types").Attachment[];
-}) {
-  const { t } = useT("chat");
-  // useState seeds once at mount — subsequent renders never overwrite the
-  // user's manual toggle. The streaming → completed transition unmounts
-  // the live <TimelineView> and mounts the persisted AssistantMessage's
-  // own <TimelineView>, so the persisted instance starts closed (default)
-  // even if the live one was open. That's the desired collapsed-default.
-  const [open, setOpen] = useState(defaultOpen ?? false);
-  const stepCount = items.length;
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <span>{t(($) => $.message_list.process_steps, { count: stepCount })}</span>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="mt-1 rounded-lg border bg-muted/20 p-2 space-y-0.5">
-          {items.map((item) =>
-            item.type === "text" ? (
-              <MiddleTextRow key={item.seq} item={item} attachments={attachments} />
-            ) : (
-              <ItemRow key={item.seq} item={item} />
-            ),
-          )}
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
-
-// Intermediate text segment rendered inside the outer fold. Visually
-// down-shifted (xs / muted) so it reads as part of the agent's process,
-// not the final answer — the final answer renders below the fold at full
-// prose size.
-function MiddleTextRow({
-  item,
-  attachments,
-}: {
-  item: ChatTimelineItem;
-  attachments?: import("@multiremi/core/types").Attachment[];
-}) {
-  return (
-    <div className="py-0.5 text-xs text-muted-foreground prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-      <Markdown attachments={attachments}>{item.content ?? ""}</Markdown>
     </div>
   );
 }
-
-// ─── Individual item rows ────────────────────────────────────────────────
-
-function ItemRow({ item }: { item: ChatTimelineItem }) {
-  switch (item.type) {
-    case "tool_use":
-      return <ToolCallRow item={item} />;
-    case "tool_result":
-      return <ToolResultRow item={item} />;
-    case "thinking":
-      return <ThinkingRow item={item} />;
-    case "error":
-      return <ErrorRow item={item} />;
-    case "permission_request":
-    case "permission_response":
-    case "question_request":
-    case "question_response":
-      return <HumanEventRow item={item} />;
-    default:
-      return null;
-  }
-}
-
-// Static history rows for the approval-routing flow; the interactive pending
-// card lives in HumanRequestDock, this only records what was asked/decided.
-function HumanEventRow({ item }: { item: ChatTimelineItem }) {
-  const isRequest = item.type === "permission_request" || item.type === "question_request";
-  return (
-    <div className="flex items-start gap-1.5 py-0.5 text-xs text-muted-foreground">
-      <AlertCircle
-        className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", isRequest ? "text-amber-500" : "text-emerald-500")}
-      />
-      <span className="min-w-0 break-words">{item.content ?? ""}</span>
-    </div>
-  );
-}
-
-function shortenPath(p: string): string {
-  const parts = p.split("/");
-  if (parts.length <= 3) return p;
-  return ".../" + parts.slice(-2).join("/");
-}
-
-function getToolSummary(item: ChatTimelineItem): string {
-  if (!item.input) return "";
-  const inp = item.input as Record<string, string>;
-  if (inp.query) return inp.query;
-  if (inp.file_path) return shortenPath(inp.file_path);
-  if (inp.path) return shortenPath(inp.path);
-  if (inp.pattern) return inp.pattern;
-  if (inp.description) return String(inp.description);
-  if (inp.command) {
-    const cmd = String(inp.command);
-    return cmd.length > 100 ? cmd.slice(0, 100) + "..." : cmd;
-  }
-  if (inp.prompt) {
-    const p = String(inp.prompt);
-    return p.length > 100 ? p.slice(0, 100) + "..." : p;
-  }
-  if (inp.skill) return String(inp.skill);
-  for (const v of Object.values(inp)) {
-    if (typeof v === "string" && v.length > 0 && v.length < 120) return v;
-  }
-  return "";
-}
-
-function ToolCallRow({ item }: { item: ChatTimelineItem }) {
-  const [open, setOpen] = useState(false);
-  const summary = getToolSummary(item);
-  const hasInput = item.input && Object.keys(item.input).length > 0;
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded px-1 -mx-1 py-0.5 text-xs hover:bg-accent/30 transition-colors">
-        <ChevronRight
-          className={cn(
-            "h-3 w-3 shrink-0 text-muted-foreground transition-transform",
-            open && "rotate-90",
-            !hasInput && "invisible",
-          )}
-        />
-        <span className="font-medium text-foreground shrink-0">{item.tool}</span>
-        {summary && <span className="truncate text-muted-foreground">{summary}</span>}
-      </CollapsibleTrigger>
-      {hasInput && (
-        <CollapsibleContent>
-          <pre className="ml-[18px] mt-0.5 max-h-32 overflow-auto rounded bg-muted/50 p-2 text-xs text-muted-foreground whitespace-pre-wrap break-all">
-            {JSON.stringify(item.input, null, 2)}
-          </pre>
-        </CollapsibleContent>
-      )}
-    </Collapsible>
-  );
-}
-
-function ToolResultRow({ item }: { item: ChatTimelineItem }) {
-  const { t } = useT("chat");
-  const [open, setOpen] = useState(false);
-  const output = item.output ?? "";
-  if (!output) return null;
-
-  const preview = output.length > 120 ? output.slice(0, 120) + "..." : output;
-  const labelPrefix = item.tool
-    ? t(($) => $.message_list.tool_result_named, { tool: item.tool })
-    : t(($) => $.message_list.tool_result_unnamed);
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex w-full items-start gap-1.5 rounded px-1 -mx-1 py-0.5 text-xs hover:bg-accent/30 transition-colors">
-        <ChevronRight
-          className={cn("h-3 w-3 shrink-0 text-muted-foreground transition-transform mt-0.5", open && "rotate-90")}
-        />
-        <span className="text-muted-foreground/70 truncate">
-          {labelPrefix}{preview}
-        </span>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <pre className="ml-[18px] mt-0.5 max-h-40 overflow-auto rounded bg-muted/50 p-2 text-xs text-muted-foreground whitespace-pre-wrap break-all">
-          {output.length > 4000 ? output.slice(0, 4000) + "\n... (truncated)" : output}
-        </pre>
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
-
-function ThinkingRow({ item }: { item: ChatTimelineItem }) {
-  const [open, setOpen] = useState(false);
-  const text = item.content ?? "";
-  if (!text) return null;
-
-  const preview = text.length > 150 ? text.slice(0, 150) + "..." : text;
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex w-full items-start gap-1.5 rounded px-1 -mx-1 py-0.5 text-xs hover:bg-accent/30 transition-colors">
-        <Brain className="h-3 w-3 shrink-0 text-muted-foreground/60 mt-0.5" />
-        <span className="text-muted-foreground italic truncate">{preview}</span>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <pre className="ml-[18px] mt-0.5 max-h-40 overflow-auto rounded bg-muted/30 p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words">
-          {text}
-        </pre>
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
-
-function ErrorRow({ item }: { item: ChatTimelineItem }) {
-  return (
-    <div className="flex items-start gap-1.5 px-1 -mx-1 py-0.5 text-xs">
-      <AlertCircle className="h-3 w-3 shrink-0 text-destructive mt-0.5" />
-      <span className="text-destructive">{item.content}</span>
-    </div>
-  );
-}
-
-// ─── Shared ──────────────────────────────────────────────────────────────

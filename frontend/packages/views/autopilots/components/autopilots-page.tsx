@@ -10,6 +10,7 @@ import { useActorName } from "@multiremi/core/workspace/hooks";
 import { AppLink } from "../../navigation";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { PageHeader } from "../../layout/page-header";
+import { useListPerfMarker } from "../../common/use-list-perf-marker";
 import { Skeleton } from "@multiremi/ui/components/ui/skeleton";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { cn } from "@multiremi/ui/lib/utils";
@@ -136,7 +137,7 @@ function AutopilotRow({ autopilot }: { autopilot: Autopilot }) {
   const StatusIcon = visual.icon;
 
   return (
-    <div className="group/row flex flex-col gap-2 border-b px-4 py-3 text-sm transition-colors hover:bg-accent/40 sm:h-11 sm:flex-row sm:items-center sm:gap-2 sm:border-b-0 sm:px-5 sm:py-0">
+    <div data-perf-item="autopilot" data-perf-key={autopilot.id} className="group/row flex flex-col gap-2 border-b px-4 py-3 text-sm transition-colors hover:bg-accent/40 sm:h-11 sm:flex-row sm:items-center sm:gap-2 sm:border-b-0 sm:px-5 sm:py-0">
       <AppLink
         href={wsPaths.autopilotDetail(autopilot.id)}
         className="flex min-w-0 items-center gap-2 sm:flex-1"
@@ -183,7 +184,18 @@ function AutopilotRow({ autopilot }: { autopilot: Autopilot }) {
 export function AutopilotsPage() {
   const { t } = useT("autopilots");
   const wsId = useWorkspaceId();
-  const { data: autopilots = [], isLoading } = useQuery(autopilotListOptions(wsId));
+  const {
+    data: autopilots = [],
+    isLoading,
+    status: autopilotsStatus,
+    isPlaceholderData: autopilotsIsPlaceholderData,
+  } = useQuery(autopilotListOptions(wsId));
+  // MUL-472 item 5: mark the list container as this page's measured viewport and
+  // publish whether the rows came from this round's own response.
+  const perfMarker = useListPerfMarker({
+    status: autopilotsStatus,
+    isPlaceholderData: autopilotsIsPlaceholderData,
+  });
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<AutopilotTemplate | null>(null);
 
@@ -193,7 +205,7 @@ export function AutopilotsPage() {
   };
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col" {...perfMarker}>
       {/* Header */}
       <PageHeader className="justify-between px-5">
         <div className="flex items-center gap-2">

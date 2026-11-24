@@ -1,56 +1,69 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
-import { runMigrations } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { historicalWriters } from "./unified-model-test-backends.js";
+import { readOfferedTurnInput } from "../../fixtures/turn-report.js";
+import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 
 afterEach(resetMultiremiTestEnv);
 
-function fixture() {
+function fixture(owner: "chat" | "issue" = "chat") {
   const store = createStore();
   const runtime = store.registerRuntime({ id: "parallel", name: "parallel", provider: "claude", maxConcurrency: 6,
-    metadata: { parallel_agent_execution: 1, cli_version: "0.2.66" } });
+    metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
   const leader = store.createAgent({ name: "Leader", provider: "claude" });
   const worker = store.createAgent({ name: "Worker", provider: "claude" });
   const qa = store.createAgent({ name: "QA", provider: "claude" });
-  const issue = store.createIssue({ title: "Concurrent delivery" });
-  const main = store.createTask({ agentId: leader.id, issueId: issue.id, prompt: "coordinate" });
+  const issue = createResponsibleTestIssue(store, { title: "Concurrent delivery" });
+  const chat = owner === "chat" ? store.createChatSession({ agentId: leader.id }) : null;
+  const session = store.createIssueSession(issue.id, { chatId: chat?.id, title: "Concurrent delivery" });
+  const main = store.createTask({ agentId: leader.id, issueId: issue.id, issueSessionId: session.id, prompt: "coordinate" });
   expect(store.claimTask(runtime.id)?.id).toBe(main.id);
   store.buildTaskSessionProjection(main.id);
   store.startTask(main.id);
   const delegate = (agentId: string, delegationId: string) => store.createTask({
-    agentId, issueId: issue.id, prompt: delegationId, delegationId, delegatedByAgentId: leader.id,
+    agentId, issueId: issue.id, issueSessionId: session.id, prompt: delegationId, delegationId, delegatedByAgentId: leader.id,
   });
-  return { store, runtime, leader, worker, qa, issue, main, delegate };
+  return { store, runtime, leader, worker, qa, issue, session, main, delegate };
 }
 
 describe("parallel agent execution", () => {
-  it("migrates existing lane checkpoints once without losing canonical history", () => {
-    const f = fixture();
-    f.store.completeTask(f.main.id, { output: "historical answer", sessionId: "old_provider", workDir: "/tmp/old" });
-    const session = f.main.issueSessionId!;
-    const old = f.store.getSessionAgentLane(session, f.leader.id)!;
-    const queued = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, prompt: "continue" });
-    expect(f.store.getTask(queued.id)?.sessionId).toBe("old_provider");
-    const events = db!.query("SELECT * FROM multiremi_session_events WHERE session_id = ? ORDER BY seq").all(session);
-    db!.exec(`CREATE TABLE legacy_lanes AS SELECT session_id, agent_id, provider_session_id,
-      runtime_id, provider, work_dir, cursor_seq, generation, status, last_task_id,
-      created_at, updated_at, execution_fingerprint FROM multiremi_session_agent_lanes;
-      DROP TABLE multiremi_session_agent_lanes;
-      ALTER TABLE legacy_lanes RENAME TO multiremi_session_agent_lanes;`);
-    runMigrations(db!);
-    expect(f.store.getSessionAgentLane(session, f.leader.id)).toMatchObject({
-      generation: old.generation + 1, providerSessionId: null, workDir: null, cursorSeq: 0,
+  it("migrates existing lane checkpoints once, voiding the native session but not the canonical history", () => {
+    const legacy = openSqliteDatabase(":memory:");
+    try {
+    bootstrapPreUnifiedSchema(legacy);
+    const h = historicalWriters(legacy);
+    const leader = h.createAgent({ name: "Historical leader", provider: "claude" });
+    const issue = h.createIssue({ title: "Historical lane" });
+    const main = h.createTask({ agentId: leader.id, issueId: issue.id, prompt: "coordinate" });
+    legacy.run("UPDATE multiremi_tasks SET status='completed', session_id='old_provider', work_dir='/tmp/old' WHERE id=?", [main.id]);
+    const session = h.getOrCreateDefaultIssueSession(issue.id).id;
+    h.appendConversationLog({ sessionId: session, kind: "comment", authorType: "agent", authorId: leader.id, taskId: main.id, bodyMd: "historical answer" });
+    legacy.run("UPDATE multiremi_session_agent_lanes SET provider_session_id='old_provider', work_dir='/tmp/old', cursor_seq=2 WHERE session_id=?", [session]);
+    const queued = h.createTask({ agentId: leader.id, issueId: issue.id, prompt: "continue" });
+    legacy.run("UPDATE multiremi_tasks SET session_id='old_provider', work_dir='/tmp/old' WHERE id=?", [queued.id]);
+    const events = legacy.query("SELECT * FROM multiremi_session_events WHERE session_id = ? ORDER BY seq").all(session);
+    runMigrations(legacy, { historicalMaintenance: true });
+    const upgraded = new MultiremiStore(legacy);
+    expect(upgraded.getSessionAgentLane(session, leader.id)).toMatchObject({
+      generation: 2, providerSessionId: null, workDir: null, cursorSeq: 2,
     });
-    expect(db!.query("SELECT * FROM multiremi_session_events WHERE session_id = ? ORDER BY seq").all(session)).toEqual(events);
-    expect(f.store.getTask(queued.id)).toMatchObject({ sessionId: null, workDir: null, projectionToSeq: null });
-    const scoped = f.store.getOrCreateSessionAgentLane(session, f.leader.id, "dlg_parallel");
-    runMigrations(db!);
-    expect(f.store.getSessionAgentLane(session, f.leader.id)?.generation).toBe(old.generation + 1);
-    expect(f.store.getSessionAgentLane(session, f.leader.id, "dlg_parallel")).toEqual(scoped);
+    expect(legacy.query("SELECT * FROM multiremi_session_events WHERE session_id = ? ORDER BY seq").all(session)).toEqual(events);
+    expect(upgraded.listConversationLogEntries(session).map(row => row.body_md)).toContain("historical answer");
+    expect(upgraded.getTask(queued.id)).toMatchObject({ sessionId: null, workDir: null, projectionToSeq: null });
+    const scoped = upgraded.getOrCreateSessionAgentLane(session, leader.id, "dlg_parallel");
+    runMigrations(legacy);
+    expect(upgraded.getSessionAgentLane(session, leader.id)?.generation).toBe(2);
+    expect(upgraded.getSessionAgentLane(session, leader.id, "dlg_parallel")).toEqual(scoped);
+    } finally { legacy.close(); }
   });
 
   it("keeps one task's comment from suppressing another task's final answer", () => {
-    const f = fixture();
+    const f = fixture("issue");
     const first = f.delegate(f.worker.id, "dlg_first");
     const second = f.delegate(f.worker.id, "dlg_second");
     f.store.claimTask(f.runtime.id);
@@ -68,16 +81,22 @@ describe("parallel agent execution", () => {
 
   it("runs Leader, worker and QA together but serializes the next Leader turn", () => {
     const f = fixture();
-    const next = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, prompt: "follow up" });
+    const next = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, issueSessionId: f.session.id, prompt: "follow up" });
     const worker = f.delegate(f.worker.id, "dlg_work");
     const qa = f.delegate(f.qa.id, "dlg_qa");
     expect(f.store.claimTask(f.runtime.id)?.id).toBe(worker.id);
     expect(f.store.claimTask(f.runtime.id)?.id).toBe(qa.id);
     expect(f.store.claimTask(f.runtime.id)).toBeNull();
     expect(f.store.getTaskQueueBlocker(worker.id)).toBeNull();
-    expect(f.store.getTaskQueueBlocker(next.id)?.taskId).toBe(f.main.id);
+    expect(next.id).toBe(f.main.id);
+    expect(f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(f.main.id)!).input_messages
+      .filter(row => row.body_md.includes("coordinate") || row.body_md === "follow up")
+      .map(row => f.store.getMessage(row.id)!.body_md)).toEqual(["coordinate", "follow up"]);
+    f.store.recordSessionAgentRangeRead(f.main.issueSessionId!, f.leader.id, { seq: 1, offset: 0 },
+      { seq: f.store.getConversationLogHead(f.main.issueSessionId!)!.headSeq + 1, offset: 0 }, f.main.id);
+    readOfferedTurnInput(f.store, f.main.id);
     f.store.completeTask(f.main.id, { output: "delegated" });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(next.id);
+    expect(f.store.claimTask(f.runtime.id)).toBeNull();
   });
 
   it("isolates two delegations to the same agent, including continuation checkpoints", () => {
@@ -117,14 +136,20 @@ describe("parallel agent execution", () => {
     f.store.startTask(independent.id);
     expect(f.store.claimTask(f.runtime.id)).toBeNull();
 
+    expect(continued.id).toBe(first.id);
+    f.store.recordSessionAgentRangeRead(first.issueSessionId!, f.worker.id, { seq: 1, offset: 0 },
+      { seq: f.store.getConversationLogHead(first.issueSessionId!)!.headSeq + 1, offset: 0 }, first.id);
+    readOfferedTurnInput(f.store, first.id);
     f.store.completeTask(first.id, {
       output: "first round",
       sessionId: "provider_serial",
       workDir: "/tmp/serial",
     });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(continued.id);
-    expect(f.store.getTask(continued.id)?.sessionId).toBe("provider_serial");
-    expect(f.store.buildTaskSessionProjection(continued.id)?.mode).toBe("delta");
+    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    const next = f.delegate(f.worker.id, "dlg_serial");
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(next.id);
+    expect(f.store.getTask(next.id)?.sessionId).toBe("provider_serial");
+    expect(f.store.buildTaskSessionProjection(next.id)?.mode).toBe("delta");
     expect(f.store.getTask(independent.id)?.status).toBe("running");
     expect(f.store.getTask(f.main.id)?.status).toBe("running");
   });
@@ -162,7 +187,7 @@ describe("parallel agent execution", () => {
     const sessionId = changed.issueSessionId!;
     const generation = f.store.getSessionAgentLane(sessionId, f.worker.id, "dlg_changed")!.generation;
     db!.run(
-      "UPDATE multiremi_session_agent_lanes SET provider = 'codex' WHERE session_id = ? AND agent_id = ? AND execution_scope = ?",
+      "UPDATE multiremi_session_lanes SET provider = 'codex' WHERE session_id = ? AND reader_id = ? AND execution_scope = ?",
       [sessionId, f.worker.id, "dlg_changed"],
     );
     const continued = f.delegate(f.worker.id, "dlg_changed");
@@ -211,10 +236,14 @@ describe("parallel agent execution", () => {
     expect(store.claimTask(runtime.id)).toBeNull();
   });
 
-  it("does not give Issue tasks to an old daemon that cannot isolate execution state", () => {
+  it("gives Issue tasks to a baseline daemon without a redundant parallel capability flag", () => {
     const f = fixture();
-    const old = f.store.registerRuntime({ id: "old", name: "old", provider: "claude", metadata: { cli_version: "0.2.66" } });
-    f.delegate(f.worker.id, "dlg_new");
-    expect(f.store.claimTask(old.id)).toBeNull();
+    // Pre-contract daemons are rejected at hello, before reaching task placement.
+    // Every admitted daemon already supports isolated parallel execution.
+    const baseline = f.store.registerRuntime({ id: "baseline", name: "baseline", provider: "claude",
+      metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
+    const task = f.delegate(f.worker.id, "dlg_new");
+    expect(f.store.claimTask(baseline.id)?.id).toBe(task.id);
+    expect(daemonTaskClaimResponse(f.store, f.store.getTaskWithAgent(task.id)!).execution_scope).toBe("dlg_new");
   });
 });

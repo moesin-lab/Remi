@@ -108,6 +108,25 @@ describe("MachineCliUpdate", () => {
     await waitFor(() => expect(screen.getByText(fullError)).toBeInTheDocument());
   });
 
+  it("keeps polling during restart and verification, then displays rollback", async () => {
+    vi.useFakeTimers();
+    apiMocks.getUpdateResult.mockResolvedValueOnce({ status: "restarting" })
+      .mockResolvedValueOnce({ status: "verifying" })
+      .mockResolvedValue({ status: "rolled_back", error: "candidate startup exited" });
+    renderWithProviders(<MachineCliUpdate runtimeId="rt-1" currentVersion="0.3.0" cliVersions={["0.3.0"]} managedByDesktop={false} />);
+    await act(async () => Promise.resolve());
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByTestId("machine-cli-update")).toHaveTextContent(enRuntimes.update.status.restarting);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByTestId("machine-cli-update")).toHaveTextContent(enRuntimes.update.status.verifying);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByRole("button", { name: "Rolled back" })).toBeInTheDocument();
+    const calls = apiMocks.getUpdateResult.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+    expect(apiMocks.getUpdateResult).toHaveBeenCalledTimes(calls);
+  });
+
   it("disables an available update when the machine has no online representative", async () => {
     renderWithProviders(
       <MachineCliUpdate runtimeId={null} currentVersion="0.3.0" cliVersions={["0.3.0"]} managedByDesktop={false} />,
@@ -118,11 +137,35 @@ describe("MachineCliUpdate", () => {
 });
 
 describe("UpdateSection", () => {
-  it("only renders provider-scoped Agent and ACP update actions", () => {
-    renderWithProviders(<UpdateSection runtimeId="rt-1" agentVersion="1.2.3" acpVersion="2.3.4" isOnline />);
+  it.each(["claude", "codex", "antigravity"])("directs %s upgrades to the machine CLI and labels ACP repair accurately", (provider) => {
+    renderWithProviders(<UpdateSection runtimeId="rt-1" provider={provider} agentVersion="1.2.3" acpVersion="2.3.4" isOnline />);
 
     expect(screen.queryByRole("button", { name: "Update" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update Agent" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reinstall ACP" })).toBeInTheDocument();
+    expect(screen.getByText(enRuntimes.update.managed_runtime_hint)).toBeInTheDocument();
+  });
+
+  it("keeps standalone Grok updates without offering an unsupported ACP action", () => {
+    renderWithProviders(<UpdateSection runtimeId="rt-1" provider="grok" agentVersion="1.2.3" acpVersion={null} isOnline />);
     expect(screen.getByRole("button", { name: "Update Agent" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Update ACP" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reinstall ACP" })).not.toBeInTheDocument();
+  });
+
+  it("reports ACP reinstallation without claiming a version upgrade", async () => {
+    vi.useFakeTimers();
+    apiMocks.initiateUpdate.mockResolvedValue({ id: "reinstall-1" });
+    apiMocks.getUpdateResult.mockResolvedValue({ status: "completed", output: "ACP 2.3.4 reinstalled", error: null });
+    try {
+      renderWithProviders(<UpdateSection runtimeId="rt-1" provider="claude" agentVersion="1.2.3" acpVersion="2.3.4" isOnline />);
+      fireEvent.click(screen.getByRole("button", { name: "Reinstall ACP" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(apiMocks.initiateUpdate).toHaveBeenCalledWith("rt-1", "latest", "acp");
+      expect(screen.getByText(enRuntimes.update.acp_reinstalled)).toBeInTheDocument();
+      expect(screen.queryByText(enRuntimes.update.status.completed)).not.toBeInTheDocument();
+      expect(screen.getByText("2.3.4")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,0 +1,91 @@
+/**
+ * Storage retention policy of a daemon (ADR 0018, section 9).
+ *
+ * The workspace setting `settings.storage` is the source of truth, managed from
+ * the server. A same-named environment variable overrides one key on this
+ * machine only. Machine parameters (interval, enable switch, dry run, legacy
+ * retention) come from the environment alone.
+ */
+
+import {
+  STORAGE_SETTINGS_KEYS,
+  resolveStorageSettings,
+  validateStorageSettingsPatch,
+  type StorageSettings,
+} from "@multiremi/contracts/storage.js";
+
+const ENV_OVERRIDES: Partial<Record<keyof StorageSettings, string>> = {
+  ttl_ms: "MULTIREMI_GC_TTL_MS",
+  pressure_free_percent: "MULTIREMI_GC_PRESSURE_FREE_PERCENT",
+  pressure_free_bytes: "MULTIREMI_GC_PRESSURE_FREE_BYTES",
+  critical_free_percent: "MULTIREMI_GC_CRITICAL_FREE_PERCENT",
+  critical_free_bytes: "MULTIREMI_GC_CRITICAL_FREE_BYTES",
+  automation_ttl_ms: "MULTIREMI_GC_AUTOMATION_TTL_MS",
+  max_retained: "MULTIREMI_GC_MAX_RETAINED",
+  orphan_ttl_ms: "MULTIREMI_GC_ORPHAN_TTL_MS",
+  snapshot_max_bytes: "MULTIREMI_GC_SNAPSHOT_MAX_BYTES",
+};
+
+export interface StorageMachineOptions {
+  /** `MULTIREMI_GC_ENABLED`: run periodic rounds at all. */
+  enabled: boolean;
+  /** `MULTIREMI_GC_INTERVAL_MS`: time between periodic rounds. */
+  intervalMs: number;
+  /** `MULTIREMI_GC_DRY_RUN`: plan only, never mutate. */
+  dryRun: boolean;
+  /** `MULTIREMI_LEGACY_KEEP_DAYS`: how long a swept `legacy-<date>` directory stays. */
+  legacyKeepDays: number;
+}
+
+export const DEFAULT_GC_INTERVAL_MS = 15 * 60 * 1000;
+export const DEFAULT_LEGACY_KEEP_DAYS = 7;
+
+export function resolveStorageMachineOptions(env: NodeJS.ProcessEnv = process.env): StorageMachineOptions {
+  return {
+    enabled: booleanValue(env.MULTIREMI_GC_ENABLED, true),
+    intervalMs: integerValue(env.MULTIREMI_GC_INTERVAL_MS, DEFAULT_GC_INTERVAL_MS),
+    dryRun: booleanValue(env.MULTIREMI_GC_DRY_RUN, false),
+    legacyKeepDays: integerValue(env.MULTIREMI_LEGACY_KEEP_DAYS, DEFAULT_LEGACY_KEEP_DAYS),
+  };
+}
+
+/**
+ * Effective policy for one workspace: defaults, then `settings.storage`, then
+ * the machine's environment overrides. A value outside its bounds is ignored at
+ * every layer, so a bad override can never relax retention below the minimum.
+ */
+export function resolveStoragePolicy(
+  workspaceSettings: Record<string, unknown> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): StorageSettings {
+  const base = resolveStorageSettings(workspaceSettings?.storage);
+  const merged = { ...base };
+  for (const key of STORAGE_SETTINGS_KEYS) {
+    const name = ENV_OVERRIDES[key];
+    const raw = name ? env[name] : undefined;
+    if (raw === undefined || raw.trim() === "") continue;
+    const parsed = Number(raw);
+    // Validate the override alone: out of range falls back to the workspace value.
+    if (!validateStorageSettingsPatch({ [key]: parsed }).errors.length) merged[key] = parsed;
+  }
+  for (const unit of ["percent", "bytes"] as const) {
+    const critical = `critical_free_${unit}` as const;
+    const pressure = `pressure_free_${unit}` as const;
+    if (merged[critical] > 0 && merged[pressure] > 0 && merged[critical] > merged[pressure]) {
+      // Reject the conflicting critical override first, preserving a valid pressure override.
+      merged[critical] = base[critical];
+      if (merged[critical] > merged[pressure]) merged[pressure] = base[pressure];
+    }
+  }
+  return resolveStorageSettings(merged);
+}
+
+function booleanValue(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  return !["0", "false", "no", "off"].includes(value.trim().toLowerCase());
+}
+
+function integerValue(value: string | undefined, fallback: number): number {
+  const parsed = value === undefined || value.trim() === "" ? Number.NaN : Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}

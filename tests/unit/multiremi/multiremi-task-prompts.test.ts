@@ -1,7 +1,11 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { turnApiPath } from "./unified-test-paths.js";
+import { taskOfferResponse } from "../../fixtures/task-offer.js";
+import { reportFrame } from "../../fixtures/report-session.js";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -28,7 +32,7 @@ describe("assembled task prompt audit", () => {
     })).toThrow("immutable");
   });
 
-  it("accepts daemon reporting and exposes the exact artifact to authorized UI clients", async () => {
+  it("accepts daemon reporting and exposes canonical input separately from the daemon prompt audit", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store });
     const runtime = store.registerRuntime({
@@ -44,30 +48,82 @@ describe("assembled task prompt audit", () => {
 
     const prompt = "# Delta Prompt\n\n## Current Request\nDo it";
     const sha256 = createHash("sha256").update(prompt).digest("hex");
-    const reported = await app.request(`/api/daemon/tasks/${task.id}/prompt`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "delta", prompt, sha256 }),
-    });
-    expect(reported.status).toBe(200);
-    expect(await reported.json()).toMatchObject({ task_id: task.id, mode: "delta", sha256 });
+    const reported = await reportFrame(store, "task.prompt", { task_id: task.id, mode: "delta", prompt, sha256 }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(reported.ok).toBe(true);
+    expect(store.getTaskPrompt(task.id)).toMatchObject({ taskId: task.id, mode: "delta", sha256 });
 
-    const fetched = await app.request(`/api/tasks/${task.id}/prompt`);
+    const fetched = await app.request(turnApiPath(store, task.id, "?input=true"));
     expect(fetched.status).toBe(200);
-    expect(await fetched.json()).toMatchObject({ task_id: task.id, mode: "delta", prompt, sha256 });
+    const input = await fetched.json();
+    expect(input.turn.id).toBe(task.id);
+    expect(input.input.messages[0].body_md).toBe("Do it");
+    expect(store.getTaskPrompt(task.id)).toMatchObject({ taskId: task.id, mode: "delta", prompt, sha256 });
+    // Without an instructions field (older daemon) the turn input says nothing was recorded for them.
+    expect(input.input).toMatchObject({ sent_attempt_id: task.id, sent_prompt: prompt, instructions: null });
   });
 
-  it("returns 404 before the daemon records a prompt", async () => {
+  it("records the AGENTS.md notes a daemon reports and returns what the attempt sent (ADR 0023)", async () => {
+    const store = createStore();
+    const app = createMultiremiApp({ store });
+    const runtime = store.registerRuntime({ id: "rt_notes", name: "Notes runtime", provider: "claude", workspaceId: "local" });
+    const agent = store.createAgent({ name: "Notes worker", provider: "claude" });
+    const task = store.createTask({ agentId: agent.id, runtimeId: runtime.id, prompt: "你好" });
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    store.startTask(task.id);
+    const prompt = "你好";
+    const instructions = "# Notes worker\n\n# Remi\nNotes.\n";
+    const sha256 = createHash("sha256").update(prompt).digest("hex");
+    const reported = await reportFrame(store, "task.prompt", { task_id: task.id, mode: "bootstrap", prompt, sha256, instructions },
+      { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(reported.ok).toBe(true);
+    expect(store.getTaskPrompt(task.id)).toMatchObject({ prompt, instructions });
+
+    const current = await (await app.request(turnApiPath(store, task.id, "?input=true"))).json();
+    expect(current.input).toMatchObject({ sent_attempt_id: task.id, sent_prompt: "你好", instructions });
+    const chosen = await (await app.request(turnApiPath(store, task.id, `?input=true&attempt=${task.id}`))).json();
+    expect(chosen.input).toMatchObject({ sent_attempt_id: task.id, sent_prompt: "你好", instructions });
+    const foreign = await app.request(turnApiPath(store, task.id, "?input=true&attempt=tsk_not_this_turn"));
+    expect(foreign.status).toBe(400);
+
+    // A block too large to be Remi's is dropped, not refused: a refused report would block the outbox.
+    const other = store.createTask({ agentId: agent.id, runtimeId: runtime.id, prompt: "again" });
+    const otherSha = createHash("sha256").update("again").digest("hex");
+    expect(store.recordTaskPrompt(other.id, { mode: "delta", prompt: "again", sha256: otherSha, instructions: "x".repeat(70 * 1024) }))
+      .toMatchObject({ prompt: "again", instructions: null });
+  });
+
+  it("exposes pending canonical input before a daemon assembles its prompt", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store });
     const agent = store.createAgent({ name: "Queued worker", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, prompt: "Wait" });
-    const response = await app.request(`/api/tasks/${task.id}/prompt`);
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "prompt not recorded" });
+    const response = await app.request(turnApiPath(store, task.id, "?input=true"));
+    expect(response.status).toBe(200);
+    const input = await response.json();
+    expect(input.turn.status).toBe("pending");
+    expect(input.input.messages.map((m: any) => m.body_md)).toEqual(["Wait"]);
+    expect(store.getTaskPrompt(task.id)).toBeNull();
+
+    const credential = await store.createTaskAccessToken(task, "local");
+    const headers = { Authorization: `Bearer ${credential.token}` };
+    const ownInput = await app.request(turnApiPath(store, task.id, "?input=true"), { headers });
+    expect(ownInput.status).toBe(200);
+    expect((await ownInput.json()).input.messages.map((message: any) => message.body_md)).toEqual(["Wait"]);
+    const other = store.createTask({ agentId: agent.id, prompt: "PRIVATE_OTHER_NATIVE_INPUT" });
+    expect(store.getTurnForAttempt(other.id)!.session_id).not.toBe(store.getTurnForAttempt(task.id)!.session_id);
+    const crossInput = await app.request(turnApiPath(store, other.id, "?input=true"), { headers });
+    expect(crossInput.status).toBe(403);
+    expect(await crossInput.text()).not.toContain("PRIVATE_OTHER_NATIVE_INPUT");
+
+    const otherTurn = store.getTurnForAttempt(other.id)!;
+    db!.run("UPDATE multiremi_turns SET session_id = ? WHERE id = ?", ["auto_missing", otherTurn.id]);
+    expect(store.getTurn(otherTurn.id)?.current_attempt_id).toBe(other.id);
+    const unknownOwnerInput = await app.request(`/api/turns/${otherTurn.id}?input=true`);
+    expect(unknownOwnerInput.status).toBe(404);
+    expect(await unknownOwnerInput.text()).not.toContain("PRIVATE_OTHER_NATIVE_INPUT");
   });
 
-  it("sends only sibling results published since the previous prompt on a delta turn", async () => {
+  it("sends no sibling results in bootstrap or delta offers while preserving authorized result reads", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store });
     const runtime = store.registerRuntime({
@@ -77,7 +133,7 @@ describe("assembled task prompt audit", () => {
       workspaceId: "local",
     });
     const agent = store.createAgent({ name: "Delta worker", provider: "codex" });
-    const issue = store.createIssue({ title: "Delta results", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Delta results", workspaceId: "local" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const sibling = store.createIssueSession(issue.id, { title: "Research" });
     const oldResult = store.publishSessionResult(sibling.id, {
@@ -86,11 +142,14 @@ describe("assembled task prompt audit", () => {
     });
     const first = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Bootstrap" });
 
-    const firstClaim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const firstClaim = await taskOfferResponse(store, runtime.id);
     expect(firstClaim.status).toBe(200);
-    expect((await firstClaim.json()).task.issue_session_results.map((result: any) => result.id)).toEqual([oldResult.id]);
+    const firstWire = (await firstClaim.json()).task;
+    // ADR 0023: published results are no longer computed or sent; agents read them through the CLI.
+    expect(firstWire).not.toHaveProperty("issue_session_results");
+    expect(JSON.stringify(firstWire)).not.toContain(oldResult.body);
 
-    const firstPrompt = "# Bootstrap Prompt\n\n## Current Request\nBootstrap";
+    const firstPrompt = "Bootstrap";
     store.recordTaskPrompt(first.id, {
       mode: "bootstrap",
       prompt: firstPrompt,
@@ -117,11 +176,17 @@ describe("assembled task prompt audit", () => {
     ]);
 
     const second = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Continue" });
-    const secondClaim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const secondClaim = await taskOfferResponse(store, runtime.id);
     expect(secondClaim.status).toBe(200);
     const claimed = (await secondClaim.json()).task;
-    expect(claimed.id).toBe(second.id);
+    expect(claimed.attempt_id).toBe(second.id);
     expect(claimed.session_projection.mode).toBe("delta");
-    expect(claimed.issue_session_results.map((result: any) => result.id)).toEqual([newResult.id]);
+    expect(claimed).not.toHaveProperty("issue_session_results");
+    expect(JSON.stringify(claimed)).not.toContain(oldResult.body);
+    expect(JSON.stringify(claimed)).not.toContain(newResult.body);
+    const results = await app.request(`/api/issues/${issue.id}/session-results`,
+      { headers: { Authorization: `Bearer ${claimed.auth_token}` } });
+    expect(results.status).toBe(200);
+    expect((await results.json() as any[]).map(result => result.id).sort()).toEqual([oldResult.id, newResult.id].sort());
   });
 });

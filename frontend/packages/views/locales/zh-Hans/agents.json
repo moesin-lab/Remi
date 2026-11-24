@@ -128,7 +128,7 @@
   "fallback": {
     "model_label": "备用模型",
     "thinking_label": "备用模型思考等级",
-    "description": "仅在主模型网关资源不可用时自动接管当前任务。",
+    "description": "主模型或网关不可用时，自动接管当前任务。",
     "unconfigured": "未配置",
     "same_as_primary": "备用模型不能与主模型相同",
     "clear": "清除备用模型",
@@ -137,6 +137,9 @@
     "switch_count": "切换 {{count}} 次",
     "reason_gateway": "网关资源不可用",
     "reason_no_account": "网关无可用账号",
+    "reason_model_unavailable": "主模型不可用",
+    "reason_server": "供应商服务错误",
+    "reason_queued": "候选 Runtime 均不支持主模型",
     "reason_unknown": "资源不可用"
   },
   "inspector": {
@@ -200,7 +203,8 @@
     "label": "模型",
     "default_provider": "默认（提供方）",
     "discovery_failed": "发现失败",
-    "clear_full": "清除选择（使用提供方默认）"
+    "clear_full": "清除选择（使用提供方默认）",
+    "blocked_by_policy": "该模型已被组策略屏蔽，请选择其他模型。"
   },
   "tabs": {
     "activity": "动态",
@@ -279,7 +283,7 @@
       "unsaved_changes": "未保存的修改"
     },
     "instructions": {
-      "intro": "定义这个智能体的身份和工作风格。会注入到每个 task 的上下文。支持 Markdown。",
+      "intro": "定义这个智能体的身份和工作风格。写入该智能体每个会话（Chat 和 Issue）的 AGENTS.md 开头，每一轮都生效。支持 Markdown。",
       "placeholder": "定义这个智能体的角色、专长和工作风格。\n\n# 示例\n你是一名专注 React 和 TypeScript 的前端工程师。\n\n## 工作风格\n- 写小而聚焦的 PR —— 每个逻辑变更一个 commit\n- 优先组合而不是继承\n- 新组件总是配单元测试\n\n## 约束\n- 未经明确批准不要修改 shared/ 下的 type\n- 遵循 features/ 中现有的组件模式"
     },
     "env": {
@@ -345,7 +349,7 @@
     },
     "integrations": {
       "intro": "把这个智能体连接到外部聊天平台，让大家在自己熟悉的工具里直接与它协作。",
-      "members_note": "只有工作区的所有者和管理员才能为智能体绑定飞书 Bot。你可以在「设置 → 集成」中查看已连接的 Bot。"
+      "members_note": "只有工作区的所有者和管理员才能为智能体绑定飞书 Bot。你可以在「IM 平台 → 飞书 → 机器人」中查看已连接的 Bot。"
     },
     "activity": {
       "section_now": "当前",
@@ -421,6 +425,17 @@
   },
   "transcript": {
     "dialog_title": "智能体执行记录",
+    "view_live": "查看实时执行过程",
+    "view_finished": "查看已结束的执行过程",
+    "trace_loading": "正在加载执行过程…",
+    "trace_live": "实时更新中",
+    "trace_finished": "执行已结束 · {{count}} 条事件",
+    "trace_unreachable": "执行机 {{name}} 离线，过程记录暂时无法读取",
+    "trace_last_seen": "最近在线 {{time}}",
+    "trace_lost": "执行过程已丢失",
+    "trace_not_found": "暂无执行过程记录",
+    "trace_failed": "执行过程载入失败",
+    "trace_retry": "重试",
     "execution_view": "执行过程",
     "prompt_view": "输入 Prompt",
     "copy_prompt": "复制 Prompt",
@@ -428,11 +443,16 @@
     "prompt_loading": "正在读取输入 Prompt...",
     "prompt_not_recorded": "该任务未记录输入 Prompt，可能由旧版本运行时创建。",
     "prompt_load_failed": "输入 Prompt 读取失败，请稍后重试。",
+    "prompt_sent_title": "本轮发送给智能体的内容",
+    "prompt_messages_fallback": "该次执行未记录发送原文，以下为本轮的消息。",
+    "prompt_steers": "插话",
+    "session_instructions": "会话设定",
+    "session_instructions_note": "本次执行时会话 AGENTS.md 中由 Remi 写入的部分。本地工作区里的指令文件只保存在本机，不在此显示。",
     "status_queued": "排队中",
     "status_dispatched": "等待中",
     "status_waiting_local_directory": "等待本地目录",
     "status_running": "进行中",
-    "status_awaiting_human": "等待审核",
+    "status_awaiting_human": "等待回答",
     "status_completed": "已完成",
     "status_failed": "失败",
     "status_cancelled": "已取消",
@@ -447,21 +467,20 @@
     "final_answer": "最终回复",
     "copy_answer": "复制",
     "tokens_context": "{{value}} 上下文",
+    "context_usage": "上下文 {{value}}",
     "waiting_dispatch": "正在等待可用运行时...",
     "waiting_start": "正在等待任务启动...",
     "waiting_local_directory": "正在等待本地目录释放...",
-    "waiting_human": "正在等待审核...",
+    "waiting_human": "正在等待回答...",
     "waiting_events": "等待事件中...",
     "no_data": "未记录执行数据。",
     "sort_label": "排序",
     "sort_chronological": "时间顺序",
     "sort_newest_first": "最新在前",
     "plan": "计划",
-    "command_not_recorded": "命令未记录（旧版本任务）",
-    "tool_running": "执行中…",
     "nested_steps_other": "{{count}} 个步骤",
-    "collab_activity_hidden": "子智能体的内部过程不可见",
     "step_not_finished": "未完成",
+    "steer_not_delivered": "未送达",
     "human_answer_label": "回答：",
     "human_status": "状态：{{value}}",
     "human_responded_by": "响应人：{{value}}"
@@ -491,7 +510,7 @@
     "members": "{{online}} 在线 · {{count}} 个 Runtime",
     "pinned": "当前仍固定到 Runtime {{runtime}}。重新选择能力组后，可在组内调度。",
     "automatic": "自动调度 · {{provider}}",
-    "automatic_hint": "任务可在工作区内此云友有权使用的同类型 Runtime 之间自动调度。",
+    "automatic_hint": "任务可在工作区内此智能体有权使用的同类型 Runtime 之间自动调度。",
     "model_routing": "模型路由 · {{provider}}",
     "model_routing_hint": "按所选模型和思考等级，跨可用能力组与 Runtime 动态匹配；未选模型时使用兼容 Runtime 的默认模型。",
     "fixed_group": "固定能力组 · {{group}}"

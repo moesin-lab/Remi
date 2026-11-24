@@ -2,6 +2,7 @@ import { z } from "zod";
 import { IssueSchema, IssueWorkspaceSchema } from "./issues";
 import { ProjectSchema } from "./projects";
 import { TimelineEntriesSchema } from "./timeline";
+import { TraceTurnPageSchema } from "./tasks";
 
 export const ManagedIssueShareSchema = z.object({
   token: z.string(),
@@ -47,8 +48,10 @@ const SharedTaskSchema = z.object({
   issue_session_id: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
-  messages: z.array(z.record(z.string(), z.unknown())).default([]),
 }).loose();
+
+/** A shared task's trace: the same `view=turn` page the workspace routes return. */
+export const SharedTaskTracePageSchema = TraceTurnPageSchema;
 
 const SharedSessionSchema = z.object({
   id: z.string(),

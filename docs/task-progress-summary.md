@@ -1,13 +1,13 @@
 # 任务 LLM 进度摘要（MUL-67）
 
 运行中的任务由 daemon 持续生成一句人话进度，写入 `progress_summary / progress_step / progress_total`，
-前端 agent-live-card、`remi issue runs` CLI 及任何读取任务 wire 字段的消费端可直接展示。
+前端 agent-live-card、`remi turn list --issue <issue>` CLI 及任何读取任务 wire 字段的消费端可直接展示。
 
 ## 工作方式
 
 - **开场白**：run 刚启动、第一条模型摘要还没生成时，daemon 先写入一条随机开场白
   （`pickTaskStartupLine(agentName)` / `TASK_STARTUP_LINES`，`progress-summarizer.ts`）。
-  双触发意味着这条文案要独占每次 run 的前 ~45 秒，所以它按产品文案对待：由当前云友以第一人称
+  双触发意味着这条文案要独占每次 run 的前 ~45 秒，所以它按产品文案对待：由当前 Agent 以第一人称
   出场（模板里的 `{name}` 替换成 `task.agent.name`，缺失时回落到 `Remi`，超长名字截断到 16 字），
   和模型摘要同一口吻的短中文，随机取一条，避免连续几次 run 看起来像卡住了。
 - **双触发（借鉴 MoA Task Summary）**：daemon 在 `session.run()` 事件循环里累计新增 task_messages，
@@ -60,10 +60,10 @@ OpenAI 兼容模型和 Claude 兜底模型。设置保存在 workspace `settings
 ## 消费端
 
 - 前端：Issue 页 agent-live-card 在运行行下方展示一行摘要（`progress_summary`）。
-- CLI：`remi issue runs <issue-id> --output table` 的 `PROGRESS` 列（含 `[step/total]` 前缀）。
-- API：`/api/issues/:id/task-runs`、daemon 任务 wire 均已携带 `progress_summary/step/total`。
+- CLI：`remi turn get <turn> --attempts --output json` 的尝试进度字段。
+- API：`/api/turns/:id`、daemon attempt wire 均已携带 `progress_summary/step/total`。
 
 ## 测试
 
-- `tests/unit/daemon/progress-summarizer.test.ts`：开场白随机取值 / 云友署名与回落 / 长名截断 / 触发计数 / 防抖 / 摘要压缩 / 凭证解析 / 单飞 / 失败隔离 / 终态 / 零配置 OpenAI 默认链 / OpenAI→API→CLI 降级 / CLI 超时。
+- `tests/unit/daemon/progress-summarizer.test.ts`：开场白随机取值 / Agent 署名与回落 / 长名截断 / 触发计数 / 防抖 / 摘要压缩 / 凭证解析 / 单飞 / 失败隔离 / 终态 / 零配置 OpenAI 默认链 / OpenAI→API→CLI 降级 / CLI 超时。
 - `tests/unit/multiremi/store-tasks-repo.test.ts`：终态任务仅接受 `final` 摘要写入。

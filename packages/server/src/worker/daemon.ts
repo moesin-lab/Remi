@@ -1,18 +1,41 @@
-import { createHash } from "node:crypto";
+import { foldStoredTrace } from "./trace-pages.js";
+import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
+import { restartQuestionKey, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
+import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
+import { performUpdate } from "@shared/cli-update.js";
+import { armUpdateWatchdog, restorePreviousLauncher, journalForInstall, updateJournalDir, readUpdateJournal, updateDecision, decideUpdate, DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
+import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
+import { runtimeConnectionModels, type RuntimeExecutionBinding, type RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
+import { parseExecutionConnectionProfile } from "@multiremi/contracts/execution-profile.js";
+import { createHash, randomUUID } from "node:crypto";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
 import { assertRuntimeClaudeProjectCredentials, resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
 import { resolveRuntimeCodexProfile } from "@daemon/agent-runtime/codex-profile.js";
 import { discoverRuntimeProfileModels } from "./runtime-profile-models.js";
-import { antigravityCliVersion, resolveAntigravityExecutable } from "@acp/antigravity.js";
+import { ensureAntigravityServer, installedAntigravity } from "@acp/antigravity-install.js";
+import { AntigravityGatewayShim, type GatewayShimRun } from "@daemon/agent-runtime/antigravity/gateway-shim.js";
 import { prepareRuntimeCodexModelCatalog } from "./runtime-codex-model-catalog.js";
-import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
-import { mkdirSync, realpathSync } from "node:fs";
+import { FeishuDeliveryError, isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
+import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { cpus, homedir, hostname } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { multiremiStateDir } from "@shared/home-paths.js";
+import { basename, dirname, join, resolve } from "node:path";
+import { acquireDaemonOutbox, releaseDaemonOutbox, daemonReportTransport, daemonOutboxHasPriority } from "./report-transport.js";
+import { acquireDaemonTrace, releaseDaemonTrace, daemonTraceStore, type DaemonTraceTransport } from "./trace-transport.js";
+import { installedExternalCodexCommand, registerDaemonExternalChats } from "./external-chats.js";
+import { CodexExternalChats } from "@daemon/external-chats/index.js";
+import type { DaemonTraceListener } from "./trace-subscriptions.js";
+import type { TraceStore } from "@multiremi/worker/trace-store.js";
+import type { TraceSteerResult } from "@multiremi/contracts/trace.js";
+import { COMPACT_COMMAND_REPLY, isCompactCommand, type ObservedSlashCommand, type SlashCommandCatalogue } from "@multiremi/contracts/slash-commands.js";
 import { createLogger } from "@shared/logger.js";
 import {
   AcpProvider,
+  AcpSessionFailureError,
+  AcpRpcError,
+  redactProviderErrorText,
   createRuntimeProvider,
   type AcpModelCapability,
   type AcpProviderOptions,
@@ -23,30 +46,68 @@ import {
   createAdapter,
 } from "@acp/index.js";
 import type { ElicitationCreateParams, ElicitationResult, PermissionOutcome, RequestPermissionParams } from "@shared/contracts/acp-protocol.js";
-import { answersToElicitationContent, elicitationToQuestions } from "@shared/contracts/acp-elicitation.js";
-import type { AgentResponse, Provider } from "@shared/contracts/provider-types.js";
-import type { AgentTask } from "@daemon/contracts/types.js";
+import { answersToElicitationContent, elicitationToQuestions, type ElicitationQuestion } from "@shared/contracts/acp-elicitation.js";
+import type { AgentResponse, Provider, ProviderEvent } from "@shared/contracts/provider-types.js";
+import type { AgentTask, AgentTaskSkill } from "@daemon/contracts/types.js";
+import type { UnifiedMessage } from "@multiremi/contracts/unified-model.js";
 import {
   DEFAULT_DAEMON_REQUEST_TIMEOUT_MS,
   isTerminalDaemonAuthorityError,
   MultiremiDaemonClient,
   MultiremiDaemonHttpError,
   type MultiremiDaemonHeartbeatConfigAck,
-  type MultiremiDaemonGcStatus,
   type MultiremiDaemonRegisterResponse,
-  type MultiremiDaemonSessionArchiveStatus,
-  type MultiremiDaemonSessionArchiveWire,
   type MultiremiRelayEngineWire,
   type MultiremiRelayWire,
   type UploadFeishuBotAttachmentInput,
 } from "./client.js";
-import { createEventMapper, responseToUsage } from "./acp-event-mapper.js";
+import { responseToUsageUnits } from "./usage-units.js";
+import { createTraceTranslator, type TraceSubagentRef, type TraceTranslator, type TraceTranslatorCheckpoint } from "./trace-translator.js";
+import { nativeAgentItemId } from "@acp/adapters/trace-vendor.js";
+import { TaskActivityReporter } from "./task-activity.js";
+import { LaneTaskContextFile, type LaneTaskContext } from "./lane-task-context.js";
+import { finalReplyBody } from "@shared/turn-trace.js";
 import {
-  DaemonWakeupSocket,
-  type DaemonWakeupConnect,
-  type DaemonWakeupStatus,
-  type DaemonWakeupTransport,
-} from "./daemon-websocket.js";
+  BACKGROUND_DOORBELL_PREFIX,
+  BACKGROUND_KEEPALIVE_ENV,
+  backgroundFolderHolderNote,
+  parksBackgroundTasks,
+  resolveBackgroundKeepAliveMs,
+} from "@shared/background-tasks.js";
+import {
+  LANE_STOP_TIMEOUT_MS,
+  ParkedLanes,
+  isBackgroundDoorbellMessage,
+  killProcessGroup,
+  laneKeyOf,
+  processStartTime,
+  resolveMaxParkedLanes,
+  type LaneRecord,
+  type LaneResources,
+  type ParkedLanesOptions,
+} from "./parked-lanes.js";
+import { TaskUsageLedger } from "./task-usage-ledger.js";
+import { extractAntigravityDefaultModel, extractBaseUrl } from "@multiremi/relay/fragment.js";
+import type { TaskUsageSnapshot, TaskUsageUnit } from "@multiremi/contracts/usage-accounting.js";
+import {
+  DaemonProtocolClient,
+  DaemonProtocolRpcError,
+  type DaemonProtocolClientOptions,
+  type DaemonProtocolLane,
+} from "./daemon-protocol-client.js";
+import { normalizeDaemonTurnOffer, registerDaemonOfferHandler } from "./daemon-offers.js";
+import { DaemonTaskDownlinks, type DaemonSteerMessage } from "./daemon-downlinks.js";
+import { registerDaemonRuntimeDownlinks } from "./daemon-runtime-downlinks.js";
+import {
+  DAEMON_HEARTBEAT_INTERVAL_MS,
+  type DaemonLaneBackgroundReleasePayload,
+  type DaemonLaneBackgroundStopPayload,
+  type DaemonLaneBackgroundWakeReply,
+  type DaemonLaneRef,
+  type DaemonRuntimeCapabilities,
+  type DaemonTaskCompletionFields,
+  type DaemonTurnInput,
+} from "@multiremi/contracts/daemon-protocol.js";
 import { FeishuConciergeSupervisor, type FeishuConciergeHost } from "./feishu-concierge.js";
 import { deliverFeishuOutbound } from "./feishu-outbound.js";
 import { redactFeishuBotError } from "@multiremi/feishu-bot/diagnostics.js";
@@ -56,13 +117,15 @@ import {
   responseToFeishuImage,
 } from "@connectors/feishu/outbound-images.js";
 import {
-  buildSteerInjectionPrompt,
+  buildSteerInjectionPrompt, withSteerIdentity,
+  steerMessageText,
   materializeTaskSteerAttachments,
   DEFAULT_FORCE_ANSWER_GRACE_MS,
   DEFAULT_STEER_POLL_MS,
-  mergeTaskUsageEntries,
   TaskSteerFeed,
+  type TaskSteerSource,
 } from "./steer.js";
+import { SteerPump, steerResultGroups } from "./steer-pump.js";
 import {
   MultiremiTaskReportOutbox,
   type MultiremiOutboxKind,
@@ -70,7 +133,6 @@ import {
   type MultiremiOutboxStats,
   type MultiremiOutboxDrainResult,
 } from "./outbox.js";
-import { TaskMessageBatcher } from "./task-message-batcher.js";
 import { probeRuntimeModels } from "./runtime-model-probe.js";
 import {
   browseRuntimeDirectory,
@@ -83,6 +145,7 @@ import {
 import { hasReadOnlyCodeSnapshot, isSideConversation } from "@daemon/agent-runtime/prompts/side-conversation.js";
 import type { TaskRepoSnapshot } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import { buildTaskPromptArtifact, type TaskRepoCheckout, type TaskRepoWarning } from "@multiremi/prompt.js";
+import { isPrivateChatTask, turnImages } from "@daemon/agent-runtime/prompts/turn-input.js";
 import {
   MultiremiRepoCache,
   normalizeRepoList,
@@ -91,43 +154,56 @@ import {
 } from "@multiremi/repo-cache.js";
 import {
   classifyDaemonTaskFailure,
+  classifyLegacyProviderFailure,
   classifyPoisonedOutput,
   TaskFailureReason,
   type TaskFailureReasonValue,
 } from "./task-failure.js";
 import { executeRuntimeCommand } from "./runtime-command.js";
+import { BUILD_COMMIT } from "@shared/version.js";
+import { matchesUpdateIdentity } from "@shared/daemon-update.js";
 import { multiremiVersion } from "@multiremi/version.js";
 import {
   writeTaskContext,
-  writeTaskGcContext,
   writeProjectResourceContext,
   writeAgentSkillContext,
+  syncAgentSkills,
+  agentSkillRoot,
+  providerHomeSkillRoot,
+  reportedSlashCommands,
 } from "@daemon/agent-runtime/skills/ephemeral.js";
-import { runSnapshotGcOnce } from "@daemon/agent-runtime/repo/snapshot-gc.js";
+import {
+  runSnapshotGcOnce,
+  type RunSnapshotGcOnceOptions,
+  type SnapshotGcSummary,
+} from "@daemon/agent-runtime/repo/snapshot-gc.js";
 import { prepareIntakeWorkspace } from "@daemon/agent-runtime/workspace/intake.js";
+import { TraceFileStore } from "./trace-file-store.js";
 import { prepareReadOnlyCodeWorkspace } from "@daemon/agent-runtime/workspace/readonly-code.js";
 import {
   assertIssueSessionNativeCodexOAuth,
-  cleanupTemporaryTaskProviderHome,
   cleanupTaskPrivateTempDirectory,
+  ensureOwnedDirectory,
   ensureProviderHomeDirectory,
-  prepareIssueExecutionDirectory,
+  listTaskConversationRoots,
   loadIssueSessionProviderEnv,
-  listIssueSessionRuntimeRoots,
+  prepareIssueExecutionDirectory,
   prepareIssueSessionProviderHome,
-  resolveIssueRuntimeStateRoot,
   resolveTaskProviderHome,
   prepareTaskPrivateTempDirectory,
+  seedIssueSessionAntigravityHome,
+  seedIssueSessionNativeAntigravityHome,
   type TaskPrivateTempDirectory,
   type IssueSessionProviderHome,
 } from "@daemon/agent-runtime/workspace/session-home.js";
 import { prepareIssueWikiWorkspace } from "@daemon/agent-runtime/workspace/wiki.js";
+import { fetchTaskWikiBodies } from "@daemon/agent-runtime/workspace/wiki-fetch.js";
 import { prepareChatRepositories } from "@daemon/agent-runtime/workspace/chat-repos.js";
 import { materializeChatAttachments } from "@daemon/agent-runtime/workspace/chat-attachments.js";
 import { cleanProcessEnv } from "@daemon/agent-runtime/env/injector.js";
 import { mergeCodexSessionConfig, type CodexModelCatalogState } from "@daemon/agent-runtime/relay-sync.js";
 import { AgentRuntime } from "@daemon/agent-runtime/runtime.js";
-import { prepareRuntimeWorkspaceContext } from "@daemon/agent-runtime/workspace/runtime-context.js";
+import { remiInstructionsBudget, runtimeWorkspaceContext, writeProviderInstructions } from "@daemon/agent-runtime/workspace/runtime-context.js";
 import { AgentSession } from "@daemon/agent-runtime/session.js";
 import type { EphemeralContext } from "@daemon/agent-runtime/types.js";
 import { AgentPluginCache } from "@daemon/agent-runtime/agent-plugins/cache.js";
@@ -137,11 +213,10 @@ import {
   pluginSetupRequired,
 } from "@daemon/agent-runtime/agent-plugins/reconciler.js";
 import {
-  cleanupNonIssueTaskPluginRuntime,
   materializeTaskPlugins,
   prepareCodexPluginReadinessRuntime,
-  resolveTaskPluginRuntimeBase,
   resolveTaskPluginSnapshot,
+  taskPluginFingerprint,
 } from "@daemon/agent-runtime/agent-plugins/materialize.js";
 import {
   installCodexPluginHome,
@@ -160,21 +235,35 @@ import { AgentPluginError } from "@daemon/agent-runtime/agent-plugins/types.js";
 import {
   LocalDirectoryError,
   LocalPathLocker,
+  lockedFolderOf,
   resolveTaskWorkDir,
   type ResolvedTaskWorkDir,
 } from "@daemon/agent-runtime/workspace/ephemeral.js";
-import {
-  discussionSessionLifecycleKey,
-  runWorkspaceGcOnce,
-  type MultiremiDaemonGcSummary,
-} from "@daemon/agent-runtime/workspace/gc.js";
-import { resolveWorkspaceGcPolicy, type WorkspaceGcPolicy } from "@daemon/agent-runtime/workspace/gc-policy.js";
 import { resolveWorkspaceProgressSummaryPolicy } from "@daemon/agent-runtime/workspace/progress-summary-policy.js";
-import {
-  IsomorphicGitWorktreeInspector,
-  type GitWorktreeInspector,
-} from "@daemon/agent-runtime/workspace/git-worktree-inspector.js";
+import type { GcRunMode, StorageReport } from "@multiremi/contracts/storage.js";
 import { IssueWorkspaceLifecycleLocker } from "@daemon/agent-runtime/workspace/lifecycle-lock.js";
+import { isPathWithinWorkspacesRoot } from "@daemon/agent-runtime/workspace/persistent.js";
+import {
+  codeViewsRoot,
+  conversationForTask,
+  envRoot,
+  executionLaneForTask,
+  laneForTask,
+  pluginRuntimeBaseDirectory,
+  probeRoot,
+  sharedReposRoot,
+  subjectForTask,
+  subjectIdOfWorkDirectory,
+  usesSharedWorkspace,
+  workDirectory,
+} from "@daemon/agent-runtime/workspace/layout.js";
+import { runLegacySweep } from "@daemon/agent-runtime/workspace/legacy-sweep.js";
+import { executionTrackerFor } from "@daemon/agent-runtime/workspace/execution-tracker.js";
+import { ReclaimEngine } from "@daemon/agent-runtime/workspace/reclaim.js";
+import { restoreReclaimedSubject } from "@daemon/agent-runtime/workspace/restore.js";
+import { DiskPressureMonitor, DISK_CHECK_MS, strictestDiskThresholds } from "@daemon/agent-runtime/workspace/disk-pressure.js";
+import { resolveStorageMachineOptions, resolveStoragePolicy } from "@daemon/agent-runtime/workspace/storage-policy.js";
+import { readSubjectRecord, upsertSubjectRecord } from "@daemon/agent-runtime/workspace/registry.js";
 import {
   TopicWorkspaceLifecycle,
   type CommittedTopicMigration,
@@ -182,39 +271,33 @@ import {
 } from "@daemon/agent-runtime/workspace/topic-lifecycle.js";
 import { configuredMultiremiWorkspacesRoot } from "@daemon/agent-runtime/workspace/process-owner.js";
 import { ownedDirectoryRemovalSupport } from "@daemon/agent-runtime/workspace/safe-remove.js";
-import {
-  prepareIssueSessionArchive,
-  readIssueSessionArchiveReceipt,
-  removePreparedIssueSessionArchive,
-  writeIssueSessionArchiveReceipt,
-} from "@daemon/agent-runtime/workspace/session-archive.js";
 import { SshMeshManager } from "@daemon/ssh-mesh.js";
 import type {
   BotMenuPublishResult,
   MultiremiDaemonHeartbeatAck,
   MultiremiDaemonSshMeshStatus,
   MultiremiIssueWorkspaceRepo,
-  MultiremiIssueWorkspaceArchiveBinding,
+  MultiremiIssueDecision,
   MultiremiRepoData,
   MultiremiRuntimeModel,
   MultiremiRuntimeUpdateScope,
   MultiremiTaskHumanRequest,
-  MultiremiTaskMessage,
   MultiremiTaskStatus,
   MultiremiTaskSteerMessage,
   MultiremiTaskWithAgent,
   MultiremiSshMeshHeartbeatAck,
   RegisterRuntimeInput,
   ResolvedBotMenuConfig,
-  TaskUsageEntry,
   FeishuBotTaskSnapshot,
   FeishuBotCancelResult,
   SubmitFeishuBotMessageInput,
   SubmitFeishuBotMessageResult,
 } from "@multiremi/contracts/types.js";
 import {
+  FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION,
+  FEISHU_DECISION_CARD_PROTOCOL_VERSION,
+  FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,
   MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
-  MULTIREMI_SESSION_ARCHIVE_PREPARATION_FAILURE_REVISION,
   MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
 } from "@multiremi/contracts/types.js";
 import {
@@ -231,18 +314,28 @@ import {
 
 // Re-export the per-task context writers (moved to daemon/agent-runtime/skills in D6)
 // so existing `from "../multiremi/daemon.js"` imports keep resolving (铁律#3).
-export { writeTaskContext, writeTaskGcContext, writeProjectResourceContext, writeAgentSkillContext };
-// Re-export the workspace GC entry point (moved to daemon/agent-runtime/workspace
-// in D6) so existing `from "../multiremi/daemon.js"` imports keep resolving.
-export { runWorkspaceGcOnce, type MultiremiDaemonGcSummary };
-// Re-export the ACP-event mapper (moved to ./acp-event-mapper.ts) and the
-// runtime directory scan/browse entry points (moved to ./local-skills.ts) so
-// existing `from "@multiremi/daemon.js"` imports keep resolving.
-export { createEventMapper };
+export { writeTaskContext, writeProjectResourceContext, writeAgentSkillContext };
+// Re-export the runtime directory scan/browse entry points (moved to
+// ./local-skills.ts) so existing `from "@multiremi/daemon.js"` imports keep resolving.
 export { browseRuntimeDirectory, scanRuntimeDirectories };
 
 const log = createLogger("multiremi-daemon");
-const HUMAN_REQUEST_POLL_MS = 2000;
+
+/** `{ id, name }` of the attachments a turn's input carries, for its `user_message` trace item. */
+function traceAttachments(value: unknown): Array<{ id: string; name: string | null }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    if (typeof row.id !== "string") return [];
+    return [{ id: row.id, name: typeof row.filename === "string" ? row.filename : typeof row.name === "string" ? row.name : null }];
+  });
+}
+/** ADR 0025: catalogues kept for attempts that have not sent their terminal report yet. */
+const ATTEMPT_SLASH_COMMANDS_LIMIT = 256;
+/** A failed layout sweep is retried with this backoff; the daemon does not register meanwhile. */
+const LEGACY_SWEEP_RETRY_MIN_MS = 1_000;
+const LEGACY_SWEEP_RETRY_MAX_MS = 30_000;
 const RUNTIME_MODEL_PROBE_TIMEOUT_MS = 30_000;
 const RUNTIME_MODEL_RETRY_BASE_MS = 5_000;
 const RUNTIME_MODEL_RETRY_MAX_MS = 5 * 60_000;
@@ -260,6 +353,32 @@ function readResponseAnswers(response: Record<string, unknown> | null): Record<s
     if (typeof value === "string" && value.trim()) answers[key] = value;
   }
   return Object.keys(answers).length ? answers : null;
+}
+
+function decisionReplyObject(reply: UnifiedMessage): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(reply.body_md);
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch { return null; }
+}
+
+/** Convert published option values and form answers back to provider field names. */
+function decisionReplyAnswers(reply: UnifiedMessage, questions: ElicitationQuestion[]): Record<string, string> | null {
+  const structured = decisionReplyObject(reply);
+  const answers = readResponseAnswers(reply.metadata) ?? readResponseAnswers(structured);
+  const result: Record<string, string> = {};
+  if (answers) {
+    for (const { fieldKey, question } of questions) {
+      const answer = answers[fieldKey] ?? answers[question.question];
+      if (answer !== undefined) result[question.question] = answer;
+    }
+  } else if (structured && typeof structured.question === "string" && typeof structured.answer === "string") {
+    const match = questions.find(({ fieldKey, question }) => structured.question === fieldKey || structured.question === question.question);
+    if (match) result[match.question.question] = structured.answer;
+  } else if (questions.length === 1) {
+    result[questions[0]!.question.question] = reply.body_md;
+  }
+  return Object.keys(result).length ? result : null;
 }
 
 function providerBootstrapEnv(
@@ -364,9 +483,7 @@ export async function installCodexPluginReadinessHome(
 export const MULTIREMI_REREGISTER_COALESCE_WINDOW_MS = 30_000;
 export const MULTIREMI_REREGISTER_FAILURE_BACKOFF_MS = 60_000;
 const TERMINAL_AUTHORITY_CLEANUP_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 60_000];
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 /** The Feishu concierge host is the only Runtime whose ack latency users feel. */
-const CONCIERGE_HEARTBEAT_INTERVAL_MS = 3_000;
 const DEFAULT_CLAIM_IDLE_BASE_MS = 3_000;
 const DEFAULT_CLAIM_IDLE_MAX_MS = 30_000;
 const DEFAULT_PLUGIN_DESIRED_REFRESH_MS = 30_000;
@@ -376,7 +493,10 @@ const AUTHORITY_PROBE_DELAYS_MS = [30_000, 60_000, 120_000, 240_000, 480_000, 90
 const DEFAULT_AUTHORITY_PROBE_MAX_MS = 900_000;
 const DEFAULT_TASK_DRAIN_TIMEOUT_MS = 5 * 60 * 1_000;
 const DEFAULT_OUTBOX_STARTUP_FLUSH_TIMEOUT_MS = 30_000;
-const OUTBOX_RECONCILE_CONCURRENCY = 6;
+/** An owed autonomous round may take this long to send its first frame (PR 5 §2.5, decision U1). */
+const DEFAULT_AUTONOMOUS_IDLE_MS = 60_000;
+/** Autonomous rounds one attempt waits for, at most. */
+const AUTONOMOUS_MAX_ROUNDS = 8;
 const IN_PROCESS_RUNTIME_MODEL_DISCOVERY_DISABLED =
   "Runtime model discovery is temporarily disabled in the daemon process; gateway models remain available";
 
@@ -396,12 +516,17 @@ export interface MultiremiDaemonOptions {
   provider?: string;
   workspaceId?: string | null;
   pollIntervalMs?: number;
-  /** Deadline for control-plane JSON requests; archive uploads have a separate budget. */
+  /** Deadline for control-plane JSON requests. */
   requestTimeoutMs?: number;
   maxConcurrency?: number;
   once?: boolean;
+  onceOfferTimeoutMs?: number;
   providerFactory?: MultiremiDaemonProviderFactory;
   updateRunner?: MultiremiDaemonUpdateRunner;
+  updateRestartSpec?: { command: string[]; manager?: "systemd" | "launchd" };
+  updateVerifyTimeoutSeconds?: number;
+  stopTimeoutMs?: number;
+  onStopTimeout?: () => void;
   localSkillRoots?: Record<string, string>;
   launchedBy?: string | null;
   onRestartRequested?: () => void;
@@ -416,33 +541,53 @@ export interface MultiremiDaemonOptions {
   steerPollIntervalMs?: number;
   /** How long a force-answer run may keep going before the daemon wraps it up with the output so far (default 3 min). */
   forceAnswerGraceMs?: number;
+  /**
+   * Native subagent child sessions on the ACP bridges that support them (PR 5,
+   * default on): each subagent's work arrives on its own session and becomes a
+   * nested trace. `REMI_ACP_NATIVE_SUBAGENTS=0` restores the root-only frames.
+   */
+  nativeSubagents?: boolean;
+  /**
+   * Late answers as autonomous rounds (PR 5 §2, default on): Claude's frames
+   * between prompts are captured and an owed round is waited for in the same
+   * attempt. `REMI_ACP_AUTONOMOUS_ROUNDS=0` turns both off, restoring the
+   * completion timing without it; independent of {@link nativeSubagents}.
+   */
+  autonomousRounds?: boolean;
+  /**
+   * How long the daemon waits for an owed autonomous round's first frame
+   * (Claude's late answer to a background subagent, PR 5 §2.5; default 60 s).
+   */
+  autonomousIdleMs?: number;
+  /**
+   * Background tasks on the ACP bridges that publish them (PR 6 §3.1, default
+   * on): the AIR `asyncTasks` capability and a task registry per session.
+   * `REMI_ACP_ASYNC_TASKS=0` turns it off; nothing then parks.
+   */
+  asyncTasks?: boolean;
+  /**
+   * Chat lanes whose process may stay parked with background tasks running
+   * (PR 6 D11, `REMI_MAX_PARKED_LANES`, default 4); 0 turns parking off.
+   */
+  maxParkedLanes?: number;
+  /** The keep-alive cap of a parked lane (U1; `REMI_BACKGROUND_KEEPALIVE_MS`, default 2 h). */
+  backgroundKeepAliveMs?: number;
+  /** How long an attempt's end waits for a bridge's late task announcements (Codex, PR 6 §2.2; default 2 s). */
+  backgroundDrainMs?: number;
+  /** Test hooks of the parked-lane registry (idle close, request hold, stop and snapshot timings). */
+  parkedLaneOptions?: Partial<Pick<ParkedLanesOptions, "idleCloseMs" | "requestHoldMs" | "stopTimeoutMs" | "debounceMs"
+    | "refreshMs" | "closedRepeats" | "closedRepeatMs" | "processStartTime" | "killProcessGroup">>;
   daemonPort?: number;
   workspacesRoot?: string;
   repoCacheRoot?: string;
   gcEnabled?: boolean;
   gcIntervalMs?: number;
-  gcTtlMs?: number;
-  /** Last-access TTL for immutable archive snapshots; independent of workspace policy. */
+  /** Plan every reclaim round without changing anything (`MULTIREMI_GC_DRY_RUN`). */
+  gcDryRun?: boolean;
+  /** Days a swept `legacy-<date>` directory stays (`MULTIREMI_LEGACY_KEEP_DAYS`). */
+  legacyKeepDays?: number;
+  /** Last-access TTL for shared read-only code views; independent of workspace policy. */
   snapshotTtlMs?: number;
-  gcOrphanTtlMs?: number;
-  /** Session archives are a mandatory Issue GC precondition by default. */
-  gcRequireArchive?: boolean;
-  /** Injectable isolated Git inspector for GC tests. */
-  gitWorktreeInspector?: GitWorktreeInspector;
-  /** Maximum uncompressed provider history accepted for one Issue snapshot. */
-  sessionArchiveMaxSourceBytes?: number;
-  /** Operator-trusted API origin used only for Session Archive content uploads. */
-  sessionArchiveUploadBaseUrl?: string | null;
-  /** Largest archive allowed through the control-plane proxy fallback. */
-  sessionArchiveProxyMaxBytes?: number;
-  /** TTL for positive and negative direct-route HEAD attestations. */
-  sessionArchiveDirectProbeTtlMs?: number;
-  /** Maximum duration of a direct-route HEAD attestation. */
-  sessionArchiveDirectProbeTimeoutMs?: number;
-  /** Maximum total duration of one archive content upload. */
-  sessionArchiveUploadTimeoutMs?: number;
-  /** Maximum duration of best-effort upload failure reporting. */
-  sessionArchiveFailureReportTimeoutMs?: number;
   /** Runtime-global immutable Agent Plugin cache. */
   pluginCacheRoot?: string;
   /** Injectable provider capability probe; production uses the native CLI and ACP bridge. */
@@ -466,11 +611,13 @@ export interface MultiremiDaemonOptions {
   /**
    * Root-scoped Issue lifecycle barrier. Every provider daemon that shares a
    * workspaces root must receive the same instance so task setup cannot race
-   * another provider's archive-and-delete pass.
+   * another provider's reclaim pass.
    */
   issueWorkspaceLifecycleLocker?: IssueWorkspaceLifecycleLocker;
   /** Verifies that this process still owns the canonical workspaces root. */
   workspaceRootFence?: () => void;
+  /** Replacement code-view GC pass, so tests can observe the sweep without touching the filesystem. */
+  runSnapshotGcPass?: (options: RunSnapshotGcOnceOptions) => Promise<SnapshotGcSummary>;
   /** Shared readiness of every provider daemon in this supervisor process. */
   supervisorReady?: () => boolean;
   /** Updates the shared provider readiness barrier. */
@@ -487,20 +634,21 @@ export interface MultiremiDaemonOptions {
   taskDrainTimeoutMs?: number;
   /** Maximum startup wait for persisted reports before the daemon becomes ready. */
   outboxStartupFlushTimeoutMs?: number;
-  /** Between heartbeats; the Feishu concierge host overrides this with a shorter cadence. */
-  heartbeatIntervalMs?: number;
   /** Ceiling for the idle claim backoff. */
   claimIdleMaxMs?: number;
   /** Fallback desired-state refresh for servers that do not report a revision. */
   pluginDesiredRefreshMs?: number;
-  /** Wake-up channel for `daemon:task_available`; disabled when false. */
-  taskWakeupEnabled?: boolean;
-  /** Injectable wake-up transport for tests. */
-  taskWakeup?: DaemonWakeupTransport;
-  /** Injectable socket factory for the wake-up channel. */
-  taskWakeupConnect?: DaemonWakeupConnect;
+  /** Shared by every provider lane in one supervisor process. */
+  protocolClient?: DaemonProtocolClient;
+  /** Injectable transport and clock for connection-layer tests. */
+  protocolClientOptions?: Partial<DaemonProtocolClientOptions>;
   /** Injectable probe schedule for terminal-authority tests. */
   authorityProbeDelaysMs?: number[];
+  /**
+   * The Antigravity gateway shim (PR 4 §4). Production creates one lazily per
+   * daemon and stops it at shutdown; tests inject one with a fake upstream.
+   */
+  antigravityGatewayShim?: AntigravityGatewayShim;
 }
 
 export interface MultiremiDaemonSshMeshRuntime {
@@ -513,12 +661,135 @@ interface RunSummary {
   output: string;
   sessionId: string | null;
   workDir: string | null;
-  usage: TaskUsageEntry[];
+  usageSnapshot: TaskUsageSnapshot;
   failureReason?: TaskFailureReasonValue;
   /** True when the run loop already finalized the task server-side (progress,
    *  usage and completeTask) — done inside runAgent so a steer racing
    *  completion can still be injected while the provider session is open. */
   completed: boolean;
+}
+
+/** Preserve the last provider checkpoint when shutdown interrupts runAgent. */
+class RunAgentError extends Error {
+  constructor(cause: unknown, readonly sessionId: string | null, readonly workDir: string,
+    readonly runtimeInterrupted: boolean) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+/** stop() permits providers to drain; only transport cancellation/exit is
+ * evidence of an interrupted provider. Typed failures retain their authority. */
+function isShutdownInterruption(error: unknown): boolean {
+  if (error instanceof AcpSessionFailureError || error instanceof AcpRpcError) return false;
+  if (error instanceof DaemonProtocolRpcError) return error.code === "authority_revoked";
+  return error instanceof Error && (error.message === "Cancelled"
+    || /^ACP agent died unexpectedly \([^\n]+\)$/.test(error.message));
+}
+
+/**
+ * What a Chat lane's process holds besides itself (PR 6 §2.8): its private
+ * temp dir, the work directory (and its lock), the materialized plugins, and
+ * the execution-tracker hold that keeps reclaim off the subject and that temp
+ * dir. Whoever ends the process disposes them, once: the attempt, or the
+ * parked-lane registry when the process outlived it.
+ */
+class DaemonLaneResources implements LaneResources {
+  privateTmp: TaskPrivateTempDirectory | null = null;
+  resolvedWorkDir: ResolvedTaskWorkDir | null = null;
+  pluginRuntime: PreparedAgentPluginRuntime | undefined;
+  hold: (() => void) | null = null;
+  private disposed: Promise<void> | null = null;
+  /** Made at first use; null when it could not be. */
+  private contextFile: LaneTaskContextFile | null | undefined;
+
+  constructor(private readonly cleanupTmp: (directory: TaskPrivateTempDirectory) => Promise<void>) {}
+
+  /**
+   * The lane's task context file (PR 6 §2.4), in its private temp directory:
+   * every process of the lane reads the current attempt's token there, since
+   * the token in its spawn env is revoked when that attempt completes. Null
+   * before the directory exists, or when the file could not be made (readers
+   * then fall back to the env, as an Issue lane does).
+   */
+  taskContextFile(): LaneTaskContextFile | null {
+    if (this.contextFile !== undefined) return this.contextFile;
+    if (!this.privateTmp) return null;
+    try {
+      this.contextFile = LaneTaskContextFile.create(this.privateTmp.path);
+    } catch (error) {
+      log.warn(`Could not create a lane's task context file: ${error instanceof Error ? error.message : String(error)}`);
+      this.contextFile = null;
+    }
+    return this.contextFile;
+  }
+
+  /** Name the attempt running on the lane's process; `token: null` once none does. */
+  writeTaskContext(context: LaneTaskContext): void {
+    const file = this.taskContextFile();
+    if (!file) return;
+    try {
+      file.write(context);
+    } catch (error) {
+      log.warn(`Could not write a lane's task context file: ${error instanceof Error ? error.message : String(error)}`);
+      try { file.discard(); } catch { /* readers then see the last version */ }
+    }
+  }
+
+  get privateTmpPath(): string | null {
+    return this.privateTmp ? this.privateTmp.aliasPath ?? this.privateTmp.path : null;
+  }
+
+  get pluginFingerprint(): string | null {
+    return this.pluginRuntime?.pluginFingerprint ?? null;
+  }
+
+  dispose(): Promise<void> {
+    this.disposed ??= (async () => {
+      try {
+        if (this.privateTmp) await this.cleanupTmp(this.privateTmp);
+      } catch (error) {
+        log.warn(`Failed to clean a lane's private temp: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        try { this.resolvedWorkDir?.release?.(); } catch { /* released already */ }
+        this.hold?.();
+      }
+    })();
+    return this.disposed;
+  }
+}
+
+/** One attempt of an eligible Chat lane (PR 6 §2.4): the parked lane it claimed and the process it ran on. */
+interface BackgroundAttempt {
+  lane: DaemonLaneRef;
+  /** The parked lane this attempt claimed at its start, until it adopts or releases it. */
+  claimed: LaneRecord | null;
+  /** What this attempt made itself; a lane record owns it once it parks or begins with it. */
+  own: DaemonLaneResources;
+  /** The record of the process the attempt ran on (begun or adopted). */
+  record: LaneRecord | null;
+}
+
+/** Env an attempt sets for itself; the rest of a process's launch must match for the next attempt to adopt it (PR 6 §2.4). */
+const ATTEMPT_ENV_KEYS = new Set(["MULTIREMI_TOKEN", "MULTIREMI_TURN_ID", "MULTIREMI_ATTEMPT_ID"]);
+
+/**
+ * What a bridge process fixes at launch and the provider's own staleness rule
+ * cannot see (PR 6 §2.4): executable, args, MCP servers, routing and profile
+ * env, allowed tools and system prompt. A different value releases the
+ * parked process (`config_changed`); cwd, plugins, CODEX_HOME and the startup
+ * model are `reuseCheck`'s.
+ */
+function backgroundLaunchFingerprint(input: {
+  agentType: string; executable?: string | null; args?: string[]; env?: Record<string, string>; mcpServers?: unknown;
+  allowedTools?: string[]; systemPrompt?: string | null; claudeSettings?: unknown; claudeOneMillionModels?: readonly string[];
+  instructions?: string | null;
+}): string {
+  const env = Object.entries(input.env ?? {}).filter(([key]) => !ATTEMPT_ENV_KEYS.has(key)).sort(([a], [b]) => a.localeCompare(b));
+  return createHash("sha256").update(JSON.stringify([input.agentType, input.executable ?? null, input.args ?? [], env,
+    input.mcpServers ?? [], input.allowedTools ?? null, input.systemPrompt ?? null, input.claudeSettings ?? null,
+    [...input.claudeOneMillionModels ?? []],
+    // Only when there is a file, so every other lane keeps the fingerprint it had.
+    ...(input.instructions ? [createHash("sha256").update(input.instructions).digest("hex")] : [])])).digest("hex");
 }
 
 interface PreparedIssueWorkspace {
@@ -546,13 +817,49 @@ function upsertRepoWarning(warnings: TaskRepoWarning[], warning: TaskRepoWarning
   else warnings.push(warning);
 }
 
-export type MultiremiTaskProvider = Pick<Provider, "sendStream" | "getLastResponse"> & {
+export type MultiremiTaskProvider = Pick<Provider, "sendStream" | "getLastResponse" | "steer"> & {
+  /** An autonomous round after the prompt resolved (PR 5 §2.3); absent when the provider captures none. */
+  listenAutonomous?: Provider["listenAutonomous"];
+  // Background tasks (PR 6 §3.3); absent when the provider keeps no task registry.
+  listAsyncTasks?: Provider["listAsyncTasks"];
+  stopAsyncTask?: Provider["stopAsyncTask"];
+  settleAsyncTasks?: Provider["settleAsyncTasks"];
+  reuseCheck?: Provider["reuseCheck"];
+  adoptSession?: Provider["adoptSession"];
+  park?: Provider["park"];
+  processGroupId?: Provider["processGroupId"];
+  /** Whether a live process is pooled under `chatId` (PR 6 §2.4). */
+  sessionAlive?: (chatId: string) => boolean;
+  /** ADR 0025: the latest command list the agent advertised under `chatId`, or null; absent on providers without one. */
+  availableCommands?: (chatId: string) => ObservedSlashCommand[] | null;
+  /** `session/cancel` for a cycle nobody reads (PR 6 §2.5). */
+  cancelIdle?: (chatId: string) => Promise<void>;
+  /** The native agent of a child session, as the provider registered it (PR 5 §1.3). */
+  subagentSession?: (sessionId: string) => { agentId: string; name: string | null } | null;
+  readonly typedSessionFailures?: boolean;
   close?: () => Promise<void> | void;
   discoverModelCapabilities?: () => Promise<AcpModelCapability[]>;
   getStreamedText?: (chatId: string) => string;
   setPermissionHandler?: (handler: (params: RequestPermissionParams) => Promise<PermissionOutcome>) => void;
   setElicitationHandler?: (handler: (params: ElicitationCreateParams) => Promise<ElicitationResult>) => void;
 };
+
+/** A frame of model work in an autonomous round (PR 5 §2.5); title and status updates are not. */
+function isAutonomousActivity(event: ProviderEvent): boolean {
+  switch (event.sessionUpdate) {
+    case "agent_message_chunk":
+    case "agent_thought_chunk":
+    case "tool_call":
+    case "tool_call_update":
+    case "plan":
+    case "usage_update":
+    case "subagent_spawned":
+    case "subagent_state_update":
+      return true;
+    default:
+      return false;
+  }
+}
 
 export interface ElicitationContext {
   text: string;
@@ -601,6 +908,37 @@ export function sliceElicitationContext(
 }
 
 export type MultiremiDaemonProviderFactory = (options: AcpProviderOptions) => MultiremiTaskProvider;
+
+/** The run's shim scope plus what the run needs to know about its gateway. */
+interface AntigravityRunGateway {
+  run: GatewayShimRun;
+  /** For redaction only. */
+  apiKey: string;
+  defaultModel: string | null;
+}
+
+/** A run's Antigravity gateway: the workspace Model gateway engine, resolved before the start ACK. */
+interface AntigravityGateway {
+  upstreamBase: string;
+  apiKey: string;
+  /** The engine's `default_model`, used when the Agent names none. */
+  defaultModel: string | null;
+}
+
+/**
+ * Antigravity runs only through the workspace Model gateway (PR 4 §3): its
+ * engine needs a base URL and a key. Fails fast with a typed reason, before
+ * the start ACK and therefore before any model call.
+ */
+export function antigravityGatewayFor(relay: MultiremiRelayEngineWire | null | undefined): AntigravityGateway {
+  const upstreamBase = relay ? extractBaseUrl("antigravity", relay.fragment) : null;
+  const apiKey = relay?.auth_token?.trim() ?? "";
+  if (!relay || !upstreamBase || !apiKey) {
+    throw new Error("[antigravity_gateway_unconfigured] Antigravity runs only through the workspace Model gateway: "
+      + `configure Settings > Model gateway > Antigravity with ${upstreamBase ? "an API key" : "a base URL and an API key"}`);
+  }
+  return { upstreamBase, apiKey, defaultModel: extractAntigravityDefaultModel(relay.fragment) };
+}
 export type MultiremiDaemonUpdateRunner = (targetVersion: string) => string | Promise<string>;
 export type MultiremiAgentPluginProviderPreflight = (
   provider: "claude" | "codex",
@@ -630,9 +968,20 @@ export class MultiremiRuntimeReregisterGate {
   }
 }
 
+interface RuntimeBindingDiscovery {
+  key: string;
+  binding: RuntimeExecutionBinding;
+  ack: RuntimeExecutionBindingAck;
+  abort: AbortController;
+  probe?: Promise<void>;
+  timer?: ReturnType<typeof setTimeout>;
+  nextRefreshAt: number;
+}
+
 export class MultiremiDaemon {
+  private readonly userHome = homedir();
   private client: MultiremiDaemonClient;
-  private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcTtlMs" | "gcOrphanTtlMs" | "gcRequireArchive" | "gitWorktreeInspector" | "sessionArchiveMaxSourceBytes" | "sessionArchiveUploadBaseUrl" | "sessionArchiveProxyMaxBytes" | "sessionArchiveDirectProbeTtlMs" | "sessionArchiveDirectProbeTimeoutMs" | "sessionArchiveUploadTimeoutMs" | "sessionArchiveFailureReportTimeoutMs" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "heartbeatIntervalMs" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "taskWakeupEnabled" | "taskWakeup" | "taskWakeupConnect" | "authorityProbeDelaysMs">> & {
+  private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "updateRestartSpec" | "updateVerifyTimeoutSeconds" | "stopTimeoutMs" | "onStopTimeout" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcDryRun" | "legacyKeepDays" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "runSnapshotGcPass" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "protocolClient" | "protocolClientOptions" | "authorityProbeDelaysMs" | "antigravityGatewayShim" | "parkedLaneOptions">> & {
     token: string | null;
     runtimeId: string | null;
     daemonId: string | null;
@@ -644,21 +993,23 @@ export class MultiremiDaemon {
     repoCacheRoot: string;
     gcEnabled: boolean;
     gcIntervalMs: number;
-    gcTtlMs: number;
-    gcOrphanTtlMs: number;
-    gcRequireArchive: boolean;
-    sessionArchiveMaxSourceBytes: number;
+    gcDryRun: boolean;
+    legacyKeepDays: number;
     pluginCacheRoot: string;
-    taskWakeup: DaemonWakeupTransport | null;
-    taskWakeupConnect: DaemonWakeupConnect | undefined;
     authorityProbeDelaysMs: number[];
-    heartbeatIntervalMs: number | null;
     claimIdleMaxMs: number;
     pluginDesiredRefreshMs: number;
-    taskWakeupEnabled: boolean;
   };
   private providerFactory: MultiremiDaemonProviderFactory;
-  private updateRunner: MultiremiDaemonUpdateRunner;
+  private updateRunner?: MultiremiDaemonUpdateRunner;
+  private updateRestartSpec?: MultiremiDaemonOptions["updateRestartSpec"];
+  private updateVerifyTimeoutSeconds?: number;
+  private stopTimeoutMs: number;
+  private onStopTimeout: () => void;
+  private liveUpdateProviders = new Map<MultiremiTaskProvider, string>();
+  private runActive = false;
+  private stopDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private updateConfirmation: Promise<void> | null = null;
   private onRestartRequested: (() => void) | null;
   private localSkillRoots: Record<string, string>;
   private repoCache: MultiremiRepoCache;
@@ -667,9 +1018,166 @@ export class MultiremiDaemon {
   private workspaceRepoUrls = new Map<string, Set<string>>();
   private workspaceSettings = new Map<string, Record<string, unknown>>();
   private workspaceRelays = new Map<string, MultiremiRelayWire | undefined>();
+  /** Antigravity's loopback gateway shim; created at the first Antigravity run or probe. */
+  private antigravityShim: AntigravityGatewayShim | null = null;
+  /** Running attempts' `task.activity` reporters, resent on reconnect (PR 5 §3.8). */
+  private activityReporters = new Set<TaskActivityReporter>();
+  /**
+   * ADR 0025: each attempt's latest command catalogue, sent with its terminal
+   * report and dropped when the trace closes. Bounded: an attempt that never
+   * reports leaves at most a few entries behind.
+   */
+  private readonly attemptSlashCommands = new Map<string, SlashCommandCatalogue>();
+  /** Chat lanes whose process lives across attempts while background tasks run (PR 6 §2.3). */
+  private readonly parkedLanes: ParkedLanes;
+  /** The parked lanes' close when the daemon stops (PR 6 §2.7); null while running. */
+  private parkedLanesClosing: Promise<void> | null = null;
+  private readonly ownsAntigravityShim: boolean;
   private runtimeCodexProfile: RuntimeCodexProfile | null = null;
   private runtimeClaudeProfile: RuntimeClaudeProfile | null = null;
+  private runtimeProfileSnapshotReceived = false;
   private runtimeProviderKeys = new Map<string, Promise<string>>();
+  private runtimeBindingAcks: RuntimeExecutionBindingAck[] = [];
+  private runtimeBindingDiscoveries = new Map<string, RuntimeBindingDiscovery>();
+  private runtimeBindingProbeTasks = new Set<Promise<void>>();
+  private runtimeBindingApplication = 0;
+
+  private async applyRuntimeExecutionBindings(bindings: RuntimeExecutionBinding[]): Promise<void> {
+    const application = ++this.runtimeBindingApplication;
+    const registration = this.runtimeRegistrationGeneration;
+    const runtimeId = this.options.runtimeId;
+    const currentApplication = () => application === this.runtimeBindingApplication
+      && registration === this.runtimeRegistrationGeneration && runtimeId === this.options.runtimeId;
+    const acknowledgements: RuntimeExecutionBindingAck[] = [];
+    const desired = new Map(bindings.map(binding => [binding.groupId, JSON.stringify(binding)]));
+    for (const [groupId, entry] of this.runtimeBindingDiscoveries) {
+      if (desired.get(groupId) !== entry.key) {
+        entry.abort.abort();
+        clearTimeout(entry.timer);
+        this.runtimeBindingDiscoveries.delete(groupId);
+      }
+    }
+    for (const binding of bindings) {
+      const cached = this.runtimeBindingDiscoveries.get(binding.groupId);
+      if (cached) {
+        acknowledgements.push(cached.ack);
+        continue;
+      }
+      const identity = { generation: binding.generation, groupId: binding.groupId, profileId: binding.profileId, profileRevision: binding.profileRevision };
+      try {
+        if (typeof binding.generation !== "string" || !binding.generation) throw new Error("Binding generation is required");
+        if (this.options.provider !== binding.provider && this.options.provider !== "any") {
+          throw new Error("Runtime provider does not match capability group");
+        }
+        if (binding.profileId !== null && (!binding.profile || !Number.isSafeInteger(binding.profileRevision) || binding.profileRevision! < 1)) {
+          throw new Error("Capability group profile revision is unavailable");
+        }
+        if (binding.profileId === null && (binding.profile !== null || binding.profileRevision !== null)) {
+          throw new Error("Invalid capability group profile reference");
+        }
+        if (binding.profile) {
+          if (binding.provider !== "codex" && binding.provider !== "claude" && binding.provider !== "antigravity") {
+            throw new Error("Runtime provider does not support connection profiles");
+          }
+          const profile = parseExecutionConnectionProfile(binding.provider, binding.profile)!;
+          const key = await this.runtimeProfileKey(profile, binding.provider);
+          if (!currentApplication()) return;
+          // Build the same isolated configuration used by task snapshots. Never
+          // replace the Runtime's global provider config with a group's profile.
+          const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
+          if (!token) throw new Error("Capability group credentials are unavailable");
+          if (profile.model) {
+            if (binding.provider === "codex") resolveRuntimeCodexProfile(profile, process.env, key);
+            else if (binding.provider === "claude") resolveRuntimeClaudeProfile(profile, process.env, key);
+          }
+        } else if (binding.connectionMode === "native" && binding.provider === "antigravity") {
+          if (!Bun.which("agy", { PATH: process.env.PATH })) throw new Error("Local Antigravity requires agy on PATH");
+        }
+        const ack: RuntimeExecutionBindingAck = { ...identity, status: "ready" };
+        acknowledgements.push(ack);
+        this.runtimeBindingDiscoveries.set(binding.groupId, { key: JSON.stringify(binding), binding, ack,
+          abort: new AbortController(), nextRefreshAt: 0 });
+      } catch {
+        if (!currentApplication()) return;
+        // Do not return raw transport/configuration errors: they can contain
+        // provider credentials or response bodies.
+        acknowledgements.push({ ...identity, status: "error", error: "Profile could not be applied; check provider compatibility and configured credentials" });
+      }
+    }
+    if (!currentApplication()) return;
+    this.runtimeBindingAcks = acknowledgements;
+    if (this.options.runtimeId && acknowledgements.length > 0) await this.client.reportRuntimeBindingAcks(this.options.runtimeId, acknowledgements);
+    if (!currentApplication()) return;
+    for (const entry of this.runtimeBindingDiscoveries.values()) this.refreshRuntimeBindingModels(entry);
+  }
+
+  private refreshRuntimeBindingModels(entry: RuntimeBindingDiscovery): void {
+    const { binding } = entry;
+    if (this.stopped || (!binding.profile && binding.connectionMode !== "native") || entry.probe || Date.now() < entry.nextRefreshAt) return;
+    if (binding.provider !== "codex" && binding.provider !== "claude" && binding.provider !== "antigravity" && binding.provider !== "grok") return;
+    const provider = binding.provider;
+    const runtimeId = this.options.runtimeId;
+    const registration = this.runtimeRegistrationGeneration;
+    if (!runtimeId) return;
+    const current = () => !this.stopped && !entry.abort.signal.aborted && this.options.runtimeId === runtimeId
+      && this.runtimeRegistrationGeneration === registration && this.runtimeBindingDiscoveries.get(binding.groupId) === entry;
+    entry.probe = (async () => {
+      const startedAt = Date.now();
+      let model_catalog: NonNullable<RuntimeExecutionBindingAck["model_catalog"]>;
+      try {
+        let models: MultiremiRuntimeModel[];
+        if (binding.connectionMode === "native") {
+          const prepared = await this.runtimeModelProbeProviderOptions(binding.groupId, provider);
+          try { models = await this.discoverAcpRuntimeModelsWith(prepared, entry.abort.signal); }
+          finally { prepared.release?.(); }
+        } else {
+          if (provider === "grok") throw new Error("Grok does not support endpoint connections");
+          const profile = parseExecutionConnectionProfile(provider, binding.profile)!;
+          const key = await this.runtimeProfileKey(profile, provider);
+          const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
+          if (!token) throw new Error("Capability group credentials are unavailable");
+          models = await discoverRuntimeProfileModels(provider,
+            binding.connectionMode === "endpoint" ? { ...profile, model: "" } : profile, token, entry.abort.signal);
+        }
+        model_catalog = { status: "ready", models };
+      } catch (error) {
+        model_catalog = { status: "error", models: [] };
+        if (current()) {
+          const message = error instanceof Error ? error.message : "";
+          const status = /^Runtime (?:codex|claude) model discovery HTTP (\d{3})$/.exec(message)?.[1];
+          const reason = status ? `http_${status}` : message === "Runtime codex model discovery native metadata validation failed"
+            ? "native_metadata_invalid" : "discovery_failed";
+          log.warn("Capability group model discovery failed", {
+            event: "runtime_binding_model_discovery_failed", runtime_id: runtimeId, group_id: binding.groupId,
+            provider, profile_id: binding.profileId, profile_revision: binding.profileRevision,
+            durationMs: Date.now() - startedAt, reason,
+          });
+        }
+      }
+      if (!current()) return;
+      entry.nextRefreshAt = Date.now() + (model_catalog.status === "ready"
+        ? this.options.runtimeModelRefreshIntervalMs : this.options.runtimeModelRetryBaseMs);
+      entry.ack = { ...entry.ack, model_catalog };
+      this.runtimeBindingAcks = [...this.runtimeBindingDiscoveries.values()].map(value => value.ack);
+      await this.client.reportRuntimeBindingAcks(runtimeId, [entry.ack]);
+    })().catch(() => {
+      // The durable report transport retains delivery; configuration replay also carries this cached result.
+      if (current()) log.warn("Capability group model report failed", {
+        event: "runtime_binding_model_report_failed", group_id: binding.groupId, provider,
+      });
+    }).finally(() => {
+      this.runtimeBindingProbeTasks.delete(entry.probe!);
+      entry.probe = undefined;
+      if (current()) {
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => { entry.timer = undefined; this.refreshRuntimeBindingModels(entry); },
+          Math.max(0, entry.nextRefreshAt - Date.now()));
+        entry.timer.unref?.();
+      }
+    });
+    this.runtimeBindingProbeTasks.add(entry.probe);
+  }
+
 
   private applyRuntimeCodexProfile(profile: RuntimeCodexProfile | null | undefined): void {
     const next = parseRuntimeCodexProfile(profile ?? null);
@@ -691,14 +1199,14 @@ export class MultiremiDaemon {
     this.wakeRuntimeModelRetry();
   }
 
-  private async runtimeProfileKey(profile: RuntimeCodexProfile | RuntimeClaudeProfile, provider: "codex" | "claude"): Promise<string | undefined> {
+  private async runtimeProfileKey(profile: RuntimeCodexProfile | RuntimeClaudeProfile, provider: "codex" | "claude" | "antigravity"): Promise<string | undefined> {
     if (profile.auth_mode !== "api_key") return undefined;
     if (!profile.credential_id || !this.options.runtimeId) throw new Error(`${provider} profile API key is unavailable`);
     const id = `${this.options.runtimeId}:${profile.credential_id}`;
     let pending = this.runtimeProviderKeys.get(id);
     if (!pending) {
       if (this.runtimeProviderKeys.size >= 64) this.runtimeProviderKeys.clear();
-      pending = provider === "codex"
+      pending = provider === "antigravity" ? this.client.getRuntimeEndpointKey(this.options.runtimeId, profile.credential_id) : provider === "codex"
         ? this.client.getRuntimeCodexProfileKey(this.options.runtimeId, profile.credential_id)
         : this.client.getRuntimeClaudeProfileKey(this.options.runtimeId, profile.credential_id);
       this.runtimeProviderKeys.set(id, pending);
@@ -721,6 +1229,26 @@ export class MultiremiDaemon {
       ...(codexProfile ? { codex: resolveRuntimeCodexProfile(codexProfile, process.env, await this.runtimeProfileKey(codexProfile, "codex")) } : {}),
       ...(claudeProfile ? { claude: resolveRuntimeClaudeProfile(claudeProfile, process.env, await this.runtimeProfileKey(claudeProfile, "claude")) } : {}),
     };
+  }
+  private async taskConnectionRelay(task: MultiremiTaskWithAgent): Promise<MultiremiRelayWire | undefined> {
+    const connection = task.executionConnection;
+    if (!connection) return this.effectiveWorkspaceRelay(task.workspaceId, task.codexProfile ?? null, task.claudeProfile ?? null);
+    if (connection.provider !== task.agent?.provider) throw new Error("Task connection does not match its execution engine");
+    // Explicit empty routing removes inherited workspace/environment gateways.
+    const relay: MultiremiRelayWire = { claude: null, codex: null, antigravity: null, model_discovery: false };
+    if (connection.mode === "native") return relay;
+    const profile = connection.profile;
+    if (!profile || connection.provider === "grok") throw new Error("Endpoint snapshot is unavailable");
+    const key = await this.runtimeProfileKey(profile, connection.provider);
+    if (connection.provider === "codex") relay.codex = resolveRuntimeCodexProfile(profile, process.env, key);
+    else if (connection.provider === "claude") relay.claude = resolveRuntimeClaudeProfile(profile, process.env, key);
+    else {
+      const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
+      if (!token) throw new Error("Endpoint credentials are unavailable");
+      relay.antigravity = { fragment: JSON.stringify({ base_url: profile.base_url, default_model: profile.model }),
+        auth_token: token, revision: connection.endpoint_revision! };
+    }
+    return relay;
   }
   private async prepareCodexModelCatalog(
     profile: RuntimeCodexProfile,
@@ -755,6 +1283,18 @@ export class MultiremiDaemon {
   private inflight = new Set<Promise<void>>();
   private activeTaskIds = new Set<string>();
   private activeTaskAborts = new Set<AbortController>();
+  private readonly taskAbortsById = new Map<string, AbortController>();
+  private readonly restartExecutions = new Map<string, RestartExecution>();
+  private readonly restartTraceIdentities = new Map<string, { state: TraceTranslatorCheckpoint; trace_head: number }>();
+  private readonly executionGenerations = new Map<string, number>();
+  private readonly resumedUsageRuns = new Map<string, string>();
+  private restartRecoveryCandidates = new Set<string>();
+  private readonly restartProviderClosed = new Set<string>();
+  private readonly expiredRestartTasks = new Set<string>();
+  private readonly restartDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly resumedRestartIds = new Set<string>();
+  private restartJournal: PlannedRestartJournal | null = null;
+  private restartTransfer: PlannedRestartTransfer | null = null;
   private claimsPaused = false;
   /**
    * Server-driven platform drain. Like a local update claim pause, a drain
@@ -763,15 +1303,22 @@ export class MultiremiDaemon {
   private serverDrainActive = false;
   private appliedDrainGeneration = 0;
   private outbox: MultiremiTaskReportOutbox | null = null;
+  private traceTransport: DaemonTraceTransport | null = null;
+  private externalChats: { close(): Promise<void> } | null = null;
   private outboxAbort: AbortController | null = null;
   private readonly outboxPath: string;
+  private readonly legacyOutboxPath: string;
   private readonly outboxBackoffMs: number[] | undefined;
   private readonly outboxMaxBytes: number | undefined;
   private restartRequestedFlag = false;
+  private readonly diskMonitor: DiskPressureMonitor;
+  private diskTimer: ReturnType<typeof setInterval> | null = null;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
-  private gcInFlight: Promise<MultiremiDaemonGcSummary> | null = null;
-  private sessionArchiveRetryLogAt = new Map<string, number>();
-  private readonly gitWorktreeInspector: GitWorktreeInspector;
+  private gcInFlight: Promise<void> | null = null;
+  private readonly reclaim: ReclaimEngine;
+  /** `runtime.gc_run` requests being served, by request id. */
+  private gcRunRequests = new Map<string, Promise<void>>();
+  private readonly runSnapshotGcPass: (options: RunSnapshotGcOnceOptions) => Promise<SnapshotGcSummary>;
   private localPathLocks = new LocalPathLocker();
   private issueWorkspaceLifecycleLocks: IssueWorkspaceLifecycleLocker;
   private readonly topicWorkspaces: TopicWorkspaceLifecycle;
@@ -783,7 +1330,6 @@ export class MultiremiDaemon {
   private readonly agentPluginProviderPreflight: MultiremiAgentPluginProviderPreflight;
   private readonly sshMeshManager: MultiremiDaemonSshMeshRuntime;
   private readonly terminalAuthorityCleanupRetryDelaysMs: number[];
-  private readonly defaultGcPolicy: WorkspaceGcPolicy;
   private readonly workspaceRootFence: (() => void) | null;
   private readonly supervisorReady: () => boolean;
   private readonly onReadyChange: (ready: boolean) => void;
@@ -800,15 +1346,16 @@ export class MultiremiDaemon {
   private agentPluginReconcileAbort: AbortController | null = null;
   /** Wake-up handle for the claim timer installed by the poll loop. */
   private waitWake: (() => void) | null = null;
-  private taskWakeup: DaemonWakeupTransport | null = null;
+  private readonly protocolClient: DaemonProtocolClient;
+  private readonly protocolLane: DaemonProtocolLane;
+  private readonly taskDownlinks: DaemonTaskDownlinks;
+  private readonly drainRuntimeDownlinks: () => Promise<void>;
   private readonly authorityProbeDelaysMs: number[];
-  /** Heartbeat/claim/desired cadences, split so an idle lane cannot slow the others. */
-  private nextHeartbeatAt = 0;
-  private nextClaimAt = 0;
-  /** Interval applied by the last cadence refresh, to detect a lane change. */
-  private appliedHeartbeatIntervalMs = 0;
-  private claimIdleMs: number;
-  private readonly claimIdleBaseMs: number;
+  /** Ten-minute RPC fallback for incomplete plugin revision definitions. */
+  private nextPluginDesiredAt = 0;
+  private pluginLocalRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private onceTaskAccepted = false;
+  private onceOfferTimer: ReturnType<typeof setTimeout> | null = null;
   private lastDesired: { revision: string; artifacts: AgentPluginArtifactSpec[] } | null = null;
   private desiredFetchedAt = 0;
   private lastDesiredRefreshAt = 0;
@@ -837,8 +1384,9 @@ export class MultiremiDaemon {
       );
     }
     this.runtimeModelDiscoveryEnabled = options.inProcessRuntimeModelDiscoveryEnabled === true
-      || (!options.providerFactory && ["claude", "codex", "antigravity"].includes(options.provider ?? "claude"));
+      || (!options.providerFactory && ["claude", "codex", "grok", "antigravity"].includes(options.provider ?? "claude"));
     const workspacesRoot = configuredMultiremiWorkspacesRoot(options.workspacesRoot);
+    const storageMachine = resolveStorageMachineOptions();
     const runtimeName = options.runtimeName ?? process.env.MULTIREMI_RUNTIME_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}-bun-runtime`;
     const deviceName = options.deviceName ?? process.env.MULTIREMI_DEVICE_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}`;
     const runtimeId = options.runtimeId ?? process.env.MULTIREMI_RUNTIME_ID ?? null;
@@ -856,9 +1404,8 @@ export class MultiremiDaemon {
     this.explicitRuntimeId = Boolean(runtimeId);
     this.issueWorkspaceLifecycleLocks = options.issueWorkspaceLifecycleLocker
       ?? new IssueWorkspaceLifecycleLocker();
-    this.gitWorktreeInspector = options.gitWorktreeInspector
-      ?? new IsomorphicGitWorktreeInspector();
     this.workspaceRootFence = options.workspaceRootFence ?? null;
+    this.runSnapshotGcPass = options.runSnapshotGcPass ?? runSnapshotGcOnce;
     this.supervisorReady = options.supervisorReady ?? (() => this.ready);
     this.onReadyChange = options.onReadyChange ?? (() => {});
     this.cliUpdateCoordinator = options.cliUpdateCoordinator ?? null;
@@ -874,6 +1421,7 @@ export class MultiremiDaemon {
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_DAEMON_REQUEST_TIMEOUT_MS,
       maxConcurrency: resolveDaemonConcurrency(options.maxConcurrency ?? numberEnv(process.env.MULTIREMI_MAX_CONCURRENCY, 0)),
       once: options.once ?? false,
+      onceOfferTimeoutMs: Math.max(1, options.onceOfferTimeoutMs ?? 5_000),
       launchedBy: options.launchedBy ?? process.env.MULTIREMI_LAUNCHED_BY ?? null,
       taskTimeoutMs: options.taskTimeoutMs ?? parseInt(process.env.MULTIREMI_TASK_TIMEOUT_MS ?? "0", 10),
       taskDrainTimeoutMs: Math.max(1, options.taskDrainTimeoutMs ?? DEFAULT_TASK_DRAIN_TIMEOUT_MS),
@@ -891,28 +1439,24 @@ export class MultiremiDaemon {
         ?? numberEnv(process.env.MULTIREMI_UNATTENDED_HUMAN_REQUEST_TIMEOUT_MS, 5 * 60 * 1000),
       steerPollIntervalMs: options.steerPollIntervalMs ?? numberEnv(process.env.MULTIREMI_STEER_POLL_INTERVAL_MS, DEFAULT_STEER_POLL_MS),
       forceAnswerGraceMs: options.forceAnswerGraceMs ?? numberEnv(process.env.MULTIREMI_FORCE_ANSWER_GRACE_MS, DEFAULT_FORCE_ANSWER_GRACE_MS),
+      nativeSubagents: options.nativeSubagents ?? process.env.REMI_ACP_NATIVE_SUBAGENTS !== "0",
+      autonomousRounds: options.autonomousRounds ?? process.env.REMI_ACP_AUTONOMOUS_ROUNDS !== "0",
+      asyncTasks: options.asyncTasks ?? process.env.REMI_ACP_ASYNC_TASKS !== "0",
+      maxParkedLanes: Math.max(0, Math.floor(options.maxParkedLanes ?? resolveMaxParkedLanes(process.env.REMI_MAX_PARKED_LANES))),
+      backgroundKeepAliveMs: options.backgroundKeepAliveMs ?? resolveBackgroundKeepAliveMs(process.env[BACKGROUND_KEEPALIVE_ENV]),
+      backgroundDrainMs: Math.max(0, options.backgroundDrainMs ?? 2_000),
+      autonomousIdleMs: Math.max(1, options.autonomousIdleMs ?? DEFAULT_AUTONOMOUS_IDLE_MS),
       daemonPort: options.daemonPort ?? numberEnv(process.env.MULTIREMI_DAEMON_PORT, 6131),
       workspacesRoot,
-      repoCacheRoot: options.repoCacheRoot ?? process.env.MULTIREMI_REPO_CACHE_ROOT ?? join(workspacesRoot, ".repos"),
-      gcEnabled: options.gcEnabled ?? booleanEnv(process.env.MULTIREMI_GC_ENABLED, true),
-      gcIntervalMs: options.gcIntervalMs ?? numberEnv(process.env.MULTIREMI_GC_INTERVAL_MS, 15 * 60 * 1000),
-      gcTtlMs: options.gcTtlMs ?? numberEnv(process.env.MULTIREMI_GC_TTL_MS, 72 * 60 * 60 * 1000),
+      repoCacheRoot: options.repoCacheRoot ?? process.env.MULTIREMI_REPO_CACHE_ROOT ?? sharedReposRoot(workspacesRoot),
+      gcEnabled: options.gcEnabled ?? storageMachine.enabled,
+      gcIntervalMs: options.gcIntervalMs ?? storageMachine.intervalMs,
+      gcDryRun: options.gcDryRun ?? storageMachine.dryRun,
+      legacyKeepDays: options.legacyKeepDays ?? storageMachine.legacyKeepDays,
       snapshotTtlMs: options.snapshotTtlMs ?? numberEnv(process.env.MULTIREMI_SNAPSHOT_TTL_MS, 72 * 60 * 60 * 1000),
-      gcOrphanTtlMs: options.gcOrphanTtlMs ?? numberEnv(process.env.MULTIREMI_GC_ORPHAN_TTL_MS, 72 * 60 * 60 * 1000),
-      gcRequireArchive: options.gcRequireArchive ?? true,
-      sessionArchiveMaxSourceBytes: options.sessionArchiveMaxSourceBytes
-        ?? numberEnv(process.env.MULTIREMI_SESSION_ARCHIVE_MAX_SOURCE_BYTES, 512 * 1024 * 1024),
       pluginCacheRoot: options.pluginCacheRoot
         ?? process.env.MULTIREMI_PLUGIN_CACHE_ROOT
-        ?? join(homedir(), ".remi", "plugin-cache", "sha256"),
-      // An explicit `pollIntervalMs` predates the split cadence and was the only
-      // loop timer (tests and embedded harnesses use it to stay fast). Honour it
-      // for both lanes; production leaves it unset and gets the slower defaults.
-      heartbeatIntervalMs: normalizeOptionalInterval(
-        options.heartbeatIntervalMs
-          ?? optionalNumberEnv(process.env.MULTIREMI_HEARTBEAT_INTERVAL_MS)
-          ?? options.pollIntervalMs,
-      ),
+        ?? join(this.userHome, ".remi", "plugin-cache", "sha256"),
       claimIdleMaxMs: Math.max(
         DEFAULT_CLAIM_IDLE_BASE_MS,
         options.claimIdleMaxMs
@@ -925,9 +1469,6 @@ export class MultiremiDaemon {
         options.pluginDesiredRefreshMs
           ?? numberEnv(process.env.MULTIREMI_PLUGIN_DESIRED_REFRESH_MS, DEFAULT_PLUGIN_DESIRED_REFRESH_MS),
       ),
-      taskWakeupEnabled: options.taskWakeupEnabled ?? true,
-      taskWakeup: options.taskWakeup ?? null,
-      taskWakeupConnect: options.taskWakeupConnect,
       authorityProbeDelaysMs: [],
       runtimeModelRetryBaseMs,
       runtimeModelRetryMaxMs,
@@ -940,17 +1481,27 @@ export class MultiremiDaemon {
       root: workspacesRoot,
       locker: this.issueWorkspaceLifecycleLocks,
       assertRootOwner: () => this.assertWorkspaceRootOwner(),
+      recordMigration: (migration) => {
+        upsertSubjectRecord(workspacesRoot, {
+          subject: { kind: "issue", id: migration.issue_id },
+          workspace_id: this.options.workspaceId ?? "local",
+          issue_key: migration.issue_key,
+        });
+      },
     });
-    this.defaultGcPolicy = {
-      ttlMs: this.options.gcTtlMs,
-      intervalMs: this.options.gcIntervalMs,
-    };
     this.providerFactory = options.providerFactory ?? createRuntimeProvider;
-    this.updateRunner = options.updateRunner ?? runDefaultMultiremiUpdate;
+    this.antigravityShim = options.antigravityGatewayShim ?? null;
+    this.ownsAntigravityShim = !options.antigravityGatewayShim;
+    this.updateRunner = options.updateRunner;
+    this.updateRestartSpec = options.updateRestartSpec;
+    this.updateVerifyTimeoutSeconds = options.updateVerifyTimeoutSeconds;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? DAEMON_STOP_TIMEOUT_MS;
+    this.onStopTimeout = options.onStopTimeout ?? (() => process.exit(1));
     this.onRestartRequested = options.onRestartRequested ?? null;
     this.cliUpdateCoordinator?.register({
       provider: this.options.provider,
       activeTaskCount: () => this.activeTaskCount,
+      activeTaskIds: () => [...this.activeTaskIds],
       pendingClaimCount: () => this.pendingClaimCount,
       claimsPaused: () => this.claimsPaused,
       pauseClaims: () => { this.claimsPaused = true; },
@@ -965,10 +1516,6 @@ export class MultiremiDaemon {
       ? cleanupRetryDelays
       : [...TERMINAL_AUTHORITY_CLEANUP_RETRY_DELAYS_MS];
     this.localSkillRoots = options.localSkillRoots ?? {};
-    this.taskWakeup = options.taskWakeup ?? null;
-    // Idle claims back off from the same legacy cadence when a caller pinned one.
-    this.claimIdleBaseMs = Math.max(1, options.pollIntervalMs ?? DEFAULT_CLAIM_IDLE_BASE_MS);
-    this.claimIdleMs = this.claimIdleBaseMs;
     const probeDelays = (options.authorityProbeDelaysMs ?? [])
       .filter((delay) => Number.isFinite(delay) && delay > 0)
       .map((delay) => Math.max(1, Math.floor(delay)));
@@ -980,19 +1527,6 @@ export class MultiremiDaemon {
       .map((delay) => Math.min(delay, authorityProbeMaxMs));
     this.client = new MultiremiDaemonClient(options.serverUrl, this.options.token, {
       requestTimeoutMs: this.options.requestTimeoutMs,
-      sessionArchiveUploadBaseUrl: options.sessionArchiveUploadBaseUrl === undefined
-        ? process.env.MULTIREMI_ARCHIVE_UPLOAD_BASE_URL ?? null
-        : options.sessionArchiveUploadBaseUrl,
-      sessionArchiveProxyMaxBytes: options.sessionArchiveProxyMaxBytes
-        ?? numberEnv(process.env.MULTIREMI_ARCHIVE_PROXY_MAX_BYTES, 8 * 1024 * 1024),
-      sessionArchiveDirectProbeTtlMs: options.sessionArchiveDirectProbeTtlMs
-        ?? numberEnv(process.env.MULTIREMI_ARCHIVE_DIRECT_PROBE_TTL_MS, 5 * 60 * 1_000),
-      sessionArchiveDirectProbeTimeoutMs: options.sessionArchiveDirectProbeTimeoutMs
-        ?? numberEnv(process.env.MULTIREMI_ARCHIVE_DIRECT_PROBE_TIMEOUT_MS, 10_000),
-      sessionArchiveUploadTimeoutMs: options.sessionArchiveUploadTimeoutMs
-        ?? numberEnv(process.env.MULTIREMI_ARCHIVE_UPLOAD_TIMEOUT_MS, 15 * 60 * 1_000),
-      sessionArchiveFailureReportTimeoutMs: options.sessionArchiveFailureReportTimeoutMs
-        ?? numberEnv(process.env.MULTIREMI_ARCHIVE_FAILURE_REPORT_TIMEOUT_MS, 10_000),
     });
     this.sshMeshManager = options.sshMeshManager ?? new SshMeshManager({
       workspaceId: this.options.workspaceId ?? "local",
@@ -1010,6 +1544,37 @@ export class MultiremiDaemon {
       },
       ...repoCacheTimeoutOverrides(process.env),
     });
+    this.diskMonitor = new DiskPressureMonitor({
+      path: workspacesRoot,
+      thresholds: () => this.rootDiskThresholds(),
+      criticalChanged: (disk, wasCritical) => {
+        log.warn(`Disk critical ${wasCritical ? "recovered" : "entered"}`, disk);
+        this.protocolClient?.sendHeartbeatNow();
+        if (wasCritical) this.wakeClaim();
+      },
+      pressureError: error => log.warn(`Pressure reclaim failed: ${String(error)}`),
+      pressure: async () => {
+        if (this.options.gcEnabled && !this.options.once && !this.stopped) await this.runGcOnce("pressure");
+      },
+    });
+    this.reclaim = new ReclaimEngine({
+      storageDisk: () => this.diskMonitor.latest,
+      checkDisk: () => this.diskMonitor.check(),
+      diskThresholds: () => this.rootDiskThresholds(),
+      root: workspacesRoot,
+      client: this.client,
+      runtimeId: () => this.options.runtimeId,
+      policyFor: (workspaceId) => resolveStoragePolicy(this.workspaceSettings.get(workspaceId)),
+      dryRun: this.options.gcDryRun,
+      legacyKeepDays: this.options.legacyKeepDays,
+      locker: this.issueWorkspaceLifecycleLocks,
+      topics: { lifecycle: this.topicWorkspaces, workspaceId: this.options.workspaceId ?? "local" },
+      repoCacheRoot: this.options.repoCacheRoot,
+      withRepoLock: (barePath, action) => this.repoCache.runExclusiveForBarePath(barePath, action),
+      assertRootOwner: () => this.assertWorkspaceRootOwner(),
+      // A `du` over the whole root must not outlive the daemon.
+      stopSignal: () => this.pollAbort.signal,
+    });
     this.agentPluginCache = new AgentPluginCache({
       root: this.options.pluginCacheRoot,
       serverUrl: this.options.serverUrl,
@@ -1025,12 +1590,17 @@ export class MultiremiDaemon {
       this.options.daemonId ?? this.options.runtimeName,
       this.options.provider,
     ].join("|")).digest("hex").slice(0, 16);
-    this.outboxPath = options.outboxPath
+    this.legacyOutboxPath = options.outboxPath
       ?? join(
         process.env.MULTIREMI_OUTBOX_DIR
-          ?? join(process.env.MULTIREMI_STATE_DIR ?? join(homedir(), ".multiremi"), "outbox"),
+          ?? join(multiremiStateDir(), "outbox"),
         `${this.options.provider}-${outboxIdentity}.db`,
       );
+    const processOutboxIdentity = createHash("sha256").update([
+      this.options.serverUrl, this.options.workspaceId ?? "local", this.options.daemonId ?? this.options.runtimeName,
+    ].join("|")).digest("hex").slice(0, 16);
+    this.outboxPath = options.outboxPath === ":memory:" ? ":memory:"
+      : join(dirname(this.legacyOutboxPath), `v2-${processOutboxIdentity}.db`);
     this.outboxBackoffMs = options.outboxBackoffMs;
     this.outboxMaxBytes = options.outboxMaxBytes
       ?? numberEnv(process.env.MULTIREMI_OUTBOX_MAX_BYTES, 256 * 1024 * 1024);
@@ -1045,6 +1615,206 @@ export class MultiremiDaemon {
         await this.client.reportRuntimeAgentPluginState(runtimeId, report.versionId, report.input);
       },
     });
+    this.protocolClient = options.protocolClient ?? new DaemonProtocolClient({
+      serverUrl: this.options.serverUrl,
+      token: this.options.token,
+      daemonId: this.options.daemonId ?? this.options.runtimeName,
+      cliVersion: multiremiVersion,
+      launchedBy: this.options.launchedBy,
+      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch"],
+      log,
+      ...options.protocolClientOptions,
+    });
+    this.taskDownlinks = new DaemonTaskDownlinks(this.protocolClient, () => this.options.runtimeId ?? undefined);
+    if (this.options.provider === "codex" && typeof process.getuid === "function") {
+      this.externalChats = registerDaemonExternalChats(this.protocolClient,
+        () => this.stopped ? undefined : this.options.runtimeId ?? undefined,
+        () => new CodexExternalChats({
+          home: this.userHome,
+          baseHome: process.env.CODEX_HOME,
+          ...installedExternalCodexCommand(),
+          stateDir: join(dirname(this.outboxPath), "external-chats", outboxIdentity),
+        }));
+    }
+    // Co-resident lanes share a client whose construction-time caps may be empty.
+    this.protocolClient.advertiseCaps(["input_unread", "turn.restart"]);
+    // PR 6 §5.3: this lane keeps Chat processes alive for background tasks; it parks only when the server echoes the cap.
+    if (this.options.asyncTasks) this.protocolClient.advertiseCaps(["lane.background"]);
+    this.parkedLanes = new ParkedLanes({
+      maxParkedLanes: this.options.maxParkedLanes,
+      keepAliveMs: this.options.backgroundKeepAliveMs,
+      stateFile: options.outboxPath === ":memory:" ? null
+        : join(dirname(this.legacyOutboxPath), `parked-bridges-${this.options.provider}-${outboxIdentity}.json`),
+      runtimeId: () => this.options.runtimeId,
+      sharesCap: () => this.options.asyncTasks && this.protocolClient.sharesCap("lane.background"),
+      sendSnapshot: (payload) => this.client.reportLaneBackgroundTasks(payload),
+      wake: async (payload) => await this.taskDownlinks.rpc("lane.background_wake", payload as unknown as Record<string, unknown>,
+        30_000) as unknown as DaemonLaneBackgroundWakeReply,
+      log,
+      processStartTime,
+      killProcessGroup,
+      ...options.parkedLaneOptions,
+    });
+    this.protocolClient.registerFrameHandler("lane.background_stop", (frame) => {
+      if (!frame.rt || frame.rt !== this.options.runtimeId) return;
+      const payload = frame.payload as unknown as DaemonLaneBackgroundStopPayload;
+      if (typeof payload?.session_id !== "string" || typeof payload.task_id !== "string") return;
+      const key = `${laneKeyOf(payload)}\u0000${payload.task_id}\u0000${payload.requested_at}`;
+      if (!this.protocolClient.dedupe.claim("lane.background_stop", key)) return;
+      return this.parkedLanes.handleStop(payload);
+    });
+    this.protocolClient.registerFrameHandler("lane.background_release", (frame) => {
+      if (!frame.rt || frame.rt !== this.options.runtimeId) return;
+      const payload = frame.payload as unknown as DaemonLaneBackgroundReleasePayload;
+      if (typeof payload?.session_id !== "string" || typeof payload.provider_session_id !== "string") return;
+      return this.parkedLanes.handleRelease(payload);
+    });
+    this.drainRuntimeDownlinks = registerDaemonRuntimeDownlinks(this.protocolClient, () => this.options.runtimeId,
+      (rt, input) => this.handleHeartbeatAck(rt, input), (rt, revision) => this.reconcileRuntimeAgentPlugins(rt, revision));
+    this.protocolLane = {
+      runtime: () => this.options.runtimeId && !this.stopped ? {
+        runtime_id: this.options.runtimeId,
+        provider: this.options.provider,
+        max_concurrency: this.options.maxConcurrency,
+        active_task_ids: [...new Set([...this.activeTaskIds, ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId) ?? [])])],
+        active_question_waits: this.taskDownlinks.activeQuestionWaits(),
+        capabilities: this.runtimeCapabilities(),
+        // PR 6 §5.2: the lanes whose process lives, so the server settles the others' rows.
+        ...(this.options.asyncTasks ? { parked_lanes: this.parkedLanes.helloLanes() } : {}),
+      } : null,
+      heartbeat: () => ({
+        active_task_count: this.activeTaskCount,
+        health: this.diskMonitor.health(),
+        outbox: { pending: this.outboxStats()?.pending ?? 0, unacked: 0 },
+        drain_ack_generation: this.appliedDrainGeneration,
+        ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
+        ssh_mesh_status: this.sshMeshManager.getHeartbeatStatus(),
+      }),
+      onHeartbeatAck: async ack => {
+        if (this.stopped || ack.runtime_id !== this.options.runtimeId) return;
+        // A v2 runtime ack is not a full HTTP configuration snapshot.
+        if (ack.status === "runtime_gone" || ack.runtime_gone) await this.handleHeartbeatAck(ack.runtime_id, ack);
+        else this.tickFeishuConcierge();
+        this.wakeClaim();
+      },
+      probeUpgrade: async () => {
+        if (this.stopped || !this.options.runtimeId) return;
+        try {
+          const capabilities = this.runtimeCapabilities();
+          const ack = await this.client.heartbeatRuntime(
+            this.options.runtimeId, this.sshMeshManager.getHeartbeatStatus(),
+            { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: [...this.activeTaskIds] },
+            capabilities.supports_bot_menu === true,
+            Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal, [], capabilities.planned_restart,
+          );
+          for (const task of ack.cancelled_tasks ?? []) {
+            if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+              this.taskDownlinks.reconcileCancellation(task.task_id, task.status);
+            }
+          }
+          if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.drain_deadline, ack.pending_update.target_commit);
+        } catch (error) {
+          if (isTerminalDaemonAuthorityError(error)) await this.stopAfterTerminalAuthority();
+        }
+      },
+      onTerminal: async code => {
+        if (this.stopped) return;
+        const reason = code === 4410 ? "daemon_retired" : "authority_revoked";
+        const status = code === 4410 ? 410 : 401;
+        log.error(`daemon authorization was revoked or retired: HTTP ${status} ${reason} (protocol close ${code}); entering cleanup-only mode`);
+        await this.stopAfterTerminalAuthority();
+      },
+      onStateChange: () => { this.taskDownlinks.connectionChanged(); this.wakeClaim(); },
+      readyToConnect: () => this.supervisorReady(),
+      onConnected: () => {
+        // welcome follows the server's authenticated target-version hello transition.
+        this.updateConfirmation ??= this.confirmRuntimeUpdate().catch(error => {
+          log.warn(`Update confirmation deferred: ${error instanceof Error ? error.message : String(error)}`);
+        }).finally(() => { this.updateConfirmation = null; });
+        for (const reporter of this.activityReporters) reporter.resend();
+        this.parkedLanes?.resendAll();
+        const runtime = this.protocolLane.runtime();
+        if (runtime) this.protocolClient.send({ t: "runtime.ready",
+          rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids, active_question_waits: runtime.active_question_waits ?? [] } });
+        if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
+          this.onceOfferTimer = setTimeout(() => { this.onceOfferTimer = null; this.stop(); }, this.options.onceOfferTimeoutMs);
+        }
+      },
+    };
+    // Requests are derived from persisted server handoffs, never a local timer.
+    this.protocolClient.registerFrameHandler("turn.restart", frame => {
+      const p = frame.payload;
+      if (!frame.rt || frame.rt !== this.options.runtimeId || typeof p.attempt_id !== "string"
+        || typeof p.turn_id !== "string" || typeof p.handoff_id !== "string"
+        || !Number.isSafeInteger(p.generation) || Number(p.generation) < 0) return;
+      const abort = this.taskAbortsById.get(p.attempt_id);
+      if (!abort || this.restartExecutions.has(p.attempt_id)) return;
+      this.restartExecutions.set(p.attempt_id, { workspace_id: this.options.workspaceId ?? "local",
+        daemon_id: this.options.daemonId ?? this.options.runtimeName, runtime_id: frame.rt,
+        turn_id: p.turn_id, attempt_id: p.attempt_id, handoff_id: p.handoff_id, generation: Number(p.generation) });
+      // At the deadline a currently running tool may be cancelled and replayed.
+      // runAgent's finally awaits provider.close(), flushes trace and ends reports
+      // before handleTask can create the prepared journal record.
+      abort.abort();
+      // Provider cancellation/close is cooperative. If it never settles there
+      // can be no checkpoint receipt: terminate the process as a crash, so the
+      // replacement takes MUL-45 recovery rather than reviving unsafe state.
+      const deadline = setTimeout(() => {
+        this.expiredRestartTasks.add(p.attempt_id as string);
+        this.restartDeadlines.delete(p.attempt_id as string);
+        this.restartExecutions.delete(p.attempt_id as string);
+        this.forceStopProcesses();
+        this.requestRestart();
+        this.onStopTimeout();
+      }, this.stopTimeoutMs);
+      deadline.unref?.();
+      this.restartDeadlines.set(p.attempt_id, deadline);
+    });
+    this.protocolClient.addLane(this.protocolLane);
+    registerDaemonOfferHandler(this.protocolClient, {
+      runtimeId: () => this.options.runtimeId,
+      rejection: (task) => {
+        if (this.diskMonitor.critical) return "disk_critical";
+        if (this.options.once && this.onceTaskAccepted) return "draining";
+        if (this.serverDrainActive) return "draining";
+        if (this.stopped || !this.ready || !this.supervisorReady() || this.claimsPaused || this.runtimeGoneInflight.size) return "claims_paused";
+        // PR 6 D5: an offer for a parked lane takes no new slot's worth of work; its process already runs.
+        const lane = this.backgroundLaneOf(task as MultiremiTaskWithAgent);
+        const parked = lane !== null && this.parkedLanes.isParked(laneKeyOf(lane));
+        if ((!parked && this.activeTaskCount >= this.options.maxConcurrency) || (this.options.once && this.onceTaskAccepted)) return "capacity";
+        return null;
+      },
+      run: task => {
+        this.taskDownlinks.bindTurn(task);
+        this.onceTaskAccepted = true;
+        if (this.onceOfferTimer !== null) clearTimeout(this.onceOfferTimer);
+        this.onceOfferTimer = null;
+        const run = this.handleTask(task).catch(error => {
+          log.error(`task ${task.id} crashed outside handleTask (${error instanceof Error ? error.name : typeof error})`);
+        }).finally(async () => {
+          if (!this.options.once) return;
+          // A once execution has no next task to keep the connection alive.
+          // Drain detached helper calls before stop() aborts report delivery.
+          await Promise.allSettled([...this.inflight].filter(pending => pending !== run));
+          this.stop();
+        });
+        this.inflight.add(run);
+        void run.finally(() => this.inflight.delete(run));
+      },
+    });
+    this.ensureTrace();
+    this.client.setReportTransport(daemonReportTransport(this.protocolClient, () => this.options.runtimeId, () => this.ensureOutbox(),
+      this.options.taskDrainTimeoutMs, () => this.pollAbort.signal, {
+        completion: (taskId, status) => {
+          const trace = this.ensureTrace();
+          if (this.options.runtimeId) trace.track(taskId, this.options.runtimeId);
+          return this.withSlashCommands(taskId, trace.completion(taskId, status));
+        },
+        close: (taskId, status, error) => {
+          this.attemptSlashCommands.delete(taskId);
+          this.ensureTrace().close(taskId, status, error);
+        },
+      }, taskId => this.executionGenerations.get(taskId) ?? 0));
   }
 
   async checkExternalWorkspaceMembership(workspaceId: string, externalId: string): Promise<boolean> {
@@ -1067,28 +1837,79 @@ export class MultiremiDaemon {
     return this.client.downloadFeishuBotOutboundAttachment(this.options.runtimeId!, deliveryId, claimToken, attachmentId);
   }
 
-  listFeishuBotTaskMessages(taskId: string, sinceSeq: number): Promise<MultiremiTaskMessage[]> {
-    return this.client.listTaskMessages(taskId, sinceSeq);
-  }
-
   getFeishuBotTaskSnapshot(taskId: string): Promise<FeishuBotTaskSnapshot> {
     return this.client.getFeishuBotTaskSnapshot(taskId);
   }
 
-  async isFeishuBotHumanRequestPending(taskId: string, requestId: string): Promise<boolean> {
-    return (await this.client.getTaskHumanRequest(taskId, requestId))?.status === "pending";
+  /** Cards this Runtime still owes click handlers for (MUL-407 restart recovery). */
+  listFeishuBotDecisionCards(): Promise<Array<{
+    requestId: string;
+    taskId: string;
+    chatId: string;
+    messageId: string;
+    recipientOpenId: string;
+  }>> {
+    return this.client.listFeishuBotDecisionCards(this.options.runtimeId!);
   }
 
-  getFeishuBotHumanRequest(taskId: string, requestId: string): Promise<MultiremiTaskHumanRequest | null> {
-    return this.client.getTaskHumanRequest(taskId, requestId);
+  /** Issue decision cards this Runtime must re-register after a restart (MUL-412). */
+  listFeishuIssueDecisionCards(): Promise<Array<{
+    decisionId: string;
+    issueId: string;
+    chatId: string;
+    messageId: string;
+    recipientOpenId: string;
+  }>> {
+    return this.client.listFeishuIssueDecisionCards(this.options.runtimeId!);
+  }
+
+  getFeishuIssueDecision(decisionId: string): Promise<MultiremiIssueDecision | null> {
+    return this.client.getFeishuIssueDecision(decisionId);
+  }
+
+  answerFeishuIssueDecision(
+    decisionId: string,
+    input: { answer: string; operatorOpenId: string; token?: string; routeRevision?: number },
+  ): Promise<MultiremiIssueDecision> {
+    return this.client.answerFeishuIssueDecision(decisionId, input);
+  }
+
+  getFeishuDecisionMessage(messageId: string) {
+    return this.client.getFeishuDecisionMessage(messageId);
+  }
+
+  getMessageHumanRequest(requestId: string): Promise<MultiremiTaskHumanRequest | null> {
+    return this.client.getMessageHumanRequest(requestId);
+  }
+
+  async getFeishuBotHumanRequest(taskId: string, requestId: string): Promise<MultiremiTaskHumanRequest | null> {
+    const request = await this.getMessageHumanRequest(requestId);
+    return request?.taskId === taskId ? request : null;
+  }
+
+  async waitFeishuBotHumanRequestSettled(requestId: string, signal: AbortSignal): Promise<MultiremiTaskHumanRequest | null> {
+    // The card host is not the executing turn's subscriber. Read its authorized
+    // decision message while provider replies stay on S3's turn downlink.
+    const waitSignal = AbortSignal.any([signal, this.pollAbort.signal]);
+    const deadline = Date.now() + 24 * 60 * 60 * 1000;
+    while (!waitSignal.aborted && Date.now() < deadline) {
+      const request = await this.getMessageHumanRequest(requestId);
+      if (!request || request.status !== "pending") return request;
+      await sleep(1000);
+    }
+    return null;
+  }
+
+  prepareTaskHumanRequestCard(requestId: string, recipientOpenId: string): Promise<Record<string, unknown>> {
+    return this.client.prepareTaskHumanRequestCard(requestId, recipientOpenId);
   }
 
   respondFeishuBotHumanRequest(
-    taskId: string,
     requestId: string,
     response: Record<string, unknown>,
+    credential?: { token: string; operatorOpenId: string; routeRevision?: number },
   ): Promise<MultiremiTaskHumanRequest> {
-    return this.client.respondTaskHumanRequest(taskId, requestId, response);
+    return this.client.respondTaskHumanRequest(requestId, response, credential);
   }
 
   resetFeishuBotSession(revision: number, externalSessionKey: string): Promise<boolean> {
@@ -1111,6 +1932,24 @@ export class MultiremiDaemon {
 
   async ensureTopicWorkspace(sessionKey: string, topicId: string): Promise<string | null> {
     return this.topicWorkspaces.ensureTopicWorkspace(sessionKey, topicId);
+  }
+
+  private runtimeCapabilities(): DaemonRuntimeCapabilities {
+    const concierge = this.feishuConcierge !== null;
+    return {
+      planned_restart: 1,
+      supports_batch_import: true,
+      supports_directory_scan: true,
+      supports_skill_directory: true,
+      external_chats: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
+      external_chat_models: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
+      supports_bot_menu: this.botMenuPublisher !== null,
+      bot_menu_protocol: this.botMenuPublisher ? BOT_MENU_PROTOCOL_VERSION : 0,
+      agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
+      feishu_concierge_protocol: concierge ? FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION : 0,
+      feishu_decision_card: concierge ? FEISHU_DECISION_CARD_PROTOCOL_VERSION : 0,
+      feishu_issue_decision_card: concierge ? FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION : 0,
+    };
   }
 
   setBotMenuPublisher(
@@ -1165,6 +2004,20 @@ export class MultiremiDaemon {
   }
 
   async start(): Promise<void> {
+    this.runActive = true;
+    try {
+      await this.runUntilStopped();
+    } finally {
+      // Startup may stop during the layout sweep, before the poll-loop cleanup.
+      // No stop deadline may outlive the start() invocation that armed it.
+      if (this.stopDeadlineTimer) clearTimeout(this.stopDeadlineTimer);
+      this.stopDeadlineTimer = null;
+      this.runActive = false;
+    }
+  }
+
+  private async runUntilStopped(): Promise<void> {
+    this.ensureTrace();
     this.startedAt = new Date();
     this.ready = false;
     this.stopped = false;
@@ -1176,35 +2029,44 @@ export class MultiremiDaemon {
     this.terminalAuthorityCleanupAttempts = 0;
     this.restartRequestedFlag = false;
     this.workspaceOwnershipLost = false;
-    // A reused instance (tests, an embedded harness) must not inherit the pause
-    // a previous terminal-authority failure left on the wake-up channel.
-    this.taskWakeup?.setAuthoritySuspended(false);
     this.onReadyChange(false);
     this.assertWorkspaceRootOwner();
+    await this.sweepLegacyLayout();
+    if (this.stopped) return;
+    // PR 6 R2: bridges a crashed run left parked die before anything is claimed.
+    this.parkedLanes?.sweepCrashedBridges();
+    this.parkedLanes?.disable(null);
+    this.parkedLanesClosing = null;
     const outbox = this.ensureOutbox();
+    this.plannedRestartTransfer();
+    this.restartRecoveryCandidates = new Set(this.restartJournal!.entries().map(entry => entry.execution.handoff_id));
     this.startRepoCheckoutServer();
     try {
       await this.registerCurrentRuntime();
+      if (this.options.runtimeId) {
+        const directory = updateJournalDir(multiremiStateDir(), this.options.runtimeId);
+        if (readUpdateJournal(directory)) writeFileSync(join(directory, "candidate.pid"), String(process.pid), { mode: 0o600 });
+      }
       this.assertWorkspaceRootOwner();
-      // Replay reports left over from a previous run BEFORE recover-orphans:
-      // recoverOrphans marks in-flight tasks failed, so an undelivered
-      // complete/fail must land first or a finished task gets mislabelled.
-      // Purely non-terminal history has a bounded startup wait and may continue
-      // in the background; tasks with terminal reports must settle first.
-      await this.reconcilePendingOutboxTasks(outbox);
-      await this.flushStartupOutbox(outbox);
+      // Replay never holds startup waiting for a socket. The temporary HTTP
+      // recovery below is guarded against pending terminal reports instead.
+      outbox.pumpAll();
       await this.refreshWorkspaceRepos(this.options.workspaceId);
       this.assertWorkspaceRootOwner();
+      // Every daemon checks before it can accept its first offer, including non-GC leaders.
+      await this.diskMonitor.check();
+      this.diskTimer = setInterval(() => {
+        void this.diskMonitor.check().catch(error => log.warn(`Disk monitor failed: ${String(error)}`));
+      }, DISK_CHECK_MS);
       this.startGcLoop();
       // One-shot mode is primarily used for a single queued task (and tests), so
       // avoid paying for a second ACP process unless a model-list request exists.
       if (this.runtimeModelDiscoveryEnabled && !this.options.once) {
         this.startRuntimeModelRefresh();
       }
-      await this.reconcileRuntimeAgentPlugins(this.options.runtimeId!, null, { force: true });
       // registerCurrentRuntime() assigns a non-null runtime id; it is re-read each
       // iteration because handleHeartbeatAck() may re-register and replace it.
-      await this.client.recoverOrphans(this.options.runtimeId!);
+      if (await this.canRecoverOrphans(outbox)) await this.client.recoverOrphans(this.options.runtimeId!);
       this.ready = true;
       this.onReadyChange(true);
       // A co-resident provider becoming ready is not enough to claim work.
@@ -1214,9 +2076,10 @@ export class MultiremiDaemon {
         await sleep(Math.max(10, Math.min(this.options.pollIntervalMs, 100)));
       }
 
-      if (!this.options.once) this.ensureTaskWakeup()?.setRuntimeId(this.options.runtimeId!);
-      this.nextHeartbeatAt = Date.now();
-      this.nextClaimAt = Date.now();
+      this.protocolClient?.startLane(this.protocolLane);
+      await this.resumePlannedRestarts();
+      this.nextPluginDesiredAt = Date.now() + PLUGIN_DESIRED_FORCED_REFRESH_MS;
+      this.onceTaskAccepted = false;
       while (!this.stopped) {
         try {
           this.assertWorkspaceRootOwner();
@@ -1224,65 +2087,11 @@ export class MultiremiDaemon {
             await sleep(Math.max(10, Math.min(this.options.pollIntervalMs, 100)));
             continue;
           }
-          // The concierge can be assigned or released at any time, so pick up a
-          // new cadence before testing the deadline.
-          this.refreshHeartbeatCadence();
-          if (this.options.once || Date.now() >= this.nextHeartbeatAt) {
-            const heartbeatIntervalMs = this.heartbeatIntervalMs();
-            this.appliedHeartbeatIntervalMs = heartbeatIntervalMs;
-            this.nextHeartbeatAt = Date.now() + heartbeatIntervalMs;
-            const ack = await this.client.heartbeatRuntime(
-              this.options.runtimeId!,
-              this.sshMeshManager.getHeartbeatStatus(),
-              {
-                ackGeneration: this.appliedDrainGeneration,
-                activeTaskCount: this.activeTaskCount,
-              },
-              this.botMenuPublisher !== null,
-              this.feishuConcierge !== null,
-              this.pollAbort.signal,
-            );
-            const skipClaim = await this.handleHeartbeatAck(this.options.runtimeId!, ack);
-            if (!skipClaim && !this.stopped) {
-              await this.reconcileRuntimeAgentPlugins(
-                this.options.runtimeId!,
-                ack.agent_plugins?.revision ?? null,
-                { force: this.options.once },
-              );
-            }
-            if (this.stopped) break;
-            if (skipClaim) {
-              // The Runtime vanished and could not be replaced yet, so there is
-              // nothing safe to claim. Push the claim deadline out before
-              // sleeping, or an already-due deadline would spin the loop.
-              if (this.options.once) return;
-              this.deferClaimLane();
-              await this.waitForNextTick();
-              continue;
-            }
+          if (Date.now() >= this.nextPluginDesiredAt) {
+            this.nextPluginDesiredAt = Date.now() + PLUGIN_DESIRED_FORCED_REFRESH_MS;
+            await this.reconcileRuntimeAgentPlugins(this.options.runtimeId!, null, { force: true });
           }
-
-          if (this.options.once) {
-            // One-shot mode (tests, single runs) stays strictly serial:
-            // claim one task, run it to completion, return.
-            if (this.claimsPaused || this.serverDrainActive) return;
-            const task = await this.claimTask(this.options.runtimeId!);
-            if (!task) return;
-            await this.handleTask(task);
-            return;
-          }
-
-          if (this.claimsPaused || this.serverDrainActive) {
-            // A sibling can pause claims while it installs the shared CLI, or
-            // the platform can be draining. Keep this lane ready and
-            // heartbeating so a failed install can release the pause; only a
-            // successful update explicitly stops the supervisor. The claim
-            // deadline has to move with it, otherwise the sleep below sees a
-            // deadline that is already due and returns immediately.
-            this.deferClaimLane();
-          } else if (Date.now() >= this.nextClaimAt) {
-            await this.runClaimPump();
-          }
+          await this.resumePlannedRestarts();
           await this.waitForNextTick();
         } catch (err) {
           // A transient server/network blip (e.g. the server restarting) must not
@@ -1299,13 +2108,10 @@ export class MultiremiDaemon {
           }
           if (this.stopped) break;
           if (this.options.once) throw err;
-          // A failed heartbeat/claim also delays the next attempt so a hard
-          // outage cannot turn the poll loop into a tight retry spin.
-          const retryMs = Math.max(this.options.pollIntervalMs, this.heartbeatIntervalMs());
-          this.nextHeartbeatAt = Date.now() + retryMs;
-          this.nextClaimAt = Date.now() + retryMs;
+          // A transient failure must not turn event-driven wakeups into a tight retry spin.
+          const retryMs = Math.max(this.options.pollIntervalMs, DAEMON_HEARTBEAT_INTERVAL_MS);
           log.warn(`daemon poll loop error, retrying in ${retryMs}ms: ${err instanceof Error ? err.message : String(err)}`);
-          await this.waitForNextTick();
+          await this.waitForNextTick(retryMs);
         }
       }
     } catch (error) {
@@ -1327,6 +2133,8 @@ export class MultiremiDaemon {
       }
       throw error;
     } finally {
+      this.stop();
+      await this.leaveProtocolLane();
       this.ready = false;
       this.onReadyChange(false);
       // Stop scheduling new sweeps before draining tasks. An existing sweep
@@ -1335,97 +2143,66 @@ export class MultiremiDaemon {
       this.cancelRuntimeModelRefresh();
       const modelRefresh = this.runtimeModelRefreshTask;
       if (modelRefresh) await Promise.allSettled([modelRefresh]);
+      await Promise.allSettled([...this.runtimeBindingProbeTasks]);
       await Promise.allSettled([...this.runtimeModelListRequests.values()]);
       // Running tasks depend on the repo-checkout server, so let any in-flight
       // tasks drain before waiting for the GC lease they may currently hold.
-      await Promise.allSettled([...this.inflight]);
+      // Task finalization can register a detached progress-summary call while
+      // the main execution is draining. Keep its accepted usage run alive.
+      this.parkedLanes?.disable("stopping");
+      while (this.inflight.size) await Promise.allSettled([...this.inflight]);
+      // PR 6 §2.7: a planned stop or update ends every parked lane's tasks, saying why.
+      await this.parkedLanes?.closeAll("daemon_restart");
       for (const run of this.feishuOutboundRuns.values()) run.abort.abort();
       await Promise.allSettled([...this.feishuOutboundRuns.values()].map(run => run.done));
       await this.drainGcInFlight();
-      this.gitWorktreeInspector?.close();
+      await this.externalChats?.close();
+      this.externalChats = null;
+      await this.protocolClient?.drain();
+      if (this.traceTransport) {
+        this.traceTransport = null;
+        await releaseDaemonTrace(this.protocolClient);
+      }
+      this.restartJournal?.close();
+      this.restartJournal = null;
+      this.restartTransfer = null;
       this.stopRepoCheckoutServer();
+      // Every task has drained, so no Antigravity server still needs the gateway.
+      if (this.ownsAntigravityShim) {
+        this.antigravityShim?.stop();
+        this.antigravityShim = null;
+      }
       // Undelivered rows stay on disk and replay on the next start(). close()
       // wakes retry sleepers, so a mid-backoff pump exits promptly.
       this.outboxAbort?.abort();
       const outbox = this.outbox;
       this.outbox = null;
       if (outbox) {
-        await outbox.close().catch((error) => {
+        await releaseDaemonOutbox(this.protocolClient).catch((error) => {
           log.warn(`outbox close failed: ${error instanceof Error ? error.message : String(error)}`);
         });
       }
     }
   }
 
-  /**
-   * Heartbeat cadence. Only the Runtime the control plane actually assigned the
-   * concierge to runs the fast loop, because its ack is the only delivery path
-   * for proactive Feishu replies.
-   *
-   * Being *able* to host the bot is not the same thing: every long-running
-   * daemon is offered the host so the control plane may hand the bot to any of
-   * them, and treating that as "hosting" pinned the whole fleet to 3s.
-   * `this.options.heartbeatIntervalMs` (the MULTIREMI_HEARTBEAT_INTERVAL_MS
-   * override and the legacy pollIntervalMs) therefore applies to the normal
-   * cadence only — the assigned Runtime stays at 3s.
-   */
-  private heartbeatIntervalMs(): number {
-    if (this.conciergeIsAssigned()) return CONCIERGE_HEARTBEAT_INTERVAL_MS;
-    return this.options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-  }
 
-  /**
-   * Whether the control plane currently has the concierge running here.
-   *
-   * `starting` and `failed` also count as assigned: both follow a directive that
-   * picked this Runtime, and the failed retry ladder depends on the fast
-   * heartbeat to re-read that directive. Only `stopped` means it is not ours.
-   */
-  private conciergeIsAssigned(): boolean {
-    return (this.feishuConcierge?.snapshot().state ?? "stopped") !== "stopped";
-  }
-
-  /**
-   * Re-apply the heartbeat interval after the assignment can have changed.
-   *
-   * Shortening it has to take effect within the new interval rather than after
-   * the remainder of the old one: a Runtime that just received the bot cannot
-   * sit out a pending 10s wait before its first 3s heartbeat. Lengthening it
-   * only affects the deadline the next heartbeat sets, which is what a handover
-   * away wants — losing the bot never provokes an extra heartbeat.
-   */
-  private refreshHeartbeatCadence(): void {
-    const interval = this.heartbeatIntervalMs();
-    if (interval === this.appliedHeartbeatIntervalMs) return;
-    const previous = this.appliedHeartbeatIntervalMs;
-    this.appliedHeartbeatIntervalMs = interval;
-    if (previous === 0 || interval >= previous) return;
-    this.nextHeartbeatAt = Math.min(this.nextHeartbeatAt, Date.now() + interval);
-    // The poll sleep is waiting on the old, longer deadline; wake it so it can
-    // recompute against the new one.
-    this.wakeClaim();
-  }
-
-  /**
-   * Sleep until the earlier of the next heartbeat and the next claim.
-   *
-   * Returns early when {@link wakeClaim} fires — either a `daemon:task_available`
-   * frame or a local reset event — so an idle backoff never delays a queued task.
-   */
-  private async waitForNextTick(): Promise<void> {
+  /** Business pushes wake this wait; pending restart receipts also need bounded retries. */
+  private async waitForNextTick(retryMs?: number): Promise<void> {
     if (this.stopped) return;
-    const now = Date.now();
-    const delayMs = Math.max(0, Math.min(this.nextHeartbeatAt, this.nextClaimAt) - now);
-    await new Promise<void>((resolveWait) => {
+    const pendingRestart = [...this.restartRecoveryCandidates].some(id => !this.resumedRestartIds.has(id));
+    const idleMs = Math.max(0, this.nextPluginDesiredAt - Date.now());
+    const delayMs = retryMs ?? (pendingRestart ? Math.min(idleMs, Math.max(1_000, this.options.pollIntervalMs)) : idleMs);
+    await new Promise<void>(resolveWait => {
       let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
       const finish = () => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer !== null) clearTimeout(timer);
         if (this.waitWake === finish) this.waitWake = null;
         resolveWait();
       };
-      const timer = setTimeout(finish, delayMs);
+      timer = setTimeout(finish, delayMs);
       this.waitWake = finish;
       if (this.stopped) finish();
     });
@@ -1436,49 +2213,7 @@ export class MultiremiDaemon {
     this.waitWake?.();
   }
 
-  private ensureTaskWakeup(): DaemonWakeupTransport | null {
-    // `--once` runs claim a single task and return, so a wake-up channel would
-    // outlive the loop that consumes it. Also keeps single-run harnesses from
-    // dialing a socket merely to register.
-    if (this.options.once) return null;
-    if (this.taskWakeup || !this.options.taskWakeupEnabled) return this.taskWakeup;
-    this.taskWakeup = new DaemonWakeupSocket({
-      serverUrl: this.options.serverUrl,
-      token: this.options.token,
-      onTaskAvailable: () => {
-        // Queued work may have appeared: drop the idle backoff and interrupt the
-        // pending sleep instead of waiting out the remainder of the interval.
-        this.resetClaimBackoff();
-        this.wakeClaim();
-      },
-      ...(this.options.taskWakeupConnect ? { connect: this.options.taskWakeupConnect } : {}),
-      log: { info: (message) => log.info(message), warn: (message) => log.warn(message) },
-    });
-    return this.taskWakeup;
-  }
 
-  /** Reset the idle claim backoff; every event that can add queued work calls this. */
-  private resetClaimBackoff(): void {
-    this.claimIdleMs = this.claimIdleBaseMs;
-    this.nextClaimAt = Date.now();
-  }
-
-  /**
-   * Push the next claim attempt out without claiming.
-   *
-   * Used whenever the claim lane is suppressed (paused, draining, or a lost
-   * Runtime): the poll sleep waits for the earliest deadline, so leaving a due
-   * deadline in place would turn the sleep into a busy loop.
-   */
-  private deferClaimLane(): void {
-    // Wake for the next heartbeat rather than a short poll: while claims are
-    // suppressed there is nothing to do in between, and the heartbeat is what
-    // can lift the suppression (a drain directive or a released update pause).
-    this.nextClaimAt = Math.max(
-      this.nextHeartbeatAt,
-      Date.now() + this.options.pollIntervalMs,
-    );
-  }
 
   /**
    * Free one concurrency slot and wake the claim lane.
@@ -1489,85 +2224,14 @@ export class MultiremiDaemon {
   private releaseActiveTaskSlot(): void {
     const previous = this.activeTaskCount;
     this.activeTaskCount = Math.max(0, previous - 1);
-    if (this.activeTaskCount < previous) this.resetClaimBackoff();
+    if (this.activeTaskCount < previous) {
+      this.protocolClient?.sendHeartbeatNow();
+      this.wakeClaim();
+    }
   }
 
-  /** Local `/health` view of the wake-up channel, so operators can see a blocked WS. */
-  taskWakeupStatus(): DaemonWakeupStatus | null {
-    return this.taskWakeup?.status() ?? null;
-  }
-
-  /**
-   * `claim_wake_ws` block of the daemon status JSON.
-   *
-   * A disconnected wake-up channel is not a failure — claims still happen on the
-   * idle backoff — but it raises task-start latency to the backoff ceiling, so it
-   * has to be visible without reading logs.
-   */
-  private claimWakeWsStatus(): Record<string, unknown> {
-    const status = this.taskWakeup?.status();
-    if (!status) {
-      return {
-        state: "disabled",
-        connected: false,
-        connected_since: null,
-        last_error: null,
-        reconnect_attempts: 0,
-        next_reconnect_at: null,
-        suspended: false,
-      };
-    }
-    return {
-      state: status.state,
-      connected: status.connected,
-      connected_since: status.connected_since,
-      last_error: status.last_error,
-      reconnect_attempts: status.reconnect_attempts,
-      next_reconnect_at: status.next_reconnect_at,
-      suspended: status.suspended,
-    };
-  }
-
-  /**
-   * Bounded claim pump: keep claiming while there is spare capacity and run each
-   * task concurrently (detached). The server's claim query also caps in-flight
-   * tasks at the runtime's maxConcurrency, so this local gate and the server
-   * agree. `activeTaskCount` is incremented synchronously at the top of
-   * handleTask, so the loop sees it grow.
-   *
-   * An empty claim backs the next attempt off exponentially up to
-   * `MULTIREMI_CLAIM_IDLE_MAX_MS`; claiming one task resets it, and the
-   * `daemon:task_available` socket wake-up short-circuits the wait entirely.
-   */
-  private async runClaimPump(): Promise<void> {
-    let claimed = false;
-    while (
-      this.activeTaskCount < this.options.maxConcurrency
-      && !this.stopped
-      && !this.claimsPaused
-      && !this.serverDrainActive
-      && this.supervisorReady()
-    ) {
-      const task = await this.claimTask(this.options.runtimeId!);
-      if (!task) break;
-      claimed = true;
-      const run = this.handleTask(task).catch((err) => {
-        // handleTask routes task failures to failTask itself; this guards the
-        // detached promise against an unexpected unhandled rejection.
-        log.error(`task ${task.id} crashed outside handleTask: ${err instanceof Error ? err.message : String(err)}`);
-      });
-      this.inflight.add(run);
-      void run.finally(() => this.inflight.delete(run));
-    }
-    if (this.stopped) return;
-    if (claimed) {
-      this.resetClaimBackoff();
-      return;
-    }
-    const idleMs = this.claimIdleMs;
-    this.claimIdleMs = Math.min(this.claimIdleMs * 2, this.options.claimIdleMaxMs);
-    this.nextClaimAt = Date.now() + idleMs;
-  }
+  /** The process connection is shared by every co-resident provider. */
+  daemonProtocolClient(): DaemonProtocolClient { return this.protocolClient; }
 
   private async registerCurrentRuntime(): Promise<string> {
     if (!this.explicitRuntimeId) {
@@ -1599,29 +2263,42 @@ export class MultiremiDaemon {
       this.applyWorkspaceRegistrationState(response);
       this.runtimeRegistrationGeneration++;
       this.clearDesiredAgentPlugins();
-      this.ensureTaskWakeup()?.setRuntimeId(this.options.runtimeId);
       log.info(`Runtime registered: ${this.options.runtimeId} (${this.options.provider})`);
+      this.protocolClient.runtimesChanged();
+      this.startReportReplay();
       return this.options.runtimeId;
     }
     const runtime = await this.client.registerRuntime(this.currentRuntimeRegistrationInput());
     this.options.runtimeId = runtime.runtime.id;
-    if (this.botMenuPublisher || this.feishuConcierge || (this.options.provider === "codex" || this.options.provider === "claude")) {
-      const ack = await this.client.heartbeatRuntime(
-        this.options.runtimeId,
-        undefined,
-        undefined,
-        this.botMenuPublisher !== null,
-        this.feishuConcierge !== null,
-      );
-      // A heartbeat also claims maintenance requests; process the entire ack
-      // so fetching the initial provider config cannot strand those requests.
-      await this.handleHeartbeatAck(this.options.runtimeId, ack);
-    }
     this.runtimeRegistrationGeneration++;
     this.clearDesiredAgentPlugins();
-    this.ensureTaskWakeup()?.setRuntimeId(this.options.runtimeId);
     log.info(`Runtime registered: ${this.options.runtimeId} (${this.options.provider})`);
+    this.protocolClient.runtimesChanged();
+    this.startReportReplay();
     return this.options.runtimeId;
+  }
+
+  private startReportReplay(): void {
+    const outbox = this.ensureOutbox();
+    if (existsSync(this.legacyOutboxPath)) outbox.importLegacy(this.legacyOutboxPath, this.options.runtimeId ?? undefined);
+    this.protocolClient.startLane(this.protocolLane);
+    outbox.pumpAll();
+  }
+
+  private async canRecoverOrphans(outbox: MultiremiTaskReportOutbox): Promise<boolean> {
+    const pending = outbox.taskIdsWithPendingTerminal(this.options.runtimeId ?? undefined);
+    if (!pending.length) return true;
+    if (this.protocolClient.connectionState() === "connected") {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), this.options.outboxStartupFlushTimeoutMs);
+      const stop = () => abort.abort();
+      this.pollAbort.signal.addEventListener("abort", stop, { once: true });
+      try { await Promise.all(pending.map(taskId => outbox.waitForTaskDrain(taskId, abort.signal))); }
+      finally { clearTimeout(timer); this.pollAbort.signal.removeEventListener("abort", stop); }
+      if (!outbox.taskIdsWithPendingTerminal(this.options.runtimeId ?? undefined).length) return true;
+    }
+    log.warn("skipping HTTP recoverOrphans: this runtime has undelivered terminal reports");
+    return false;
   }
 
   private applyWorkspaceRegistrationState(response: MultiremiDaemonRegisterResponse): void {
@@ -1638,14 +2315,16 @@ export class MultiremiDaemon {
   /** Version of this runtime's ACP bridge (claude-agent-acp / codex-acp), or null. */
   private acpVersion(): string | null {
     const provider = this.options.provider;
+    // Antigravity's ACP server is the agent itself: the pinned install's version.
+    if (provider === "antigravity") return installedAntigravity()?.manifest.version ?? null;
     return provider === "claude" || provider === "codex" ? bridgeVersion(provider) : null;
   }
 
-  /** Version of the underlying agent CLI (`claude` / `codex`), or null. */
+  /** Version of the underlying agent CLI (`claude` / `codex` / `grok`), or null. */
   private agentVersion(): string | null {
     const provider = this.options.provider;
-    if (provider === "antigravity") return antigravityCliVersion();
-    return provider === "claude" || provider === "codex" ? agentCliVersion(provider) : null;
+    if (provider === "antigravity") return installedAntigravity()?.manifest.version ?? null;
+    return provider === "claude" || provider === "codex" || provider === "grok" ? agentCliVersion(provider) : null;
   }
 
   private currentRuntimeRegistrationInput(): RegisterRuntimeInput {
@@ -1660,12 +2339,19 @@ export class MultiremiDaemon {
       metadata: {
         version: multiremiVersion,
         cli_version: multiremiVersion,
+        ...(BUILD_COMMIT ? { cli_commit: BUILD_COMMIT } : {}),
         parallel_agent_execution: 1,
         acp_version: this.acpVersion() ?? undefined,
         agent_version: this.agentVersion() ?? undefined,
         launched_by: this.options.launchedBy ?? "manual",
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         runtime_workspaces: 1,
+        external_chats: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
+        external_chat_models: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
+        execution_profiles: 1,
+        execution_endpoints: 1,
+        antigravity_native: 1,
+        execution_endpoint_options: 1,
         codex_profiles: 1,
         claude_profiles: 1,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
@@ -1676,8 +2362,13 @@ export class MultiremiDaemon {
   }
 
   private async handleHeartbeatAck(runtimeId: string, ack: MultiremiDaemonHeartbeatConfigAck): Promise<boolean> {
-    this.applyRuntimeCodexProfile(ack.codex_profile);
-    this.applyRuntimeClaudeProfile(ack.claude_profile);
+    if (ack.runtime_bindings) await this.applyRuntimeExecutionBindings(ack.runtime_bindings);
+    if ("codex_profile" in ack) this.applyRuntimeCodexProfile(ack.codex_profile);
+    if ("claude_profile" in ack) this.applyRuntimeClaudeProfile(ack.claude_profile);
+    if ("codex_profile" in ack || "claude_profile" in ack) {
+      this.runtimeProfileSnapshotReceived = true;
+      if (!this.options.once) this.startRuntimeModelRefresh();
+    }
     const workspaceId = this.options.workspaceId ?? "local";
     if (ack.drain) {
       const draining = ack.drain.mode === "draining";
@@ -1688,7 +2379,14 @@ export class MultiremiDaemon {
             : "Platform drain released: resuming task claims",
         );
       }
-      if (this.serverDrainActive && !draining) this.resetClaimBackoff();
+      if (this.serverDrainActive && !draining) this.wakeClaim();
+      // PR 6 §2.7: a platform drain parks nothing new and ends the parked lanes.
+      if (draining && !this.serverDrainActive) {
+        this.parkedLanes?.disable("draining");
+        void this.parkedLanes?.closeAll("daemon_restart");
+      } else if (!draining && this.serverDrainActive && !this.stopped) {
+        this.parkedLanes?.disable(null);
+      }
       this.serverDrainActive = draining;
       // Track the highest generation seen so the next heartbeat acknowledges
       // it. Acknowledging in normal mode too keeps the ack current when a new
@@ -1705,7 +2403,7 @@ export class MultiremiDaemon {
       this.workspaceRelays.set(workspaceId, ack.relay);
     }
     if (ack.pending_update) {
-      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
+      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.drain_deadline, ack.pending_update.target_commit);
     }
     if (ack.pending_model_list) {
       const requestId = ack.pending_model_list.id;
@@ -1723,6 +2421,10 @@ export class MultiremiDaemon {
     if (ack.pending_directory_scan) {
       await this.handleRuntimeDirectoryScan(runtimeId, ack.pending_directory_scan);
     }
+    if (ack.pending_gc_run) {
+      this.handleRuntimeGcRun(runtimeId, ack.pending_gc_run);
+      if (this.options.once) await Promise.allSettled([...this.gcRunRequests.values()]);
+    }
     if (ack.pending_command) {
       await this.handleRuntimeCommand(runtimeId, ack.pending_command);
     }
@@ -1733,6 +2435,7 @@ export class MultiremiDaemon {
     if (ack.pending_feishu_outbound) {
       this.queueFeishuBotOutbound(runtimeId, ack.pending_feishu_outbound);
     }
+    for (const delivery of ack.pending_feishu_outbounds ?? []) this.queueFeishuBotOutbound(runtimeId, delivery);
     if (ack.ssh_mesh) {
       await this.sshMeshManager.reconcile(ack.ssh_mesh);
     }
@@ -1784,7 +2487,11 @@ export class MultiremiDaemon {
       }
       await this.refreshWorkspaceRepos(workspaceId);
       try {
-        await this.client.recoverOrphans(newRuntimeId);
+        // The temporary HTTP recovery has no active_task_ids argument. A task
+        // still running locally must be protected by runtime.ready instead.
+        if (this.activeTaskIds.size === 0 && await this.canRecoverOrphans(this.ensureOutbox())) {
+          await this.client.recoverOrphans(newRuntimeId);
+        }
       } catch (error) {
         log.warn(`Recover orphans after runtime_gone failed for ${newRuntimeId}: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1799,6 +2506,8 @@ export class MultiremiDaemon {
     requestId: string,
     targetVersion: string,
     scope: MultiremiRuntimeUpdateScope = "cli",
+    drainDeadline?: string,
+    targetCommit?: string,
   ): Promise<void> {
     // Only the CLI binary is owned by the Desktop app; the ACP bridges live in
     // ~/.remi and are independent of how the daemon was launched.
@@ -1809,7 +2518,9 @@ export class MultiremiDaemon {
       });
       return;
     }
-    const claimPause = this.tryPauseClaimsForUpdate(scope);
+    const claimPause = scope === "cli"
+      ? await this.pauseCliClaimsUntilIdle(drainDeadline)
+      : this.tryPauseLocalClaimsForUpdate();
     if (!claimPause.ok) {
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
         status: "failed",
@@ -1817,46 +2528,133 @@ export class MultiremiDaemon {
       });
       return;
     }
+    // Admission is deliberately non-durable: a timed-out running report must
+    // never replay after this executor has given up and queued failed.
+    const platformDeadline = drainDeadline === undefined ? Infinity : Date.parse(drainDeadline);
+    const admissionNow = Date.now();
+    // An expired drain that was safely checkpointed must still be able to
+    // confirm installation; future deadlines retain the existing smaller budget.
+    const admissionEnd = Number.isNaN(platformDeadline) ? admissionNow : Math.min(admissionNow + 30_000,
+      platformDeadline > admissionNow ? platformDeadline : admissionNow + 30_000);
+    while (true) {
+      try {
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" },
+          AbortSignal.timeout(Math.max(1, admissionEnd - Date.now())));
+        break;
+      } catch (error) {
+        if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
+          this.releaseUpdateClaimPause(scope);
+          // Propagate so the WS downlink releases its dedupe key. Heartbeat
+          // also retries the same pending id on its next poll.
+          throw error;
+        }
+        if (Date.now() >= admissionEnd) {
+          try {
+            await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
+              status: "failed", error: `CLI update admission confirmation deadline exceeded: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          } finally { this.releaseUpdateClaimPause(scope); }
+          return;
+        }
+        await Bun.sleep(Math.min(250, Math.max(0, admissionEnd - Date.now())));
+      }
+    }
     try {
-      await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" });
       const output = scope === "acp"
-        ? this.reinstallAcpBridge()
+        ? await this.reinstallAcpBridge()
         : scope === "agent"
           ? await this.updateAgentCli()
-          : await this.updateRunner(targetVersion);
+          : this.updateRunner ? await this.updateRunner(targetVersion)
+            : await this.installRuntimeUpdate(runtimeId, requestId, targetVersion, targetCommit);
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
-        status: "completed",
+        status: scope === "cli" ? "restarting" : "completed",
         output: output || (scope === "acp" ? "ACP bridge updated" : scope === "agent" ? "Agent updated" : `Updated to ${targetVersion}`),
       });
-      this.requestRestartAfterUpdate();
+      if (scope === "cli") await this.requestRestartAfterUpdate();
+      else this.releaseUpdateClaimPause(scope);
     } catch (err) {
       this.releaseUpdateClaimPause(scope);
-      await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
-        status: "failed",
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const error = err instanceof Error ? err.message : String(err);
+      const directory = updateJournalDir(multiremiStateDir(), runtimeId, requestId);
+      const journal = scope === "cli" && !this.updateRunner ? readUpdateJournal(directory) : null;
+      if (journal && decideUpdate(directory, "rolled_back")) {
+        restorePreviousLauncher(journal);
+        writeFileSync(join(directory, "reason"), error, { mode: 0o600 });
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "rolled_back", error });
+        renameSync(directory, `${directory}.settled`);
+      } else {
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "failed", error });
+      }
     }
   }
 
-  /** Force-reinstall this runtime's ACP bridge to the latest version. */
-  private reinstallAcpBridge(): string {
+  private async installRuntimeUpdate(runtimeId: string, requestId: string, targetVersion: string, targetCommit?: string): Promise<string> {
+    const restart = this.updateRestartSpec;
+    if (!restart) throw new Error("This daemon launch has no recoverable update restart specification");
+    const result = await performUpdate({ targetVersion, targetCommit, currentCommit: BUILD_COMMIT, serverUrl: this.options.serverUrl, token: this.options.token,
+      onProgress: message => log.info(`[cli-update] ${message}`), currentVersion: multiremiVersion, serviceRestart: restart,
+      ...(basename(process.execPath) === "remi" ? { rollbackExecutable: process.execPath } : {}),
+      beforeActivate: async installed => {
+        const journal = journalForInstall(installed, runtimeId, requestId, multiremiVersion);
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "restarting" });
+        armUpdateWatchdog({ directory: updateJournalDir(multiremiStateDir(), runtimeId, requestId), journal,
+          restart: restart.command, manager: restart.manager, timeoutSeconds: this.updateVerifyTimeoutSeconds });
+      },
+    });
+    return `Installed ${result.version} from ${result.source}${result.commit ? ` (${result.commit})` : ""}; awaiting target-version hello and startup self-check`;
+  }
+
+  private async confirmRuntimeUpdate(): Promise<void> {
+    if (!this.options.runtimeId || !this.ready || !this.supervisorReady() || this.stopped) return;
+    const directory = updateJournalDir(multiremiStateDir(), this.options.runtimeId);
+    const journal = readUpdateJournal(directory);
+    if (!journal) return;
+    const version = multiremiVersion.replace(/^v/, "");
+    if (!updateDecision(directory) && matchesUpdateIdentity(journal, version, BUILD_COMMIT)) decideUpdate(directory, "completed");
+    const decision = updateDecision(directory);
+    if (decision === "completed" && matchesUpdateIdentity(journal, version, BUILD_COMMIT)) {
+      await this.client.reportRuntimeUpdateResult(journal.runtimeId, journal.requestId, {
+        status: "completed", self_check: true, output: `Registered ${version}; startup self-check passed`,
+      });
+    } else if (decision === "rolled_back" && version === journal.previousVersion.replace(/^v/, "")) {
+      await this.client.reportRuntimeUpdateResult(journal.runtimeId, journal.requestId, {
+        status: "rolled_back", error: readFileSync(join(directory, "reason"), "utf8").trim(),
+        output: `Restored ${version}; startup self-check passed`,
+      });
+    } else return;
+    renameSync(directory, `${directory}.settled`);
+  }
+
+  /** Reinstall the ACP bundle pinned by this daemon release. */
+  private async reinstallAcpBridge(): Promise<string> {
     const provider = this.options.provider;
+    if (provider === "antigravity") {
+      // Re-download the version this Remi release pins; the terms acceptance on record carries over.
+      const installed = await ensureAntigravityServer({ force: true, log: (message) => log.info(`[acp] ${message}`) });
+      return `Antigravity ACP server ${installed.manifest.version} reinstalled`;
+    }
     if (provider !== "claude" && provider !== "codex") {
       throw new Error(`ACP bridge update not supported for provider: ${provider}`);
     }
-    return reinstallBridge(provider as ProvisionProvider, (m) => log.info(`[acp] ${m}`));
+    const version = reinstallBridge(provider as ProvisionProvider, (m) => log.info(`[acp] ${m}`));
+    return `${provider} ACP ${version} reinstalled from this Remi release. Upgrade the machine's Remi CLI to upgrade its bundled Agent and ACP.`;
   }
 
-  /** Update the underlying agent CLI (claude/codex) via its own `update` subcommand. */
+  /** Update the underlying agent CLI via its own `update` subcommand. */
   private async updateAgentCli(): Promise<string> {
     const provider = this.options.provider;
-    if (!["claude", "codex", "antigravity"].includes(provider)) {
+    if (provider === "claude" || provider === "codex") {
+      throw new Error("Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead");
+    }
+    if (provider === "antigravity") {
+      throw new Error("The Antigravity ACP server is pinned by the Remi release; upgrade Remi to change it");
+    }
+    if (!["claude", "codex", "grok"].includes(provider)) {
       throw new Error(`agent update not supported for provider: ${provider}`);
     }
     // Spawn with the daemon's own env: it was launched from a login shell, so
-    // PATH already resolves claude/codex (incl. Homebrew on macOS).
-    const executable = provider === "antigravity" ? resolveAntigravityExecutable() : provider;
-    const proc = Bun.spawn([executable, "update"], { stdout: "pipe", stderr: "pipe", env: process.env });
+    // PATH already resolves claude/codex/grok (incl. Homebrew on macOS).
+    const proc = Bun.spawn([provider, "update"], { stdout: "pipe", stderr: "pipe", env: process.env });
     const [stdout, stderr, exitCode] = await Promise.all([
       streamText(proc.stdout),
       streamText(proc.stderr),
@@ -1895,7 +2693,7 @@ export class MultiremiDaemon {
 
   private async handleRuntimeCommand(
     runtimeId: string,
-    request: NonNullable<MultiremiDaemonHeartbeatAck["pending_command"]>,
+    request: NonNullable<MultiremiDaemonHeartbeatConfigAck["pending_command"]>,
   ): Promise<void> {
     const result = await executeRuntimeCommand({
       command: request.command,
@@ -1923,7 +2721,7 @@ export class MultiremiDaemon {
    */
   private queueBotMenuPublish(
     runtimeId: string,
-    request: NonNullable<MultiremiDaemonHeartbeatAck["pending_bot_menu"]>,
+    request: NonNullable<MultiremiDaemonHeartbeatConfigAck["pending_bot_menu"]>,
   ): void {
     this.botMenuPublishChain = this.botMenuPublishChain
       .catch(() => {})
@@ -1935,7 +2733,7 @@ export class MultiremiDaemon {
 
   private async handleBotMenuPublish(
     runtimeId: string,
-    request: NonNullable<MultiremiDaemonHeartbeatAck["pending_bot_menu"]>,
+    request: NonNullable<MultiremiDaemonHeartbeatConfigAck["pending_bot_menu"]>,
   ): Promise<void> {
     if (!this.botMenuPublisher) {
       await this.client.reportBotMenuPublishResult(runtimeId, request.id, {
@@ -1967,11 +2765,11 @@ export class MultiremiDaemon {
   }
 
   /**
-   * Hand a heartbeat's concierge directive to the supervisor without waiting
+   * Hand a changed concierge directive to the supervisor without waiting
    * for it. Booting a Remi core takes seconds, and the heartbeat loop is also
    * what claims tasks — blocking it on a connector start would stall unrelated
-   * work. The supervisor serializes its own reconciles, so firing on every
-   * heartbeat cannot overlap two starts.
+   * work. This and the independent heartbeat tick share a serial queue, so
+   * they cannot overlap two starts.
    */
   private applyFeishuBotDirective(ack: MultiremiDaemonHeartbeatConfigAck): void {
     const supervisor = this.feishuConcierge;
@@ -1982,11 +2780,18 @@ export class MultiremiDaemon {
       .then(() => supervisor.apply(directive))
       .catch((error) => {
         log.warn(`Feishu concierge reconcile failed: ${error instanceof Error ? error.message : String(error)}`);
-      })
-      .finally(() => {
-        // Applying a directive is what moves this Runtime into or out of the
-        // concierge lane, so the heartbeat cadence has to follow it.
-        this.refreshHeartbeatCadence();
+      });
+  }
+
+  /** v2 only sends each unchanged directive once; retry from the heartbeat lane. */
+  private tickFeishuConcierge(): void {
+    const supervisor = this.feishuConcierge;
+    if (!supervisor) return;
+    this.feishuConciergeReconcile = this.feishuConciergeReconcile
+      .catch(() => {})
+      .then(() => supervisor.tick())
+      .catch((error) => {
+        log.warn(`Feishu concierge heartbeat reconcile failed: ${error instanceof Error ? error.message : String(error)}`);
       });
   }
 
@@ -2011,6 +2816,7 @@ export class MultiremiDaemon {
     signal: AbortSignal = this.pollAbort.signal,
   ): Promise<void> {
     const supervisor = this.feishuConcierge;
+    let sending = false;
     try {
       if (!supervisor) throw new Error("Feishu concierge is unavailable");
       const resolveImage = createFeishuImageResolver({
@@ -2026,16 +2832,33 @@ export class MultiremiDaemon {
         ),
         uploadImage: async (image) => (await supervisor.uploadImage(image.buffer)).imageKey,
       });
-      const body = await rewriteMarkdownImages(delivery.body, resolveImage, {
-        publicUrl: this.options.serverUrl,
-      });
+      let body = delivery.body;
+      if (delivery.kind === "result_card") {
+        const card = JSON.parse(body);
+        card.text = await rewriteMarkdownImages(card.text, resolveImage, { publicUrl: this.options.serverUrl });
+        body = JSON.stringify(card);
+      } else {
+        body = await rewriteMarkdownImages(body, resolveImage, { publicUrl: this.options.serverUrl });
+      }
       await deliverFeishuOutbound(delivery, {
         signal,
         prepareMention: openId => this.client.prepareFeishuBotOutboundMention(runtimeId, delivery.id, delivery.claimToken, openId),
-        send: options => supervisor.sendOutbound({ ...delivery, body }, options),
-        report: input => this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input),
+        send: async options => {
+          sending = true;
+          return supervisor.sendOutbound({ ...delivery, body }, options);
+        },
+        report: async input => {
+          try { await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input); }
+          catch (error) {
+            if (input.status === "sent") throw new FeishuDeliveryError(redactFeishuBotError(error), true, true);
+            throw error;
+          }
+        },
       });
     } catch (error) {
+      // A missing transport acknowledgement may hide a committed send. Keep
+      // the sending lease so recovery uses the bounded stable-UUID path.
+      if (sending && error instanceof FeishuDeliveryError && error.ambiguous) throw error;
       await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, {
         claimToken: delivery.claimToken,
         status: "failed",
@@ -2066,7 +2889,7 @@ export class MultiremiDaemon {
   }
 
   private startRuntimeModelRefresh(): void {
-    if (!this.runtimeModelDiscoveryEnabled || this.stopped) return;
+    if (!this.runtimeModelDiscoveryEnabled || this.stopped || !this.runtimeProfileSnapshotReceived) return;
     if (this.runtimeModelRefreshTask) {
       this.wakeRuntimeModelRetry();
       return;
@@ -2164,6 +2987,13 @@ export class MultiremiDaemon {
   private cancelRuntimeModelRefresh(): void {
     this.runtimeModelRefreshAbort?.abort();
     this.cancelRuntimeModelProbe();
+    for (const entry of this.runtimeBindingDiscoveries.values()) {
+      entry.abort.abort();
+      clearTimeout(entry.timer);
+    }
+    this.runtimeBindingDiscoveries.clear();
+    this.runtimeBindingAcks = [];
+    this.runtimeBindingApplication++;
     this.wakeRuntimeModelRetry();
   }
 
@@ -2174,7 +3004,7 @@ export class MultiremiDaemon {
   private async discoverRuntimeModels(force: boolean): Promise<MultiremiRuntimeModel[]> {
     if (!this.runtimeModelDiscoveryEnabled) {
       const profile = this.runtimeModelProfile();
-      if (profile) return [{ id: profile.model, label: profile.model, provider: this.options.provider, default: true }];
+      if (profile) return runtimeConnectionModels(profile, this.options.provider, []);
       throw new Error(IN_PROCESS_RUNTIME_MODEL_DISCOVERY_DISABLED);
     }
     if (!force && this.runtimeModels
@@ -2201,7 +3031,7 @@ export class MultiremiDaemon {
         // ACP supplies reasoning metadata, not the custom supplier's model inventory.
         // Services without a models endpoint retain the configured model and its ACP capabilities.
         models = catalog.status === "fulfilled" ? catalog.value : this.runtimeModels
-          ?? [{ id: profile.model, label: profile.model, provider, default: true }];
+          ?? runtimeConnectionModels(profile, provider, []);
         if (capabilities.status === "fulfilled") {
           const byId = new Map(capabilities.value.map(model => [model.id, model]));
           models = models.map(model => {
@@ -2235,13 +3065,26 @@ export class MultiremiDaemon {
 
   private async discoverAcpRuntimeModels(signal: AbortSignal): Promise<MultiremiRuntimeModel[]> {
     const prepared = await this.runtimeModelProbeProviderOptions();
+    try {
+      const models = await this.discoverAcpRuntimeModelsWith(prepared, signal);
+      prepared.check?.();
+      return models;
+    } finally {
+      prepared.release?.();
+    }
+  }
+
+  private async discoverAcpRuntimeModelsWith(
+    prepared: Awaited<ReturnType<MultiremiDaemon["runtimeModelProbeProviderOptions"]>>,
+    signal: AbortSignal,
+  ): Promise<MultiremiRuntimeModel[]> {
     const probe = async (): Promise<MultiremiRuntimeModel[]> => {
       if (!this.options.inProcessRuntimeModelDiscoveryEnabled) {
         const capabilities = await probeRuntimeModels(prepared.options, {
           signal, timeoutMs: RUNTIME_MODEL_PROBE_TIMEOUT_MS,
         });
         signal.throwIfAborted();
-        return runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
+        return runtimeModelsFromAcpCapabilities(prepared.options.agentType ?? this.options.provider, capabilities);
       }
       const provider = this.providerFactory(prepared.options);
       try {
@@ -2254,7 +3097,7 @@ export class MultiremiDaemon {
         );
         signal.throwIfAborted();
         if (!capabilities.length) throw new Error(`ACP did not advertise any models for provider: ${this.options.provider}`);
-        return runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
+        return runtimeModelsFromAcpCapabilities(prepared.options.agentType ?? this.options.provider, capabilities);
       } finally {
         await provider.close?.();
       }
@@ -2276,23 +3119,27 @@ export class MultiremiDaemon {
     return runtimeModelsWithCatalogError(probed, prepared.catalogState.error);
   }
 
-  private async runtimeModelProbeProviderOptions(): Promise<{
+  private async runtimeModelProbeProviderOptions(nativeGroupId?: string, bindingProvider?: string): Promise<{
     options: AcpProviderOptions;
     catalogState?: CodexModelCatalogState;
     relay?: MultiremiRelayEngineWire | null;
+    /** Ends what the probe borrowed (the Antigravity shim token). */
+    release?: () => void;
+    /** Throws when the probe's models cannot be trusted (the Antigravity gateway refused its listing). */
+    check?: () => void;
   }> {
-    const provider = this.options.provider;
+    const provider = bindingProvider ?? this.options.provider;
+    if (provider === "antigravity") return this.antigravityModelProbeOptions(nativeGroupId);
     if (provider !== "claude" && provider !== "codex") {
-      return { options: { agentType: provider, cwd: homedir() } };
+      return { options: { agentType: provider, cwd: this.userHome } };
     }
     const workspaceId = this.options.workspaceId ?? "local";
-    const workspaceRelay = await this.effectiveWorkspaceRelay(workspaceId);
+    const workspaceRelay = nativeGroupId ? { claude: null, codex: null, antigravity: null } : await this.effectiveWorkspaceRelay(workspaceId);
     const relayAuthoritative = workspaceRelay !== undefined;
     const relay = provider === "claude" ? workspaceRelay?.claude : workspaceRelay?.codex;
-    const owner = `${this.options.daemonId ?? this.options.runtimeName}:${provider}`;
+    const owner = `${this.options.daemonId ?? this.options.runtimeName}:${provider}:${nativeGroupId ?? ""}`;
     const root = join(
-      resolve(this.options.workspacesRoot),
-      ".runtime-probe",
+      probeRoot(this.options.workspacesRoot),
       `${provider}-${createHash("sha256").update(owner).digest("hex").slice(0, 16)}`,
     );
     const providerHome: IssueSessionProviderHome = {
@@ -2312,7 +3159,7 @@ export class MultiremiDaemon {
           }
         : {}),
     });
-    if (provider === "claude" && this.runtimeClaudeProfile) Object.assign(providerEnv, runtimeClaudeProfileEnv(this.runtimeClaudeProfile, relay!.auth_token));
+    if (!nativeGroupId && provider === "claude" && this.runtimeClaudeProfile) Object.assign(providerEnv, runtimeClaudeProfileEnv(this.runtimeClaudeProfile, relay!.auth_token));
     const usesCodexRelayKey = provider === "codex" && Boolean(providerEnv.OPENAI_API_KEY);
     const prepared = await prepareIssueSessionProviderHome(providerHome, {
       linkCodexAuth: provider === "codex" && !usesCodexRelayKey,
@@ -2339,6 +3186,54 @@ export class MultiremiDaemon {
         },
       },
     };
+  }
+
+  /**
+   * The Antigravity model probe (PR 4 §3): a per-daemon probe home and a probe
+   * shim token in front of the workspace gateway. The probe subprocess cannot
+   * hold the in-process shim, so it gets only the token URL; listing models
+   * consumes nothing, so the channel's observations are not metered.
+   */
+  private async antigravityModelProbeOptions(nativeGroupId?: string): Promise<{ options: AcpProviderOptions; release?: () => void; check?: () => void }> {
+    const workspaceId = this.options.workspaceId ?? "local";
+    const relay = nativeGroupId ? null : (await this.effectiveWorkspaceRelay(workspaceId))?.antigravity;
+    const native = !!nativeGroupId || (!relay && !!Bun.which("agy", { PATH: process.env.PATH }));
+    const owner = `${this.options.daemonId ?? this.options.runtimeName}:antigravity:${nativeGroupId ?? (native ? "native" : "gateway")}`;
+    const root = join(probeRoot(this.options.workspacesRoot), `antigravity-${createHash("sha256").update(owner).digest("hex").slice(0, 16)}`);
+    const providerHome: IssueSessionProviderHome = {
+      storageRoot: resolve(this.options.workspacesRoot), root, home: join(root, "home"),
+      sessionId: "runtime-model-probe", agentId: owner, generation: 1, provider: "antigravity",
+    };
+    await prepareIssueSessionProviderHome(providerHome);
+    if (native) {
+      await seedIssueSessionNativeAntigravityHome(providerHome, process.env.GEMINI_HOME || join(this.userHome, ".gemini"));
+      return { options: { agentType: "antigravity", cwd: root, providerHome: providerHome.home, antigravityNative: true } };
+    }
+    const gateway = antigravityGatewayFor(relay);
+    await seedIssueSessionAntigravityHome(providerHome, { cwd: root });
+    const run = this.antigravityGatewayShim().forRun({ upstreamBase: gateway.upstreamBase, apiKey: gateway.apiKey, runId: "runtime-model-probe" });
+    try {
+      const channel = run.open("runtime-model-probe");
+      // Server 1.4.0 answers a refused or unreachable listing with built-in
+      // fallback ids; those are not the gateway's models, so the probe fails.
+      // The breaker stays open; a later successful listing supersedes a failed one.
+      const seen: { fatal: string | null; listing: string | null } = { fatal: null, listing: null };
+      channel.subscribe((event) => {
+        if (event.type === "fatal") seen.fatal = event.message;
+        else if (event.type === "listing") seen.listing = event.failure?.message ?? null;
+      });
+      return {
+        options: { agentType: "antigravity", cwd: root, providerHome: providerHome.home, gatewayUrl: channel.baseUrl },
+        release: () => run.close(),
+        check: () => {
+          const problem = seen.fatal ?? seen.listing;
+          if (problem) throw new Error(`[antigravity_gateway_unavailable] the model probe could not list the gateway's models: ${problem}`);
+        },
+      };
+    } catch (error) {
+      run.close();
+      throw error;
+    }
   }
 
   private async handleRuntimeLocalSkillList(runtimeId: string, requestId: string, requestedRoot?: string): Promise<void> {
@@ -2422,11 +3317,9 @@ export class MultiremiDaemon {
   /**
    * Converge this Runtime's Agent Plugins toward the server's desired set.
    *
-   * `serverRevision` is the revision the heartbeat ack advertised. When it
-   * matches the cached desired state the loop skips the GET entirely and only
-   * re-runs the local reconcile, which still has to notice retry deadlines and
-   * setup re-checks. A server that predates the ack field passes `null` and falls
-   * back to a periodic refresh.
+   * `serverRevision` arrives as a downlink. Matching revisions reuse the local
+   * desired state; a forced RPC snapshot every ten minutes defends against an
+   * incomplete revision definition.
    *
    * A fetch is forced at startup, after a re-registration, and every
    * `PLUGIN_DESIRED_FORCED_REFRESH_MS` so a revision definition that misses a
@@ -2437,6 +3330,7 @@ export class MultiremiDaemon {
     serverRevision: string | null = null,
     options: { force?: boolean } = {},
   ): Promise<void> {
+    if (this.protocolClient.connectionState() !== "connected") return;
     this.agentPluginReconcileAbort?.abort();
     const abort = new AbortController();
     this.agentPluginReconcileAbort = abort;
@@ -2449,16 +3343,14 @@ export class MultiremiDaemon {
       const mustFetch = cached === null
         || options.force === true
         || now - this.lastDesiredRefreshAt >= PLUGIN_DESIRED_FORCED_REFRESH_MS
-        || (serverRevision === null
-          ? now - this.desiredFetchedAt >= this.options.pluginDesiredRefreshMs
-          : cached.revision !== serverRevision);
+        || (serverRevision !== null && cached.revision !== serverRevision);
       if (mustFetch) {
-        const desired = await this.client.getRuntimeAgentPluginDesired(runtimeId, abort.signal);
+        const desired = await this.taskDownlinks.rpc("plugin.desired", {}) as unknown as Awaited<ReturnType<MultiremiDaemonClient["getRuntimeAgentPluginDesired"]>>;
         if (desired.runtime_id && desired.runtime_id !== runtimeId) {
           throw new Error(`Agent Plugin desired state belongs to Runtime ${desired.runtime_id}, expected ${runtimeId}`);
         }
         const parsed = desired.plugins.map(agentPluginDesiredFromWire);
-        // The GET is the only view of what the server already knows, so it also
+        // The RPC snapshot is the view of what the server already knows, so it also
         // refreshes the report dedupe baseline: a server-side rewrite then
         // re-reports on the following local reconcile.
         this.agentPluginReconciler.restoreStates(parsed.map((entry) => entry.state));
@@ -2473,6 +3365,23 @@ export class MultiremiDaemon {
       const artifacts = this.lastDesired?.artifacts;
       if (!artifacts) return;
       await this.agentPluginReconciler.reconcile(artifacts, { signal: abort.signal });
+      if (this.pluginLocalRetryTimer !== null) clearTimeout(this.pluginLocalRetryTimer);
+      this.pluginLocalRetryTimer = null;
+      const nextRetry = this.agentPluginReconciler.getStates().map(state => Date.parse(state.nextRetryAt ?? ""))
+        .filter(at => Number.isFinite(at) && at > Date.now()).sort((a, b) => a - b)[0];
+      if (nextRetry !== undefined && !this.stopped) {
+        this.pluginLocalRetryTimer = setTimeout(() => {
+          this.pluginLocalRetryTimer = null;
+          const run = this.reconcileRuntimeAgentPlugins(runtimeId, this.lastDesired?.revision ?? null);
+          this.inflight.add(run);
+          void run.catch(error => log.warn(`Agent Plugin local retry failed: ${error instanceof Error ? error.name : typeof error}`))
+            .finally(() => this.inflight.delete(run));
+        }, nextRetry - Date.now());
+        this.pluginLocalRetryTimer.unref?.();
+      }
+    } catch (error) {
+      if (this.stopped && error instanceof DaemonProtocolRpcError && error.code === "authority_revoked") return;
+      throw error;
     } finally {
       if (this.agentPluginReconcileAbort === abort) {
         this.agentPluginReconcileAbort = null;
@@ -2525,7 +3434,7 @@ export class MultiremiDaemon {
         {
           readinessRoot: join(this.options.pluginCacheRoot, ".codex-readiness"),
           scopeIdentity: workspaceId,
-          baseHome: process.env.CODEX_HOME || join(homedir(), ".codex"),
+          baseHome: process.env.CODEX_HOME || join(this.userHome, ".codex"),
           relayAuthoritative: workspaceRelay !== undefined,
           relay: workspaceRelay?.codex ?? null,
           signal,
@@ -2540,16 +3449,55 @@ export class MultiremiDaemon {
     }
   }
 
+  /**
+   * Leave the protocol socket (the last lane to leave closes it). PR 6 §2.7: parked lanes stop
+   * their tasks and report `closed` first, while the socket is still up, so the registry does not
+   * wait for the next hello; what an attempt still holds closes in start()'s finally.
+   */
+  private leaveProtocolLane(): Promise<void> | void {
+    if (!this.parkedLanesClosing && !this.parkedLanes?.parkedCount) {
+      this.protocolClient?.stopLane(this.protocolLane);
+      return;
+    }
+    this.parkedLanesClosing ??= this.parkedLanes.closeAll("daemon_restart", { parkedOnly: true }).catch(() => {});
+    return this.parkedLanesClosing.then(() => this.protocolClient?.stopLane(this.protocolLane));
+  }
+
+  /** Synchronous cleanup shared by the process supervisor before any lane can exit. */
+  forceStopProcesses(): void {
+    for (const abort of this.activeTaskAborts) abort.abort();
+    this.parkedLanes?.killAllProcesses();
+    for (const [provider, chatId] of this.liveUpdateProviders) {
+      const pgid = provider.processGroupId?.(chatId);
+      if (pgid) { try { killProcessGroup(pgid); } catch { /* already exited */ } }
+    }
+    this.stopRepoCheckoutServer();
+  }
+
   stop(): void {
+    if (this.runActive && !this.stopDeadlineTimer) {
+      this.stopDeadlineTimer = setTimeout(() => {
+        this.forceStopProcesses();
+        log.error("Daemon graceful stop deadline exceeded; bridge process groups terminated");
+        this.onStopTimeout();
+      }, this.stopTimeoutMs);
+      this.stopDeadlineTimer.unref?.();
+    }
+    if (this.pluginLocalRetryTimer !== null) clearTimeout(this.pluginLocalRetryTimer);
+    this.pluginLocalRetryTimer = null;
+    if (this.onceOfferTimer !== null) clearTimeout(this.onceOfferTimer);
+    this.onceOfferTimer = null;
     this.stopped = true;
     this.pollAbort.abort();
+    // No lane parks from now on; start()'s finally closes the parked ones.
+    this.parkedLanes?.disable("stopping");
     // stop() is synchronous and may be called while start() is sleeping. Clear
     // the timer immediately; start()'s finally block waits for any current run.
     this.stopGcLoop();
     this.terminalAuthorityCleanupRetryWake?.();
     this.authorityProbeWake?.();
     this.waitWake?.();
-    this.taskWakeup?.close();
+    void this.leaveProtocolLane();
     this.agentPluginReconcileAbort?.abort(this.pollAbort.signal.reason);
     this.cancelRuntimeModelRefresh();
     // Release any handleTask waiting on report delivery; undelivered rows are
@@ -2582,10 +3530,10 @@ export class MultiremiDaemon {
     this.claimsPaused = true;
     this.ready = false;
     this.terminalAuthorityMode = true;
-    // The control plane refuses this credential, so it refuses the wake-up
+    // The control plane refuses this credential, so it refuses the protocol
     // handshake too. Reconnecting every 30s until the probe restores us would
     // add noise to the outage without delivering a single frame.
-    this.taskWakeup?.setAuthoritySuspended(true);
+    this.protocolClient?.suspendAuthority();
     this.stopGcLoop();
     for (const abort of this.activeTaskAborts) abort.abort();
     this.agentPluginReconcileAbort?.abort();
@@ -2713,9 +3661,18 @@ export class MultiremiDaemon {
     });
   }
 
-  async runGcOnce(): Promise<MultiremiDaemonGcSummary> {
-    if (this.gcInFlight) return await this.gcInFlight;
-    const run = this.executeGcOnce();
+  private rootDiskThresholds() {
+    const policies = [...this.workspaceSettings.values()].map(settings => resolveStoragePolicy(settings));
+    return strictestDiskThresholds(policies.length ? policies : [resolveStoragePolicy(undefined)]);
+  }
+
+  async runGcOnce(mode: "periodic" | "pressure" = "periodic"): Promise<void> {
+    if (this.gcInFlight) {
+      await this.gcInFlight;
+      if (mode === "pressure") return this.runGcOnce(mode);
+      return;
+    }
+    const run = this.executeGcOnce(mode);
     this.gcInFlight = run;
     try {
       return await run;
@@ -2724,248 +3681,116 @@ export class MultiremiDaemon {
     }
   }
 
-  private async executeGcOnce(): Promise<MultiremiDaemonGcSummary> {
+  private async executeGcOnce(mode: "periodic" | "pressure" = "periodic"): Promise<void> {
     this.assertWorkspaceRootOwner();
-    const summary = await runWorkspaceGcOnce({
-      root: this.options.workspacesRoot,
-      ttlMs: this.options.gcTtlMs,
-      orphanTtlMs: this.options.gcOrphanTtlMs,
-      client: this.client,
-      runtimeId: this.options.runtimeId,
-      requireIssueSessionArchive: this.options.gcRequireArchive,
-      ensureIssueSessionArchive: (issueId, workspaceDir, forceFreshSnapshot) =>
-        this.ensureIssueSessionArchive(issueId, workspaceDir, forceFreshSnapshot),
-      assertRootOwner: () => this.assertWorkspaceRootOwner(),
-      hasDirtyGitWorktree: (workspaceDir) =>
-        this.gitWorktreeInspector.hasDirtyWorktree(workspaceDir),
-      withIssueWorkspaceLock: (issueId, _workspaceDir, action) =>
-        this.issueWorkspaceLifecycleLocks.runExclusive(issueId, async () => {
-          this.assertWorkspaceRootOwner();
-          await action();
-          this.assertWorkspaceRootOwner();
-        }),
-      recoverTopicWorkspace: (topicDir) => this.topicWorkspaces.recoverTopicWorkspace(topicDir),
-      isTopicWorkspaceBound: (topicDir) => this.topicWorkspaces.isTopicWorkspaceBound(topicDir),
-      recoverIssueWorkspace: (issueDir) => this.topicWorkspaces.recoverIssueWorkspace(issueDir),
-      returnTerminalIssueToTopic: (issueDir) => this.topicWorkspaces.returnTerminalIssueToTopic(issueDir),
-      onError: (workspaceDir, error) => {
-        log.warn(`Workspace GC skipped ${workspaceDir}: ${error instanceof Error ? error.message : String(error)}`);
-      },
-    });
-    this.assertWorkspaceRootOwner();
-    const snapshots = await runSnapshotGcOnce({
-      workspacesRoot: this.options.workspacesRoot,
-      snapshotsRoot: this.snapshotsRoot,
-      repoCacheRoot: this.options.repoCacheRoot,
-      ttlMs: this.options.snapshotTtlMs,
-      withRepoLock: (barePath, action) => this.repoCache.runExclusiveForBarePath(barePath, action),
-      assertRootOwner: () => this.assertWorkspaceRootOwner(),
-      onError: (path, error) => {
-        log.warn(`Snapshot GC skipped ${path}: ${error instanceof Error ? error.message : String(error)}`);
-      },
-    });
-    log.info("Snapshot GC finished", snapshots);
-    this.assertWorkspaceRootOwner();
-    // Repo worktree metadata is pruned lazily for the repository that is about
-    // to create a worktree. Sweeping every cached repository here creates a
-    // large burst of synchronous child processes in the long-lived Bun daemon.
-    return summary;
-  }
-
-  private get snapshotsRoot(): string {
-    return join(this.options.workspacesRoot, ".snapshots");
-  }
-
-  private async ensureIssueSessionArchive(
-    issueId: string,
-    workspaceDir: string,
-    forceFreshSnapshot = false,
-  ): Promise<MultiremiIssueWorkspaceArchiveBinding | null> {
-    this.assertWorkspaceRootOwner();
-    const runtimeId = this.options.runtimeId;
-    if (!runtimeId) throw new Error("Session archive requires a registered Runtime");
-    const receipt = await readIssueSessionArchiveReceipt(workspaceDir);
-    let preflightStatus: MultiremiDaemonSessionArchiveStatus | null = null;
-    if (!forceFreshSnapshot && receipt?.issueId === issueId) {
-      const status = await this.client.getIssueSessionArchiveStatus(
-        runtimeId,
-        issueId,
-        receipt.sourceRevision,
-        receipt.sha256,
-      );
-      if (
-        receipt.archiveId
-        && status.gc_ready
-        && status.requested_ready?.id === receipt.archiveId
-      ) {
-        return {
-          archiveId: receipt.archiveId,
-          sourceRevision: receipt.sourceRevision,
-          sha256: receipt.sha256,
-        };
-      }
-      preflightStatus = status;
-    }
-    preflightStatus ??= await this.client.getIssueSessionArchiveStatus(runtimeId, issueId);
-    if (this.shouldDeferIssueSessionArchive(issueId, preflightStatus.latest)) {
-      return null;
-    }
-    const runtimeStorageRoot = this.options.workspacesRoot;
-    const sessionArchiveSource = runtimeStorageRoot ? ".runtime" : ".multiremi/sessions";
-    let prepared: Awaited<ReturnType<typeof prepareIssueSessionArchive>>;
-    try {
-      this.assertWorkspaceRootOwner();
-      prepared = await prepareIssueSessionArchive(workspaceDir, {
-        maxSourceBytes: this.options.sessionArchiveMaxSourceBytes,
-        ...(runtimeStorageRoot
-          ? {
-              sessionRoots: listIssueSessionRuntimeRoots(runtimeStorageRoot, issueId),
-              sessionRootBoundary: runtimeStorageRoot,
-            }
-          : {}),
-      });
-      log.debug(`Issue Session archive prepared for ${issueId}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    let reclaimFailure: unknown = null;
+    // Without a registered Runtime there is no way to ask the server about a subject.
+    if (this.options.runtimeId) {
       try {
-        await this.client.reportIssueSessionArchiveFailure(runtimeId, issueId, {
-          stage: "prepare",
-          error: message,
-        });
-      } catch (reportError) {
-        log.warn(
-          `Failed to report Issue session archive preparation failure for ${issueId}: ${reportError instanceof Error ? reportError.message : String(reportError)}`,
-        );
-      }
-      throw error;
-    }
-    try {
-      log.debug(`Checking Issue Session archive status for ${issueId}`);
-      const status = await this.client.getIssueSessionArchiveStatus(
-        runtimeId,
-        issueId,
-        prepared.sourceRevision,
-        prepared.sha256,
-        forceFreshSnapshot,
-      );
-      log.debug(`Issue Session archive status checked for ${issueId}: ready=${status.gc_ready}`);
-      if (status.gc_ready) {
-        if (
-          status.latest?.source_revision === MULTIREMI_SESSION_ARCHIVE_PREPARATION_FAILURE_REVISION
-          && (status.latest.status === "failed" || status.latest.status === "pending")
-        ) {
-          await this.client.initIssueSessionArchive(runtimeId, issueId, {
-            sourceRevision: prepared.sourceRevision,
-            sha256: prepared.sha256,
-            sizeBytes: prepared.sizeBytes,
-            fileCount: prepared.fileCount,
-            metadata: {
-              format: prepared.metadata.format,
-              source: sessionArchiveSource,
-            },
-          });
-        }
-        const archiveId = status.requested_ready?.id;
-        if (!archiveId) return null;
+        await this.runReclaimRound(mode);
+      } catch (error) {
+        // Losing the root ends the sweep; anything else must not starve the code-view sweep below.
         this.assertWorkspaceRootOwner();
-        await writeIssueSessionArchiveReceipt(workspaceDir, {
-          issueId,
-          sourceRevision: prepared.sourceRevision,
-          sha256: prepared.sha256,
-          archiveId,
-        });
-        return {
-          archiveId,
-          sourceRevision: prepared.sourceRevision,
-          sha256: prepared.sha256,
-        };
+        reclaimFailure = error;
       }
-
-      log.debug(`Initializing Issue Session archive for ${issueId}`);
-      const initialized = await this.client.initIssueSessionArchive(runtimeId, issueId, {
-        sourceRevision: prepared.sourceRevision,
-        sha256: prepared.sha256,
-        sizeBytes: prepared.sizeBytes,
-        fileCount: prepared.fileCount,
-        metadata: {
-          format: prepared.metadata.format,
-          source: sessionArchiveSource,
+    }
+    if (mode === "pressure") {
+      if (reclaimFailure) throw reclaimFailure;
+      return;
+    }
+    this.traceTransport?.pruneMissing();
+    try {
+      const snapshots = await this.runSnapshotGcPass({
+        workspacesRoot: this.options.workspacesRoot,
+        snapshotsRoot: codeViewsRoot(this.options.workspacesRoot),
+        repoCacheRoot: this.options.repoCacheRoot,
+        ttlMs: this.options.snapshotTtlMs,
+        withRepoLock: (barePath, action) => this.repoCache.runExclusiveForBarePath(barePath, action),
+        assertRootOwner: () => this.assertWorkspaceRootOwner(),
+        onError: (path, error) => {
+          log.warn(`Snapshot GC skipped ${path}: ${error instanceof Error ? error.message : String(error)}`);
         },
       });
-      log.debug(`Issue Session archive initialized for ${issueId}: status=${initialized.archive.status}`);
-      if (initialized.archive.status === "ready") {
-        this.assertWorkspaceRootOwner();
-        await writeIssueSessionArchiveReceipt(workspaceDir, {
-          issueId,
-          sourceRevision: prepared.sourceRevision,
-          sha256: prepared.sha256,
-          archiveId: initialized.archive.id,
-        });
-        return {
-          archiveId: initialized.archive.id,
-          sourceRevision: prepared.sourceRevision,
-          sha256: prepared.sha256,
-        };
-      }
-      log.debug(`Uploading Issue Session archive for ${issueId}`);
-      await this.client.uploadIssueSessionArchive(
-        runtimeId,
-        issueId,
-        initialized.archive.id,
-        prepared.archivePath,
-      );
-      log.debug(`Issue Session archive uploaded for ${issueId}`);
-      const completed = await this.client.completeIssueSessionArchive(
-        runtimeId,
-        issueId,
-        initialized.archive.id,
-      );
-      if (completed.status !== "ready") return null;
-      this.assertWorkspaceRootOwner();
-      await writeIssueSessionArchiveReceipt(workspaceDir, {
-        issueId,
-        sourceRevision: prepared.sourceRevision,
-        sha256: prepared.sha256,
-        archiveId: completed.id,
-      });
-      return {
-        archiveId: completed.id,
-        sourceRevision: prepared.sourceRevision,
-        sha256: prepared.sha256,
-      };
-    } finally {
-      await removePreparedIssueSessionArchive(prepared.archivePath);
+      log.info("Snapshot GC finished", snapshots);
+    } catch (error) {
+      log.warn(`Snapshot GC failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     }
+    this.assertWorkspaceRootOwner();
+    if (reclaimFailure) throw reclaimFailure;
   }
 
-  private shouldDeferIssueSessionArchive(
-    issueId: string,
-    archive: MultiremiDaemonSessionArchiveWire | null,
-  ): boolean {
-    if (
-      !archive
-      || (archive.status !== "pending" && archive.status !== "uploading" && archive.status !== "failed")
-    ) return false;
-    const retryState = archive.retry_state
-      ?? (archive?.retry_exhausted_at
-        ? "exhausted"
-        : archive?.next_retry_at && archive.next_retry_at > new Date().toISOString()
-          ? "backoff"
-          : "eligible");
-    if (retryState !== "backoff" && retryState !== "exhausted") return false;
-    const now = Date.now();
-    const logs = this.sessionArchiveRetryLogAt ??= new Map<string, number>();
-    const previous = logs.get(issueId) ?? 0;
-    if (now - previous >= 60_000) {
-      logs.set(issueId, now);
-      if (logs.size > 1_000) logs.delete(logs.keys().next().value!);
-      log.warn(
-        retryState === "exhausted"
-          ? `Issue Session archive automatic retries exhausted for ${issueId}; preserving workspace for manual retry`
-          : `Issue Session archive retry deferred for ${issueId} until ${archive?.next_retry_at ?? "the server retry window"}`,
-      );
+  /** One reclaim round; a real round also reports its findings to the server. */
+  private async runReclaimRound(mode: StorageReport["mode"]): Promise<StorageReport> {
+    const report = await this.reclaim.run(mode);
+    if (mode !== "dry_run") this.client.reportStorageReport(this.options.runtimeId!, report);
+    log.info(`Reclaim ${report.mode} round finished`, {
+      reclaimed: report.reclaimed_this_round,
+      forgotten: report.forgotten_this_round,
+      freed_bytes: report.freed_bytes,
+      errors: report.errors.length,
+    });
+    return report;
+  }
+
+  /** `runtime.gc_run`: run one round on request and send its report back as the result. */
+  private handleRuntimeGcRun(runtimeId: string, request: { id: string; mode: GcRunMode }): void {
+    if (this.gcRunRequests.has(request.id)) return;
+    const served = (async () => {
+      try {
+        this.assertWorkspaceRootOwner();
+        // Only an explicit `run` may change anything; an unknown mode is refused, never applied.
+        if (request.mode !== "dry_run" && request.mode !== "run") throw new Error(`unknown reclaim mode: ${String(request.mode)}`);
+        while (this.gcInFlight) await this.gcInFlight;
+        let report!: StorageReport;
+        const round = this.runReclaimRound(request.mode).then(value => { report = value; });
+        this.gcInFlight = round;
+        try { await round; } finally { if (this.gcInFlight === round) this.gcInFlight = null; }
+        await this.client.reportGcRunResult(runtimeId, request.id, { status: "completed", report, error: null });
+      } catch (error) {
+        this.assertWorkspaceRootOwner();
+        const message = error instanceof Error ? error.message : String(error);
+        log.warn(`Reclaim run ${request.id} failed: ${message}`);
+        await this.client.reportGcRunResult(runtimeId, request.id, { status: "failed", report: null, error: message });
+      }
+    })()
+      .catch((error) => log.warn(`Reclaim run ${request.id} could not report its result: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => this.gcRunRequests.delete(request.id));
+    this.gcRunRequests.set(request.id, served);
+  }
+
+  /**
+   * Move an older workspace layout aside before the daemon registers or claims
+   * anything. The new layout never reads the old paths and a half-swept root
+   * would hide unsaved work in them, so a failed sweep is retried with backoff
+   * and the daemon stays down until it succeeds. Losing the root, or `once`
+   * mode, ends the retries.
+   */
+  private async sweepLegacyLayout(): Promise<void> {
+    let delayMs = LEGACY_SWEEP_RETRY_MIN_MS;
+    while (!this.stopped) {
+      try {
+        await this.issueWorkspaceLifecycleLocks.runExclusive("legacy-layout-sweep", () =>
+          runLegacySweep({
+            root: this.options.workspacesRoot,
+            repoCacheRoot: this.options.repoCacheRoot,
+            assertRootOwner: () => this.assertWorkspaceRootOwner(),
+          }));
+        return;
+      } catch (error) {
+        this.assertWorkspaceRootOwner();
+        if (this.options.once) throw error;
+        log.error(`Legacy workspace layout sweep failed; retrying in ${delayMs}ms: ${error instanceof Error ? error.message : String(error)}`);
+        await new Promise<void>((resolveWait) => {
+          const timer = setTimeout(resolveWait, delayMs);
+          this.pollAbort.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolveWait();
+          }, { once: true });
+        });
+        delayMs = Math.min(delayMs * 2, LEGACY_SWEEP_RETRY_MAX_MS);
+      }
     }
-    return true;
   }
 
   restartRequested(): boolean {
@@ -2983,7 +3808,61 @@ export class MultiremiDaemon {
    * never unwinds the agent's provider session.
    */
   private enqueueTaskReport(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>): void {
-    this.ensureOutbox().enqueue(taskId, kind, payload);
+    const terminal = kind === "complete" || kind === "fail";
+    const status = kind === "complete" ? "completed" : "failed";
+    if (terminal && this.options.runtimeId) this.ensureTrace().track(taskId, this.options.runtimeId);
+    // The completion fields describe the close that follows the enqueue.
+    this.ensureOutbox().enqueue(taskId, kind, { ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
+      ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) });
+    if (terminal) {
+      this.attemptSlashCommands.delete(taskId);
+      this.ensureTrace().close(taskId, status, typeof payload.error === "string"
+        ? { message: payload.error, reason: typeof payload.failureReason === "string" ? payload.failureReason : null } : null);
+    }
+  }
+
+  /** ADR 0025: a terminal report's fields, with the attempt's command catalogue when the agent advertised one. */
+  private withSlashCommands(taskId: string, fields: DaemonTaskCompletionFields): DaemonTaskCompletionFields {
+    const commands = this.attemptSlashCommands.get(taskId);
+    return commands ? { ...fields, available_commands: commands } : fields;
+  }
+
+  /** ADR 0025: keep the attempt's catalogue from what the agent advertised; nothing when it advertised none. */
+  private noteSlashCommands(taskId: string, provider: string | undefined, observed: ObservedSlashCommand[] | null,
+    skills: readonly AgentTaskSkill[], installedSkillDirs: readonly string[]): void {
+    if (!observed) return;
+    this.attemptSlashCommands.delete(taskId);
+    this.attemptSlashCommands.set(taskId, { provider: provider ?? "", reported_at: new Date().toISOString(),
+      commands: reportedSlashCommands(provider, observed, skills, installedSkillDirs) });
+    while (this.attemptSlashCommands.size > ATTEMPT_SLASH_COMMANDS_LIMIT) {
+      this.attemptSlashCommands.delete(this.attemptSlashCommands.keys().next().value!);
+    }
+  }
+
+  /** Seal the trace of a task the server stopped (cancel, or terminal elsewhere); its execution is over. */
+  private closeStoppedTrace(taskId: string, status: "completed" | "failed" | "cancelled"): void {
+    try {
+      const trace = this.ensureTrace();
+      if (trace.store.head(taskId)) trace.close(taskId, status);
+    } catch (err) {
+      log.warn(`Failed to close the trace of stopped task ${taskId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private ensureTrace(): DaemonTraceTransport {
+    if (this.traceTransport) return this.traceTransport;
+    const store = () => new TraceFileStore({ workspacesRoot: this.options.workspacesRoot,
+      // Only replay of a legacy outbox row can reach this fallback. New tasks
+      // register their Session/Agent/provider context before any report.
+      resolveTask: (taskId) => ({ subjectId: taskId, agentId: "unknown", provider: "unknown", startedAt: new Date().toISOString() }) });
+    return this.traceTransport = acquireDaemonTrace(this.protocolClient, store,
+      () => daemonOutboxHasPriority(this.protocolClient),
+      error => log.warn(`Trace transport failed: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  traceStore(): TraceStore { return daemonTraceStore(this.protocolClient); }
+  subscribeTrace(taskId: string, fromSeq: number, onEvents: DaemonTraceListener): Promise<() => Promise<void>> {
+    return this.ensureTrace().subscriptions.subscribeTrace(taskId, fromSeq, onEvents);
   }
 
   /**
@@ -2995,7 +3874,7 @@ export class MultiremiDaemon {
   private ensureOutbox(): MultiremiTaskReportOutbox {
     if (!this.outbox) {
       this.outboxAbort ??= new AbortController();
-      this.outbox = new MultiremiTaskReportOutbox({
+      this.outbox = acquireDaemonOutbox(this.protocolClient, {
         path: this.outboxPath ?? ":memory:",
         deliver: (record) => this.deliverOutboxRecord(record),
         ...(this.outboxBackoffMs ? { backoffScheduleMs: this.outboxBackoffMs } : {}),
@@ -3005,10 +3884,10 @@ export class MultiremiDaemon {
     return this.outbox;
   }
 
-  private async awaitTaskReportDrain(taskId: string): Promise<MultiremiOutboxDrainResult> {
+  private async awaitTaskReportDrain(taskId: string, executionSignal?: AbortSignal): Promise<MultiremiOutboxDrainResult> {
     const outbox = this.outbox;
     const drainAbort = new AbortController();
-    const shutdownSignal = this.outboxAbort?.signal;
+    const shutdownSignal = executionSignal ? AbortSignal.any([executionSignal, ...(this.outboxAbort ? [this.outboxAbort.signal] : [])]) : this.outboxAbort?.signal;
     const onShutdown = () => drainAbort.abort();
     if (shutdownSignal?.aborted) drainAbort.abort();
     else shutdownSignal?.addEventListener("abort", onShutdown, { once: true });
@@ -3024,22 +3903,6 @@ export class MultiremiDaemon {
       if (result === "blocked") {
         log.error(`task ${taskId} still has undelivered reports blocked on a permanent error`);
       } else if (result === "aborted" && timedOut) {
-        try {
-          const status = await this.client.getTaskStatus(taskId);
-          if (status === "completed" || status === "failed" || status === "cancelled") {
-            const purged = outbox.purgeTask(taskId);
-            log.warn(
-              `task ${taskId} report delivery exceeded ${this.options.taskDrainTimeoutMs}ms after reaching ${status}; `
-              + `discarded ${purged} stale report(s) instead of replaying them indefinitely`,
-            );
-            return "delivered";
-          }
-        } catch (error) {
-          log.warn(
-            `could not reconcile timed-out outbox reports for task ${taskId}; preserving them: `
-            + (error instanceof Error ? error.message : String(error)),
-          );
-        }
         log.warn(
           `task ${taskId} report delivery exceeded ${this.options.taskDrainTimeoutMs}ms; `
           + "continuing while the durable outbox retries in the background",
@@ -3054,140 +3917,13 @@ export class MultiremiDaemon {
     }
   }
 
-  private async reconcilePendingOutboxTasks(outbox: MultiremiTaskReportOutbox): Promise<void> {
-    const terminalTaskIds = outbox.taskIdsWithPendingTerminal();
-    const terminalSet = new Set(terminalTaskIds);
-    const taskIds = [
-      ...terminalTaskIds,
-      ...outbox.pendingTaskIds().filter((taskId) => !terminalSet.has(taskId)),
-    ];
-    let nextIndex = 0;
-    const reconcile = async () => {
-      while (nextIndex < taskIds.length) {
-        const taskId = taskIds[nextIndex++]!;
-        try {
-          const status = await this.client.getTaskStatus(taskId);
-          if (status === "completed" || status === "failed" || status === "cancelled") {
-            const purged = outbox.purgeTask(taskId);
-            log.debug(`purged ${purged} stale outbox report(s) for terminal task ${taskId} (${status})`);
-          }
-        } catch (error) {
-          if (error instanceof MultiremiDaemonHttpError && error.status === 404) {
-            const purged = outbox.purgeTask(taskId);
-            log.debug(`purged ${purged} stale outbox report(s) for missing task ${taskId}`);
-            continue;
-          }
-          // Status lookup and delivery use the same control-plane dependency.
-          // Preserve unknown tasks so a transient failure cannot lose reports.
-          log.warn(
-            `could not reconcile persisted outbox task ${taskId}; preserving its reports: `
-            + (error instanceof Error ? error.message : String(error)),
-          );
-        }
-      }
-    };
-    await Promise.all(
-      Array.from({ length: Math.min(OUTBOX_RECONCILE_CONCURRENCY, taskIds.length) }, () => reconcile()),
-    );
-  }
-
-  private async flushStartupOutbox(outbox: MultiremiTaskReportOutbox): Promise<void> {
-    const terminalTaskIds = outbox.taskIdsWithPendingTerminal();
-    const terminalTaskSet = new Set(terminalTaskIds);
-    const historicalTaskIds = outbox.pendingTaskIds().filter((taskId) => !terminalTaskSet.has(taskId));
-    const flushAbort = new AbortController();
-    const shutdownSignal = this.outboxAbort?.signal;
-    const onShutdown = () => flushAbort.abort();
-    if (shutdownSignal?.aborted) flushAbort.abort();
-    else shutdownSignal?.addEventListener("abort", onShutdown, { once: true });
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      flushAbort.abort();
-    }, this.options.outboxStartupFlushTimeoutMs);
-    timer.unref?.();
-    try {
-      await Promise.all(historicalTaskIds.map((taskId) => outbox.waitForTaskDrain(taskId, flushAbort.signal)));
-    } finally {
-      clearTimeout(timer);
-      shutdownSignal?.removeEventListener("abort", onShutdown);
-    }
-    if (timedOut) {
-      log.warn(
-        `startup non-terminal outbox replay exceeded ${this.options.outboxStartupFlushTimeoutMs}ms; `
-        + "continuing those historical deliveries in the background",
-      );
-      outbox.pumpAll();
-    }
-
-    // Reconciliation removed tasks already terminal on the server. Every
-    // remaining local terminal row is therefore authoritative completion or
-    // failure evidence for an in-flight server task. Do not let orphan
-    // recovery overwrite it, even when ordinary history took too long.
-    const terminalResults = await Promise.all(terminalTaskIds.map(async (taskId) => ({
-      taskId,
-      result: await outbox.waitForTaskDrain(taskId, shutdownSignal),
-    })));
-    const unsettled = terminalResults.filter(({ result }) => result !== "delivered");
-    if (unsettled.length > 0) {
-      throw new Error(
-        `startup terminal outbox replay did not complete for ${unsettled
-          .map(({ taskId, result }) => `${taskId} (${result})`)
-          .join(", ")}`,
-      );
-    }
-  }
-
   /** Outbox → API dispatch. Each call is idempotent server-side (seq upsert / status guards). */
   private async deliverOutboxRecord(record: MultiremiOutboxRecord): Promise<void> {
-    const payload = record.payload as Record<string, any>;
-    switch (record.kind) {
-      case "start":
-        await this.client.startTask(record.taskId);
-        return;
-      case "prompt":
-        await this.client.reportTaskPrompt(record.taskId, {
-          mode: payload.mode === "delta" ? "delta" : "bootstrap",
-          prompt: String(payload.prompt ?? ""),
-          sha256: String(payload.sha256 ?? ""),
-        });
-        return;
-      case "session_pin":
-        await this.client.pinTaskSession(record.taskId, payload.sessionId ?? null, payload.workDir ?? null);
-        return;
-      case "progress":
-        await this.client.reportProgress(record.taskId, String(payload.summary ?? ""), payload.step, payload.total);
-        return;
-      case "messages":
-        await this.client.reportTaskMessages(record.taskId, Array.isArray(payload.messages) ? payload.messages : []);
-        return;
-      case "usage":
-        await this.client.reportTaskUsage(record.taskId, Array.isArray(payload.usage) ? payload.usage : []);
-        return;
-      case "workspace":
-        await this.client.reportIssueWorkspace(record.taskId, {
-          runtimeId: String(payload.runtimeId ?? ""),
-          rootPath: String(payload.rootPath ?? ""),
-          branchName: String(payload.branchName ?? ""),
-          status: payload.status,
-          repos: Array.isArray(payload.repos) ? payload.repos : [],
-        });
-        return;
-      case "complete":
-        await this.client.completeTask(record.taskId, String(payload.output ?? ""), payload.sessionId ?? null, payload.workDir ?? null);
-        return;
-      case "fail":
-        await this.client.failTask(
-          record.taskId,
-          String(payload.error ?? "Task failed"),
-          payload.sessionId ?? null,
-          payload.workDir ?? null,
-          payload.failureReason ?? null,
-        );
-        return;
-      default:
-        throw new Error(`unknown outbox record kind: ${String(record.kind)}`);
-    }
+    if (record.kind !== "messages") throw new Error("non-message reports use WS");
+    // Only v1 queues can contain these rows: fragment messages from before
+    // PR 2, which a turn + items trace cannot hold. They are dropped.
+    const count = Array.isArray(record.payload.messages) ? record.payload.messages.length : 0;
+    log.warn(`Dropped a legacy outbox messages row for task ${record.taskId} (${count} fragment message(s)); traces are turn + items since PR 2`);
   }
 
   /** Exposed on the local /health endpoint for observability. */
@@ -3195,24 +3931,31 @@ export class MultiremiDaemon {
     return this.outbox?.stats() ?? null;
   }
 
-  private tryPauseClaimsForUpdate(scope: MultiremiRuntimeUpdateScope): MultiremiCliUpdatePauseResult {
-    if (scope === "cli" && this.cliUpdateCoordinator) {
-      return this.cliUpdateCoordinator.tryPauseClaims();
-    }
+  private async pauseCliClaimsUntilIdle(drainDeadline?: string): Promise<MultiremiCliUpdatePauseResult> {
+    // The server normally hands off only after drain. This covers accepted
+    // local work racing its last report, using the same persisted deadline.
+    const coordinator = this.cliUpdateCoordinator ?? new MultiremiCliUpdateCoordinator();
+    if (!this.cliUpdateCoordinator) coordinator.register({
+      provider: this.options.provider,
+      activeTaskCount: () => this.activeTaskCount,
+      activeTaskIds: () => [...this.activeTaskIds],
+      pendingClaimCount: () => this.pendingClaimCount,
+      claimsPaused: () => this.claimsPaused,
+      pauseClaims: () => { this.claimsPaused = true; },
+      releaseClaims: () => this.releaseLocalUpdateClaimPause(),
+    });
+    const configured = Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
+    const fallback = Number.isSafeInteger(configured) && configured > 0 && configured <= 86_400_000 ? configured : DEFAULT_DAEMON_DRAIN_MS;
+    const deadline = drainDeadline !== undefined ? Date.parse(drainDeadline) : Date.now() + fallback;
+    return coordinator.pauseClaimsUntilIdle(Number.isFinite(deadline) ? deadline : Date.now(), () => this.stopped);
+  }
+
+  private tryPauseLocalClaimsForUpdate(): MultiremiCliUpdatePauseResult {
     if (this.claimsPaused || this.activeTaskCount > 0) {
       return { ok: false, error: "daemon is busy; retry update when idle" };
     }
     this.claimsPaused = true;
     return { ok: true };
-  }
-
-  private async claimTask(runtimeId: string): Promise<MultiremiTaskWithAgent | null> {
-    this.pendingClaimCount++;
-    try {
-      return await this.client.claimTask(runtimeId) as MultiremiTaskWithAgent | null;
-    } finally {
-      this.pendingClaimCount--;
-    }
   }
 
   private releaseUpdateClaimPause(scope: MultiremiRuntimeUpdateScope): void {
@@ -3226,10 +3969,12 @@ export class MultiremiDaemon {
   private releaseLocalUpdateClaimPause(): void {
     if (this.restartRequestedFlag) return;
     this.claimsPaused = false;
-    this.resetClaimBackoff();
+    this.wakeClaim();
   }
 
-  private requestRestartAfterUpdate(): void {
+  private async requestRestartAfterUpdate(): Promise<void> {
+    await this.drainRuntimeDownlinks();
+    if (this.options.runtimeId) await this.awaitTaskReportDrain(`rt:${this.options.runtimeId}`);
     this.requestRestart();
   }
 
@@ -3246,6 +3991,20 @@ export class MultiremiDaemon {
     this.onRestartRequested?.();
   }
 
+  /**
+   * The background lane of a task (PR 6 D9): a Chat lane (a Chat session, no
+   * Issue) of an agent whose bridge publishes background tasks, with the
+   * switch on. Only these may park; null for every other task.
+   */
+  private backgroundLaneOf(task: MultiremiTaskWithAgent): DaemonLaneRef | null {
+    if (!this.options.asyncTasks || !task.chatSessionId || task.issueId || !task.agent?.id) return null;
+    const provider = task.agent.provider;
+    if (provider !== "claude" && provider !== "codex") return null;
+    if (!parksBackgroundTasks(createAdapter(provider).asyncTasks)) return null;
+    return { session_id: task.chatSessionId, agent_id: task.agent.id, execution_scope: task.execution_scope ?? "" };
+  }
+
+  /** The expected work directory of a Runtime workspace task, when it is one (its claimed lane may hold the lock). */
   private async handleTask(task: MultiremiTaskWithAgent): Promise<void> {
     // Historical claims may still carry their parent's directory binding.
     // Non-workspace Sessions execute in their own daemon-owned directory.
@@ -3256,14 +4015,43 @@ export class MultiremiDaemon {
       log.warn(`Ignored duplicate claim for active task ${task.id}`);
       return;
     }
+    const subject = subjectForTask(task);
+    const trace = this.ensureTrace();
+    if (trace.store instanceof TraceFileStore) trace.store.registerTask(task.id, {
+      sessionId: conversationForTask(task),
+      subjectId: subject.id,
+      agentId: task.agent?.id ?? "unknown", provider: task.agent?.provider ?? "unknown",
+      startedAt: new Date().toISOString(), runtimeId: this.options.runtimeId ?? undefined,
+    });
     this.activeTaskIds.add(task.id);
+    const finishTracking = executionTrackerFor(this.options.workspacesRoot).begin(subject.id, task.id);
+    // PR 6 §2.4: an attempt of an eligible lane claims the lane's parked process before preparing (in the try below).
+    const backgroundLane = this.backgroundLaneOf(task);
+    const background: BackgroundAttempt | null = backgroundLane ? {
+      lane: backgroundLane,
+      claimed: null,
+      own: new DaemonLaneResources((directory) => cleanupTaskPrivateTempDirectory(directory, () => this.assertWorkspaceRootOwner())),
+      record: null,
+    } : null;
+    const claimedResources = () => background?.claimed?.resources as DaemonLaneResources | undefined;
+    /** Release the claimed lane before this attempt makes what the lane cannot share (§2.4). */
+    const releaseClaimed = async (reason: "config_changed" | "lane_reset") => {
+      const claimed = background?.claimed;
+      if (!claimed) return;
+      background!.claimed = null;
+      log.info(`Releasing parked lane before task ${task.id}: ${reason}`, { event: "background_lane_release", reason });
+      await this.parkedLanes.release(claimed, reason);
+    };
     this.activeTaskCount++;
     log.info(`Claimed task ${task.id}`);
     const abort = new AbortController();
     this.activeTaskAborts.add(abort);
+    this.taskAbortsById.set(task.id, abort);
+    let checkpointRestart: RestartExecution | null = null;
     let serverTerminalStatus: Extract<MultiremiTaskStatus, "completed" | "failed" | "cancelled"> | null = null;
-    const taskStateWatcher = this.watchTaskState(task.id, abort, (status) => {
+    const stopWatching = this.taskDownlinks.observeCancellation(task.id, (status) => {
       serverTerminalStatus = status;
+      abort.abort();
     });
     let timedOut = false;
     const timeoutMs = Number.isFinite(this.options.taskTimeoutMs) ? Math.max(0, this.options.taskTimeoutMs) : 0;
@@ -3274,15 +4062,34 @@ export class MultiremiDaemon {
       }, timeoutMs)
       : null;
     let summary: RunSummary | null = null;
+    const usageRunId = this.resumedUsageRuns.get(task.id) ?? randomUUID();
+    let observedUsage: TaskUsageSnapshot | null = null;
+    const observedUsageUnits = new Map<string, TaskUsageUnit>();
     let resolvedWorkDir: ResolvedTaskWorkDir | null = null;
-    let pluginRuntimeBase: string | null = null;
     let pluginRuntime: PreparedAgentPluginRuntime | undefined;
     let providerHome: IssueSessionProviderHome | null = null;
     let taskPrivateTmp: TaskPrivateTempDirectory | null = null;
     let providerEnv: Record<string, string> | undefined;
+    const failureCredentials: string[] = [];
+    const redactTaskError = (text: string) => redactProviderErrorText(text, [
+      ...failureCredentials, ...Object.entries(providerEnv ?? {})
+        .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
+        .map(([, value]) => value),
+    ]);
     let providerInstallEnv: Record<string, string> | undefined;
+    let antigravity: AntigravityRunGateway | null = null;
+    /** The runtime workspace's local instructions, read on this host; written with the Chat block in `runAgent`. */
+    let localInstructions: string | null = null;
     let releaseIssueWorkspaceLifecycle: (() => void) | null = null;
     let progressSummarizer: TaskProgressSummarizer | null = null;
+    let providerEntered = false;
+    let usageLedger: TaskUsageLedger | undefined;
+    const checkpointUsage = (usage: TaskUsageSnapshot | null) => {
+      if (!usage) return;
+      observedUsage = { ...usage, units: [] };
+      for (const unit of usage.units) if ((observedUsageUnits.get(unit.unitId)?.revision ?? -1) < unit.revision) observedUsageUnits.set(unit.unitId, unit);
+      this.enqueueTaskReport(task.id, "usage", { usageSnapshot: usage });
+    };
     let activeExecutionReleased = false;
     const awaitFinalReportDrain = async () => {
       if (!activeExecutionReleased) {
@@ -3298,27 +4105,34 @@ export class MultiremiDaemon {
     };
 
     try {
-      this.assertWorkspaceRootOwner();
-      if (task.issueId && !task.chatSessionId) {
-        // Shared Issue roots and private discussion Session roots have separate
-        // lifecycle keys, so each is protected from GC without serializing them
-        // against one another.
-        const lifecycleKey = task.holdsWorkspace === false
-          ? discussionSessionLifecycleKey(task.issueSessionId ?? "")
-          : task.issueId;
-        if (!task.runtimeWorkspaceId && task.holdsWorkspace !== false && task.issue?.key) {
-          const adopted = await this.topicWorkspaces.preparePendingMigrationForIssue(
-            task.issueId,
-            task.issue.key,
-            true,
-          );
-          if (adopted) log.info(`Adopted pending Feishu topic workspace for ${task.issue.key}`);
-        }
-        releaseIssueWorkspaceLifecycle = await this.issueWorkspaceLifecycleLocks.acquireShared(lifecycleKey);
-        abort.signal.throwIfAborted();
-        this.assertWorkspaceRootOwner();
+      if (background) {
+        // One process per lane: an attempt still finishing on it (a stopped one, say) parks or closes first,
+        // then this attempt claims what parked, or starts fresh.
+        background.claimed = await this.parkedLanes.acquire(laneKeyOf(background.lane), task.id, abort.signal);
       }
-      resolvedWorkDir = await this.resolveTaskWorkDir(task, abort.signal);
+      this.assertWorkspaceRootOwner();
+      if (task.issueId && !task.chatSessionId && !task.runtimeWorkspaceId && task.holdsWorkspace !== false && task.issue?.key) {
+        const adopted = await this.topicWorkspaces.preparePendingMigrationForIssue(
+          task.issueId,
+          task.issue.key,
+          true,
+        );
+        if (adopted) log.info(`Adopted pending Feishu topic workspace for ${task.issue.key}`);
+      }
+      // Every execution holds its subject shared for as long as it runs, so reclaim
+      // (which takes the lock exclusively) can never delete a workspace in use.
+      releaseIssueWorkspaceLifecycle = await this.issueWorkspaceLifecycleLocks.acquireShared(subject.id);
+      abort.signal.throwIfAborted();
+      this.assertWorkspaceRootOwner();
+      const claimedDir = claimedResources()?.resolvedWorkDir ?? null;
+      if (claimedDir?.release && claimedDir.lockPath && claimedDir.lockPath === lockedFolderOf(task, this.localDirectoryDaemonIds(task))) {
+        // The parked process holds this folder's lock (a Runtime workspace or a local folder); the lane's next attempt runs under it.
+        resolvedWorkDir = claimedDir;
+      } else {
+        if (claimedDir?.release) await releaseClaimed("config_changed");
+        resolvedWorkDir = await this.resolveTaskWorkDir(task, abort.signal);
+        if (background) background.own.resolvedWorkDir = resolvedWorkDir;
+      }
       if (resolvedWorkDir.resetSession) {
         const projection = (task as AgentTask).sessionProjection ?? (task as AgentTask).session_projection;
         if (projection?.mode === "delta") {
@@ -3331,53 +4145,59 @@ export class MultiremiDaemon {
         }
         task = { ...task, sessionId: null, workDir: resolvedWorkDir.workDir };
       }
-      const issueRuntimeStateRoot = resolveIssueRuntimeStateRoot(
-        task,
-        resolvedWorkDir.workDir,
-        this.options.workspacesRoot,
-        resolvedWorkDir.localDirectory,
-      );
-      providerHome = resolveTaskProviderHome(task, issueRuntimeStateRoot, this.options.workspacesRoot);
+      providerHome = resolveTaskProviderHome(task, this.options.workspacesRoot);
       if (providerHome) {
-        // Validate/create every daemon-owned parent before GC metadata, Plugin
+        // Validate/create every daemon-owned parent before Plugin
         // materialization or provider-native JSONL can write through it.
         await ensureProviderHomeDirectory(providerHome);
       }
+      this.recordSubjectUse(task, resolvedWorkDir);
       if (task.issueId && task.holdsWorkspace !== false) {
-        // Establish the Issue lifecycle before provider setup can create JSONL.
-        // This also covers repository-free Issues and preparation failures, so
-        // GC can never mistake their history for an unowned directory.
-        writeTaskGcContext(issueRuntimeStateRoot, task, {
-          localDirectory: resolvedWorkDir.localDirectory,
-        });
         const runtimeId = task.runtimeId ?? this.options.runtimeId;
         if (runtimeId) {
           this.enqueueTaskReport(task.id, "workspace", {
             runtimeId,
-            rootPath: issueRuntimeStateRoot,
+            rootPath: this.issueWorkspaceRoot(task, resolvedWorkDir),
             branchName: task.issue?.issueKind === "intake" ? "" : `agent/${task.issue?.key ?? task.id}`,
             status: "preparing",
             repos: [],
           });
         }
       }
-      if (providerHome?.runtimeStateRoot) {
-        writeTaskGcContext(
-          providerHome.runtimeStateRoot,
-          task,
-          task.issueId ? { kind: "issue_runtime" } : undefined,
-        );
-      }
       const codexProfile = task.agent?.provider === "codex" ? task.codexProfile ?? null : null;
       const claudeProfile = task.agent?.provider === "claude" ? task.claudeProfile ?? null : null;
-      if (claudeProfile) await assertRuntimeClaudeProjectCredentials(resolvedWorkDir.workDir);
-      const workspaceRelay = await this.effectiveWorkspaceRelay(task.workspaceId, codexProfile, claudeProfile);
+      if (claudeProfile) await assertRuntimeClaudeProjectCredentials(resolvedWorkDir.workDir, {
+        workspaceRoot: resolvedWorkDir.runtimeWorkspaceRoot
+          ?? (resolvedWorkDir.localDirectory ? undefined : resolvedWorkDir.workDir),
+      });
+      const workspaceRelay = await this.taskConnectionRelay(task);
       const relayAuthoritative = workspaceRelay !== undefined;
       const relay = task.agent?.provider === "claude"
         ? workspaceRelay?.claude
         : task.agent?.provider === "codex"
           ? workspaceRelay?.codex
-          : null;
+          : task.agent?.provider === "antigravity"
+            ? workspaceRelay?.antigravity ?? null
+            : null;
+      if (relay?.auth_token) failureCredentials.push(relay.auth_token);
+      if (task.authToken) failureCredentials.push(task.authToken);
+      if (task.agent?.provider === "antigravity" && task.executionConnection?.mode === "native") {
+        if (!providerHome) throw new Error("[antigravity_home_required] Local Antigravity needs a session home");
+        if (!Bun.which("agy", { PATH: process.env.PATH })) throw new Error("[antigravity_login_required] Install agy and sign in on the Runtime machine");
+        await seedIssueSessionNativeAntigravityHome(providerHome, process.env.GEMINI_HOME || join(this.userHome, ".gemini"));
+      } else if (task.agent?.provider === "antigravity") {
+        // Before the start ACK, so a missing gateway costs no model call (PR 4 §3).
+        const gateway = antigravityGatewayFor(relay);
+        if (!task.agent.model && !gateway.defaultModel) {
+          throw new Error("[antigravity_model_required] antigravity needs a model: set the Agent's model or the Model gateway default_model");
+        }
+        // The real key stays in the daemon: the server gets a per-process loopback token.
+        antigravity = {
+          run: this.antigravityGatewayShim().forRun({ upstreamBase: gateway.upstreamBase, apiKey: gateway.apiKey, runId: usageRunId,
+            headers: task.executionConnection?.profile?.endpoint_options?.headers }),
+          apiKey: gateway.apiKey, defaultModel: gateway.defaultModel,
+        };
+      }
       if (providerHome) {
         providerEnv = await loadIssueSessionProviderEnv(providerHome, {
           ...(relayAuthoritative
@@ -3398,25 +4218,30 @@ export class MultiremiDaemon {
           && !providerInstallEnv.OPENAI_API_KEY
         ) {
           await assertIssueSessionNativeCodexOAuth(
-            process.env.CODEX_HOME || join(homedir(), ".codex"),
+            process.env.CODEX_HOME || join(this.userHome, ".codex"),
           );
         }
       }
-      if (resolveTaskPluginSnapshot(task).length) {
+      const pluginSnapshot = resolveTaskPluginSnapshot(task);
+      // A parked process keeps the plugins it loaded only while the set is the same (§2.8).
+      if (background?.claimed && (pluginSnapshot.length ? taskPluginFingerprint(task) : null) !== background.claimed.resources.pluginFingerprint) {
+        await releaseClaimed("config_changed");
+      }
+      if (pluginSnapshot.length && background?.claimed) {
+        pluginRuntime = claimedResources()!.pluginRuntime;
+      } else if (pluginSnapshot.length) {
         this.assertWorkspaceRootOwner();
-        pluginRuntimeBase = resolveTaskPluginRuntimeBase(
-          task,
-          providerHome?.root ?? issueRuntimeStateRoot,
-          this.options.workspacesRoot,
-        );
+        const lane = laneForTask(task);
+        if (!lane) throw new Error(`Task ${task.id} has no agent to run Plugins for`);
         pluginRuntime = await this.prepareTaskPluginRuntime(
           task,
           resolvedWorkDir.workDir,
-          pluginRuntimeBase,
+          pluginRuntimeBaseDirectory(this.options.workspacesRoot, lane),
           abort.signal,
           providerHome,
           providerInstallEnv,
         );
+        if (background) background.own.pluginRuntime = pluginRuntime;
       }
       let codexCatalogError: string | undefined;
       if (providerHome) {
@@ -3440,35 +4265,78 @@ export class MultiremiDaemon {
           await this.prepareCodexModelCatalog(codexProfile, relay!.auth_token, providerHome.home, abort.signal, task.id);
         }
         if (task.runtimeWorkspaceId) {
-          writeAgentSkillContext(providerHome.home, task);
-          const localEnv = prepareRuntimeWorkspaceContext(task, providerHome, resolvedWorkDir.workDir);
-          providerEnv = { ...localEnv, ...providerEnv };
+          const local = runtimeWorkspaceContext(task, providerHome, resolvedWorkDir.workDir);
+          localInstructions = local?.instructions ?? null;
+          providerEnv = { ...local?.env, ...providerEnv };
         }
       }
       if (!providerHome) throw new Error(`Task ${task.id} has no isolated provider home`);
-      taskPrivateTmp = await prepareTaskPrivateTempDirectory(providerHome, task.id);
-      this.enqueueTaskReport(task.id, "start", {});
+      // The parked process's `TMPDIR` (or `/tmp` mount) is fixed: its next attempt shares the dir (§2.8).
+      taskPrivateTmp = claimedResources()?.privateTmp
+        ?? await prepareTaskPrivateTempDirectory(this.options.workspacesRoot, subject, task.id);
+      if (background && !background.claimed) {
+        background.own.privateTmp = taskPrivateTmp;
+        // This attempt's hold protects the temp dir named after it, for as long as its process lives.
+        background.own.hold = finishTracking;
+      }
+      // Bind the run to the authenticated runtime before any provider can
+      // consume tokens. A durable but unacknowledged start is not permission
+      // to execute while the task may have been reassigned.
+      // Shutdown drains already-running providers, but must release an attempt
+      // that has not obtained execution authority before the socket closes.
+      const startSignal = AbortSignal.any([abort.signal, this.pollAbort.signal]);
+      startSignal.throwIfAborted();
+      const startReply = await this.ensureOutbox().enqueueAndWait(task.id, "start", {
+        usage_run_id: usageRunId, runtime_id: this.options.runtimeId, ...(this.executionGenerations.has(task.id) ? { generation: this.executionGenerations.get(task.id) } : {}),
+      }, this.options.requestTimeoutMs, startSignal);
+      if (startReply.execution_authorized !== true) throw new Error("Task execution start does not authorize this run to execute");
+      startSignal.throwIfAborted();
       if (codexCatalogError) {
         this.enqueueTaskReport(task.id, "progress", {
           summary: `能力加载失败，已回退 Codex 内置目录：${codexCatalogError}`,
         });
       }
       this.enqueueTaskReport(task.id, "progress", { summary: pickTaskStartupLine(task.agent?.name), step: 1, total: 3 });
-      progressSummarizer = await this.createTaskProgressSummarizer(task, providerEnv, relay?.fragment);
-      summary = await this.runAgent(task, abort.signal, resolvedWorkDir, pluginRuntime, providerHome, providerEnv, progressSummarizer, taskPrivateTmp.path);
+      const usageConnection = task.executionConnection?.mode === "endpoint"
+        ? `workspace:${task.workspaceId}:endpoint:${task.executionConnection.endpoint_id}`
+        : task.codexProfile || task.claudeProfile
+        ? `runtime:${this.options.runtimeId}:profile:${task.agent?.provider}`
+        : relay?.auth_token ? `workspace:${task.workspaceId}:relay:${task.agent?.provider}` : null;
+      usageLedger = new TaskUsageLedger(usageConnection, usageRunId);
+      progressSummarizer = await this.createTaskProgressSummarizer(task, providerEnv, relay?.fragment, usageLedger, checkpointUsage);
+      startSignal.throwIfAborted();
+      summary = await this.runAgent(
+        task, abort.signal, resolvedWorkDir, pluginRuntime, providerHome, providerEnv,
+        progressSummarizer, taskPrivateTmp.aliasPath ?? taskPrivateTmp.path,
+        relay?.one_million_models ?? [],
+        usageConnection,
+        (usage) => {
+          observedUsage = { ...usage, units: [] };
+          for (const unit of usage.units) {
+            if ((observedUsageUnits.get(unit.unitId)?.revision ?? -1) < unit.revision) observedUsageUnits.set(unit.unitId, unit);
+          }
+        },
+        usageRunId,
+        usageLedger,
+        startSignal,
+        () => { providerEntered = true; },
+        antigravity,
+        background,
+        localInstructions,
+      );
       if (!summary.completed) {
         const failureReason = summary.failureReason
           ?? classifyPoisonedOutput(summary.output)
           ?? TaskFailureReason.AgentFallbackMessage;
-        if (summary.usage.length) this.enqueueTaskReport(task.id, "usage", { usage: summary.usage });
+        this.enqueueTaskReport(task.id, "usage", { usageSnapshot: summary.usageSnapshot });
         this.enqueueTaskReport(task.id, "fail", {
-          error: summary.output,
+          error: redactTaskError(summary.output),
           sessionId: summary.sessionId,
           workDir: summary.workDir,
           failureReason,
         });
         log.warn(`Failed task ${task.id} with unusable output: ${failureReason}`);
-        this.finalizeTaskProgress(progressSummarizer, "failed", failureReason);
+        this.finalizeTaskProgress(progressSummarizer, "failed", failureReason, task.id);
         await awaitFinalReportDrain();
         return;
       }
@@ -3476,67 +4344,212 @@ export class MultiremiDaemon {
       // barrier) already happened synchronously inside runAgent, while the
       // provider session was still open — only the summarizer wrap-up and the
       // outbox drain remain.
-      this.finalizeTaskProgress(progressSummarizer, "completed", summary.output);
+      this.finalizeTaskProgress(progressSummarizer, "completed", summary.output, task.id);
       await awaitFinalReportDrain();
     } catch (err) {
-      const error = timedOut ? `Agent timed out after ${timeoutMs}ms` : err instanceof Error ? err.message : String(err);
+      if (!providerEntered && this.pollAbort.signal.aborted) {
+        // Closing the optional helper releases its deferred usage scope. A
+        // failed startup must not create a new terminal-summary model call.
+        await progressSummarizer?.closeWithoutSummary();
+        progressSummarizer = null;
+      }
+      const error = redactTaskError(timedOut ? `Agent timed out after ${timeoutMs}ms` : err instanceof Error ? err.message : String(err));
       if (!timedOut && abort.signal.aborted && serverTerminalStatus) {
-        if (serverTerminalStatus === "cancelled") this.outbox?.purgeTask(task.id);
+        // The cancel (or server-side terminal) path never sends a terminal
+        // report, so the trace is sealed here (ARCH appendix A item 5).
+        this.closeStoppedTrace(task.id, serverTerminalStatus);
+        if (serverTerminalStatus === "cancelled") {
+          this.outbox?.purgeTask(task.id, { keepUsage: true });
+          // Cancellation drops execution reports, but actual consumption must
+          // survive the purge and remain durable while the API is unavailable.
+          const usageSnapshot = observedUsage as TaskUsageSnapshot | null;
+          if (usageSnapshot) this.enqueueTaskReport(task.id, "usage", { usageSnapshot: { ...usageSnapshot, units: [...observedUsageUnits.values()] } });
+          await awaitFinalReportDrain();
+        }
         log.info(`Task ${task.id} is already ${serverTerminalStatus} on the server; stopped local execution`);
-        this.finalizeTaskProgress(progressSummarizer, serverTerminalStatus);
+        this.finalizeTaskProgress(progressSummarizer, serverTerminalStatus, undefined, task.id);
         return;
       }
-      if (!timedOut && abort.signal.aborted && await this.wasTaskCancelledByServer(task.id)) {
-        this.outbox?.purgeTask(task.id);
-        log.info(`Task ${task.id} was cancelled by the server`);
-        this.finalizeTaskProgress(progressSummarizer, "cancelled");
+      const restart = this.restartExecutions.get(task.id);
+      if (restart && !timedOut) {
+        if (providerEntered && !this.restartProviderClosed.has(task.id)) return;
+        checkpointRestart = restart;
+        // runAgent has joined provider shutdown. Preserve the same visible
+        // attempt; a checkpoint failure leaves ordinary crash recovery intact.
+        this.enqueueTaskReport(task.id, "session_pin", {
+          sessionId: err instanceof RunAgentError ? err.sessionId : task.sessionId,
+          workDir: err instanceof RunAgentError ? err.workDir : resolvedWorkDir?.workDir ?? task.workDir,
+        });
+        await progressSummarizer?.closeWithoutSummary();
+        progressSummarizer = null;
         return;
       }
-      const failureReason = err instanceof LocalDirectoryError
-        ? err.failureReason
-        : classifyDaemonTaskFailure(task.agent?.provider ?? "", error);
+      // stop() closes the lane before draining providers. SIGTERM may also
+      // terminate ACP children, so Cancelled/EOF here is runtime interruption,
+      // not an Agent failure. Keep the report durable: replay must create the
+      // retry even when startup orphan recovery skips pending terminal rows.
+      const runtimeInterrupted = !timedOut && (this.expiredRestartTasks.has(task.id) || (err instanceof RunAgentError
+        ? err.runtimeInterrupted : this.pollAbort.signal.aborted && isShutdownInterruption(err)));
+      const cause = err instanceof RunAgentError ? err.cause : err;
+      const failureReason = runtimeInterrupted ? "runtime_recovery" : cause instanceof LocalDirectoryError
+        ? cause.failureReason
+        : classifyDaemonTaskFailure(task.agent?.provider ?? "", error,
+          cause instanceof AcpSessionFailureError ? cause.hint
+            : cause instanceof AcpRpcError && cause.data && typeof cause.data === "object"
+              ? cause.data : undefined);
       this.enqueueTaskReport(task.id, "fail", {
         error,
-        sessionId: summary?.sessionId ?? task.sessionId,
-        workDir: summary?.workDir ?? task.workDir,
+        sessionId: err instanceof RunAgentError ? err.sessionId : summary?.sessionId ?? task.sessionId,
+        workDir: err instanceof RunAgentError ? err.workDir : summary?.workDir ?? task.workDir,
         failureReason,
       });
       log.error(`Failed task ${task.id}: ${error}`);
-      this.finalizeTaskProgress(progressSummarizer, "failed", error);
+      this.finalizeTaskProgress(progressSummarizer, "failed", error, task.id);
       await awaitFinalReportDrain();
     } finally {
-      await cleanupTaskPrivateTempDirectory(
-        taskPrivateTmp,
-        () => this.assertWorkspaceRootOwner(),
-      ).catch((error) => {
-        log.warn(`Failed to clean task private temp for ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
-      });
-      if (pluginRuntimeBase && !task.issueId && !task.chatSessionId) {
-        await cleanupNonIssueTaskPluginRuntime(
-          task,
-          this.options.workspacesRoot,
+      // Revokes the run's shim tokens; runAgent already closed them unless setup failed first.
+      antigravity?.run.close();
+      if (usageLedger) checkpointUsage(usageLedger.finish());
+      if (background) {
+        // PR 6 §2.8: a lane's process owns what it runs with; this attempt releases only what is still its own.
+        if (background.claimed?.state === "claimed") this.parkedLanes.unclaim(background.claimed);
+        if (background.record?.resources !== background.own) await background.own.dispose();
+        if (background.own.hold !== finishTracking) finishTracking();
+      } else {
+        await cleanupTaskPrivateTempDirectory(
+          taskPrivateTmp,
           () => this.assertWorkspaceRootOwner(),
         ).catch((error) => {
-          log.warn(`Failed to clean task Plugin runtime for ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
+          log.warn(`Failed to clean task private temp for ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
         });
+        resolvedWorkDir?.release?.();
+        finishTracking();
       }
-      await cleanupTemporaryTaskProviderHome(
-        providerHome,
-        this.options.workspacesRoot,
-        () => this.assertWorkspaceRootOwner(),
-      ).catch((error) => {
-        log.warn(`Failed to clean task provider home for ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
-      });
-      resolvedWorkDir?.release?.();
       releaseIssueWorkspaceLifecycle?.();
+      if (checkpointRestart) {
+        try {
+          await this.plannedRestartTransfer().suspend(checkpointRestart, async () => {
+            const drained = await this.ensureOutbox().waitForTaskDrain(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
+            if (drained !== "delivered") throw new Error(`Planned restart reports not acknowledged: ${drained}`);
+            await this.ensureTrace().streamer.flushTask(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
+            const result = await this.taskDownlinks.rpc("turn.restart.checkpoint", checkpointRestart! as unknown as Record<string, unknown>, this.options.requestTimeoutMs);
+            const checkpoint = result.checkpoint as PlannedRestartCheckpoint;
+            const consumed = foldStoredTrace(this.ensureTrace().store, task.id).fold.state().items.flatMap(item =>
+              item.type === "user_message" && item.steer?.consumed ? [item.steer.steer_id] : []);
+            const head = this.ensureTrace().store.head(task.id)?.head ?? 0;
+            const identities = this.restartTraceIdentities.get(task.id);
+            try {
+              if (!identities || identities.trace_head !== head) throw new Error("Trace identity snapshot not available at checkpoint head");
+              this.restartJournal!.saveTraceIdentities(checkpointRestart!, head, identities.state);
+            } catch (error) {
+              log.warn(`Task ${task.id}: optional trace identity snapshot omitted: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: head };
+          });
+          const deadline = this.restartDeadlines.get(task.id);
+          if (deadline) clearTimeout(deadline);
+          this.restartDeadlines.delete(task.id);
+          log.info(`Task ${task.id} planned restart checkpoint acknowledged`);
+        } catch (error) {
+          log.error(`Task ${task.id} planned restart checkpoint deferred: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (!checkpointRestart && (serverTerminalStatus || timedOut || !this.restartExecutions.has(task.id))) {
+        const deadline = this.restartDeadlines.get(task.id);
+        if (deadline) clearTimeout(deadline);
+        this.restartDeadlines.delete(task.id);
+      }
+      this.restartProviderClosed.delete(task.id);
+      this.expiredRestartTasks.delete(task.id);
+      this.taskAbortsById.delete(task.id);
+      this.restartExecutions.delete(task.id);
       this.activeTaskAborts.delete(abort);
       this.activeTaskIds.delete(task.id);
       if (!activeExecutionReleased) {
         this.releaseActiveTaskSlot();
       }
-      clearInterval(taskStateWatcher);
+      stopWatching();
+      this.taskDownlinks.release(task.id);
+      this.restartQuestions.delete(task.id);
+      this.restartTraceIdentities.delete(task.id);
       if (timeout) clearTimeout(timeout);
     }
+  }
+
+  private readonly pendingResumedTasks = new Map<string, ReturnType<typeof normalizeDaemonTurnOffer>>();
+
+  private async resumePlannedRestarts(): Promise<void> {
+    this.plannedRestartTransfer();
+    for (const entry of this.restartJournal!.entries()) {
+      if (this.stopped || !this.restartRecoveryCandidates.has(entry.execution.handoff_id) || this.resumedRestartIds.has(entry.execution.handoff_id)
+        || entry.execution.runtime_id !== this.options.runtimeId) continue;
+      const retry = this.restartJournal!.reserveResume(entry.execution.handoff_id);
+      if (retry === "waiting") continue;
+      if (retry === "expired") {
+        // Retain the exhausted journal as evidence, but never retry it, including
+        // after another daemon restart. It is not an execution grant.
+        this.restartRecoveryCandidates.delete(entry.execution.handoff_id);
+        log.error(`Planned restart ${entry.execution.handoff_id} recovery budget exhausted`);
+        continue;
+      }
+      try {
+        await this.restartTransfer!.resume(entry.execution.handoff_id);
+        const task = this.pendingResumedTasks.get(entry.execution.handoff_id)!;
+        this.pendingResumedTasks.delete(entry.execution.handoff_id);
+        this.resumedRestartIds.add(entry.execution.handoff_id);
+        const run = this.handleTask(task).finally(() => this.inflight.delete(run));
+        this.inflight.add(run);
+        void run.catch(error => log.error(`Resumed task ${task.id} failed: ${String(error)}`));
+      } catch (error) {
+        if (error instanceof DaemonProtocolRpcError
+          && ["restart_terminal", "stale_execution", "authority_revoked", "capacity", "invalid_checkpoint", "invalid_report"].includes(error.code)) {
+          this.restartJournal!.remove(entry.execution.handoff_id);
+          this.restartRecoveryCandidates.delete(entry.execution.handoff_id);
+          this.pendingResumedTasks.delete(entry.execution.handoff_id);
+          log.info(`Planned restart ${entry.execution.handoff_id} terminated: ${error.code}`);
+          continue;
+        }
+        log.warn(`Planned restart ${entry.execution.handoff_id} waiting: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  private plannedRestartTransfer(): PlannedRestartTransfer {
+    if (this.restartTransfer) return this.restartTransfer;
+    this.restartJournal ??= new PlannedRestartJournal(this.outboxPath === ":memory:" ? ":memory:"
+      : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash("sha256").update(this.legacyOutboxPath).digest("hex").slice(0, 16)}.db`));
+    return this.restartTransfer = new PlannedRestartTransfer(this.restartJournal, {
+      suspend: async entry => {
+        await this.taskDownlinks.rpc("turn.restart.suspend", { ...entry.execution, checkpoint: entry.checkpoint }, this.options.requestTimeoutMs);
+      },
+      resume: async entry => {
+        const identities = this.restartJournal!.traceIdentities(entry, reason => log.warn(`Task ${entry.execution.attempt_id}: ${reason}; using trace fold only`));
+        const result = await this.taskDownlinks.rpc("turn.restart.resume", { ...entry.execution, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
+        const task = normalizeDaemonTurnOffer(result.task as Record<string, unknown>);
+        const generation = Number(result.generation);
+        if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
+        this.executionGenerations.set(task.id, generation);
+        if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
+        this.resumedUsageRuns.set(task.id, entry.consumer_id);
+        this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
+        this.taskDownlinks.bindTurn({ ...task, generation });
+        const prior = foldStoredTrace(this.ensureTrace().store, task.id).fold.state();
+        const replay = new Set(prior.items.flatMap(item => item.type === "user_message" && item.steer && !item.steer.consumed ? [item.steer.steer_id] : []));
+        let firstReplay = true;
+        task.input_messages = task.input_messages.map(message => {
+          if (!replay.has(message.id)) return message;
+          const notice = firstReplay ? "以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。\n" : "";
+          firstReplay = false;
+          return { ...message, body_md: withSteerIdentity(message.body_md, message.id, notice) };
+        });
+        const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
+        this.restartQuestions.set(task.id, questions);
+        for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
+        // No model may run until transfer.resume has persisted the local receipt.
+        this.pendingResumedTasks.set(entry.execution.handoff_id, task);
+        return { generation };
+      },
+    });
   }
 
   private async prepareTaskPluginRuntime(
@@ -3552,9 +4565,8 @@ export class MultiremiDaemon {
       signal,
       codexHome: task.agent?.provider === "codex" ? providerHome?.home : undefined,
     });
-    if (!task.issueId) writeTaskGcContext(runtimeBase, task);
     if (task.agent?.provider === "codex" && prepared.codexHome) {
-      const baseHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+      const baseHome = process.env.CODEX_HOME || join(this.userHome, ".codex");
       await installCodexPluginHome(prepared, {
         signal,
         seedHome: (targetHome) => seedCodexHomeFromBase({
@@ -3570,6 +4582,50 @@ export class MultiremiDaemon {
     return prepared;
   }
 
+  /** Where the server is told an Issue's workspace lives; never a user-registered directory. */
+  private issueWorkspaceRoot(task: AgentTask, resolved: Pick<ResolvedTaskWorkDir, "workDir" | "localDirectory">): string {
+    return resolved.localDirectory ? workDirectory(this.options.workspacesRoot, subjectForTask(task)) : resolved.workDir;
+  }
+
+  /**
+   * A reclaimed subject reopens: put its saved unsaved work back over the fresh
+   * checkout. Never blocks the execution; see `restoreReclaimedSubject`.
+   */
+  private async restoreReclaimedWorkspace(task: MultiremiTaskWithAgent, resolved: ResolvedTaskWorkDir): Promise<void> {
+    if (task.runtimeWorkspaceId || !usesSharedWorkspace(task) || resolved.localDirectory || !resolved.ensureDir) return;
+    await this.issueWorkspaceLifecycleLocks.runExclusive(`prepare:${resolved.workDir}`, () =>
+      restoreReclaimedSubject({
+        root: this.options.workspacesRoot,
+        subject: subjectForTask(task),
+        wiki: true,
+        assertRootOwner: () => this.assertWorkspaceRootOwner(),
+      }));
+  }
+
+  /** Registry upsert on every execution start: the only record reclaim reads. */
+  private recordSubjectUse(
+    task: MultiremiTaskWithAgent,
+    resolved: ResolvedTaskWorkDir,
+    repos?: MultiremiIssueWorkspaceRepo[],
+  ): void {
+    try {
+      const subject = subjectForTask(task);
+      upsertSubjectRecord(this.options.workspacesRoot, {
+        subject,
+        workspace_id: task.workspaceId,
+        ...(subject.kind === "issue" && task.issue?.key ? { issue_key: task.issue.key } : {}),
+        external_work_dir: resolved.localDirectory ? resolved.runtimeWorkspaceRoot ?? resolved.workDir : null,
+        ...(repos ? {
+          repos: repos.filter((repo) => repo.status !== "error").map((repo) => ({
+            repo_url: repo.repoUrl, dir: basename(repo.worktreePath), branch: repo.branchName || null,
+          })),
+        } : {}),
+      });
+    } catch (error) {
+      log.warn(`Failed to record subject use for task ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private async resolveTaskWorkDir(task: MultiremiTaskWithAgent, signal: AbortSignal): Promise<ResolvedTaskWorkDir> {
     return resolveTaskWorkDir(task, {
       daemonIds: this.localDirectoryDaemonIds(task),
@@ -3581,7 +4637,19 @@ export class MultiremiDaemon {
           log.warn(`Failed to mark task ${taskId} waiting_local_directory: ${err instanceof Error ? err.message : String(err)}`);
         });
       },
+      describeLockHolder: (holderId) => this.backgroundFolderHolder(holderId),
     });
+  }
+
+  /**
+   * PR 6 §2.8: a parked lane keeps its shared folder's lock up to the
+   * keep-alive cap, so a turn of another Chat on that folder waits. Its reason
+   * then names that Chat's background tasks, not the ended attempt's id.
+   */
+  private backgroundFolderHolder(holderId: string): string | null {
+    const lane = this.parkedLanes.findParked((record) => record.resources instanceof DaemonLaneResources
+      && record.resources.resolvedWorkDir?.lockHolderId === holderId);
+    return lane ? backgroundFolderHolderNote(lane.lane.session_id) : null;
   }
 
   /**
@@ -3640,6 +4708,7 @@ export class MultiremiDaemon {
           skipFetch: true,
           signal,
           coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(task.workspaceId),
+          coAuthoredBy: this.workspaceCoAuthoredBy(task.workspaceId),
         });
         if (result.preferredRefResolved === false) {
           const message = `Configured default branch ${JSON.stringify(repo.defaultBranch)} could not be resolved; fell back to ${result.baseRef}`;
@@ -3702,7 +4771,7 @@ export class MultiremiDaemon {
     // resource is removed. ensureDir alone does not prove daemon ownership.
     try {
       const root = realpathSync(this.options.workspacesRoot);
-      return realpathSync(workDir.workDir) === join(root, "chats", task.chatSessionId!);
+      return realpathSync(workDir.workDir) === workDirectory(root, subjectForTask(task));
     } catch {
       return false;
     }
@@ -3804,7 +4873,7 @@ export class MultiremiDaemon {
     if (task.issue?.issueKind !== "intake") {
       const prepared = await this.autoCheckoutTaskRepos(task, resolvedWorkDir, syncResults, signal);
       let wikiMaterialized = false;
-      if (!resolvedWorkDir.localDirectory && !task.issueSessionId) {
+      if (!resolvedWorkDir.localDirectory) {
         wikiMaterialized = Boolean(await prepareIssueWikiWorkspace(resolvedWorkDir.workDir, task));
       }
       return { ...prepared, wikiMaterialized };
@@ -3832,7 +4901,7 @@ export class MultiremiDaemon {
     let prepared: PreparedIssueWorkspace;
     try {
       prepared = await prepareIntakeWorkspace(resolvedWorkDir.workDir, task, this.repoCache, {
-        snapshotsRoot: this.snapshotsRoot,
+        snapshotsRoot: codeViewsRoot(this.options.workspacesRoot),
         skipRepoFetch: true,
         signal,
       });
@@ -3877,11 +4946,11 @@ export class MultiremiDaemon {
     const runtimeId = task.runtimeId ?? this.options.runtimeId;
     if (!task.issueId || task.holdsWorkspace === false || !runtimeId) return;
     if (task.runtimeWorkspaceId) {
-      // Only native session/archive state belongs to the Issue. Never report
-      // the external directory as an Issue-owned root that GC may reclaim.
+      // Never report the external directory as an Issue-owned root that
+      // reclaim may delete.
       this.enqueueTaskReport(task.id, "workspace", {
         runtimeId,
-        rootPath: resolveIssueRuntimeStateRoot(task, rootPath, this.options.workspacesRoot, true),
+        rootPath: this.issueWorkspaceRoot(task, { workDir: rootPath, localDirectory: true }),
         branchName: task.issue?.issueKind === "intake" ? "" : `agent/${task.issue?.key ?? task.id}`,
         status: "ready", repos: [],
       });
@@ -3937,18 +5006,43 @@ export class MultiremiDaemon {
     ].map((value) => value?.trim()).filter((value): value is string => Boolean(value));
   }
 
+  private readonly restartQuestions = new Map<string, UnifiedMessage[]>();
+
+  private async createOrRecoverDecision(taskId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const metadata = payload.metadata as Record<string, unknown>;
+    const candidates = this.restartQuestions.get(taskId) ?? [];
+    const recovered = candidates.find(message => {
+      const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
+      return request?.payload && restartQuestionKey(request.payload) === restartQuestionKey(metadata);
+    });
+    if (!recovered && candidates.some(message => {
+      const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
+      return request?.payload?.kind === metadata.kind;
+    })) throw new Error("Planned restart request changed; original question retained");
+    const messageId = recovered?.id ?? `question_${randomUUID()}`;
+    const waitId = randomUUID();
+    this.taskDownlinks.beginQuestionWait(taskId, messageId, waitId);
+    const result = await this.taskDownlinks.rpc("turn.decision", { ...payload, message_id: messageId, wait_id: waitId,
+      ...(recovered ? { recover_question_id: recovered.id } : {}) });
+    if (recovered) this.restartQuestions.set(taskId, this.restartQuestions.get(taskId)!.filter(message => message.id !== recovered.id));
+    return result;
+  }
+
   private attachHumanInputHandlers(
     provider: MultiremiTaskProvider,
     task: MultiremiTaskWithAgent,
     signal: AbortSignal,
-    nextSeq: () => number,
+    trace: TraceTranslator,
+    /** Where the handlers go instead of the provider (PR 6: a lane's record routes a request raised while parked). */
+    sink?: Pick<MultiremiTaskProvider, "setPermissionHandler" | "setElicitationHandler">,
   ): () => void {
+    const target = sink ?? provider;
     let elicitationContextOffset = 0;
     const humanRequestTimeoutMs = task.autopilotRunId
       ? this.options.unattendedHumanRequestTimeoutMs
       : this.options.humanRequestTimeoutMs;
     if (this.options.approvalMode !== "ask") {
-      provider.setPermissionHandler?.((params) => {
+      target.setPermissionHandler?.((params) => {
         const allow = params.options.find((o) => o.kind === "allow_always")
           ?? params.options.find((o) => o.kind === "allow_once");
         return Promise.resolve<PermissionOutcome>(
@@ -3956,43 +5050,55 @@ export class MultiremiDaemon {
         );
       });
     } else {
-      provider.setPermissionHandler?.(async (params) => {
+      target.setPermissionHandler?.(async (params) => {
+        this.taskDownlinks.beginDecision(task.id);
         try {
           const toolTitle = params.toolCall?.title ?? "tool call";
-          const request = await this.client.createTaskHumanRequest(task.id, {
-            kind: "permission",
-            payload: { session_id: params.sessionId, tool_call: params.toolCall ?? null, options: params.options },
+          // A child session's request names its subagent (PR 5 §1.3); the root's carries no field.
+          const subagent = this.subagentRef(task.id, provider, trace, params.sessionId);
+          // S2 creates the decision message and sets awaiting_human atomically.
+          const result = await this.createOrRecoverDecision(task.id, {
+            ...this.taskDownlinks.turnInput(task.id),
+            dedupe_key: `permission:${task.id}:${randomUUID()}`,
+            body_md: `Permission requested: ${toolTitle}`,
+            options: params.options.map(option => ({ label: option.name, value: option.optionId, description: option.kind })),
+            metadata: { kind: "permission", session_id: params.sessionId,
+              tool_call: params.toolCall ?? null, options: params.options, ...(subagent ? { subagent } : {}) },
+            timeout_ms: humanRequestTimeoutMs,
           });
-          await this.reportHumanRequestMessage(task.id, nextSeq(), "permission_request", `Permission requested: ${toolTitle}`, {
-            request_id: request.id,
-            options: params.options,
-            tool_call: params.toolCall ?? null,
-          });
-          const settled = await this.awaitHumanDecision(task.id, request.id, signal, humanRequestTimeoutMs);
-          const optionId = settled?.status === "responded" ? readResponseOptionId(settled.response) : null;
-          const chosen = optionId ? params.options.find((o) => o.optionId === optionId) ?? null : null;
-          await this.reportHumanRequestMessage(
-            task.id,
-            nextSeq(),
-            "permission_response",
-            chosen
-              ? `Permission ${chosen.kind.startsWith("allow") ? "granted" : "denied"}: ${chosen.name}`
-              : `Permission request ${settled?.status ?? "cancelled"}`,
-            { request_id: request.id, option_id: optionId, status: settled?.status ?? "cancelled", responded_by: settled?.respondedBy ?? null },
-          );
-          if (optionId) return { outcome: "selected", optionId };
-          return { outcome: "cancelled" };
+          const decision = result.message as UnifiedMessage;
+          if (!decision?.id || decision.message_kind !== "decision") throw new Error("turn.decision returned no decision message");
+          this.taskDownlinks.registerDecision(decision, task.id);
+          const traceItem = this.recordTrace(task.id, () => trace.permissionRequested({
+            decisionId: decision.id, toolCallId: params.toolCall?.toolCallId ?? null, title: toolTitle, options: params.options,
+          }));
+          const reply = await this.awaitDecisionReply(task.id, decision.id, signal, humanRequestTimeoutMs);
+          const optionId = reply ? readResponseOptionId(reply.metadata)
+            ?? readResponseOptionId(decisionReplyObject(reply)) ?? reply.body_md.trim() : null;
+          const chosen = optionId ? params.options.find(option => option.optionId === optionId) ?? null : null;
+          if (traceItem && !this.restartExecutions.has(task.id)) this.recordTrace(task.id, () => trace.permissionResolved(traceItem, {
+            option: chosen, outcome: chosen ? "selected" : reply || signal.aborted ? "cancelled" : "timeout",
+            respondedBy: reply?.sender_id ?? null, replyMessageId: reply?.id ?? null,
+          }));
+          if (reply) {
+            if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: this.taskDownlinks.activeQuestionWaits().find(wait => wait.message_id === decision.id)?.wait_id });
+            this.taskDownlinks.confirmDecisionReply(task.id, reply);
+          }
+          return chosen ? { outcome: "selected", optionId: chosen.optionId } : { outcome: "cancelled" };
         } catch (err) {
           // Conservative deny when the routing infrastructure itself fails.
           log.warn(`Permission routing failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
           return { outcome: "cancelled" };
+        } finally {
+          if (!this.restartExecutions.has(task.id)) this.taskDownlinks.finishDecision(task.id);
         }
       });
     }
 
     // AskUserQuestion is a collaboration primitive, not a tool permission.
     // Always surface it, including when destructive-tool approvals are automatic.
-    provider.setElicitationHandler?.(async (params) => {
+    target.setElicitationHandler?.(async (params) => {
+      this.taskDownlinks.beginDecision(task.id);
       try {
         const questions = elicitationToQuestions(params);
         if (!questions?.length) return { action: "cancel" };
@@ -4008,33 +5114,50 @@ export class MultiremiDaemon {
           elicitationContextOffset = sliced.offset;
           context = sliced.context;
         }
-        const request = await this.client.createTaskHumanRequest(task.id, {
-          kind: "question",
-          payload: {
+        const subagent = this.subagentRef(task.id, provider, trace, params.sessionId);
+        const result = await this.createOrRecoverDecision(task.id, {
+          ...this.taskDownlinks.turnInput(task.id),
+          dedupe_key: `elicitation:${task.id}:${randomUUID()}`,
+          body_md: [params.message, ...questions.map(({ question }) => question.question)].filter(Boolean).join("\n\n"),
+          options: questions.flatMap(({ fieldKey, question }) => question.options.map(option => ({
+            label: option.label, value: JSON.stringify({ question: fieldKey, answer: option.label }), description: option.description,
+          }))),
+          metadata: {
+            kind: "question",
             session_id: params.sessionId,
             message: params.message,
             questions,
             ...(context ? { context } : {}),
+            ...(subagent ? { subagent } : {}),
           },
+          timeout_ms: humanRequestTimeoutMs,
         });
-        await this.reportHumanRequestMessage(task.id, nextSeq(), "question_request", params.message || "Agent asked a question", {
-          request_id: request.id,
-          questions,
-        });
-        const settled = await this.awaitHumanDecision(task.id, request.id, signal, humanRequestTimeoutMs);
-        const answers = settled?.status === "responded" ? readResponseAnswers(settled.response) : null;
-        await this.reportHumanRequestMessage(
-          task.id,
-          nextSeq(),
-          "question_response",
-          answers ? Object.entries(answers).map(([q, a]) => `${q}: ${a}`).join("; ") : `Question ${settled?.status ?? "cancelled"}`,
-          { request_id: request.id, answers, status: settled?.status ?? "cancelled", responded_by: settled?.respondedBy ?? null },
-        );
+        const decision = result.message as UnifiedMessage;
+        if (!decision?.id || decision.message_kind !== "decision") throw new Error("turn.decision returned no decision message");
+        this.taskDownlinks.registerDecision(decision, task.id);
+        // Claude routes AskUserQuestion here with its tool call id
+        // (claude-agent-acp 0.89 dist/elicitation.js:162-166); the translator
+        // suppresses that tool call, so the question item stands for it.
+        const traceItem = this.recordTrace(task.id, () => trace.questionRequested({
+          decisionId: decision.id, toolCallId: params.toolCallId ?? null,
+          message: params.message || "Agent asked a question", questions,
+        }));
+        const reply = await this.awaitDecisionReply(task.id, decision.id, signal, humanRequestTimeoutMs);
+        const answers = reply && reply.metadata.question_closed !== true ? decisionReplyAnswers(reply, questions) : null;
+        if (traceItem && !this.restartExecutions.has(task.id)) this.recordTrace(task.id, () => trace.questionResolved(traceItem, {
+          answers, respondedBy: reply?.sender_id ?? null, replyMessageId: reply?.id ?? null,
+        }));
+        if (reply) {
+          if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: this.taskDownlinks.activeQuestionWaits().find(wait => wait.message_id === decision.id)?.wait_id });
+          this.taskDownlinks.confirmDecisionReply(task.id, reply);
+        }
         if (!answers) return { action: "cancel" };
         return { action: "accept", content: answersToElicitationContent(questions, answers) };
       } catch (err) {
         log.warn(`Question routing failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
         return { action: "cancel" };
+      } finally {
+        if (!this.restartExecutions.has(task.id)) this.taskDownlinks.finishDecision(task.id);
       }
     });
 
@@ -4044,39 +5167,62 @@ export class MultiremiDaemon {
   }
 
   /**
-   * Poll until the request leaves "pending", the task aborts, or the human
-   * timeout elapses. Timeout/abort expires the request server-side; if a human
-   * response won that race, the server returns the responded row and we honor it.
+   * The subagent a permission or question came from (PR 5 §1.3), for
+   * `metadata.subagent`; null for the root session. The request can arrive
+   * before the stream's consumer gave the translator the child's
+   * `subagent_spawned`, so the provider's own registry answers then.
    */
-  private async awaitHumanDecision(
-    taskId: string,
-    requestId: string,
-    signal: AbortSignal,
-    timeoutMs: number,
-  ): Promise<MultiremiTaskHumanRequest | null> {
-    const deadline = Date.now() + Math.max(0, timeoutMs);
-    while (!signal.aborted && Date.now() < deadline) {
-      try {
-        const request = await this.client.getTaskHumanRequest(taskId, requestId);
-        if (request && request.status !== "pending") return request;
-      } catch (err) {
-        log.warn(`Poll human request ${requestId} failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      await sleep(Math.min(Math.max(this.options.pollIntervalMs, 250), HUMAN_REQUEST_POLL_MS));
-    }
-    try {
-      return await this.client.expireTaskHumanRequest(taskId, requestId, signal.aborted ? "cancelled" : "timeout");
-    } catch (err) {
-      log.warn(`Expire human request ${requestId} failed: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
-    }
+  private subagentRef(taskId: string, provider: MultiremiTaskProvider, trace: TraceTranslator,
+    sessionId: string | null | undefined): TraceSubagentRef | null {
+    if (!sessionId) return null;
+    const traced = this.recordTrace(taskId, () => trace.subagentOfSession(sessionId));
+    if (traced) return traced;
+    const child = provider.subagentSession?.(sessionId);
+    return child ? { item_id: nativeAgentItemId(child.agentId), name: child.name ?? "" } : null;
   }
 
-  private async reportHumanRequestMessage(taskId: string, seq: number, type: string, content: string, input: Record<string, unknown>): Promise<void> {
+  /** Questions and permissions share the reply/expiry race through decision messages. */
+  private async awaitDecisionReply(taskId: string, messageId: string, signal: AbortSignal,
+    timeoutMs: number): Promise<UnifiedMessage | null> {
+    const waitSignal = AbortSignal.any([signal, this.pollAbort.signal]);
+    // Saved answers may precede this process and its bounded input projection.
+    const saved = await this.taskDownlinks.rpc("turn.decision.get", { ...this.taskDownlinks.turnInput(taskId), message_id: messageId });
+    if (this.restartExecutions.has(taskId)) return null;
+    if (saved.reply) return saved.reply as UnifiedMessage;
+    const reply = await this.taskDownlinks.waitForDecisionReply(messageId, waitSignal, timeoutMs);
+    // Planned cancellation releases the callback, while the original Q stays live.
+    if (this.restartExecutions.has(taskId)) return null;
+    if (reply) {
+      // WS input is a bounded prompt projection. Fetch once after notification;
+      // never interpret its unread_range prefix or folded body as an answer.
+      const response = await this.taskDownlinks.rpc("turn.decision.get", {
+        ...this.taskDownlinks.turnInput(taskId), message_id: messageId,
+      });
+      const original = response.reply as UnifiedMessage | undefined;
+      if (!original || original.id !== reply.id || original.reply_to_id !== messageId
+        || original.message_kind !== "reply" || typeof original.body_md !== "string") {
+        throw new Error("turn.decision.get returned no matching reply");
+      }
+      return original;
+    }
+    const expired = await this.taskDownlinks.rpc("turn.decision.expire", {
+      ...this.taskDownlinks.turnInput(taskId), message_id: messageId,
+      status: waitSignal.aborted ? "cancelled" : "timeout",
+    });
+    // A human reply committed before expiration wins the race.
+    return (expired.reply as UnifiedMessage | undefined) ?? null;
+  }
+
+  /**
+   * Run one translator call for a daemon-internal fact (permission, question).
+   * Trace storage failures never fail the decision flow; they are logged.
+   */
+  private recordTrace<T>(taskId: string, write: () => T): T | null {
     try {
-      this.enqueueTaskReport(taskId, "messages", { messages: [{ seq, type, content, input }] });
+      return write();
     } catch (err) {
-      log.warn(`Failed to report ${type} message for task ${taskId}: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn(`Failed to record a trace fact for task ${taskId}: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
     }
   }
 
@@ -4089,8 +5235,27 @@ export class MultiremiDaemon {
     task: MultiremiTaskWithAgent,
     providerEnv?: Record<string, string>,
     relayFragment?: string,
+    usageLedger?: TaskUsageLedger,
+    checkpointUsage?: (snapshot: TaskUsageSnapshot | null) => void,
   ): Promise<TaskProgressSummarizer | null> {
-    if (task.codexProfile || task.claudeProfile) {
+    const system = this.workspaceRelays.get(task.workspaceId);
+    const systemOpenAi = system?.codex?.endpoint_id ? system.codex : null;
+    const systemClaude = system?.claude?.endpoint_id ? system.claude : null;
+    const systemConfigured = Boolean(systemOpenAi || systemClaude);
+    let summaryEnv: NodeJS.ProcessEnv = process.env;
+    if (systemConfigured) {
+      const baseUrl = systemOpenAi ? extractBaseUrl("codex", systemOpenAi.fragment) : null;
+      const claudeUrl = systemClaude ? extractBaseUrl("claude", systemClaude.fragment) : null;
+      summaryEnv = { ...process.env, OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "",
+        MULTIREMI_PROGRESS_SUMMARY_OPENAI_BASE_URL: baseUrl ?? "",
+        MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY: systemOpenAi?.auth_token ?? "" };
+      providerEnv = claudeUrl && systemClaude ? {
+        ANTHROPIC_BASE_URL: claudeUrl,
+        ...(systemClaude.auth_header === "x-api-key" ? { ANTHROPIC_API_KEY: systemClaude.auth_token, ANTHROPIC_AUTH_TOKEN: "" }
+          : { ANTHROPIC_AUTH_TOKEN: systemClaude.auth_token, ANTHROPIC_API_KEY: "" }),
+      } : undefined;
+      relayFragment = undefined;
+    } else if (task.codexProfile || task.claudeProfile || task.executionConnection?.mode === "endpoint") {
       // A custom provider key is scoped to its connection. The optional
       // summarizer uses Chat Completions and may have a different base URL.
       if (!process.env.MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY?.trim()
@@ -4104,8 +5269,8 @@ export class MultiremiDaemon {
       );
       const config = await resolveTaskProgressSummaryConfig(
         providerEnv,
-        process.env,
-        undefined,
+        summaryEnv,
+        systemConfigured ? async () => null : undefined,
         workspacePolicy,
         (task.agent?.provider === "codex" || task.agent?.provider === "claude")
           && relayFragment !== undefined
@@ -4113,23 +5278,52 @@ export class MultiremiDaemon {
           : undefined,
       );
       if (!config.enabled) return null;
-      const credentials = resolveSummarizerCredentials(providerEnv);
+      const credentials = resolveSummarizerCredentials(providerEnv, summaryEnv);
+      if (systemOpenAi && config.openAi) { config.openAi.headers = systemOpenAi.headers; config.openAi.exactBaseUrl = true; }
+      if (systemClaude && credentials) credentials.headers = systemClaude.headers;
       const hasOpenAiTransport = (config.transport === "auto" || config.transport === "openai")
         && config.openAi !== null;
       if (!credentials && !hasOpenAiTransport) {
         log.info(`Progress summaries unavailable for task ${task.id}: no usable model credential`);
         return null;
       }
-      return new TaskProgressSummarizer({
+      let closeUsageScope: ReturnType<TaskUsageLedger["deferCompletion"]> | undefined;
+      const relayEngine = task.agent?.provider === "claude" || task.agent?.provider === "codex" ? task.agent.provider : null;
+      const relayBaseUrl = relayEngine && relayFragment !== undefined ? extractBaseUrl(relayEngine, relayFragment) : null;
+      const processCredentials = resolveSummarizerCredentials(undefined);
+      const summaryConnection = (provider: string): string | null => {
+        if (systemConfigured) {
+          const selected = provider === "openai" ? systemOpenAi : systemClaude;
+          return selected?.endpoint_id ? `workspace:${task.workspaceId}:endpoint:${selected.endpoint_id}` : null;
+        }
+        if (provider === "openai" && process.env.MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY?.trim() && config.openAi?.baseUrl) {
+          return `runtime:${this.options.runtimeId}:progress-summary:openai`;
+        }
+        const baseUrl = provider === "openai" ? config.openAi?.baseUrl : credentials?.baseUrl;
+        if (relayEngine && relayBaseUrl && baseUrl === relayBaseUrl && providerEnv) return `workspace:${task.workspaceId}:relay:${relayEngine}`;
+        if (provider === "claude" && processCredentials && credentials?.baseUrl === processCredentials.baseUrl
+          && credentials.apiKey === processCredentials.apiKey && credentials.authToken === processCredentials.authToken) {
+          return `runtime:${this.options.runtimeId}:progress-summary:claude`;
+        }
+        return null;
+      };
+      const summarizer = new TaskProgressSummarizer({
         config,
         credentials: credentials ?? undefined,
         providerEnv,
         taskTitle: task.issue?.title ?? task.triggerSummary ?? "",
         taskPrompt: task.prompt ?? "",
+        onUsage: units => { if (usageLedger) checkpointUsage?.(usageLedger.observe(units.map(unit => ({ ...unit, connectionId: summaryConnection(unit.provider) })))); },
+        onClosed: () => checkpointUsage?.(closeUsageScope?.() ?? null),
         report: async (result, { final }) => {
+          // An in-flight periodic summary can finish after the terminal report was queued.
+          if (!final && (this.traceStore().head(task.id)?.closed
+            || this.ensureOutbox().taskIdsWithPendingTerminal().includes(task.id))) return;
           await this.client.reportProgress(task.id, result.summary, result.step, result.total, { final });
         },
       });
+      closeUsageScope = usageLedger?.deferCompletion();
+      return summarizer;
     } catch (err) {
       log.warn(`Progress summarizer setup failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
       return null;
@@ -4141,10 +5335,18 @@ export class MultiremiDaemon {
     summarizer: TaskProgressSummarizer | null,
     outcome: ProgressRunOutcome,
     detail?: string,
+    taskId?: string,
   ): void {
-    summarizer?.finalize(outcome, detail).catch((err) => {
+    if (!summarizer) return;
+    const finalization = summarizer.finalize(outcome, detail).then(async () => {
+      // Finalize enqueues late usage and its completion marker. Keep transport
+      // alive until those durable records drain (or the bounded wait expires).
+      if (taskId) await this.awaitTaskReportDrain(taskId);
+    }).catch((err) => {
       log.warn(`Final progress summary failed: ${err instanceof Error ? err.message : String(err)}`);
     });
+    this.inflight.add(finalization);
+    void finalization.finally(() => this.inflight.delete(finalization));
   }
 
   private async runAgent(
@@ -4156,22 +5358,35 @@ export class MultiremiDaemon {
     providerEnv?: Record<string, string>,
     progressSummarizer?: TaskProgressSummarizer | null,
     privateTmpDirectory?: string,
+    claudeOneMillionModels: readonly string[] = [],
+    connectionId: string | null = null,
+    onUsage?: (usage: TaskUsageSnapshot) => void,
+    usageRunId?: string,
+    usageLedger?: TaskUsageLedger,
+    startupSignal: AbortSignal = signal,
+    onProviderEntry?: () => void,
+    antigravity: AntigravityRunGateway | null = null,
+    background: BackgroundAttempt | null = null,
+    localInstructions: string | null = null,
   ): Promise<RunSummary> {
     this.assertWorkspaceRootOwner();
     const agent = task.agent;
     if (!agent) throw new Error(`Task ${task.id} has no agent`);
-    if (!["claude", "codex", "antigravity"].includes(agent.provider)) {
+    if (!["claude", "codex", "grok", "antigravity"].includes(agent.provider)) {
       throw new Error(`Unsupported Bun Multiremi provider: ${agent.provider}`);
     }
 
-    const codeWorkDir = resolvedWorkDir.workDir;
-    // Private task metadata/skills, shared repositories referenced by absolute paths.
-    const workDir = !task.runtimeWorkspaceId && task.issueSessionId && providerHome
-      ? await prepareIssueExecutionDirectory(providerHome)
-      : codeWorkDir;
+    // Repositories and the Wiki working copy live in the subject's shared workspace and are reached by absolute path.
+    const workspaceDir = resolvedWorkDir.workDir;
+    // Holders of one Issue run concurrently on that workspace, so each starts in its lane's private directory,
+    // which holds only what differs per execution: task context, skill directories and attachments.
+    const executionLane = executionLaneForTask(task);
+    const workDir = executionLane
+      ? await prepareIssueExecutionDirectory(this.options.workspacesRoot, executionLane)
+      : workspaceDir;
     // Only create dirs the daemon owns. local_directory paths are validated
     // separately and carry ensureDir=false.
-    if (resolvedWorkDir.ensureDir) mkdirSync(workDir, { recursive: true });
+    if (resolvedWorkDir.ensureDir) await ensureOwnedDirectory(this.options.workspacesRoot, workspaceDir, "Workspace");
     // Unbound Chat retains its on-demand checkout behavior. Bound Chat prepares
     // only explicit Project repositories, fetching only absent worktrees.
     const homepageChat = Boolean(task.chatSessionId && !task.issueId);
@@ -4179,15 +5394,35 @@ export class MultiremiDaemon {
       ? []
       : await this.registerTaskRepos(task.workspaceId, task.repos ?? [], signal);
     const chatRepoAutoCheckout = this.canAutoCheckoutChatRepos(task, resolvedWorkDir);
-    const preparedWorkspace = await this.issueWorkspaceLifecycleLocks.runExclusive(`prepare:${codeWorkDir}`, () =>
-      chatRepoAutoCheckout
+    // The lock is per workspace, so concurrent holders of one Issue prepare it one at a time. That also keeps
+    // two executions from fetching and materializing the Wiki working copy at once.
+    const preparedWorkspace = await this.issueWorkspaceLifecycleLocks.runExclusive(`prepare:${workspaceDir}`, async () => {
+      if (!task.runtimeWorkspaceId && !resolvedWorkDir.localDirectory) {
+        await fetchTaskWikiBodies(workspaceDir, task, path => this.client.readTaskWiki(path, task.authToken ?? "", signal));
+      }
+      const prepared = await (chatRepoAutoCheckout
         ? this.prepareChatTaskWorkspace(task, resolvedWorkDir, signal)
         : this.prepareTaskWorkspace(task, resolvedWorkDir, repoSyncResults, signal));
-    let wikiMaterialized = preparedWorkspace.wikiMaterialized ?? false;
-    if (task.issueSessionId && task.holdsWorkspace !== false && !resolvedWorkDir.localDirectory) {
-      wikiMaterialized = Boolean(await prepareIssueWikiWorkspace(workDir, task));
+      // An intake workspace is a read-only view; its Session still gets the Wiki working copy.
+      return task.issue?.issueKind === "intake" && task.issueSessionId && task.holdsWorkspace !== false && !resolvedWorkDir.localDirectory
+        ? { ...prepared, wikiMaterialized: Boolean(await prepareIssueWikiWorkspace(workspaceDir, task)) }
+        : prepared;
+    });
+    if (!resolvedWorkDir.localDirectory && task.issue?.issueKind !== "intake" && preparedWorkspace.repos.length) {
+      this.recordSubjectUse(task, resolvedWorkDir, preparedWorkspace.repos);
     }
+    const wikiMaterialized = preparedWorkspace.wikiMaterialized ?? false;
+    await this.restoreReclaimedWorkspace(task, resolvedWorkDir);
     this.assertWorkspaceRootOwner();
+    // Issue lanes run in a private execution directory, not workspaceDir. Check
+    // the actual provider cwd too, after preparation and before entering ACP.
+    if (agent.provider === "claude" && task.claudeProfile) {
+      await assertRuntimeClaudeProjectCredentials(workDir, {
+        workspaceRoot: workDir === workspaceDir
+          ? resolvedWorkDir.runtimeWorkspaceRoot ?? (resolvedWorkDir.localDirectory ? undefined : workspaceDir)
+          : workDir,
+      });
+    }
     if (task.chatMessageAttachments?.length) {
       task.chatMessageAttachments = await materializeChatAttachments(
         workDir,
@@ -4197,14 +5432,19 @@ export class MultiremiDaemon {
         signal,
       );
     }
+    /** ADR 0025: the skill directories Remi installed for this attempt, to name its skills in the command catalogue. */
+    let installedSkillDirs: string[] = [];
     try {
       const contextDir = task.runtimeWorkspaceId ? providerHome?.root : workDir;
       if (!contextDir) throw new Error("Runtime workspace requires an isolated provider home");
       writeTaskContext(contextDir, task);
-      if (!task.runtimeWorkspaceId) {
-        writeTaskGcContext(workDir, task, { localDirectory: resolvedWorkDir.localDirectory });
-        writeAgentSkillContext(workDir, task);
-      }
+      // ADR 0023: skills load natively. Remi writes them only where it owns the folder: the daemon's execution
+      // directory, or the provider home when the working directory is the user's own (a runtime workspace or a
+      // Project's local_directory).
+      const userFolder = Boolean(task.runtimeWorkspaceId) || (resolvedWorkDir.localDirectory && workDir === workspaceDir);
+      if (!userFolder) installedSkillDirs = syncAgentSkills(agentSkillRoot(workDir, agent.provider), task);
+      else if (providerHome) installedSkillDirs = syncAgentSkills(providerHomeSkillRoot(providerHome.home, agent.provider), task);
+      else if (agent.skills?.length) log.warn(`Task ${task.id}: no provider home for skills; the user's folder is left as it is`);
       writeProjectResourceContext(contextDir, task);
     } catch (err) {
       log.warn(`Failed to write task context for ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
@@ -4212,9 +5452,32 @@ export class MultiremiDaemon {
     if (task.sessionId || workDir) {
       this.enqueueTaskReport(task.id, "session_pin", { sessionId: task.sessionId, workDir });
     }
+    const promptOptions = {
+      wikiMaterialized,
+      repoCheckouts: preparedWorkspace.checkouts,
+      repoSnapshots: preparedWorkspace.snapshots,
+      repoWarnings: preparedWorkspace.warnings,
+      chatRepoAutoCheckout,
+      workspacePath: workspaceDir,
+      sessionHistoryPaths: task.issueId
+        ? listTaskConversationRoots(this.options.workspacesRoot, task)
+        : undefined,
+    };
+    // ADR 0023: everything fixed for the session is in the provider home's AGENTS.md, rewritten
+    // before every provider start; the turn sends only its new input.
+    const privateChat = isPrivateChatTask(task);
+    const promptArtifact = buildTaskPromptArtifact(task, { ...promptOptions, instructionsMaxBytes: remiInstructionsBudget(localInstructions) });
+    const providerInstructions = providerHome
+      ? writeProviderInstructions(providerHome, { remi: promptArtifact.instructions, local: localInstructions })
+      : null;
 
     // Assemble config via AgentRuntime
     const runtime = new AgentRuntime();
+    // The resources this attempt's process uses: the claimed lane's (adopted or relaunched on them), else its own.
+    const claimedLaneResources = background?.claimed?.resources;
+    const laneResources = !background ? null
+      : claimedLaneResources ? (claimedLaneResources instanceof DaemonLaneResources ? claimedLaneResources : null)
+        : background.own;
     const ctx: EphemeralContext = {
       kind: "ephemeral",
       task,
@@ -4224,115 +5487,275 @@ export class MultiremiDaemon {
         workspacesRoot: this.options.workspacesRoot,
       },
       workDir,
+      workspaceDir,
       signal,
       approvalMode: this.options.approvalMode,
       pluginRuntime,
       providerHome: providerHome ?? undefined,
       providerEnv,
+      // PR 6 §2.4: the lane's process may outlive this attempt and its token; it reads the current one here.
+      ...(laneResources?.taskContextFile() ? { taskContextFile: laneResources.taskContextFile()!.visiblePath } : {}),
     };
     const config = runtime.assemble(ctx);
-    if (config.agentType === "antigravity" && workDir !== codeWorkDir) {
-      config.addDirs = [...new Set([...(config.addDirs ?? []), codeWorkDir])];
+    const failureCredentials = [...Object.entries(config.env ?? {})
+      .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
+      .map(([, value]) => value), ...(antigravity ? [antigravity.apiKey] : [])];
+    const antigravityNative = agent.provider === "antigravity" && task.executionConnection?.mode === "native";
+    if (agent.provider === "antigravity" && !antigravityNative) {
+      if (!antigravity || !providerHome) {
+        throw new Error("[antigravity_gateway_unconfigured] Antigravity runs only through the workspace Model gateway and a session home");
+      }
+      // Without a selection the server silently runs the gateway's first model.
+      if (!config.model) config.model = antigravity.defaultModel;
+      await seedIssueSessionAntigravityHome(providerHome, { cwd: config.cwd, workspaceDir });
     }
 
-    const provider = this.providerFactory({
-      agentType: config.agentType,
-      executable: config.executable,
-      args: config.customArgs,
-      model: task.claudeProfile?.model ?? config.model,
-      ...(task.claudeProfile ? { claudeSettings: { model: task.claudeProfile.model, env: runtimeClaudeProfileRouting(task.claudeProfile) } } : {}),
-      allowedTools: config.allowedTools,
-      cwd: config.cwd,
-      privateTmpDirectory,
-      env: config.env,
-      getMcpServers: () => config.mcpServers,
-      pluginPaths: config.pluginPaths,
-      pluginFingerprint: config.pluginFingerprint,
-      codexHome: config.codexHome,
+    // Preparation above can yield after the start ACK. Shutdown must still
+    // prevent entering a provider, without aborting an already-running turn.
+    startupSignal.throwIfAborted();
+    const claudeSettings = task.claudeProfile
+      ? { model: task.claudeProfile.model, env: runtimeClaudeProfileRouting(task.claudeProfile) } : undefined;
+    const adapter = createAdapter(config.agentType);
+    const wakesModel = adapter.asyncTasks?.wakesModel === true;
+    const launchFingerprint = background ? backgroundLaunchFingerprint({
+      agentType: config.agentType, executable: config.executable, args: config.customArgs, env: config.env,
+      mcpServers: config.mcpServers, allowedTools: config.allowedTools, systemPrompt: config.systemPrompt ?? null,
+      claudeSettings, claudeOneMillionModels,
+      // A process loads its instruction file when it starts: a changed file needs a new one.
+      instructions: providerInstructions,
+    }) : "";
+    // PR 6 §2.4: the lane's parked process is adopted when nothing it fixed at launch changed; else it
+    // is released, and has exited, before another process starts on the same provider session.
+    let chosen: MultiremiTaskProvider | null = null;
+    let laneRecord: LaneRecord | null = null;
+    let adopted = false;
+    let keptResources: LaneResources | null = null;
+    const claimed = background?.claimed ?? null;
+    if (background && claimed) {
+      background.claimed = null;
+      const verdict = this.parkedLanes.adoptVerdict(claimed, {
+        providerSessionId: task.sessionId ?? null, launchFingerprint,
+        reuse: claimed.provider.sessionAlive?.(claimed.poolChatId) === false ? { reuse: false, reason: "process_dead" }
+          : (claimed.provider as MultiremiTaskProvider).reuseCheck?.(claimed.poolChatId, {
+            chatId: claimed.poolChatId, sessionId: task.sessionId, cwd: config.cwd, model: config.model, effort: config.effort,
+            pluginPaths: config.pluginPaths, pluginFingerprint: config.pluginFingerprint, codexHome: config.codexHome,
+          } as Parameters<NonNullable<MultiremiTaskProvider["reuseCheck"]>>[1]) ?? null,
+      });
+      if (verdict.adopt && this.parkedLanes.adopt(claimed, task.id, config.chatId ?? task.id)) {
+        chosen = claimed.provider as MultiremiTaskProvider;
+        laneRecord = claimed;
+        adopted = true;
+        log.info(`Task ${task.id} adopted its lane's parked process`, { event: "background_lane_adopted", doorbell: claimed.doorbell });
+      } else {
+        log.info(`Task ${task.id} releases its lane's parked process: ${verdict.cause ?? "adopt failed"}`,
+          { event: "background_lane_release", reason: verdict.reason ?? "config_changed", cause: verdict.cause ?? null });
+        const { keptResources: kept } = await this.parkedLanes.release(claimed, verdict.reason ?? "config_changed", { keepResources: true });
+        // An earlier close (the daemon's stop, say) disposed them: this attempt's temp dir and lock are gone.
+        if (!kept) throw new Error("[lane_closed] the lane's process closed while this attempt prepared; retry the turn");
+        keptResources = claimed.resources;
+      }
+    }
+    if (!chosen) {
+      const created = this.providerFactory({
+        agentType: config.agentType,
+        executable: config.executable,
+        args: config.customArgs,
+        model: task.claudeProfile?.model ?? config.model,
+        claudeOneMillionModels,
+        ...(claudeSettings ? { claudeSettings } : {}),
+        allowedTools: config.allowedTools,
+        cwd: config.cwd,
+        privateTmpDirectory,
+        env: config.env,
+        getMcpServers: () => config.mcpServers,
+        pluginPaths: config.pluginPaths,
+        pluginFingerprint: config.pluginFingerprint,
+        codexHome: config.codexHome,
+        ...(antigravity ? { gatewayShim: antigravity.run, providerHome: providerHome!.home } : {}),
+        ...(antigravityNative ? { antigravityNative: true, providerHome: providerHome!.home } : {}),
+        // Honoured only by adapters that declare them (PR 5 §1.1, §2.3).
+        nativeSubagentSessions: this.options.nativeSubagents,
+        captureAutonomousRounds: this.options.autonomousRounds,
+        asyncTasks: this.options.asyncTasks,
+        // PR 6 §3.2: the lane registry follows every task of the process.
+        onAsyncTaskChange: this.parkedLanes?.onAsyncTaskChange,
+        onSessionLost: this.parkedLanes?.onSessionLost,
+      });
+      chosen = created;
+      if (background) {
+        laneRecord = this.parkedLanes.begin({
+          lane: background.lane, provider: created, poolChatId: config.chatId ?? task.id, attemptId: task.id,
+          providerSessionId: task.sessionId ?? null, wakesModel, launchFingerprint,
+          resources: keptResources ?? background.own,
+        });
+      }
+    }
+    if (background) background.record = laneRecord;
+    // Before the process sees this attempt's prompt (an adopted one may already be running tools):
+    // the same token, turn and attempt a process spawned for this attempt has in its env.
+    if (laneRecord?.resources instanceof DaemonLaneResources) laneRecord.resources.writeTaskContext({
+      token: config.env?.MULTIREMI_TOKEN || null, turnId: config.env?.MULTIREMI_TURN_ID || null,
+      attemptId: config.env?.MULTIREMI_ATTEMPT_ID || task.id,
     });
+    const provider: MultiremiTaskProvider = chosen;
+    this.liveUpdateProviders.set(provider, config.chatId ?? task.id);
     if (!provider.sendStream) {
       throw new Error(`Provider ${agent.provider} does not support streaming`);
     }
-    let output = "";
-    let sawCompaction = false;
-    let seq = 1;
-    const nextSeq = () => seq++;
-    let messageBatcher: TaskMessageBatcher | null = null;
-    const nextExternalSeq = () => {
-      // Human-request and steer messages use a separate producer. Flush ACP
-      // chunks first so their durable record and sequence stay chronological.
-      messageBatcher?.flush();
-      return nextSeq();
-    };
-    const resetElicitationContextOffset = this.attachHumanInputHandlers(provider, task, signal, nextExternalSeq);
-    let finalSessionId: string | null = task.sessionId;
-    let usage: TaskUsageEntry[] = [];
-    const toMessages = createEventMapper(createAdapter(config.agentType));
-    messageBatcher = new TaskMessageBatcher({
-      emit: (messages) => {
-        const sequenced = messages.map((message) => ({ ...message, seq: nextSeq() }));
-        this.enqueueTaskReport(task.id, "messages", { messages: sequenced });
-        progressSummarizer?.onMessages(sequenced);
+    /** Background tasks this attempt tracks (the provider keeps a registry). */
+    const tracksTasks = this.options.asyncTasks && typeof provider.listAsyncTasks === "function"
+      && typeof provider.settleAsyncTasks === "function" && !!adapter.asyncTasks;
+    // The sidebar's running-subagent badge (PR 5 §3.8): top-level count, else nested; and (PR 6) running background tasks.
+    const activity = new TaskActivityReporter((running, tasks) => this.client.reportTaskActivity(task.id, running, this.options.runtimeId, tasks));
+    this.activityReporters.add(activity);
+    // One writer per attempt: ACP updates, permissions, questions and steers all
+    // go through the translator, which flushes pending deltas before any other
+    // fact, so the trace keeps their order (PR 2 §2).
+    const previousTrace = this.executionGenerations.has(task.id)
+      ? foldStoredTrace(this.ensureTrace().store, task.id).fold.state() : null;
+    const trace = createTraceTranslator(createAdapter(config.agentType), (events) => {
+      try {
+        const stored = this.ensureTrace().append(task.id, this.options.runtimeId!, events);
+        progressSummarizer?.onEvents(stored);
+      } catch (err) {
+        log.warn(`Failed to append trace events for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, {
+      ...(previousTrace?.turn ? { resume: { turn: previousTrace.turn, items: previousTrace.items,
+        runtime: this.restartTraceIdentities.get(task.id)?.state } } : {}),
+      onResumeWarning: message => log.warn(`Task ${task.id}: ${message}`),
+      // Legacy (untyped) provider failures arrive as message text: keep secrets
+      // out of the trace, and keep the failure its own message for the legacy
+      // failure check below (it reads the round's last item).
+      redactText: (text) => provider.typedSessionFailures === false && classifyLegacyProviderFailure(text)
+        ? redactProviderErrorText(text, failureCredentials) : text,
+      standaloneText: (text) => provider.typedSessionFailures === false && classifyLegacyProviderFailure(text) !== null,
+      onActivity: (counts) => activity.update(counts.subagentsTop || counts.subagentsNested, tracksTasks ? counts.backgroundTasks : undefined),
+      // A task an earlier attempt of the lane started is named from the provider's registry (§2.4).
+      backgroundTaskInfo: (taskId) => {
+        const known = provider.listAsyncTasks?.({ chatId: config.chatId })?.find((candidate) => candidate.id === taskId);
+        return known ? { name: known.name, taskType: known.taskType, description: known.description, toolCallId: known.toolCallId,
+          canStop: known.canStop, startedAt: known.startedAt, sessionId: known.sessionId } : null;
       },
     });
+    if (laneRecord) {
+      this.parkedLanes.attach(laneRecord, {
+        stopRequested: (taskId, request) => this.recordTrace(task.id, () => trace.backgroundTaskStopRequested(taskId, request)),
+        stopResult: (taskId, outcome) => this.recordTrace(task.id, () => trace.backgroundTaskStopResult(taskId, outcome)),
+        output: (taskId, tail, truncated) => this.recordTrace(task.id, () => trace.backgroundTaskOutput(taskId, tail, truncated)),
+      });
+    }
+    const resetElicitationContextOffset = this.attachHumanInputHandlers(provider, task, signal, trace,
+      laneRecord ? this.parkedLanes.handlerSink(laneRecord) : undefined);
+    let finalSessionId: string | null = task.sessionId;
+    const ledger = usageLedger ?? new TaskUsageLedger(connectionId, usageRunId);
+    const checkpointUsage = (snapshot: TaskUsageSnapshot | null) => {
+      if (!snapshot) return;
+      onUsage?.(snapshot);
+      this.enqueueTaskReport(task.id, "usage", { usageSnapshot: snapshot });
+    };
+    let turnIndex = 0;
+    let unreadReminders = 0;
+    let unreadReply: string | null = null;
+    // Record when the provider failed, before cleanup can race with stop().
+    let providerFailureDuringStop: boolean | null = null;
 
-    // Steer channel: the feed polls for mid-run user directives; each batch
-    // soft-interrupts the streaming turn (ACP session/cancel) and is injected
-    // as the next prompt on the same provider session, so the transcript and
-    // all completed work survive. `force_answer` additionally arms a grace
-    // deadline after which the run wraps up with the output produced so far.
-    const steerFeed = new TaskSteerFeed(this.client, task.id, this.options.steerPollIntervalMs, (err) => {
-      log.warn(`Steer poll failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    // Steer channel: the feed receives pushed user directives. A provider that
+    // steers natively gets each batch injected into the streaming prompt
+    // (ADR 0020, `SteerPump`); otherwise, or when the native call does not
+    // inject, the batch soft-interrupts the turn (ACP session/cancel) and is
+    // injected as the next prompt on the same provider session, so the
+    // transcript and all completed work survive. `force_answer` additionally
+    // arms a grace deadline after which the run wraps up with the output so far.
+    // PR 6 §2.6: a doorbell steered into this attempt reaches the model through the bridge itself (Claude's
+    // own task notification), so it is recorded and acknowledged, never prompted.
+    let onDoorbellSteer: ((message: MultiremiTaskSteerMessage) => void) | null = null;
+    const earlyDoorbellSteers: MultiremiTaskSteerMessage[] = [];
+    // Its `metadata.background_task`, when there; a projection that drops message metadata still shows a
+    // platform message with the doorbell's text on a lane whose process outlived its attempts.
+    const isDoorbellSteer = (message: MultiremiTaskSteerMessage) => isBackgroundDoorbellMessage((message as DaemonSteerMessage).metadata,
+      () => laneRecord !== null && message.authorType === "system" && message.kind === "steer"
+        && message.content.includes(BACKGROUND_DOORBELL_PREFIX));
+    const divertDoorbell = (message: MultiremiTaskSteerMessage) => {
+      if (onDoorbellSteer) onDoorbellSteer(message);
+      else earlyDoorbellSteers.push(message);
+    };
+    const steerSource: TaskSteerSource = {
+      pendingTaskSteerMessages: (id) => this.taskDownlinks.pendingTaskSteerMessages(id).filter((message) => {
+        if (!isDoorbellSteer(message)) return true;
+        divertDoorbell(message);
+        return false;
+      }),
+      subscribeTaskSteerMessages: (id, listener) => this.taskDownlinks.subscribeTaskSteerMessages(id,
+        (message) => isDoorbellSteer(message) ? divertDoorbell(message) : listener(message)),
+    };
+    const steerFeed = new TaskSteerFeed(steerSource, task.id);
     let forceAnswerDeadline: number | null = null;
     let forceAnswerExpired = false;
+    let pump: SteerPump | null = null;
+    // Arms the current round's grace timer; null between rounds.
+    let armRoundGrace: (() => void) | null = null;
+    // PR 6 §2.2: what the attempt's end did with its background tasks (set inside the run loop).
+    let backgroundDecision: "park" | "stopped" | null = null;
+    const backgroundDecisionOf = () => backgroundDecision;
+    let endBackgroundTasksOnce: ((options: { drain: boolean; reason: "turn_end" | "cancelled" }) => Promise<void>) | null = null;
 
     try {
       const session = new AgentSession(provider as any, config);
-      messageBatcher.push([{ type: "execution", meta: { agentName: agent.name, provider: config.agentType } }]);
-      const promptArtifact = buildTaskPromptArtifact(task, {
-        wikiMaterialized,
-        repoCheckouts: preparedWorkspace.checkouts,
-        repoSnapshots: preparedWorkspace.snapshots,
-        repoWarnings: preparedWorkspace.warnings,
-        chatRepoAutoCheckout,
-        issueWorkspacePath: codeWorkDir,
-        sessionHistoryPaths: task.issueId && this.options.workspacesRoot
-          ? listIssueSessionRuntimeRoots(this.options.workspacesRoot, task.issueId).map((root) => root.root)
-          : undefined,
+      const turnInput = task as MultiremiTaskWithAgent & Partial<DaemonTurnInput>;
+      trace.start({
+        attemptId: task.id, turnId: turnInput.turn_id ?? null, agentId: agent.id, agentName: agent.name ?? null,
+        provider: config.agentType, requestedModel: task.claudeProfile?.model ?? config.model ?? null,
+        input: Array.isArray(turnInput.input_messages) ? turnInput.input_messages : [],
+        // What the provider is prompted with, not the projected bodies with their range record.
+        text: promptArtifact.prompt,
+        fallbackText: task.prompt ?? null, attachments: traceAttachments(task.chatMessageAttachments),
       });
       this.enqueueTaskReport(task.id, "prompt", {
         mode: promptArtifact.mode,
         prompt: promptArtifact.prompt,
         sha256: promptArtifact.sha256,
+        // ADR 0023: Remi's part of the AGENTS.md in effect, for the transcript's session notes. Never the local context.
+        instructions: promptArtifact.instructions,
       });
+      if (previousTrace?.turn && this.resumedUsageRuns.has(task.id)) trace.restarted(this.executionGenerations.get(task.id)!);
       signal.throwIfAborted();
       steerFeed.start();
       let prompt = promptArtifact.prompt;
+      // ADR 0023: a steer is the new messages, labelled as the turn input labels them.
+      const steerPrompt = (messages: Parameters<typeof buildSteerInjectionPrompt>[0]) =>
+        buildSteerInjectionPrompt(messages.map(message => ({ ...message, content: withSteerIdentity(message.content, message.id) })), { agentId: agent.id, alwaysLabel: !privateChat, provider: agent.provider });
 
-      // Every steer batch flows through here exactly once (injected into the
-      // next turn, or — after the force-answer grace elapsed — recorded and
-      // consumed without injection so completion can proceed).
+      // Every steer batch flows through here exactly once: injected into the
+      // running prompt (`native`), sent as the next prompt (`reprompt`), or —
+      // after the force-answer grace elapsed — recorded and consumed without
+      // injection (`none`) so completion can proceed.
       const recordedSteerIds = new Set<string>();
-      const recordSteerBatch = async (messages: MultiremiTaskSteerMessage[], injected: boolean): Promise<void> => {
+      let injectedSteerIds: string[] = [];
+      const recordSteerBatch = async (messages: MultiremiTaskSteerMessage[], via: TraceSteerResult["via"]): Promise<void> => {
+        const ids = messages.map((m) => m.id);
+        // A range hint must reach the provider before its CLI read can satisfy
+        // the server's input barrier. Acknowledging while building the prompt
+        // would fail before the unread ordinary messages could ever be read.
+        // Both injected and force-answer-expired batches belong to the final
+        // receipt. Never wait for their ACK before the reply is durable.
+        injectedSteerIds.push(...ids);
         for (const message of messages) recordedSteerIds.add(message.id);
-        // Immunize the feed against its own in-flight poll: a GET that was
-        // already on the wire when these ids were handled must not re-enqueue
+        // A reconnect replay of an already-handled id must not re-enqueue
         // them, or the stale duplicate would trip the next turn's interrupt.
         steerFeed.markHandled(messages.map((m) => m.id));
-        await this.client.consumeTaskSteerMessages(task.id, messages.map((m) => m.id)).catch((err) => {
-          log.warn(`Failed to mark steer consumed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
-        });
-        for (const message of messages) {
-          await this.reportHumanRequestMessage(task.id, nextExternalSeq(), "steer", message.content, {
-            steer_id: message.id,
-            steer_kind: message.kind,
-            author_type: message.authorType,
-            author_id: message.authorId,
-            injected,
-          });
+        for (const [result, group] of steerResultGroups(messages, via, (id) => pump?.takeFallback(id) ?? null)) {
+          // Each message as the agent got it: no range record where the input is native or complete.
+          const received = group.map((message) => ({ ...message, content: steerMessageText(message.content) }));
+          this.recordTrace(task.id, () => trace.steer(received, result));
         }
       };
+      onDoorbellSteer = (message) => {
+        if (recordedSteerIds.has(message.id)) return;
+        void recordSteerBatch([message], "native").catch((error) =>
+          log.warn(`Task ${task.id}: recording a doorbell steer failed: ${error instanceof Error ? error.message : String(error)}`));
+      };
+      for (const message of earlyDoorbellSteers.splice(0)) onDoorbellSteer(message);
       const injectSteerBatch = async (messages: MultiremiTaskSteerMessage[]): Promise<void> => {
         if (messages.some((m) => m.kind === "force_answer") && forceAnswerDeadline == null) {
           forceAnswerDeadline = Date.now() + Math.max(0, this.options.forceAnswerGraceMs);
@@ -4341,76 +5764,338 @@ export class MultiremiDaemon {
           messages, workDir, task.id,
           (id) => this.client.downloadTaskAttachment(id, task.authToken ?? "", signal), signal,
         );
-        prompt = buildSteerInjectionPrompt(preparedMessages);
-        await recordSteerBatch(messages, true);
+        prompt = steerPrompt(preparedMessages);
+        await recordSteerBatch(messages, "reprompt");
         log.info(`Injected ${messages.length} steer message(s) into task ${task.id}`);
       };
-      // Authoritative server read; a swallowed error here is safe because the
-      // completeTask steer barrier still refuses to strand a pending steer.
+      if (provider.steer) {
+        const steer = provider.steer.bind(provider);
+        pump = new SteerPump({
+          feed: steerFeed,
+          steer: (text) => steer(text, { chatId: config.chatId }),
+          // Same framing as the re-prompt; attachments become text references.
+          prepare: async (messages) => steerPrompt(await materializeTaskSteerAttachments(
+            messages, workDir, task.id,
+            (id) => this.client.downloadTaskAttachment(id, task.authToken ?? "", signal), signal,
+          )),
+          injected: (messages) => recordSteerBatch(messages, "native"),
+          // The native "[Deliver now]" is on its way into this prompt: start the grace now.
+          armForceAnswer: () => {
+            if (forceAnswerDeadline == null) forceAnswerDeadline = Date.now() + Math.max(0, this.options.forceAnswerGraceMs);
+            armRoundGrace?.();
+          },
+          forceAnswerExpired: () => forceAnswerExpired,
+          log: (message) => log.info(`Task ${task.id}: ${message}`),
+        });
+      }
+      // The completion transaction remains the authoritative steer barrier.
       const fetchPendingSteer = async (): Promise<MultiremiTaskSteerMessage[]> => {
-        try {
-          const pending = await this.client.listPendingTaskSteerMessages(task.id);
-          return pending.filter((m) => !recordedSteerIds.has(m.id));
-        } catch (err) {
-          log.warn(`Pending-steer check failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
-          return [];
-        }
+        return steerSource.pendingTaskSteerMessages(task.id).filter((m) => !recordedSteerIds.has(m.id));
       };
 
+      /** A Claude task the registry saw end (completed or failed) that the trace still shows running: its cycle is owed (§4.2). */
+      const taskEndUnseen = (): boolean => tracksTasks && wakesModel && !!provider.listAsyncTasks?.({ chatId: config.chatId })
+        .some((known) => (known.state === "completed" || known.state === "failed")
+          && trace.runningBackgroundTasks.some((item) => item.task_id === known.id));
+
+      // PR 6 §2.2: the attempt's background tasks at its end. They are handed off to a parked
+      // process when the lane may park, else stopped (Issue lanes, no cap, no room).
+      const consumeBackgroundFrames = async (events: AsyncGenerator<ProviderEvent>): Promise<void> => {
+        for await (const event of events) {
+          const usageUnits = (event as { _meta?: Record<string, unknown> })._meta?.remiUsageUnits;
+          if (Array.isArray(usageUnits)) checkpointUsage(ledger.observe((usageUnits as TaskUsageUnit[]).map(unit => ({
+            ...unit, provider: agent.provider, requestedModel: unit.requestedModel ?? config.model ?? null,
+          }))));
+          trace.acp(event);
+        }
+        this.recordTrace(task.id, () => trace.promptEnded({ aborted: false }));
+      };
+      const endBackgroundTasks = async (options: { drain: boolean; reason: "turn_end" | "cancelled" }): Promise<void> => {
+        if (!tracksTasks || !provider.settleAsyncTasks || !provider.listAsyncTasks) return;
+        const chatId = config.chatId;
+        if (options.drain && !wakesModel) {
+          // Codex announces a terminal left running after the prompt resolved (§1.2); it starts no cycle,
+          // so replaying what arrived since is safe.
+          await consumeBackgroundFrames(provider.settleAsyncTasks({ chatId, stopRunning: false,
+            drainMs: this.options.backgroundDrainMs, timeoutMs: this.options.backgroundDrainMs }));
+        } else if (wakesModel) {
+          // Claude's frames since the last stream may open a cycle the next attempt replays: they stay
+          // captured, and the trace takes the tasks' ends from the provider's registry instead.
+          for (const known of provider.listAsyncTasks({ chatId })) {
+            const open = trace.runningBackgroundTasks.some((item) => item.task_id === known.id);
+            if (open && known.state !== "running" && known.state !== "paused") {
+              trace.acp({ sessionUpdate: "async_task_state_update", asyncTaskId: known.id, state: known.state,
+                ...(known.summary ? { summary: known.summary } : {}) } as unknown as ProviderEvent);
+            }
+          }
+        }
+        const live = provider.listAsyncTasks({ chatId }).filter((candidate) => candidate.state === "running" || candidate.state === "paused");
+        if (!live.length) {
+          backgroundDecision = null;
+          return;
+        }
+        const verdict = laneRecord ? this.parkedLanes.canPark(laneRecord) : { park: false as const, reason: null };
+        if (verdict.park) {
+          this.parkedLanes.handOff(laneRecord!);
+          this.recordTrace(task.id, () => trace.backgroundTasksHandedOff());
+          backgroundDecision = "park";
+          return;
+        }
+        if (laneRecord) this.parkedLanes.noteStopReason(laneRecord, live.map((candidate) => candidate.id),
+          verdict.reason ?? options.reason);
+        this.recordTrace(task.id, () => trace.backgroundTasksEnding(options.reason));
+        const requestedAt = new Date().toISOString();
+        for (const candidate of live) {
+          this.recordTrace(task.id, () => trace.backgroundTaskStopRequested(candidate.id, { by: "remi", requested_at: requestedAt }));
+        }
+        await consumeBackgroundFrames(provider.settleAsyncTasks({ chatId, stopRunning: true, timeoutMs: LANE_STOP_TIMEOUT_MS }));
+        for (const candidate of provider.listAsyncTasks({ chatId })) {
+          if (candidate.stop && live.some((running) => running.id === candidate.id)) {
+            this.recordTrace(task.id, () => trace.backgroundTaskStopResult(candidate.id, candidate.stop!.outcome));
+          }
+        }
+        backgroundDecision = "stopped";
+      };
+      endBackgroundTasksOnce = endBackgroundTasks;
+
+      // PR 6 §2.5: a doorbell turn attaches to the parked process. The cycle Claude started when its
+      // task ended replays first; other input merged into the turn is prompted after it; a cycle
+      // that never came leaves the doorbell itself to be prompted, so the turn always gets a reply.
+      const inputMessages = Array.isArray(turnInput.input_messages) ? turnInput.input_messages : [];
+      // The doorbell is its `metadata.background_task`, when there. An offer projection that drops message
+      // metadata still shows a platform status message with the doorbell's text while this lane's doorbell is out.
+      const attachedDoorbell = adopted && laneRecord?.doorbell === "attached";
+      const isDoorbellInput = (message: UnifiedMessage) => isBackgroundDoorbellMessage(message.metadata,
+        () => attachedDoorbell && message.sender_type === "platform" && message.message_kind === "status"
+          && message.body_md.includes(BACKGROUND_DOORBELL_PREFIX));
+      const doorbellInput = inputMessages.filter(isDoorbellInput);
+      let skipFirstPrompt = false;
+      let providerEnteredEarly = false;
+      if (adopted && doorbellInput.length && wakesModel && provider.listenAutonomous) {
+        startupSignal.throwIfAborted();
+        onProviderEntry?.();
+        providerEnteredEarly = true;
+        const listen = new AbortController();
+        const stopListening = () => listen.abort();
+        signal.addEventListener("abort", stopListening, { once: true });
+        steerFeed.setInterrupt(stopListening);
+        let cycleFrames = 0;
+        try {
+          for await (const event of provider.listenAutonomous({ chatId: config.chatId, signal: listen.signal,
+            idleMs: this.options.autonomousIdleMs })) {
+            if (isAutonomousActivity(event)) cycleFrames++;
+            const usageUnits = (event as { _meta?: Record<string, unknown> })._meta?.remiUsageUnits;
+            if (Array.isArray(usageUnits)) checkpointUsage(ledger.observe((usageUnits as TaskUsageUnit[]).map(unit => ({
+              ...unit, provider: agent.provider, requestedModel: unit.requestedModel ?? config.model ?? null,
+            }))));
+            trace.acp(event);
+          }
+        } catch (err) {
+          log.warn(`Task ${task.id}: the attached cycle failed: ${redactProviderErrorText(err instanceof Error ? err.message : String(err), failureCredentials)}`);
+        } finally {
+          this.recordTrace(task.id, () => trace.promptEnded({ aborted: false }));
+          steerFeed.setInterrupt(null);
+          signal.removeEventListener("abort", stopListening);
+        }
+        const attachedResponse = provider.getLastResponse?.() as AgentResponse | null | undefined;
+        if (attachedResponse?.model) this.recordTrace(task.id, () => trace.model(attachedResponse.model!));
+        checkpointUsage(ledger.observe(responseToUsageUnits(agent.provider, attachedResponse, config.model, "attach")));
+        // Other input merged into the doorbell turn: what woke the agent besides the doorbell (§2.6).
+        const others = inputMessages.filter((message) => !isDoorbellInput(message) && message.to_agent_id === agent.id
+          && message.wake_applied === "now");
+        if (!cycleFrames) {
+          log.info(`Task ${task.id}: background_cycle_missing; prompting the doorbell`, { event: "background_cycle_missing" });
+        } else if (others.length) {
+          // The doorbell was answered by the cycle: it is neither the request nor a triggering message now.
+          const doorbellIds = new Set(doorbellInput.map((message) => message.id));
+          const projected = (task as AgentTask).sessionProjection ?? (task as AgentTask).session_projection;
+          const projection = projected?.jsonl ? { ...projected, jsonl: projected.jsonl.split("\n").filter((line) => {
+            try { return !doorbellIds.has(JSON.parse(line).id); } catch { return true; }
+          }).join("\n") } : projected;
+          prompt = buildTaskPromptArtifact({ ...task, input_messages: others,
+            ...(projection ? { sessionProjection: projection, session_projection: projection } : {}) } as MultiremiTaskWithAgent,
+          promptOptions).prompt;
+        } else {
+          skipFirstPrompt = true;
+        }
+      }
+
+      // ADR 0023: the turn's images go with its first prompt as image blocks; their lines stay in the text.
+      const firstPromptImages = turnImages(task.chatMessageAttachments);
+      // ADR 0025: a `/compact` turn that only compacts has no reply text; it is still a success.
+      const compactCommandInput = !skipFirstPrompt && isCompactCommand(prompt);
+      const remindUnreadInput = (err: unknown, candidate: string): boolean => {
+        if (!(err instanceof DaemonProtocolRpcError) || err.code !== "input_unread") return false;
+        unreadReminders++;
+        prompt = err.detail ?? "Read the folded input continuously from the original --from, then give your final reply again.";
+        if (laneRecord) this.parkedLanes.cancelHandOff(laneRecord);
+        backgroundDecision = null;
+        this.recordTrace(task.id, () => trace.steer([{
+          id: `input-unread:${unreadReminders}`, taskId: task.id, authorType: "platform", authorId: null,
+          kind: "steer", content: prompt, createdAt: new Date().toISOString(), consumedAt: null,
+        }], { via: "reprompt", native_outcome: null, error: null }));
+        unreadReply = candidate;
+        return true;
+      };
       while (true) {
+        turnIndex++;
+        config.media = turnIndex === 1 && firstPromptImages.length ? firstPromptImages : undefined;
         const turnAbort = new AbortController();
+        // Before any abort can fire: the bridge's reports of the calls the abort
+        // cuts short arrive between here and `promptEnded`.
+        turnAbort.signal.addEventListener("abort", () => this.recordTrace(task.id, () => trace.roundAborted()), { once: true });
         const onTaskAbort = () => turnAbort.abort();
         signal.addEventListener("abort", onTaskAbort, { once: true });
         if (signal.aborted) turnAbort.abort();
         config.signal = turnAbort.signal;
         let graceTimer: ReturnType<typeof setTimeout> | null = null;
-        if (forceAnswerDeadline != null) {
+        const armGrace = () => {
+          if (graceTimer || forceAnswerDeadline == null) return;
           graceTimer = setTimeout(() => {
             forceAnswerExpired = true;
             turnAbort.abort();
           }, Math.max(0, forceAnswerDeadline - Date.now()));
-        }
-        steerFeed.setInterrupt(() => turnAbort.abort());
+        };
+        armGrace();
+        armRoundGrace = armGrace;
+        const roundPump = pump;
+        roundPump?.beginRound(() => turnAbort.abort());
+        // A native steer joins only a prompt that is already on the wire.
+        config.onPromptStarted = roundPump ? () => roundPump.promptStarted() : undefined;
+        steerFeed.setInterrupt(roundPump ? () => roundPump.interrupt() : () => turnAbort.abort());
         let turnError: unknown = null;
+        providerFailureDuringStop = null;
+        // The attached cycle already answered a doorbell turn with no other input (§2.5).
+        const skipRound = turnIndex === 1 && skipFirstPrompt;
         try {
           resetElicitationContextOffset();
-          for await (const event of session.run(prompt)) {
-            const emitted = toMessages(event);
-            for (const message of emitted) {
-              if (message.type === "compaction") sawCompaction = true;
-              // Assistant text becomes the task result / issue activity body.
-              if (message.type === "text" && message.content) output += message.content;
-            }
-            // The front buffer coalesces token chunks for up to 200ms while
-            // tool/lifecycle boundaries flush immediately. Delivery remains
-            // enqueue-only, so a transient API outage never closes the provider.
-            messageBatcher.push(emitted);
+          if (turnIndex === 1 && !providerEnteredEarly) {
+            startupSignal.throwIfAborted();
+            onProviderEntry?.();
+          }
+          if (!skipRound) for await (const event of session.run(prompt)) {
+            // Billing stays on `_meta.remiUsageUnits` to the ledger; the trace
+            // keeps only context occupancy (billing-only frames are dropped).
+            const usageUnits = (event as { _meta?: Record<string, unknown> })._meta?.remiUsageUnits;
+            if (Array.isArray(usageUnits)) checkpointUsage(ledger.observe((usageUnits as TaskUsageUnit[]).map(unit => ({
+              ...unit, provider: agent.provider, requestedModel: unit.requestedModel ?? config.model ?? null,
+            }))));
+            // Token deltas coalesce for up to 200ms while item boundaries flush
+            // immediately. Delivery remains enqueue-only, so a transient API
+            // outage never closes the provider.
+            trace.acp(event);
           }
         } catch (err) {
           turnError = err;
+          providerFailureDuringStop = this.pollAbort.signal.aborted && isShutdownInterruption(err);
         } finally {
-          messageBatcher.flush();
+          // A steer interrupt aborts the round: its still-open tools end `stopped`.
+          if (!skipRound) this.recordTrace(task.id, () => trace.promptEnded({ aborted: turnAbort.signal.aborted }));
           steerFeed.setInterrupt(null);
+          roundPump?.endRound();
+          armRoundGrace = null;
           signal.removeEventListener("abort", onTaskAbort);
           if (graceTimer) clearTimeout(graceTimer);
         }
-        const last = provider.getLastResponse?.() as AgentResponse | null | undefined;
-        if (last?.model) {
-          messageBatcher.push([{ type: "execution", meta: { provider: config.agentType, model: last.model, modelName: null } }]);
-        }
+        let last = provider.getLastResponse?.() as AgentResponse | null | undefined;
+        if (last?.model) this.recordTrace(task.id, () => trace.model(last!.model!));
+        // ADR 0025: the command list the agent advertised so far (at setup, or again during the prompt).
+        this.noteSlashCommands(task.id, agent.provider, provider.availableCommands?.(config.chatId) ?? null,
+          agent.skills ?? [], installedSkillDirs);
         finalSessionId = last?.sessionId ?? finalSessionId;
-        usage = mergeTaskUsageEntries(usage, responseToUsage(agent.provider, last, config.model));
+        if (laneRecord) this.parkedLanes.setProviderSession(laneRecord, finalSessionId);
+        checkpointUsage(ledger.observe(responseToUsageUnits(agent.provider, last, config.model, `turn:${turnIndex}`)));
         // Resume by provider session id if the follow-up turn needs a fresh
         // ACP process (e.g. the previous one died between turns).
         if (finalSessionId) config.sessionId = finalSessionId;
         if (signal.aborted) throw (turnError ?? new Error("Cancelled"));
+        // A native call still in flight may yet inject its batch or hand it
+        // back for the re-prompt below; neither may be missed.
+        await roundPump?.idle();
+        // Claude may still owe this attempt a late answer (PR 5 §2.5): a
+        // background subagent that ended before the prompt's result starts a
+        // model cycle of its own. Listen for it in the same attempt, unless a
+        // steer, a wrap-up or the cancel came first; the bridge already holds a
+        // prompt while such a subagent still runs.
+        let autonomousRounds = 0;
+        // Rounds in which the bridge actually did something (an empty wait is not one).
+        let activeAutonomousRounds = 0;
+        // A wrap-up in effect (a force_answer was injected) bounds the wait by its grace deadline.
+        const wrapUpOver = () => forceAnswerDeadline != null && Date.now() >= forceAnswerDeadline;
+        while (this.options.autonomousRounds && provider.listenAutonomous && !turnError && !turnAbort.signal.aborted
+          && !signal.aborted && !forceAnswerExpired && !wrapUpOver()
+          && !steerFeed.hasPending && (trace.owesAutonomousRound || taskEndUnseen()) && autonomousRounds < AUTONOMOUS_MAX_ROUNDS) {
+          autonomousRounds++;
+          const listen = new AbortController();
+          const stopListening = () => listen.abort();
+          signal.addEventListener("abort", stopListening, { once: true });
+          // A steer or a wrap-up ends the wait; no prompt runs, so the pump has no round.
+          steerFeed.setInterrupt(stopListening);
+          let roundActivity = 0;
+          let listenFailed = false;
+          try {
+            for await (const event of provider.listenAutonomous({ chatId: config.chatId, signal: listen.signal,
+              idleMs: this.options.autonomousIdleMs, ...(forceAnswerDeadline != null ? { deadline: forceAnswerDeadline } : {}) })) {
+              if (isAutonomousActivity(event)) roundActivity++;
+              const usageUnits = (event as { _meta?: Record<string, unknown> })._meta?.remiUsageUnits;
+              if (Array.isArray(usageUnits)) checkpointUsage(ledger.observe((usageUnits as TaskUsageUnit[]).map(unit => ({
+                ...unit, provider: agent.provider, requestedModel: unit.requestedModel ?? config.model ?? null,
+              }))));
+              trace.acp(event);
+            }
+          } catch (err) {
+            // A failed listen never fails the turn: it completes with what it has.
+            listenFailed = true;
+            log.warn(`Task ${task.id}: autonomous round failed: ${redactProviderErrorText(err instanceof Error ? err.message : String(err), failureCredentials)}`);
+          } finally {
+            this.recordTrace(task.id, () => trace.promptEnded({ aborted: false }));
+            steerFeed.setInterrupt(null);
+            signal.removeEventListener("abort", stopListening);
+          }
+          last = (provider.getLastResponse?.() as AgentResponse | null | undefined) ?? last;
+          if (last?.model) this.recordTrace(task.id, () => trace.model(last!.model!));
+          finalSessionId = last?.sessionId ?? finalSessionId;
+          checkpointUsage(ledger.observe(responseToUsageUnits(agent.provider, last, config.model, `turn:${turnIndex}:auto:${autonomousRounds}`)));
+          if (roundActivity) activeAutonomousRounds++;
+          if (listenFailed) break;
+          if (!roundActivity) {
+            // R1: the owed notification was consumed inside the prompt after all (unless a steer, a cancel or a wrap-up stopped the wait).
+            if (!listen.signal.aborted && !wrapUpOver()) {
+              log.info(`Task ${task.id}: autonomous_wait_empty after ${this.options.autonomousIdleMs}ms (round ${autonomousRounds})`);
+            }
+            break;
+          }
+        }
+        if (signal.aborted) throw (turnError ?? new Error("Cancelled"));
+        // The grace ran out while waiting: deliver what there is, as a round's grace timer would.
+        if (autonomousRounds > 0 && wrapUpOver()) forceAnswerExpired = true;
         const steered = steerFeed.take().filter((m) => !recordedSteerIds.has(m.id));
-        if (turnError && !turnAbort.signal.aborted) throw turnError;
+        if (turnError && !turnAbort.signal.aborted) {
+          if (unreadReply !== null) {
+            await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: true }, unreadReply, finalSessionId, workDir);
+            return { output: unreadReply, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: true };
+          }
+          throw turnError;
+        }
+        const lastItem = trace.lastItem;
+        if (!turnAbort.signal.aborted && provider.typedSessionFailures === false && lastItem?.type === "agent_message") {
+          const error = redactProviderErrorText(lastItem.text, failureCredentials);
+          const failureReason = classifyLegacyProviderFailure(error);
+          if (failureReason) {
+            if (unreadReply !== null) {
+              await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: true }, unreadReply, finalSessionId, workDir);
+              return { output: unreadReply, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: true };
+            }
+            await this.client.pinTaskSession(task.id, finalSessionId, workDir);
+            return { output: error, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: false, failureReason };
+          }
+        }
+        unreadReply = null;
         if (forceAnswerExpired) {
-          log.warn(`Task ${task.id} force-answer grace elapsed; delivering accumulated output`);
+          log.warn(`Task ${task.id} force-answer grace elapsed; delivering last reply`);
           // Steers that arrived too late to act on are still recorded/consumed
           // so the audit trail is complete and completion is not blocked.
-          if (steered.length) await recordSteerBatch(steered, false);
+          if (steered.length) await recordSteerBatch(steered, "none");
         } else {
           if (steered.length) {
             await injectSteerBatch(steered);
@@ -4418,7 +6103,7 @@ export class MultiremiDaemon {
           }
           if (turnError) throw turnError;
           // The turn ended naturally. A steer accepted by the server but not
-          // yet seen by the 2.5s poll must not be stranded: check once more
+          // yet seen by the push must not be stranded: check once more
           // before trying to finish.
           const pending = await fetchPendingSteer();
           if (pending.length) {
@@ -4427,103 +6112,144 @@ export class MultiremiDaemon {
           }
         }
 
+        // PR 6 §2.2: hand the running background tasks off (the process parks) or stop them,
+        // before the final reply is picked and the trace closes.
+        await endBackgroundTasks({ drain: true, reason: "turn_end" });
+
         // Finalize while the provider session is still open, so a steer that
         // races completion (completeTask steer barrier → 409 steer_pending)
         // can still be injected as another turn instead of failing the run.
-        if (!output.trim() && !(last?.text ?? "").trim() && sawCompaction) {
+        // The final reply is decided once per completion attempt (spec §2.4).
+        const settled = this.recordTrace(task.id, () => trace.settle()) ?? { itemId: null, text: null };
+        const noReplyText = !settled.text?.trim() && !(last?.text ?? "").trim();
+        // ADR 0025: both bridges answer `/compact` with compaction updates only. Only a turn whose
+        // input was that command, that compacted, and that nothing else joined (no steer, no
+        // re-prompt, no autonomous round) may end without reply text; any other run still fails.
+        const compactCommandTurn = compactCommandInput && trace.sawCompaction && turnIndex === 1
+          && recordedSteerIds.size === 0 && activeAutonomousRounds === 0;
+        if (trace.sawCompaction && noReplyText && !compactCommandTurn) {
           await this.client.pinTaskSession(task.id, finalSessionId, workDir);
           return {
             output: "Agent returned empty output after compaction.",
             sessionId: finalSessionId,
             workDir,
-            usage,
+            usageSnapshot: ledger.finish(),
             completed: false,
             failureReason: TaskFailureReason.AgentEmptyOrUnparseableOutput,
           };
         }
-        const candidate = output.trim() || last?.text || "Task completed.";
+        const candidate = compactCommandTurn && noReplyText ? COMPACT_COMMAND_REPLY : finalReplyBody(settled, trace.items, last?.text);
         if (classifyPoisonedOutput(candidate)) {
           await this.client.pinTaskSession(task.id, finalSessionId, workDir);
-          return { output: candidate, sessionId: finalSessionId, workDir, usage, completed: false };
+          return { output: candidate, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: false };
         }
         await this.client.pinTaskSession(task.id, finalSessionId, workDir);
-        // Flush the outbox before flipping the task terminal: a queued
-        // "progress" record delivered after completion would be rejected by
-        // the server's terminal-status guard and wedge the outbox.
-        await this.awaitTaskReportDrain(task.id);
+        // The single pump preserves this partition's order through completion.
         await this.client.reportProgress(task.id, "Agent execution completed", 3, 3);
-        await this.client.reportTaskUsage(task.id, usage);
+        const finalUsage = ledger.finish();
+        onUsage?.(finalUsage);
+        await this.client.reportTaskUsageSnapshot(task.id, finalUsage);
         try {
-          await this.client.completeTask(task.id, candidate, finalSessionId, workDir);
+          // Persist the reply and its input receipts before any platform wait.
+          // The outbox delivers receipts first; unread bodies still use the completion gate.
+          await this.client.completeTurn({ ...this.taskDownlinks.completionInput(task.id, injectedSteerIds), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
         } catch (err) {
-          if (!isSteerPendingConflict(err)) throw err;
-          const pendingNow = await this.client.listPendingTaskSteerMessages(task.id).catch(() => [] as MultiremiTaskSteerMessage[]);
-          // Already-recorded ids still pending mean an earlier consume call
-          // failed (e.g. transient network) — retry it so the barrier lifts,
-          // instead of letting an ignorable consume error become a terminal
-          // completion conflict.
+          if (remindUnreadInput(err, candidate)) continue;
+          if (!isTurnInputPendingConflict(err)) throw err;
+          const pendingNow = await this.taskDownlinks.waitForSteer(task.id, this.options.taskDrainTimeoutMs, signal);
+          // Already-delivered ids still pending join the next durable receipt;
+          // a transport timeout must not fail this already-produced reply.
+          // A doorbell among them is the bridge's to deliver (§2.6): recorded now, never prompted.
+          for (const message of pendingNow) if (isDoorbellSteer(message)) divertDoorbell(message);
           const stale = pendingNow.filter((m) => recordedSteerIds.has(m.id));
-          if (stale.length) await this.client.consumeTaskSteerMessages(task.id, stale.map((m) => m.id));
+          injectedSteerIds.push(...stale.map((m) => m.id));
           const fresh = pendingNow.filter((m) => !recordedSteerIds.has(m.id));
           if (!forceAnswerExpired && fresh.length) {
+            // The attempt runs on: its background tasks are its own again until its next end decides (§2.2).
+            if (laneRecord) this.parkedLanes.cancelHandOff(laneRecord);
+            backgroundDecision = null;
             await injectSteerBatch(fresh);
             continue;
           }
           // Force-answer wrap-up (or an inconsistent conflict): record what's
           // there and complete once more; a second conflict fails the run
           // loudly rather than looping forever.
-          if (fresh.length) await recordSteerBatch(fresh, false);
-          await this.client.completeTask(task.id, candidate, finalSessionId, workDir);
+          if (fresh.length) await recordSteerBatch(fresh, "none");
+          // Steers recorded without injection add no reply, so the pick stands;
+          // settle() is still the one rule before every completion attempt.
+          this.recordTrace(task.id, () => trace.settle());
+          try {
+            await this.client.completeTurn({ ...this.taskDownlinks.completionInput(task.id, injectedSteerIds), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
+          } catch (error) {
+            if (remindUnreadInput(error, candidate)) continue;
+            throw error;
+          }
         }
         log.info(`Completed task ${task.id}`);
-        return { output: candidate, sessionId: finalSessionId, workDir, usage, completed: true };
+        return { output: candidate, sessionId: finalSessionId, workDir, usageSnapshot: ledger.snapshot, completed: true };
       }
+    } catch (error) {
+      throw new RunAgentError(error, finalSessionId, workDir,
+        providerFailureDuringStop ?? (this.pollAbort.signal.aborted && isShutdownInterruption(error)));
     } finally {
-      messageBatcher?.close();
+      // PR 6 §6.3: a cancelled or failed attempt whose process lives still hands its tasks off or stops them
+      // (its trace closes after this); a cancel ends the turn, not the background work.
+      if (backgroundDecisionOf() === null) {
+        await endBackgroundTasksOnce?.({ drain: false, reason: signal.aborted ? "cancelled" : "turn_end" }).catch((error: unknown) =>
+          log.warn(`Task ${task.id}: ending background tasks failed: ${error instanceof Error ? error.message : String(error)}`));
+      }
+      // Every prompt has settled (and drained its model calls): revoke the run's
+      // shim tokens before the ledger closes, so no later call can use the real
+      // key unmetered (a backgrounded command, the steering drain, close()).
+      antigravity?.run.close();
+      checkpointUsage(ledger.finish());
+      this.recordTrace(task.id, () => trace.flush());
+      activity.finish();
+      this.activityReporters.delete(activity);
+      pump?.stop();
       steerFeed.stop();
-      await this.reportIssueWorkspaceAfterRun(task, codeWorkDir, preparedWorkspace.repos).catch((err) => {
+      await this.reportIssueWorkspaceAfterRun(task, workspaceDir, preparedWorkspace.repos).catch((err) => {
         log.warn(`Failed to report final workspace state for ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
       });
-      await provider.close?.();
-    }
-  }
-
-  private watchTaskState(
-    taskId: string,
-    abort: AbortController,
-    onTerminal: (status: Extract<MultiremiTaskStatus, "completed" | "failed" | "cancelled">) => void,
-  ): ReturnType<typeof setInterval> {
-    let checking = false;
-    const check = async () => {
-      if (abort.signal.aborted || checking) return;
-      checking = true;
-      try {
-        let status = await this.client.getTaskStatus(taskId);
-        if (status === "dispatched") {
-          status = await this.client.renewTaskDispatchLease(taskId);
+      if (laneRecord) {
+        // PR 6 §2.2: park the process while its tasks run, else close it (and release what it held).
+        this.parkedLanes.attach(laneRecord, null);
+        this.parkedLanes.setProviderSession(laneRecord, finalSessionId);
+        // The attempt's token is revoked with it: until the next attempt, the process has no credential (§2.4).
+        if (laneRecord.resources instanceof DaemonLaneResources) {
+          laneRecord.resources.writeTaskContext({ token: null, turnId: null, attemptId: null });
         }
-        if (status === "completed" || status === "failed" || status === "cancelled") {
-          onTerminal(status);
-          if (status === "cancelled") this.outbox?.purgeTask(taskId);
-          abort.abort();
-        }
-      } catch (error) {
-        if (error instanceof MultiremiDaemonHttpError && error.status === 404) {
-          abort.abort();
-        }
-      } finally {
-        checking = false;
+        const outcome = backgroundDecisionOf() === "park" ? await this.parkedLanes.park(laneRecord) : null;
+        if (outcome?.parked) {
+          log.info(`Task ${task.id} parked its lane's process`, { event: "background_lane_parked" });
+          // Turns of other Chats waiting for the folder it keeps now wait for its background tasks: say so.
+          const holder = laneRecord.resources instanceof DaemonLaneResources ? laneRecord.resources.resolvedWorkDir?.lockHolderId : undefined;
+          if (holder) this.localPathLocks.renotify(holder);
+        } else await this.parkedLanes.endAttempt(laneRecord, outcome && !outcome.parked ? outcome.reason : null);
+      } else {
+        await provider.close?.();
       }
-    };
-    return setInterval(() => void check(), 2500);
+      if (this.restartExecutions.has(task.id)) {
+        // The bridge and all output sources have stopped. Close its work, keep
+        // server-owned waits, and save identities only: no activity survives.
+        this.recordTrace(task.id, () => trace.plannedRestart());
+        this.recordTrace(task.id, () => trace.flush());
+        try {
+          this.restartTraceIdentities.set(task.id, { state: trace.checkpoint(),
+            trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 });
+        } catch (error) {
+          log.warn(`Task ${task.id}: optional trace identity snapshot unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      this.restartProviderClosed.add(task.id);
+      this.liveUpdateProviders.delete(provider);
+    }
   }
 
-  private async wasTaskCancelledByServer(taskId: string): Promise<boolean> {
-    try {
-      return await this.client.getTaskStatus(taskId) === "cancelled";
-    } catch (err) {
-      return err instanceof MultiremiDaemonHttpError && err.status === 404;
-    }
+  /** The daemon's Antigravity gateway shim (PR 4 §4.1), started at first use. */
+  private antigravityGatewayShim(): AntigravityGatewayShim {
+    this.antigravityShim ??= new AntigravityGatewayShim();
+    return this.antigravityShim;
   }
 
   private startRepoCheckoutServer(): void {
@@ -4558,13 +6284,28 @@ export class MultiremiDaemon {
   }
 
   private stopGcLoop(): void {
+    if (this.diskTimer) clearInterval(this.diskTimer);
+    this.diskTimer = null;
     if (this.gcTimer) clearInterval(this.gcTimer);
     this.gcTimer = null;
   }
 
   private async drainGcInFlight(): Promise<void> {
     const gcRun = this.gcInFlight;
-    if (gcRun) await Promise.allSettled([gcRun]);
+    await Promise.allSettled([...(gcRun ? [gcRun] : []), ...this.gcRunRequests.values()]);
+  }
+
+  /** The stable branch of a subject's repositories: `chat/<id>` for a Chat, `agent/<issue key>` for an Issue. */
+  private subjectBranch(subjectId: string): string | null {
+    let record;
+    try {
+      record = readSubjectRecord(this.options.workspacesRoot, { kind: "chat", id: subjectId });
+    } catch {
+      return null;
+    }
+    if (!record) return null;
+    if (record.subject.kind === "chat") return `chat/${record.subject.id}`;
+    return record.issue_key ? `agent/${record.issue_key}` : null;
   }
 
   private async handleLocalDaemonRequest(request: Request): Promise<Response> {
@@ -4589,11 +6330,22 @@ export class MultiremiDaemon {
     if (!repoUrl) return jsonResponse({ error: "url is required" }, 400);
     if (!workspaceId) return jsonResponse({ error: "workspace_id is required" }, 400);
     if (!workDir) return jsonResponse({ error: "workdir is required" }, 400);
+    if (isPathWithinWorkspacesRoot(workDir, envRoot(this.options.workspacesRoot))) {
+      // A private execution directory is not the subject's workspace: a reclaim never restores a repository there.
+      return jsonResponse({
+        error: "repositories are checked out in the shared workspace; run the command from $MULTIREMI_WORKSPACE_ROOT, not from the private execution directory",
+      }, 400);
+    }
 
     try {
       this.assertWorkspaceRootOwner();
       await this.ensureRepoReady(workspaceId, repoUrl, request.signal);
       this.assertWorkspaceRootOwner();
+      // A subject's branch is its identity (ADR 0018): an on-demand checkout in its work directory uses
+      // the same branch as the daemon-prepared repositories, so a reclaimed subject's snapshot still
+      // sits on the history the checkout starts from.
+      const subjectId = subjectIdOfWorkDirectory(this.options.workspacesRoot, workDir);
+      const subjectBranch = subjectId ? this.subjectBranch(subjectId) : null;
       const result = await this.repoCache.createWorktree({
         workspaceId,
         repoUrl,
@@ -4602,9 +6354,22 @@ export class MultiremiDaemon {
         preferredRef: stringField(body.preferred_ref ?? body.preferredRef) ?? undefined,
         agentName: stringField(body.agent_name ?? body.agentName) ?? "agent",
         taskId: stringField(body.task_id ?? body.taskId) ?? "task",
+        ...(subjectBranch ? { branchName: subjectBranch, reuseExisting: true } : {}),
         signal: request.signal,
         coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(workspaceId),
+        coAuthoredBy: this.workspaceCoAuthoredBy(workspaceId),
       });
+      // A reclaimed subject checks its repositories out again on demand; this is where its unsaved work returns.
+      if (subjectId) {
+        await this.issueWorkspaceLifecycleLocks.runExclusive(`prepare:${workDir}`, () =>
+          restoreReclaimedSubject({
+            root: this.options.workspacesRoot,
+            // The registry is keyed by id and its record carries the real kind.
+            subject: { kind: "chat", id: subjectId },
+            wiki: false,
+            assertRootOwner: () => this.assertWorkspaceRootOwner(),
+          }));
+      }
       return jsonResponse(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -4671,10 +6436,9 @@ export class MultiremiDaemon {
         attempts: this.authorityProbeAttempts,
         next_probe_at: this.authorityProbeNextAt,
       },
-      claim_wake_ws: this.claimWakeWsStatus(),
-      heartbeat_interval_ms: this.heartbeatIntervalMs(),
+      protocol: this.protocolClient?.health(),
+      heartbeat_interval_ms: DAEMON_HEARTBEAT_INTERVAL_MS,
       // Null when no poll loop has started yet (health is served from startup).
-      claim_idle_next_at: this.nextClaimAt > 0 ? new Date(this.nextClaimAt).toISOString() : null,
       pid: process.pid,
       uptime: formatDuration(Date.now() - this.startedAt.getTime()),
       runtime_id: this.options.runtimeId,
@@ -4683,6 +6447,7 @@ export class MultiremiDaemon {
       workspace_id: this.options.workspaceId,
       server_url: this.options.serverUrl,
       cli_version: multiremiVersion,
+      ...(BUILD_COMMIT ? { cli_commit: BUILD_COMMIT } : {}),
       supervisor_ready: this.supervisorReady(),
       active_task_count: this.activeTaskCount,
       draining_task_count: this.drainingTaskCount,
@@ -4729,18 +6494,6 @@ export class MultiremiDaemon {
 
   private applyWorkspaceSettings(workspaceId: string, settings: Record<string, unknown>): void {
     this.workspaceSettings.set(workspaceId, settings);
-    if (workspaceId !== (this.options.workspaceId ?? "local")) return;
-    const policy = resolveWorkspaceGcPolicy(settings, this.defaultGcPolicy);
-    const intervalChanged = policy.intervalMs !== this.options.gcIntervalMs;
-    const ttlChanged = policy.ttlMs !== this.options.gcTtlMs;
-    if (!intervalChanged && !ttlChanged) return;
-    this.options.gcTtlMs = policy.ttlMs;
-    this.options.gcIntervalMs = policy.intervalMs;
-    log.info(`Workspace GC policy applied: ttl=${policy.ttlMs}ms interval=${policy.intervalMs}ms`);
-    if (intervalChanged && this.gcTimer) {
-      this.stopGcLoop();
-      this.startGcLoop();
-    }
   }
 
   private async registerTaskRepos(
@@ -4792,6 +6545,10 @@ export class MultiremiDaemon {
 
   private isRepoAllowed(workspaceId: string, repoUrl: string): boolean {
     return this.workspaceRepoUrls.get(workspaceId)?.has(repoUrl.trim()) ?? false;
+  }
+
+  private workspaceCoAuthoredBy(workspaceId: string) {
+    return resolveCoAuthoredByIdentity(this.workspaceSettings.get(workspaceId) ?? {});
   }
 
   private workspaceCoAuthoredByEnabled(workspaceId: string): boolean {
@@ -4961,10 +6718,6 @@ function optionalNumberEnv(value: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function normalizeOptionalInterval(value: number | null | undefined): number | null {
-  return value === null || value === undefined ? null : Math.max(1, value);
-}
-
 /**
  * Resolve the runtime's task concurrency. An explicit value >= 1 wins;
  * anything else (0/unset) defaults to one fewer than the machine's CPU count
@@ -4974,11 +6727,6 @@ function resolveDaemonConcurrency(value: number | undefined): number {
   const n = Number(value);
   if (Number.isFinite(n) && n >= 1) return Math.floor(n);
   return Math.max(1, cpus().length - 1);
-}
-
-function booleanEnv(value: string | undefined, fallback: boolean): boolean {
-  if (value == null || value === "") return fallback;
-  return !["0", "false", "no", "off"].includes(value.trim().toLowerCase());
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -4998,29 +6746,6 @@ function formatDuration(ms: number): string {
   return `${seconds}s`;
 }
 
-async function runDefaultMultiremiUpdate(targetVersion: string): Promise<string> {
-  const version = targetVersion.trim();
-  if (!version) throw new Error("target_version is required");
-  const repo = process.env.MULTIREMI_RELEASE_REPO || process.env.MULTIREMI_REPO || "Grassgod/Remi";
-  const installerUrl = process.env.MULTIREMI_INSTALLER_URL || `https://github.com/${repo}/releases/latest/download/install-remi.sh`;
-  const env = cleanProcessEnv({
-    ...process.env,
-    MULTIREMI_VERSION: version,
-  });
-  const proc = Bun.spawn(["bash", "-lc", `curl -fsSL ${shellQuote(installerUrl)} | bash`], {
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    streamText(proc.stdout),
-    streamText(proc.stderr),
-    proc.exited,
-  ]);
-  const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
-  if (exitCode !== 0) throw new Error(output || `multiremi update failed with exit code ${exitCode}`);
-  return output || `Updated to ${version}`;
-}
 
 async function streamText(stream: ReadableStream<Uint8Array> | null): Promise<string> {
   if (!stream) return "";
@@ -5039,7 +6764,9 @@ export function runtimeModelsFromAcpCapabilities(
     ? "anthropic"
     : provider.toLowerCase() === "codex"
       ? "openai"
-      : provider;
+      : provider.toLowerCase() === "grok"
+        ? "xai"
+        : provider;
   return capabilities.map((model) => ({
     id: model.id,
     label: model.label,
@@ -5114,6 +6841,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** completeTask refused because an unconsumed steer won the race (server steer barrier). */
-function isSteerPendingConflict(err: unknown): boolean {
-  return err instanceof MultiremiDaemonHttpError && err.status === 409 && err.code === "steer_pending";
+function isTurnInputPendingConflict(err: unknown): boolean {
+  return err instanceof DaemonProtocolRpcError && err.code === "turn_input_pending";
 }

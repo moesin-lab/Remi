@@ -271,22 +271,19 @@ export class NotificationChannelsRepo {
   }
 
   /**
-   * Routes for one inbox item. `memberId` is the item's recipient: workspace-level
-   * channels apply to everyone, personal channels only to their owner. A member can
-   * never receive a mirror of someone else's inbox item.
+   * All human inbox recipients now identify the same workspace operator.
+   * Legacy channel owner IDs remain as provenance, not routing partitions.
    */
   matchRoutes(
     workspaceId: string,
-    memberId: string,
+    _memberId: string,
     inboxType: string,
     severity: string,
   ): MultiremiNotificationChannel[] {
     const incomingRank = severityRank(severity);
-    const recipient = typeof memberId === "string" ? memberId.trim() : "";
     return this.listChannels(workspaceId).filter((channel) =>
       channel.enabled
       && channel.kind === "feishu_group"
-      && (channel.memberId === null || (recipient !== "" && channel.memberId === recipient))
       && (channel.eventTypes.includes("*") || channel.eventTypes.includes(inboxType))
       && incomingRank >= severityRank(channel.minSeverity)
     );
@@ -316,7 +313,7 @@ export class NotificationChannelsRepo {
     if (!delivery) return null;
     const channel = this.getChannel(delivery.channelId);
     const row = this.ctx.db.query(
-      "SELECT * FROM multiremi_inbox_items WHERE id = ?",
+      "SELECT * FROM multiremi_member_inbox_records WHERE id = ?",
     ).get(delivery.inboxItemId) as Row | null;
     const issueId = nullableString(row?.issue_id);
     const issue = issueId ? this.ctx.issues().getIssue(issueId) : null;

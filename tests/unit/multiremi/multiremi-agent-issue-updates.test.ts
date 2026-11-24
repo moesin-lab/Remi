@@ -1,389 +1,438 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { createResponsibleTestIssue } from './helpers.js';
+import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
+import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
+import { beforeEach, expect, it, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
-import { buildTaskPrompt } from "@multiremi/prompt.js";
-import { MultiremiStore } from "@multiremi/store.js";
-import { resetMultiremiTestEnv } from "./helpers.js";
-
+import { useTaskSessionInput } from "@multiremi/api/daemon-protocol/offer-budget.js";
+import { buildTaskPromptArtifact } from "@multiremi/prompt.js";
+import { normalizeDaemonClaimTask } from "@multiremi/worker/client.js";
+import { createCommitEventQueue } from "@multiremi/store/context.js";
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
+import { installPendingTurnTestConstraints, pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 
-let db: Database | null = null;
+pendingTurnBackendTests("MUL-486 relay Issue log", (fixture) => {
+  beforeEach(() => installPendingTurnTestConstraints(fixture()));
+  const foreignBody = "FOREIGN_ISSUE_HISTORY_MUST_NOT_SHIP";
 
-afterEach(() => {
-  db?.close();
-  db = null;
-  resetMultiremiTestEnv();
-});
+  function setup() {
+    const f = fixture();
+    const agent = f.store.createAgent({ name: "Relay", provider: "codex", maxConcurrentTasks: 4 });
+    const issue = createResponsibleTestIssue(f.store, { title: "Relay log", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
+    const session = f.store.getOrCreateDefaultIssueSession(issue.id);
+    f.store.createIssueComment(issue.id, { body: foreignBody });
+    const chat = f.store.createChatSession({ agentId: agent.id });
+    bindFeishuTopicFixture(f.store, f.db, chat.id, issue.id);
+    const runtime = f.store.registerRuntime({ name: "Relay test runtime", provider: "codex", maxConcurrency: 4 });
+    const legacyRows = () => Number((f.db.query("SELECT COUNT(*) AS count FROM multiremi_agent_issue_update_state").get() as { count: number }).count);
+    const lane = () => f.store.getOrCreateSessionAgentLane(session.id, agent.id, `relay:${chat.id}`);
+    const reports = () => f.store.listChatMessages(chat.id).filter(message => message.role === "system" && message.body.includes(issue.key));
+    return { ...f, agent, issue, session, chat, runtime, lane, reports, legacyRows };
+  }
 
-function createStore(options: { debounceMs?: number } = {}): MultiremiStore {
-  db = new Database(":memory:");
-  const store = new MultiremiStore(db, {
-    agentIssueUpdateDebounceMs: options.debounceMs,
-  });
-  store.ensureLocalWorkspace();
-  return store;
-}
+  function claimRelayAfterCompletedIssueRound(f: ReturnType<typeof setup>) {
+    const issueTask = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Issue work" });
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(issueTask.id);
+    f.store.startTask(issueTask.id);
+    f.store.completeTask(issueTask.id, { output: "Issue result" });
+    const relay = f.store.listTasks().find(task => task.chatSessionId === f.chat.id && task.wakeSource === "platform_to_owner")!;
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(relay.id);
+    return relay;
+  }
 
-function scaffold(store: MultiremiStore) {
-  const agent = store.createAgent({
-    name: "Issue update agent",
-    provider: "codex",
-    workspaceId: "local",
-  });
-  const issue = store.createIssue({ title: "Bound progress", workspaceId: "local" });
-  const chat = store.createChatSession({
-    agentId: agent.id,
-    workspaceId: "local",
-    creatorId: "local",
-    title: "Bound progress chat",
-  });
-  bindFeishuTopicFixture(store, db!, chat.id, issue.id);
-  return { agent, issue, chat };
-}
-
-describe("agent-facing Issue update delivery", () => {
-  it("enables Issue updates for a Feishu topic without creating a task", () => {
-    const store = createStore();
-    const { issue, chat } = scaffold(store);
-
-    expect(store.getAgentIssueUpdateSubscription(chat.id)).toMatchObject({
-      chatSessionId: chat.id,
-      issueId: issue.id,
-      channelId: `nch_agent_chat_${chat.id}`,
-      enabled: true,
-      debounceWindowSeconds: 30,
-    });
-
-    store.createIssueComment(issue.id, {
-      authorType: "member",
-      authorId: "local",
-      body: "This should be recorded without waking the agent.",
-    });
-
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 60_000))).toEqual({
-      delivered: 1,
-      dropped: 0,
-    });
-    expect(store.listChatMessages(chat.id)).toEqual([
-      expect.objectContaining({ role: "system", taskId: null }),
-    ]);
-    expect(store.listTasksForIssue(issue.id)).toHaveLength(0);
-
-    const runtime = store.registerRuntime({ name: "Cold Chat runtime", provider: "codex" });
-    const userTurn = store.sendChatMessage(chat.id, { body: "Open the bound Issue." });
-    expect(store.claimTask(runtime.id)?.id).toBe(userTurn.task.id);
-    const claimed = store.getTaskWithAgent(userTurn.task.id)!;
-    const wire = daemonTaskClaimResponse(store, claimed);
-    expect((wire.session_projection as { mode?: string } | undefined)?.mode).toBe("bootstrap");
-    const prompt = buildTaskPrompt({
-      ...claimed,
-      sessionProjection: wire.session_projection,
-      chatMessage: wire.chat_message,
-      boundIssue: wire.bound_issue,
-      boundIssueUpdates: wire.bound_issue_updates,
-      boundIssueUpdatesOmittedCount: wire.bound_issue_updates_omitted_count,
-    } as any);
-    expect(prompt).toContain("## Bound Issue Updates");
-    expect(prompt).toContain("This should be recorded without waking the agent.");
-  });
-
-  it("delivers same-agent Issue-lane updates while filtering the target Chat lane", () => {
-    const store = createStore({ debounceMs: 10 });
-    const { agent, issue, chat } = scaffold(store);
-    const session = store.getOrCreateDefaultIssueSession(issue.id);
-    const issueTask = store.createSessionTask(session.id, {
-      agentId: agent.id,
-      prompt: "Summarize the Issue lane",
-    });
-    store.createIssueComment(issue.id, {
-      authorType: "agent",
-      authorId: agent.id,
-      taskId: issueTask.id,
-      body: "Issue-lane summary from the same agent",
-    });
-    const chatTask = store.sendChatMessage(chat.id, { body: "Update the Issue" }).task;
-    store.createIssueComment(issue.id, {
-      authorType: "agent",
-      authorId: agent.id,
-      taskId: chatTask.id,
-      body: "Chat-lane comment that must not feed back",
-    });
-
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 1_000))).toEqual({
-      delivered: 1,
-      dropped: 0,
-    });
-    const delivered = store.listChatMessages(chat.id).filter((message) => message.role === "system");
-    expect(delivered).toHaveLength(1);
-    expect(delivered[0]?.body).toContain("Issue-lane summary from the same agent");
-    expect(delivered[0]?.body).not.toContain("Chat-lane comment that must not feed back");
-  });
-
-  it("delivers published Session results with task lineage and the existing body cap", async () => {
-    const store = createStore({ debounceMs: 10 });
-    const { agent, issue, chat } = scaffold(store);
-    const session = store.getOrCreateDefaultIssueSession(issue.id);
-    const issueTask = store.createSessionTask(session.id, {
-      agentId: agent.id,
-      prompt: "Publish the implementation result",
-    });
-    const credential = await store.createTaskAccessToken(issueTask, "local");
-    const app = createMultiremiApp({ store });
-    const oversizedBody = `${"result-detail ".repeat(700)}SHOULD_BE_TRUNCATED`;
-
-    const response = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/results`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${credential.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ title: "Implementation complete", body: oversizedBody }),
-    });
-    expect(response.status).toBe(201);
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 1_000))).toEqual({
-      delivered: 1,
-      dropped: 0,
-    });
-    const pending = store.listChatMessages(chat.id).filter((message) => message.role === "system");
-    expect(pending).toHaveLength(1);
-    expect(pending[0]?.body).toContain("Published result: Implementation complete");
-    expect(pending[0]?.body).not.toContain("SHOULD_BE_TRUNCATED");
-
-    const userTurn = store.sendChatMessage(chat.id, { body: "What did the team finish?" });
-    const wire = daemonTaskClaimResponse(store, store.getTaskWithAgent(userTurn.task.id)!);
-    expect(wire.bound_issue_updates).toEqual([
-      expect.stringContaining("Published result: Implementation complete"),
-    ]);
-    const prompt = buildTaskPrompt({
-      ...store.getTaskWithAgent(userTurn.task.id)!,
-      sessionProjection: wire.session_projection,
-      chatMessage: wire.chat_message,
-      boundIssue: wire.bound_issue,
-      boundIssueUpdates: wire.bound_issue_updates,
-      boundIssueUpdatesOmittedCount: wire.bound_issue_updates_omitted_count,
-    } as any);
-    expect(prompt).toContain("## Bound Issue Updates");
-    expect(prompt).toContain("Published result: Implementation complete");
-  });
-
-  it("rejects the removed Chat subscription API and keeps ordinary Chats independent", async () => {
-    const store = createStore();
-    const { issue, agent, chat: topic } = scaffold(store);
-    const privateChat = store.createChatSession({ agentId: agent.id, workspaceId: "local", creatorId: "local" });
-    const token = await store.createAccessToken({ name: "subscription API test", type: "pat", workspaceId: "local", userId: "local" });
-    const app = createMultiremiApp({ store });
-    for (const method of ["GET", "PUT"]) {
-      expect((await app.request(`/api/chat/sessions/${privateChat.id}/issue-updates`, {
-        method,
-        headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
-        ...(method === "PUT" ? { body: JSON.stringify({ enabled: true }) } : {}),
-      })).status).toBe(404);
+  function foreignLog(f: ReturnType<typeof setup>, taskId: string) {
+    const task = f.store.getTaskWithAgent(taskId)!;
+    const wire = daemonTaskClaimResponse(f.store, task);
+    const toSeq = f.store.getBoundIssueLogToSeq(taskId)!;
+    const log = wire.bound_issue_log as {
+      session_id: string; from_seq: number; to_seq: number; content_jsonl: string;
+      next_seq: number; has_more: boolean;
+    };
+    expect(log).toEqual({ session_id: f.session.id, from_seq: 0, to_seq: toSeq,
+      content_jsonl: "", next_seq: 0, has_more: false });
+    expect(JSON.stringify(wire)).not.toContain(foreignBody);
+    const read = spyOn(f.store, "listConversationLogEntries");
+    try {
+      useTaskSessionInput(f.store, task, wire);
+      expect(read.mock.calls.some(([sessionId]) => sessionId === f.session.id)).toBe(false);
+    } finally {
+      read.mockRestore();
     }
-    expect(() => store.setAgentIssueUpdateSubscription({ chatSessionId: privateChat.id, enabled: true }))
-      .toThrow("only available for Feishu Issue topics");
-    store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "Topic-only update" });
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 60_000))).toEqual({ delivered: 1, dropped: 0 });
-    expect(store.listChatMessages(topic.id)).toHaveLength(1);
-    expect(store.listChatMessages(privateChat.id)).toHaveLength(0);
-    expect(store.getAgentChatNotificationChannel(privateChat.id)).toBeNull();
+    expect(log.content_jsonl).toBe("");
+    expect(JSON.stringify(wire)).not.toContain(foreignBody);
+    const { prompt, instructions } = buildTaskPromptArtifact(normalizeDaemonClaimTask(wire)!);
+    for (const text of [prompt, instructions]) {
+      expect(text).not.toContain(foreignBody);
+      expect(text).not.toContain("## Bound Issue Log");
+      expect(text).not.toContain(`remi message list ${f.session.id}`);
+    }
+    expect(prompt).not.toContain('"type":"unread_range"');
+    expect(f.db.query("SELECT bound_issue_log_delivered_seq FROM multiremi_turn_execution_records WHERE id = ?")
+      .get(taskId)).toEqual({ bound_issue_log_delivered_seq: null });
+    return log;
+  }
+
+  function assertForeignCursorUnchanged(f: ReturnType<typeof setup>) {
+    expect(f.lane()?.cursorSeq).toBe(0);
+    expect(f.db.query("SELECT provider_cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_id=? AND execution_scope=?")
+      .get(f.session.id, f.agent.id, `relay:${f.chat.id}`)).toEqual({ provider_cursor_seq: 0 });
+  }
+
+  async function authenticatedTask(f: ReturnType<typeof setup>, taskId: string) {
+    const token = await f.store.createTaskAccessToken(f.store.getTask(taskId)!, "local");
+    return { app: createMultiremiApp({ store: f.store, authToken: "relay-test-root" }),
+      headers: { Authorization: `Bearer ${token.token}` } };
+  }
+
+  for (const status of ["failed", "cancelled"] as const) {
+    it(`reports a ${status} Issue round in its Chat without advancing the foreign Issue cursor`, async () => {
+      const f = setup();
+      const before = f.legacyRows();
+      const task = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Work on the Issue" });
+      expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+      f.store.startTask(task.id);
+      const issueReader = await authenticatedTask(f, task.id);
+      const issueRead = await issueReader.app.request(`/api/sessions/${f.session.id}/messages?from=0&to=${f.store.getConversationLogHead(f.session.id)!.headSeq}`, { headers: issueReader.headers });
+      expect(issueRead.status).toBe(200);
+      expect((await issueRead.json()).entries.map((row: any) => row.body_md).join("\n")).toContain(foreignBody);
+      if (status === "failed") f.store.failTask(task.id, { error: "Known failure", failureReason: "agent_error" });
+      else f.store.cancelTask(task.id);
+      expect(f.reports()).toHaveLength(1);
+      expect(f.reports()[0]!.body).toContain(`状态 ${status}`);
+      const entry = f.store.listConversationLogShown(f.chat.id).find(item => item.id === f.reports()[0]!.id)!;
+      expect(entry.metadata.envelope).toMatchObject({ kind: "report", outcome: status, wake: "now" });
+      const relay = f.store.listTasks().find(item => item.chatSessionId === f.chat.id && item.wakeSource === "platform_to_owner")!;
+      expect(relay).toBeDefined();
+      expect(f.lane()?.cursorSeq).toBe(0);
+      expect(f.store.claimTask(f.runtime.id)?.id).toBe(relay.id);
+      const log = foreignLog(f, relay.id);
+      expect(log.to_seq).toBeGreaterThan(0);
+      const { app, headers } = await authenticatedTask(f, relay.id);
+      const denied = await app.request(`/api/sessions/${f.session.id}/messages?from=0&to=${log.to_seq}`, { headers });
+      expect(denied.status).toBe(403);
+      expect(await denied.text()).not.toContain(foreignBody);
+      const own = await app.request(`/api/sessions/${f.chat.id}/messages?from=0&to=${f.store.getConversationLogHead(f.chat.id)!.headSeq}`, { headers });
+      expect(own.status).toBe(200);
+      expect((await own.json()).entries.map((row: any) => row.body_md).join("\n")).toContain(`状态 ${status}`);
+      assertForeignCursorUnchanged(f);
+      f.store.startTask(relay.id);
+      f.store.completeTask(relay.id, { output: "Reported to Feishu" });
+      assertForeignCursorUnchanged(f);
+      expect(f.legacyRows()).toBe(before);
+    });
+  }
+
+  it("deduplicates a repeated round trigger and reads the delivered Chat reports without foreign history", async () => {
+    const f = setup();
+    const first = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "First round" });
+    f.store.claimTask(f.runtime.id);
+    f.store.startTask(first.id);
+    f.store.completeTask(first.id, { output: "First result" });
+    const relay = f.store.listTasks().find(task => task.chatSessionId === f.chat.id && task.wakeSource === "platform_to_owner")!;
+    f.store.claimTask(f.runtime.id);
+    const firstLog = foreignLog(f, relay.id);
+    f.store.startTask(relay.id);
+    f.store.completeTask(relay.id, { output: "First summary" });
+    expect(f.lane()?.cursorSeq).toBe(0);
+    const duplicate = f.transaction(() => f.store.sendEnvelopeWithinTransaction({
+      to: { role: "relay", issueId: f.issue.id }, kind: "report", outcome: "done", wake: "now",
+      dedupeKey: `relay:${f.issue.id}:${first.id}`, body: "Repeated terminal hook", source: { issueId: f.issue.id, taskId: first.id },
+    }, [], createCommitEventQueue()));
+    expect(duplicate).toHaveLength(1);
+    expect(duplicate[0]).toMatchObject({ deduplicated: true, action: "none" });
+    expect(f.reports()).toHaveLength(1);
+    const second = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Second round" });
+    f.store.claimTask(f.runtime.id);
+    f.store.startTask(second.id);
+    f.store.completeTask(second.id, { output: "Second result" });
+    const nextRelay = f.store.listTasks().find(task => task.chatSessionId === f.chat.id && task.status === "queued")!;
+    f.store.claimTask(f.runtime.id);
+    const nextLog = foreignLog(f, nextRelay.id);
+    expect(nextLog.from_seq).toBe(0);
+    expect(nextLog.to_seq).toBeGreaterThan(firstLog.to_seq);
+    const { app, headers } = await authenticatedTask(f, nextRelay.id);
+    const own = await app.request(`/api/sessions/${f.chat.id}/messages?from=0&to=${f.store.getConversationLogHead(f.chat.id)!.headSeq}`, { headers });
+    expect(own.status).toBe(200);
+    const bodies = (await own.json()).entries.map((row: any) => row.body_md).join("\n");
+    expect(bodies).toContain("First result");
+    expect(bodies).toContain("Second result");
+    expect(bodies).not.toContain(foreignBody);
+    expect(f.reports()).toHaveLength(2);
+    assertForeignCursorUnchanged(f);
   });
 
-  it("drops queued updates when the Feishu topic binding is removed", () => {
-    const store = createStore();
-    const { issue, chat } = scaffold(store);
-    store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "Stale binding" });
-    db!.run("UPDATE multiremi_feishu_bot_chat_bindings SET issue_id = NULL WHERE chat_session_id = ?", [chat.id]);
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 60_000))).toEqual({ delivered: 0, dropped: 1 });
-    expect(store.listChatMessages(chat.id)).toHaveLength(0);
+  it("does not read foreign Issue history even when its reader would fail", () => {
+    const f = setup();
+    const relay = claimRelayAfterCompletedIssueRound(f);
+    const toSeq = f.store.getBoundIssueLogToSeq(relay.id)!;
+    expect(toSeq).toBe(5);
+    const read = spyOn(f.store, "listConversationLogShown").mockImplementation(() => {
+      throw new Error("injected foreign relay log read failure");
+    });
+    try {
+      expect(foreignLog(f, relay.id).to_seq).toBe(toSeq);
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+    f.store.startTask(relay.id);
+    f.store.completeTask(relay.id, { output: "Summary from the delivered Chat report" });
+    assertForeignCursorUnchanged(f);
+
+    const nextRelay = claimRelayAfterCompletedIssueRound(f);
+    expect(foreignLog(f, nextRelay.id).to_seq).toBeGreaterThan(toSeq);
+    expect(f.reports()).toHaveLength(2);
+    expect(f.reports().every(message => message.body.includes("Issue result"))).toBe(true);
   });
 
-  it("debounces dense Issue activity into one Chat message", () => {
-    const store = createStore({ debounceMs: 1_000 });
-    const { issue, chat } = scaffold(store);
-
-    store.createIssueComment(issue.id, {
-      authorType: "member",
-      authorId: "member_alice",
-      body: "First progress detail",
+  it("does not write a foreign delivery marker even when its writer would fail", () => {
+    const f = setup();
+    const relay = claimRelayAfterCompletedIssueRound(f);
+    const mark = spyOn(f.store, "markBoundIssueLogDelivered").mockImplementation(() => {
+      throw new Error("injected foreign relay delivery marker failure");
     });
-    store.createIssueComment(issue.id, {
-      authorType: "member",
-      authorId: "member_bob",
-      body: "Latest progress detail",
-    });
-
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 100))).toEqual({
-      delivered: 0,
-      dropped: 0,
-    });
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 2_000))).toEqual({
-      delivered: 1,
-      dropped: 0,
-    });
-    const messages = store.listChatMessages(chat.id);
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toMatchObject({ role: "system" });
-    expect(messages[0]?.body).toContain("Updates aggregated: 2");
-    expect(messages[0]?.body).toContain("Latest progress detail");
-    expect(messages[0]?.taskId).toBeNull();
-    expect(store.listTasksForIssue(issue.id)).toHaveLength(0);
+    try {
+      expect(foreignLog(f, relay.id).to_seq).toBe(5);
+      expect(mark).not.toHaveBeenCalled();
+    } finally {
+      mark.mockRestore();
+    }
+    f.store.startTask(relay.id);
+    f.store.completeTask(relay.id, { output: "Summary without foreign delivery" });
+    assertForeignCursorUnchanged(f);
   });
 
-  it("delivers a human Issue comment on the next user turn and clears it only after success", () => {
-    const store = createStore({ debounceMs: 10 });
-    const runtime = store.registerRuntime({
-      id: "rt_issue_updates",
-      name: "Issue update runtime",
-      provider: "codex",
-      workspaceId: "local",
-    });
-    const { issue, chat } = scaffold(store);
-
-    const warmup = store.sendChatMessage(chat.id, { body: "Establish the Chat session" });
-    expect(store.claimTask(runtime.id)?.id).toBe(warmup.task.id);
-    store.startTask(warmup.task.id);
-    store.completeTask(warmup.task.id, {
-      output: "Chat session established",
-      sessionId: "sess_issue_updates",
-      workDir: "/tmp/multiremi-agent-issue-updates",
-    });
-    store.createIssueComment(issue.id, {
-      authorType: "member",
-      authorId: "member_reviewer",
-      body: "The reviewer approved the API contract.",
-    });
-    const issueSessionCountBeforeDelivery = store.listIssueSessions(issue.id).length;
-    const taskCountBeforeDelivery = store.listTasks().length;
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 1_000))).toEqual({
-      delivered: 1,
-      dropped: 0,
-    });
-    expect(store.listTasks()).toHaveLength(taskCountBeforeDelivery);
-    expect(store.listChatMessages(chat.id).at(-1)).toMatchObject({
-      role: "system",
-      taskId: null,
-    });
-
-    const userTurn = store.sendChatMessage(chat.id, { body: "Review the latest status." });
-    const pendingSystemMessage = store.listChatMessages(chat.id)
-      .find((message) => message.role === "system" && message.taskId === null)!;
-    const tiedAt = userTurn.message.createdAt;
-    db!.run(
-      "UPDATE multiremi_chat_messages SET id = ?, created_at = ? WHERE id = ?",
-      ["msg_zzzzzzzzzzzz", tiedAt, pendingSystemMessage.id],
-    );
-    db!.run(
-      "UPDATE multiremi_chat_messages SET created_at = ? WHERE id = ?",
-      [tiedAt, userTurn.message.id],
-    );
-    const claimedUserTurn = store.claimTask(runtime.id)!;
-    expect(claimedUserTurn).toMatchObject({
-      id: userTurn.task.id,
-      chatSessionId: chat.id,
-      issueId: issue.id,
-      issueSessionId: null,
-      sessionId: "sess_issue_updates",
-      workDir: "/tmp/multiremi-agent-issue-updates",
-    });
-    const wire = daemonTaskClaimResponse(store, claimedUserTurn);
-    expect((wire.session_projection as { mode?: string } | undefined)?.mode).toBe("delta");
-    const prompt = buildTaskPrompt({
-      ...claimedUserTurn,
-      sessionProjection: wire.session_projection,
-      chatMessage: wire.chat_message,
-      boundIssue: wire.bound_issue,
-      boundIssueUpdates: wire.bound_issue_updates,
-      boundIssueUpdatesOmittedCount: wire.bound_issue_updates_omitted_count,
-    } as any);
-    expect(prompt).toContain(`## Issue\nKey: ${issue.key}`);
-    expect(prompt).toContain("## Bound Issue Updates");
-    expect(prompt).toContain("The reviewer approved the API contract.");
-    expect(prompt.match(/The reviewer approved the API contract\./g)).toHaveLength(1);
-    expect(wire.chat_message).toBe("Review the latest status.");
-    expect(prompt).not.toContain("## Chat Message");
-    expect(prompt).not.toContain("## Agent Instructions");
-    expect(store.listIssueSessions(issue.id)).toHaveLength(issueSessionCountBeforeDelivery);
-
-    store.startTask(claimedUserTurn.id);
-    store.failTask(claimedUserTurn.id, {
-      error: "Transient provider failure",
-      failureReason: "timeout",
-    });
-    const retry = store.listTasks().find((task) => task.parentTaskId === claimedUserTurn.id)!;
-    expect(retry).toBeDefined();
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
-    const retryWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(retry.id)!);
-    expect(retryWire.bound_issue_updates).toEqual(expect.arrayContaining([
-      expect.stringContaining("The reviewer approved the API contract."),
-    ]));
-
-    store.startTask(retry.id);
-    store.completeTask(retry.id, {
-      output: "Reviewed the latest status.",
-      sessionId: "sess_issue_updates",
-      workDir: "/tmp/multiremi-agent-issue-updates",
-    });
-
-    const nextTurn = store.sendChatMessage(chat.id, { body: "Continue." });
-    expect(store.claimTask(runtime.id)?.id).toBe(nextTurn.task.id);
-    const nextWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(nextTurn.task.id)!);
-    expect(nextWire.bound_issue_updates).toBeUndefined();
-    expect(nextWire.bound_issue_updates_omitted_count).toBeUndefined();
+  it("rejects a mismatched frozen marker and never attempts it while offering foreign metadata", () => {
+    const f = setup();
+    const relay = claimRelayAfterCompletedIssueRound(f);
+    expect(f.store.getBoundIssueLogToSeq(relay.id)).toBe(5);
+    expect(f.store.markBoundIssueLogDelivered(relay.id, 6)).toBe(false);
+    const originalMark = f.store.markBoundIssueLogDelivered.bind(f.store);
+    const mark = spyOn(f.store, "markBoundIssueLogDelivered").mockImplementation((taskId, toSeq) => originalMark(taskId, toSeq + 1));
+    const warnings = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(foreignLog(f, relay.id).to_seq).toBe(5);
+      expect(mark).not.toHaveBeenCalled();
+      expect(warnings.mock.calls).toHaveLength(0);
+    } finally {
+      mark.mockRestore();
+      warnings.mockRestore();
+    }
+    f.store.startTask(relay.id);
+    f.store.completeTask(relay.id, { output: "No foreign delivery window" });
+    assertForeignCursorUnchanged(f);
   });
 
-  it("caps a long pending update backlog without waking the agent", () => {
-    const store = createStore({ debounceMs: 1 });
-    const runtime = store.registerRuntime({
-      id: "rt_issue_update_flood",
-      name: "Issue update flood runtime",
-      provider: "codex",
-      workspaceId: "local",
-    });
-    const { issue, chat } = scaffold(store);
+  it("does not warn or mark delivery when offering the safe frozen foreign window", () => {
+    const f = setup();
+    const relay = claimRelayAfterCompletedIssueRound(f);
+    const mark = spyOn(f.store, "markBoundIssueLogDelivered");
+    const warnings = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(foreignLog(f, relay.id).to_seq).toBe(5);
+      expect(mark).not.toHaveBeenCalled();
+      expect(warnings.mock.calls).toHaveLength(0);
+    } finally {
+      mark.mockRestore();
+      warnings.mockRestore();
+    }
+    assertForeignCursorUnchanged(f);
+  });
 
-    const warmup = store.sendChatMessage(chat.id, { body: "Warm the Chat session." });
-    expect(store.claimTask(runtime.id)?.id).toBe(warmup.task.id);
-    store.startTask(warmup.task.id);
-    store.completeTask(warmup.task.id, {
-      output: "Ready.",
-      sessionId: "sess_issue_update_flood",
-      workDir: "/tmp/multiremi-agent-issue-update-flood",
-    });
-    const taskCountBeforeUpdates = store.listTasks().length;
+  it("replays the relay and pending-turn migrations twice without losing either column", () => {
+    const f = setup();
+    runMigrations(f.db);
+    runMigrations(f.db);
+    const task = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Migration check" });
+    expect(f.db.query("SELECT bound_issue_log_to_seq, bound_issue_log_delivered_seq FROM multiremi_turn_execution_records WHERE id = ?")
+      .get(task.id)).toEqual({ bound_issue_log_to_seq: null, bound_issue_log_delivered_seq: null });
+    for (const id of ["20260929_relay_issue_log_to_seq", "20260929_relay_issue_log_delivered_seq", "20260929_tasks_one_pending_turn"]) {
+      const row = f.db.query("SELECT COUNT(*) AS count FROM multiremi_schema_migrations WHERE id = ?")
+        .get(id) as { count: number | bigint };
+      expect(Number(row.count)).toBe(1);
+    }
+  });
 
-    for (let index = 0; index < 100; index += 1) {
-      store.createIssueComment(issue.id, {
-        authorType: "member",
-        authorId: "member_reviewer",
-        body: `Flood update ${index}`,
-      });
-      expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 10_000))).toEqual({
-        delivered: 1,
-        dropped: 0,
+  it("clears a historical delivery marker before retrying a stale relay without reading foreign history", () => {
+    const f = setup();
+    const relay = claimRelayAfterCompletedIssueRound(f);
+    const firstLog = foreignLog(f, relay.id);
+    const deliveredSeq = () => (f.db.query("SELECT bound_issue_log_delivered_seq FROM multiremi_turn_execution_records WHERE id = ?")
+      .get(relay.id) as { bound_issue_log_delivered_seq: number | null }).bound_issue_log_delivered_seq;
+    // Persist a pre-cutover receipt; a retry must invalidate that old proof.
+    runTurnExecutionMutation(f.db as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET bound_issue_log_delivered_seq = ?, dispatched_at = ? WHERE id = ?", [
+      firstLog.to_seq, new Date(Date.now() - 120_000).toISOString(), relay.id,
+    ]);
+    expect(deliveredSeq()).toBe(firstLog.to_seq);
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(relay.id);
+    expect(deliveredSeq()).toBeNull();
+    const read = spyOn(f.store, "listConversationLogShown").mockImplementation(() => {
+      throw new Error("injected reclaimed foreign relay read failure");
+    });
+    try {
+      expect(foreignLog(f, relay.id).to_seq).toBe(firstLog.to_seq);
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+    f.store.startTask(relay.id);
+    f.store.completeTask(relay.id, { output: "Reclaimed from the delivered Chat report" });
+    assertForeignCursorUnchanged(f);
+  });
+
+  it("waits for the final active Issue task regardless of its assignee", async () => {
+    const f = setup();
+    const other = f.store.createAgent({ name: "Contributor", provider: "codex", maxConcurrentTasks: 4 });
+    const first = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "First" });
+    const second = f.store.createSessionTask(f.session.id, { agentId: other.id, prompt: "Second" });
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(first.id);
+    f.store.startTask(first.id);
+    const firstReader = await authenticatedTask(f, first.id);
+    const firstRead = await firstReader.app.request(`/api/sessions/${f.session.id}/messages?from=0&to=${f.store.getConversationLogHead(f.session.id)!.headSeq}`, { headers: firstReader.headers });
+    expect(firstRead.status).toBe(200);
+    f.store.failTask(first.id, { error: "Failed while contributor is pending", failureReason: "agent_error" });
+    expect(f.reports()).toHaveLength(0);
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(second.id);
+    f.store.startTask(second.id);
+    const secondReader = await authenticatedTask(f, second.id);
+    const secondRead = await secondReader.app.request(`/api/sessions/${f.session.id}/messages?from=0&to=${f.store.getConversationLogHead(f.session.id)!.headSeq}`, { headers: secondReader.headers });
+    expect(secondRead.status).toBe(200);
+    f.store.cancelTask(second.id);
+    expect(f.reports()).toHaveLength(1);
+    expect(f.reports()[0]!.body).toContain(second.id);
+  });
+
+  it("does not advance the relay lane after a failed chat task", () => {
+    const f = setup();
+    const first = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Issue work" });
+    f.store.claimTask(f.runtime.id);
+    f.store.startTask(first.id);
+    f.store.completeTask(first.id, { output: "First result" });
+    const relay = f.store.listTasks().find(task => task.chatSessionId === f.chat.id && task.wakeSource === "platform_to_owner")!;
+    f.store.claimTask(f.runtime.id);
+    const firstLog = foreignLog(f, relay.id);
+    f.store.startTask(relay.id);
+    f.store.failTask(relay.id, { error: "Delivery failed", failureReason: "agent_error" });
+    expect(f.lane()?.cursorSeq).toBe(0);
+    const second = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Another round" });
+    f.store.claimTask(f.runtime.id);
+    f.store.startTask(second.id);
+    f.store.completeTask(second.id, { output: "Second result" });
+    const nextRelay = f.store.listTasks().find(task => task.chatSessionId === f.chat.id && task.status === "queued")!;
+    f.store.claimTask(f.runtime.id);
+    const nextLog = foreignLog(f, nextRelay.id);
+    expect(nextLog.from_seq).toBe(0);
+    expect(nextLog.to_seq).toBeGreaterThan(firstLog.to_seq);
+    const reports = f.reports().map(message => message.body).join("\n");
+    expect(reports).toContain("First result");
+    expect(reports).toContain("Second result");
+    assertForeignCursorUnchanged(f);
+  });
+
+  it("keeps an owned public Issue body out of the offer while preserving authenticated full-message and range reads", async () => {
+    const f = setup();
+    const body = "Issue detail: " + "x".repeat(4_001);
+    const entry = f.store.appendConversationLog({
+      sessionId: f.session.id, kind: "message", authorType: "member", bodyMd: body,
+    });
+    const task = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Read this Issue detail" });
+    expect(task.chatSessionId).toBeNull();
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+    const claimed = f.store.getTaskWithAgent(task.id)!;
+    const wire = daemonTaskClaimResponse(f.store, claimed);
+    useTaskSessionInput(f.store, claimed, wire);
+    const projection = wire.session_projection as { jsonl: string; to_seq: number };
+    const unread = JSON.parse(projection.jsonl.split("\n")[0]!);
+    expect(unread).toMatchObject({ type: "unread_range", session_id: f.session.id, from_seq: 0, to_seq: projection.to_seq });
+    expect(entry.seq).toBeLessThanOrEqual(unread.to_seq);
+    expect(projection.jsonl).not.toContain(body);
+    const { prompt, instructions } = buildTaskPromptArtifact(normalizeDaemonClaimTask(wire)!);
+    expect(prompt).toContain(`remi message list ${f.session.id} --from 0 --to ${projection.to_seq}`);
+    for (const text of [prompt, instructions]) expect(text).not.toContain(body);
+    expect(f.store.getConversationLogEntry(f.session.id, entry.seq)?.body_md).toBe(body);
+    const { app, headers } = await authenticatedTask(f, task.id);
+    const expanded = await app.request(`/api/messages/${entry.id}`, { headers });
+    expect(expanded.status).toBe(200);
+    expect((await expanded.json()).message.body_md).toBe(body);
+    const range = await app.request(`/api/sessions/${f.session.id}/messages?from=0&to=${projection.to_seq}`, { headers });
+    expect(range.status).toBe(200);
+    const page = await range.json();
+    expect(page.next_cursor).toBeNull();
+    expect(page.entries.find((row: any) => row.id === entry.id).body_md).toBe(body);
+  });
+
+  it("caps authenticated public Issue range pages at 100 and reads the full frozen interval", async () => {
+    const f = setup();
+    for (let index = 0; index < 110; index++) {
+      f.store.createIssueComment(f.issue.id, {
+        issueSessionId: f.session.id, authorType: "system", authorId: null,
+        body: `Log item ${index.toString().padStart(3, "0")}`,
       });
     }
+    const task = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Read the log" });
+    expect(task.chatSessionId).toBeNull();
+    expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+    const toSeq = f.store.getConversationLogHead(f.session.id)!.headSeq;
+    const claimed = f.store.getTaskWithAgent(task.id)!;
+    const wire = daemonTaskClaimResponse(f.store, claimed);
+    useTaskSessionInput(f.store, claimed, wire);
+    const projection = wire.session_projection as { jsonl: string; to_seq: number };
+    const unread = JSON.parse(projection.jsonl.split("\n")[0]!);
+    expect(unread).toMatchObject({ type: "unread_range", session_id: f.session.id, from_seq: 0, to_seq: toSeq });
+    expect(unread.unread_count).toBeGreaterThanOrEqual(110);
+    expect(projection.jsonl).not.toContain("Log item");
+    const { prompt } = buildTaskPromptArtifact(normalizeDaemonClaimTask(wire)!);
+    expect(prompt).toContain(`remi message list ${f.session.id} --from 0 --to ${toSeq}`);
+    expect(prompt).not.toContain('"type":"unread_range"');
+    // The range reader omits this Agent's own turn card, while retaining every message body.
+    const expected = f.store.listConversationLogShown(f.session.id, { toSeq })
+      .filter(entry => entry.kind !== "turn");
+    const { app, headers } = await authenticatedTask(f, task.id);
+    const path = `/api/sessions/${f.session.id}/messages?from=0&to=${toSeq}`;
+    const first = await app.request(path, { headers });
+    expect(first.status).toBe(200);
+    const firstPage = await first.json();
+    // The first 100 log rows include this Agent's turn pointer at seq 2.
+    expect(firstPage.read_end).toEqual({ seq: 101, offset: 0 });
+    expect(firstPage.entries).toHaveLength(99);
+    expect(firstPage.next_cursor).toBeString();
+    expect(firstPage.read_end.seq).toBeLessThan(toSeq + 1);
+    expect(JSON.stringify(firstPage.entries)).not.toContain("Log item 109");
+    f.store.createIssueComment(f.issue.id, { body: "LATE_PUBLIC_BODY_OUTSIDE_FROZEN_RANGE" });
+    const next = await app.request(`${path}&cursor=${encodeURIComponent(firstPage.next_cursor)}`, { headers });
+    expect(next.status).toBe(200);
+    const nextPage = await next.json();
+    expect(nextPage.next_cursor).toBeNull();
+    expect(nextPage.read_end).toEqual({ seq: toSeq + 1, offset: 0 });
+    const entries = [...firstPage.entries, ...nextPage.entries];
+    expect(entries.map(row => ({ id: row.id, body: row.body_md })))
+      .toEqual(expected.map(row => ({ id: row.id, body: row.body_md })));
+    expect(entries.filter(row => row.body_md.startsWith("Log item "))).toHaveLength(110);
+    expect(JSON.stringify(entries)).not.toContain("LATE_PUBLIC_BODY_OUTSIDE_FROZEN_RANGE");
+    expect(f.store.getSessionAgentReadProgress(f.session.id, f.agent.id, task.id)).toMatchObject({ seq: toSeq, offset: 0 });
+  }, 30_000);
 
-    expect(store.listTasks()).toHaveLength(taskCountBeforeUpdates);
-    expect(store.listChatMessages(chat.id).filter((message) => message.role === "system")).toHaveLength(100);
-
-    const userTurn = store.sendChatMessage(chat.id, { body: "Summarize the accumulated progress." });
-    expect(store.claimTask(runtime.id)?.id).toBe(userTurn.task.id);
-    const claimedUserTurn = store.getTaskWithAgent(userTurn.task.id)!;
-    const wire = daemonTaskClaimResponse(store, claimedUserTurn);
-    expect(wire.bound_issue_updates).toHaveLength(12);
-    expect(wire.bound_issue_updates_omitted_count).toBe(88);
-    const prompt = buildTaskPrompt({
-      ...claimedUserTurn,
-      sessionProjection: wire.session_projection,
-      chatMessage: wire.chat_message,
-      boundIssue: wire.bound_issue,
-      boundIssueUpdates: wire.bound_issue_updates,
-      boundIssueUpdatesOmittedCount: wire.bound_issue_updates_omitted_count,
-    } as any);
-    expect(prompt).toContain("88 earlier bound Issue update(s) omitted.");
-    expect(prompt).toContain("Flood update 99");
-    expect(prompt).not.toContain("Flood update 0\n");
-    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(64 * 1024);
+  it("keeps system queue rows out of the user-visible Chat queue", () => {
+    const f = fixture();
+    const agent = f.store.createAgent({ name: "Relay queue", provider: "codex", maxConcurrentTasks: 4 });
+    const issue = createResponsibleTestIssue(f.store, { title: "Bound", status: "in_progress" });
+    const chat = f.store.createChatSession({ agentId: agent.id });
+    const runtime = f.store.registerRuntime({ name: "Chat", provider: "codex", maxConcurrency: 4 });
+    const user = f.store.sendChatMessage(chat.id, { content: "Private turn" });
+    f.store.claimTask(runtime.id);
+    f.store.startTask(user.task.id);
+    f.store.cancelTask(user.task.id);
+    bindFeishuTopicFixture(f.store, f.db, chat.id, issue.id);
+    const sent = f.transaction(() => f.store.sendEnvelopeWithinTransaction({
+      to: { role: "chat", chatSessionId: chat.id, agentId: agent.id }, kind: "report", wake: "now",
+      body: "Read bound Issue", source: { issueId: issue.id },
+    }, [], createCommitEventQueue()))[0]!;
+    expect(sent.action).toBe("created");
+    expect(sent.task?.wakeSource).not.toBeNull();
+    expect(f.store.listQueuedChatTasks(chat.id)).toEqual([]);
+    // The follow-up queue (ADR 0020) holds only member-queued rows, never platform wakes.
+    expect(f.store.listQueuedMessages(chat.id)).toEqual({ items: [], paused: null });
+    expect(f.store.getTask(sent.task!.id)?.status).toBe("queued");
   });
-});
+}, { isolation: "snapshot" });

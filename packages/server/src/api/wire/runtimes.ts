@@ -1,3 +1,4 @@
+import { BUILD_COMMIT } from "@shared/version.js";
 import { runtimeModelCompatibilityResponse } from "@multiremi/store/runtime-model-catalog.js";
 export { MULTIREMI_DAEMON_PROVIDERS, fleetModelsResponse, runtimeModelCompatibilityResponse } from "@multiremi/store/runtime-model-catalog.js";
 export type { FleetModelThinkingLevelResponse, FleetModelThinkingResponse, FleetModelResponse, FleetProviderModelsResponse } from "@multiremi/store/runtime-model-catalog.js";
@@ -50,6 +51,9 @@ export function runtimeCompatibilityResponse(runtime: MultiremiRuntime): Record<
     status: runtime.status,
     device_info: runtime.deviceInfo,
     metadata: runtime.metadata,
+    cli_commit: runtime.metadata.cli_commit ?? null,
+    cli_commit_matches_platform: BUILD_COMMIT ? runtime.metadata.cli_commit === BUILD_COMMIT : null,
+    ...(runtime.protocol ? { protocol: runtime.protocol } : {}),
     owner_id: runtime.ownerId,
     visibility: runtime.visibility,
     last_seen_at: runtime.lastHeartbeatAt,
@@ -79,6 +83,7 @@ export function runtimeUpdateRequestCompatibilityResponse(request: MultiremiRunt
     status: request.status,
     scope: request.scope,
     target_version: request.targetVersion,
+    target_commit: request.targetCommit ?? null,
     created_at: request.createdAt,
     updated_at: request.updatedAt,
   };
@@ -292,9 +297,17 @@ function runtimeLaunchHeader(provider: string): string {
 /** Snake-case wire shape of relay config for the daemon register response. */
 export function relayForDaemonWire(store: MultiremiStore, workspaceId: string): Record<string, unknown> {
   const config = store.getRelayConfigForDaemon(workspaceId);
-  const engine = (e: { fragment: string; authToken: string; revision: number } | null) =>
-    e ? { fragment: e.fragment, auth_token: e.authToken, revision: e.revision } : null;
-  return { claude: engine(config.claude), codex: engine(config.codex), model_discovery: config.modelDiscovery };
+  const engine = (e: { fragment: string; authToken: string; revision: number; authHeader?: string; endpointId?: string; headers?: Record<string, string> } | null) =>
+    e ? { fragment: e.fragment, auth_token: e.authToken, revision: e.revision,
+      ...(e.endpointId ? { endpoint_id: e.endpointId, auth_header: e.authHeader, headers: e.headers } : {}) } : null;
+  const claude = engine(config.claude);
+  return {
+    claude: claude ? { ...claude, one_million_models: store.listGatewayModelContext(workspaceId, "claude").map(row => row.modelId) } : null,
+    codex: engine(config.codex),
+    // Daemons that predate the engine ignore the key.
+    antigravity: engine(config.antigravity),
+    model_discovery: config.modelDiscovery,
+  };
 }
 
 function launchHeader(provider: string): string {

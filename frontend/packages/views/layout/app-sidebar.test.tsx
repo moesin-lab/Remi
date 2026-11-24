@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@multiremi/core/api";
 import { AppSidebar } from "./app-sidebar";
 
-const { detail, deletePin, pathname, pins } = vi.hoisted(() => ({
+const { detail, deletePin, pathname, pins, observedQueries } = vi.hoisted(() => ({
+  observedQueries: [] as Array<{ queryKey: readonly unknown[]; enabled?: boolean }>,
   detail: { current: { isPending: false, isError: false, data: null as unknown, error: null as unknown } },
   deletePin: vi.fn(),
   pathname: { current: "/acme/issues" },
@@ -12,7 +13,7 @@ const { detail, deletePin, pathname, pins } = vi.hoisted(() => ({
       {
         id: "pin-1",
         workspace_id: "ws-1",
-        user_id: "user-1",
+        user_id: "local",
         item_type: "issue" as const,
         item_id: "issue-1",
         position: 0,
@@ -63,6 +64,7 @@ vi.mock("@multiremi/ui/components/ui/sidebar", () => ({
   ),
   SidebarMenuItem: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   SidebarRail: () => null,
+  useSidebar: () => ({ state: "expanded", toggleSidebar: vi.fn(), isMobile: false }),
 }));
 vi.mock("@multiremi/ui/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -87,7 +89,7 @@ vi.mock("../auth", () => ({ useLogout: () => vi.fn() }));
 vi.mock("../issues/components/status-icon", () => ({ StatusIcon: () => <span /> }));
 vi.mock("../navigation", () => ({
   AppLink: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a>,
-  useNavigation: () => ({ pathname: pathname.current, push: vi.fn() }),
+  useNavigation: () => ({ pathname: pathname.current.split("?")[0], searchParams: new URLSearchParams(pathname.current.split("?")[1]), push: vi.fn() }),
 }));
 vi.mock("../projects/components/project-icon", () => ({ ProjectIcon: () => <span /> }));
 vi.mock("../workspace/workspace-avatar", () => ({ WorkspaceAvatar: () => <span /> }));
@@ -114,9 +116,12 @@ vi.mock("@multiremi/core/paths", () => ({
     squads: () => "/acme/squads",
     usage: () => "/acme/usage",
     runtimes: () => "/acme/runtimes",
+    magpie: () => "/acme/magpie",
+    executionGroups: () => "/acme/execution-groups",
     plugins: () => "/acme/plugins",
     skills: () => "/acme/skills",
     settings: () => "/acme/settings",
+    imPlatform: (platform: string) => `/acme/im/${platform}`,
     issueDetail: (id: string) => `/acme/issues/${id}`,
     projectDetail: (id: string) => `/acme/projects/${id}`,
   }),
@@ -145,20 +150,36 @@ vi.mock("@multiremi/core/pins/queries", () => ({ pinListOptions: () => ({ queryK
 vi.mock("@multiremi/core/projects/queries", () => ({ projectDetailOptions: () => ({ queryKey: ["project"] }) }));
 vi.mock("@multiremi/core/runtimes/hooks", () => ({ useMyRuntimesNeedUpdate: () => false }));
 vi.mock("@multiremi/core/workspace/queries", () => ({
-  myInvitationListOptions: () => ({ queryKey: ["invitations"] }),
+  myInvitationListOptions: (options?: { enabled?: boolean }) => ({
+    queryKey: ["invitations"],
+    ...(options ?? {}),
+  }),
   workspaceKeys: { myInvitations: () => ["invitations"] },
   workspaceListOptions: () => ({ queryKey: ["workspaces"] }),
 }));
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-query")>()),
   useMutation: () => ({ isPending: false, mutate: vi.fn() }),
-  useQuery: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-    if (queryKey[0] === "pins") return { data: pins.current };
-    if (queryKey[0] === "issue") return detail.current;
+  useQuery: (options: { queryKey: readonly unknown[]; enabled?: boolean }) => {
+    observedQueries.push(options);
+    if (options.queryKey[0] === "pins") return { data: pins.current };
+    if (options.queryKey[0] === "issue") return detail.current;
     return { data: [] };
   },
   useQueryClient: () => ({ fetchQuery: vi.fn(), invalidateQueries: vi.fn() }),
 }));
+
+describe("shell gate wiring (MUL-472 b rework)", () => {
+  beforeEach(() => {
+    observedQueries.length = 0;
+    pathname.current = "/acme/issues";
+  });
+
+  it("does not mount the retired workspace invitation query", () => {
+    render(<AppSidebar />);
+    expect(observedQueries.filter((query) => query.queryKey[0] === "invitations")).toEqual([]);
+  });
+});
 
 describe("PinRow", () => {
   beforeEach(() => {
@@ -183,6 +204,15 @@ describe("PinRow", () => {
     detail.current = { isPending: false, isError: false, data: { identifier: "MUL-123", title: "Keep this pin", status: "todo" }, error: null };
     render(<AppSidebar />);
     expect(await screen.findByText("MUL-123 Keep this pin")).toBeInTheDocument();
+  });
+});
+
+describe("IM platform navigation", () => {
+  it("keeps the Feishu platform active throughout its child pages", () => {
+    pathname.current = "/acme/im/feishu/ingestion";
+    const { container } = render(<AppSidebar />);
+    expect(container.querySelector('button[data-href="/acme/im/feishu"]')).toHaveAttribute("data-active", "true");
+    expect(container.querySelector('button[data-href="/acme/settings"]')).toHaveAttribute("data-active", "false");
   });
 });
 
@@ -223,4 +253,11 @@ it("exposes the independent chat workspace in personal navigation", () => {
   const { container } = render(<AppSidebar />);
   const chat = container.querySelector('button[data-href="/acme/chat"]');
   expect(chat).toHaveAttribute("data-active", "true");
+});
+
+it("opens the standalone Magpie page from the sidebar and highlights only its shortcut", () => {
+  pathname.current = "/acme/magpie";
+  const { container } = render(<AppSidebar />);
+  expect(container.querySelector('button[data-href="/acme/magpie"]')).toHaveAttribute("data-active", "true");
+  expect(container.querySelector('button[data-href="/acme/runtimes"]')).toHaveAttribute("data-active", "false");
 });

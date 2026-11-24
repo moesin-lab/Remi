@@ -1,0 +1,480 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionLogEntrySchema, SessionLogWindowSchema, type SessionLogWindow } from "../api/schemas/session-log";
+import type { IssueActivityEntry } from "@multiremi/contracts";
+import { ApiError } from "../api/http";
+const mocks = vi.hoisted(() => ({ read: vi.fn(), locate: vi.fn() }));
+vi.mock("../api", () => ({ api: { getSessionLog: mocks.read, locateSessionLogEntry: mocks.locate } }));
+import { IssueLogReplica } from "./issue-log";
+
+const row = (seq: number, kind = "message") => SessionLogEntrySchema.parse({ session_id: "s", id: `r${seq}`, seq, kind,
+  revision: 1, body_md: `body ${seq}`, body_html: `<p>body ${seq}</p>`, render_version: "v", author_type: "member", author_id: "u",
+  metadata: { attachments: [{ id: "att" }], reactions: [] } });
+const windowOf = (entries = [row(80), row(81)]): SessionLogWindow => ({ entries, head_seq: 81, log_version: 4, has_more_before: true, has_more_after: false });
+const audit = (id: string): IssueActivityEntry => ({ type: "activity", id, action: "issue_created", details: null, actor_type: "system", actor_id: null, created_at: "2026-10-04T00:00:00.000Z" });
+
+describe("activity sidecar", () => {
+  it("parses optional sidecar fields, rejects invalid activity data, and accepts older windows", () => {
+    expect(SessionLogWindowSchema.parse(windowOf()).activities).toBeUndefined();
+    expect(SessionLogWindowSchema.parse({ ...windowOf(), activities: [audit("a")], prev_entry_created_at: null, activities_truncated: true }).activities).toEqual([audit("a")]);
+    expect(SessionLogWindowSchema.safeParse({ ...windowOf(), activities: [{ ...audit("a"), details: "invalid" }] }).success).toBe(false);
+  });
+  it("unions activity pages by id and replaces the sidecar on readTail", async () => {
+    mocks.read.mockReset();
+    mocks.read.mockImplementation(async (_id: string, params: { anchor?: number; with_activity?: number }) => {
+      if (params.anchor === 0) return windowOf([row(0, "head")]);
+      if (params.anchor === 79) return { ...windowOf([row(78), row(79)]), activities: [audit("old"), audit("same")], prev_entry_created_at: "older" };
+      if (params.anchor === 81) return { ...windowOf([row(82)]), activities: [audit("new"), audit("same")], activities_truncated: true };
+      return { ...windowOf(), activities: [audit("tail")] };
+    });
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: { ...windowOf(), activities: [audit("same")] } }, false, true);
+    await replica.earlier(); await replica.newer();
+    expect(replica.window?.activities?.map(a => a.id).sort()).toEqual(["new", "old", "same"]);
+    expect(replica.window?.activities_truncated).toBe(true);
+    expect(replica.window?.prev_entry_created_at).toBe("older");
+    expect(mocks.read.mock.calls.filter(([, p]) => p.anchor !== 0).every(([, p]) => p.with_activity === 1)).toBe(true);
+    await replica.loadTail();
+    expect(replica.window?.activities?.map(a => a.id)).toEqual(["tail"]);
+    expect(replica.window?.activities_truncated).toBeUndefined();
+  });
+  it("keeps activity on preserve-window refresh, but 404 fallback replaces it", async () => {
+    mocks.read.mockReset(); mocks.locate.mockReset();
+    mocks.locate.mockResolvedValue({ id: "r80", seq: 80, head_seq: 81 });
+    mocks.read.mockImplementation(async (_id, p) => p.anchor === 0 ? windowOf([row(0, "head")]) : { ...windowOf(), activities: [audit("fresh")] });
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: { ...windowOf(), activities: [audit("held")] } }, false, true);
+    await replica.loadAround("r80", true);
+    expect(replica.window?.activities?.map(a => a.id)).toEqual(["fresh", "held"]);
+    mocks.locate.mockRejectedValue(new ApiError("missing", 404, "Not Found"));
+    await replica.loadAround("deleted", true);
+    expect(replica.missingCommentId).toBe("deleted");
+    expect(replica.window?.activities?.map(a => a.id)).toEqual(["fresh"]);
+    expect(mocks.read).toHaveBeenCalledWith("s", { before: 30, with_activity: 1 });
+  });
+  it("appends live activity only to an enabled tail, without changing seq/head or freshness", () => {
+    const seed = { sessionId: "s", head: row(0, "head"), window: windowOf() };
+    for (const enabled of [false, true]) for (const middle of [false, true]) {
+      const replica = new IssueLogReplica("s", { ...seed, window: { ...seed.window, has_more_after: middle } }, false, enabled);
+      const before = replica.getSnapshot("s");
+      replica.appendActivity(audit("live")); replica.appendActivity(audit("live"));
+      replica.appendActivity({ ...audit("ignore"), action: "comment_created" });
+      expect(replica.window?.activities?.map(a => a.id) ?? []).toEqual(enabled && !middle ? ["live"] : []);
+      expect(replica.getSnapshot("s")).toMatchObject({ head: before.head, ready: before.ready, fresh: before.fresh, entries: before.entries });
+    }
+  });
+  it("refreshes an expanded default-session history with activities from every intervening page", async () => {
+    const seed = { ...windowOf([row(3), row(4)]), prev_entry_created_at: "held-boundary", before_visible_count: 2,
+      activities: [audit("held")] };
+    mocks.read.mockImplementation(async (_id, params) => params.anchor === 2
+      ? { ...windowOf([row(3), row(4), row(5), row(6)]), activities: [audit("bridge"), audit("held")] }
+      : { ...windowOf([row(7), row(8)]), activities: [audit("tail")], head_seq: 8 });
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: seed }, false, true);
+    await replica.refreshVisible();
+    expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 3, 4, 5, 6, 7, 8]);
+    expect(replica.window?.activities?.map(entry => entry.id)).toEqual(["bridge", "held", "tail"]);
+    expect(replica.window).toMatchObject({ prev_entry_created_at: "held-boundary", before_visible_count: 2 });
+    expect(mocks.read.mock.calls.map(([, params]) => params)).toEqual([
+      { before: 30, with_activity: 1 }, { anchor: 2, after: 100, with_activity: 1 },
+    ]);
+    expect(replica.getSnapshot("s")).toMatchObject({ ready: true, fresh: true, head: 8 });
+  });
+  it("removes deleted comments and refreshes edited comments without dropping loaded activities", async () => {
+    const seed = { ...windowOf([row(3), row(4), row(80), row(81)]), activities: [audit("held")] };
+    const edited = { ...row(80), revision: 2, body_md: "edited" };
+    mocks.read.mockImplementation(async (_id, params) => params.anchor === 2
+      ? { ...windowOf([row(4)]), activities: [audit("held")] }
+      : { ...windowOf([edited]), activities: [audit("fresh")] });
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: seed }, false, true);
+    await replica.refreshVisible();
+    expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 4, 80]);
+    expect(replica.getSnapshot("s").entries.at(-1)).toMatchObject({ revision: 2, body_md: "edited" });
+    expect(replica.window?.activities?.map(entry => entry.id)).toEqual(["fresh", "held"]);
+  });
+  it("keeps log-only deep-link refreshes on their existing replacement behavior", async () => {
+    const seed = { ...windowOf([row(3), row(80)]), activities: [audit("ignored")] };
+    mocks.locate.mockResolvedValue({ id: "r80", seq: 80, head_seq: 81 });
+    mocks.read.mockImplementation(async (_id, params) => params.anchor === 0
+      ? windowOf([row(0, "head")]) : windowOf([row(80), row(81)]));
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: seed });
+    await replica.loadAround("r80", true);
+    expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 80, 81]);
+    expect(replica.window?.activities).toBeUndefined();
+    expect(mocks.read.mock.calls.every(([, params]) => params.with_activity === undefined)).toBe(true);
+  });
+});
+
+afterEach(() => { vi.unstubAllGlobals(); mocks.read.mockReset(); mocks.locate.mockReset(); });
+
+describe("Issue log presentation over C7", () => {
+  it("removes C7-deleted rows from the presentation and keeps them removed during HTTP backfill", async () => {
+    const seed = { ...windowOf([row(1), row(2)]), head_seq: 2, has_more_before: false };
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: seed });
+    const visible: number[][] = [];
+    replica.subscribe("s", () => visible.push(replica.getSnapshot("s").entries.map(entry => entry.seq)));
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: { hasOpfs: false } });
+    try {
+      expect(visible.every(seqs => seqs.includes(1) && seqs.includes(2))).toBe(true);
+      await replica.hydratedFrames("s", [{ seq: 2, kind: "patch", payload: {
+        session_id: "s", target_seq: 2, revision: 3, fields: { deleted_at: "2026-10-06T00:00:00Z" },
+      } }]);
+      expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 1]);
+      mocks.read.mockResolvedValue(seed);
+      await replica.refreshTailPreservingWindow();
+      expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 1]);
+    } finally { cleanup(); }
+  });
+
+  it("forwards a hidden marker and the deletion patch when an entry is absent from hydration", async () => {
+    mocks.read.mockResolvedValue(windowOf([]));
+    const replica = new IssueLogReplica("s");
+    const delivered = vi.spyOn(replica, "frames").mockImplementation(() => {});
+    const deletion = { seq: 1, kind: "patch" as const, payload: {
+      session_id: "s", target_seq: 1, revision: 3, fields: { deleted_at: "2026-10-06T00:00:00Z" },
+    } };
+    await replica.hydratedFrames("s", [{ seq: 1, kind: "entry", payload: row(1) }, deletion]);
+    expect(delivered).toHaveBeenCalledWith("s", [
+      { seq: 1, kind: "entry", payload: { session_id: "s", seq: 1, revision: 1, visibility: "hidden" } }, deletion,
+    ]);
+  });
+
+  it("preserves hydration request failures and resumes the next deletion batch", async () => {
+    const error = new ApiError("server unavailable", 503, "Unavailable");
+    mocks.read.mockRejectedValue(error);
+    const replica = new IssueLogReplica("s");
+    const delivered = vi.spyOn(replica, "frames").mockImplementation(() => {});
+    await expect(replica.hydratedFrames("s", [{ seq: 1, kind: "entry", payload: row(1) }])).rejects.toBe(error);
+    const deletion = { seq: 1, kind: "patch" as const, payload: {
+      session_id: "s", target_seq: 1, revision: 3, fields: { deleted_at: "2026-10-06T00:00:00Z" },
+    } };
+    await replica.hydratedFrames("s", [deletion]);
+    expect(delivered).toHaveBeenCalledWith("s", [deletion]);
+  });
+
+  it("imports SSR rows into C7 without a second network read or losing display fields", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: windowOf() });
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: { hasOpfs: false } });
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(replica.getSnapshot("s").entries.map(e => e.id)).toEqual(["r0", "r80", "r81"]);
+    expect(replica.getSnapshot("s").fresh).toBe(true);
+    expect(SessionLogEntrySchema.parse(replica.getSnapshot("s").entries[1]).author_id).toBe("u");
+    cleanup();
+  });
+  it("connects and subscribes over http without crypto.randomUUID or Web Locks", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: undefined,
+      getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+    });
+    const subscribe = vi.fn();
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: windowOf() });
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe, unsubscribe: vi.fn(),
+      env: { hasOpfs: false, locks: {} as LockManager } });
+    try {
+      expect(subscribe).toHaveBeenCalledWith("s", 82);
+      expect(replica.getSnapshot("s")).toMatchObject({ ready: true, fresh: true });
+      expect(replica.getSnapshot("s").entries.map(entry => entry.id)).toEqual(["r0", "r80", "r81"]);
+    } finally { cleanup(); }
+  });
+  it("keeps the head and bounds DOM rows; thread markers cannot render", () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: windowOf([
+      ...Array.from({ length: 350 }, (_, n) => row(n + 1)), row(351, "thread_resolved"), row(352, "thread_unresolved"), row(353, "follow_frozen"),
+    ]) });
+    const entries = replica.getSnapshot("s").entries;
+    expect(entries).toHaveLength(300); expect(entries[0]?.seq).toBe(0);
+    expect(entries.some(e => e.kind.startsWith("thread_"))).toBe(false);
+    expect(entries.at(-1)?.kind).toBe("follow_frozen");
+  });
+  it("locates a deep-link window, extends both sparse ends, then returns to the tail", async () => {
+    mocks.read.mockReset(); mocks.locate.mockReset();
+    mocks.locate.mockResolvedValue({ id: "r40", seq: 40, head_seq: 81 });
+    mocks.read.mockImplementation(async (_sessionId: string, params: { anchor?: number; before?: number; after?: number }) => {
+      if (params.anchor === 0) return windowOf([row(0, "head")]);
+      if (params.anchor === 40) return { ...windowOf([row(39), row(40), row(41)]), has_more_after: true };
+      if (params.anchor === 38) return { ...windowOf([row(37), row(38)]), has_more_after: true };
+      if (params.anchor === 41) return { ...windowOf([row(42), row(43)]), has_more_after: true };
+      return windowOf();
+    });
+    const replica = new IssueLogReplica("s");
+    await replica.loadAround("r40");
+    expect(mocks.locate).toHaveBeenCalledWith("s", "r40");
+    expect(mocks.read).toHaveBeenCalledWith("s", { anchor: 40, before: 15, after: 15 });
+    expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 39, 40, 41]);
+    await replica.earlier();
+    await replica.newer();
+    expect(mocks.read).toHaveBeenCalledWith("s", { anchor: 38, before: 30 });
+    expect(mocks.read).toHaveBeenCalledWith("s", { anchor: 41, after: 30 });
+    expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 37, 38, 39, 40, 41, 42, 43]);
+    await replica.loadTail();
+    expect(replica.hasWindowFor()).toBe(true);
+    expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([0, 80, 81]);
+  });
+
+  it("refreshes Chat's tail without discarding manually expanded older rows", async () => {
+    mocks.read.mockReset().mockResolvedValue({ ...windowOf([row(80), row(81), row(82)]), head_seq: 82 });
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: null,
+      window: { ...windowOf([row(78), row(79), row(80), row(81)]), has_more_before: true } });
+    await replica.refreshTailPreservingWindow();
+    expect(mocks.read).toHaveBeenCalledWith("s", { before: 30 });
+    expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([78, 79, 80, 81, 82]);
+    expect(replica.window?.has_more_before).toBe(true);
+  });
+
+  it.each(["deleted-comment", "missing-comment"])("falls back to a ready tail when locate cannot find %s", async commentId => {
+    mocks.locate.mockReset().mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    mocks.read.mockReset().mockImplementation(async (_id, params) => params.anchor === 0
+      ? windowOf([row(0, "head")]) : windowOf());
+    const replica = new IssueLogReplica("s");
+    const readyFrames: Array<string | null> = [];
+    replica.subscribe("s", () => {
+      if (replica.getSnapshot("s").ready) readyFrames.push(replica.missingCommentId);
+    });
+    await replica.loadAround(commentId);
+    expect(replica.getSnapshot("s")).toMatchObject({ ready: true, fresh: true });
+    expect(replica.getSnapshot("s").entries.map(entry => entry.id)).toEqual(["r0", "r80", "r81"]);
+    expect(readyFrames).toEqual([commentId]);
+    expect(replica.hasWindowFor(commentId)).toBe(true);
+    expect(replica.hasWindowFor()).toBe(true);
+    mocks.locate.mockClear();
+    await replica.refreshVisible();
+    expect(mocks.locate).not.toHaveBeenCalled();
+  });
+
+  it.each([new ApiError("server unavailable", 503, "Unavailable"), new TypeError("Failed to fetch")])(
+    "preserves locate errors other than not-found: %s", async error => {
+      mocks.locate.mockReset().mockRejectedValue(error);
+      mocks.read.mockReset();
+      const replica = new IssueLogReplica("s");
+      await expect(replica.loadAround("target")).rejects.toBe(error);
+      expect(mocks.read).not.toHaveBeenCalled();
+      expect(replica.missingCommentId).toBeNull();
+      expect(replica.getSnapshot("s").ready).toBe(false);
+    },
+  );
+
+  it("does not hide a tail read failure after locate returns not-found", async () => {
+    mocks.locate.mockReset().mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    const error = new ApiError("session not found", 404, "Not Found");
+    mocks.read.mockReset().mockRejectedValue(error);
+    const replica = new IssueLogReplica("s");
+    await expect(replica.loadAround("target")).rejects.toBe(error);
+    expect(replica.getSnapshot("s").ready).toBe(false);
+    expect(replica.missingCommentId).toBeNull();
+  });
+
+  it("rechecks an SSR target that is absent from its window, then uses the tail", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"),
+      window: windowOf(), targetCommentId: "missing-comment" });
+    expect(replica.hasWindowFor("missing-comment")).toBe(false);
+    mocks.locate.mockReset().mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    mocks.read.mockReset().mockResolvedValue(windowOf());
+    await replica.loadAround("missing-comment");
+    expect(replica.hasWindowFor("missing-comment")).toBe(true);
+    expect(replica.missingCommentId).toBe("missing-comment");
+  });
+
+  it("imports an SSR missing-target fallback without locating it again", () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: null,
+      window: windowOf(), missingCommentId: "missing-comment" });
+    expect(replica.hasWindowFor("missing-comment")).toBe(true);
+    expect(replica.hasWindowFor()).toBe(true);
+    expect(replica.missingCommentId).toBe("missing-comment");
+  });
+
+  it("hydrates live message metadata before forwarding ordered frames to C7", async () => {
+    mocks.read.mockReset().mockImplementation(async (_sessionId: string, input: { anchor: number }) => {
+      if (input.anchor === 9) await new Promise(resolve => setTimeout(resolve, 10));
+      return windowOf([row(input.anchor + 1)]);
+    });
+    const replica = new IssueLogReplica("s");
+    const delivered: number[][] = [];
+    vi.spyOn(replica, "frames").mockImplementation((_sessionId, frames) => {
+      delivered.push(frames.map(frame => (frame.payload as { seq: number }).seq));
+      for (const frame of frames) {
+        expect((frame.payload as { metadata: { attachments: unknown[] } }).metadata.attachments).toHaveLength(1);
+        expect((frame.payload as { metadata: { reactions: unknown[] } }).metadata.reactions).toEqual([]);
+      }
+    });
+    const frame = (seq: number) => ({ seq, kind: "entry" as const,
+      payload: { session_id: "s", id: `r${seq}`, seq, kind: "message", metadata: {} } });
+    await Promise.all([replica.hydratedFrames("s", [frame(10)]), replica.hydratedFrames("s", [frame(11)])]);
+    expect(mocks.read).toHaveBeenCalledWith("s", { anchor: 9, after: 1 });
+    expect(delivered).toEqual([[10], [11]]);
+  });
+});
+
+describe("C7 keeps the windows this page read", () => {
+  const ticks = async () => { for (let n = 0; n < 32; n++) await Promise.resolve(); };
+  const seqs = (replica: IssueLogReplica) => replica.getSnapshot("s").entries.map(entry => entry.seq);
+  const ack = (logVersion: number, head = 2) => ({ stream: "log" as const, id: "s", first_seq: 1, head_seq: head, log_version: logVersion, gap: null });
+
+  it("stores a window opened before the Web Lock is granted, so the stream ack keeps its rows", async () => {
+    // A Chat's SSR bootstrap carries no separate head row to wait on.
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: null,
+      window: { ...windowOf([row(1), row(2)]), head_seq: 2, has_more_before: false } });
+    let grant!: () => void;
+    const locks = { request: (_name: string, _options: unknown, run: () => Promise<void>) =>
+      new Promise<void>(() => { grant = () => void run(); }) };
+    const subscribe = vi.fn();
+    const connecting = replica.connect({ userId: "u", workspaceId: "w", subscribe, unsubscribe: vi.fn(), env: {
+      hasOpfs: true, locks: locks as never, broadcastChannel: class { onmessage = null; postMessage() {} close() {} } as never,
+    } });
+    await ticks();
+    grant();
+    const cleanup = await connecting;
+    try {
+      expect(subscribe).toHaveBeenCalledWith("s", 3);
+      replica.ack("s", ack(4));
+      await ticks();
+      expect(seqs(replica)).toEqual([1, 2]);
+      expect(mocks.read).not.toHaveBeenCalled();
+    } finally { cleanup(); }
+  });
+
+  it("keeps the rows when a resumed stream acks a new log_version", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"),
+      window: { ...windowOf([row(1), row(2)]), head_seq: 2, has_more_before: false } });
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: { hasOpfs: false } });
+    try {
+      replica.ack("s", ack(4));
+      // Writes since the last ack bumped the version (ADR 0007's freshness token).
+      replica.ack("s", ack(9));
+      await ticks();
+      expect(seqs(replica)).toEqual([0, 1, 2]);
+    } finally { cleanup(); }
+  });
+
+  it("stores an older page read after the log moved on", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"),
+      window: { ...windowOf([row(3), row(4)]), head_seq: 4 } });
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: { hasOpfs: false } });
+    try {
+      mocks.read.mockResolvedValue({ ...windowOf([row(1), row(2)]), head_seq: 6, log_version: 7, has_more_before: false });
+      await replica.earlier();
+      replica.ack("s", ack(7, 4));
+      await ticks();
+      expect(seqs(replica)).toEqual([0, 1, 2, 3, 4]);
+    } finally { cleanup(); }
+  });
+
+  it("reads another tab's session through the read route, never from this session's windows", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: null,
+      window: { ...windowOf([row(1), row(2)]), head_seq: 2 } });
+    const other = SessionLogEntrySchema.parse({ ...row(1), session_id: "other", id: "o1" });
+    mocks.read.mockResolvedValue({ ...windowOf([other]), head_seq: 1 });
+    await expect(replica["readRange"]("other", { from: 1, to: 1 })).resolves.toEqual([other]);
+    expect(mocks.read).toHaveBeenCalledExactlyOnceWith("other", { anchor: 0, after: 100 });
+  });
+});
+
+describe("Chat's log: no head row, retained across connections", () => {
+  const memory = { hasOpfs: false };
+  const ticks = async () => { for (let n = 0; n < 32; n++) await Promise.resolve(); };
+  const seqs = (replica: IssueLogReplica) => replica.getSnapshot("s").entries.map(entry => entry.seq);
+  const live = (seq: number) => ({ seq, kind: "entry" as const, payload: { session_id: "s", seq, id: `r${seq}`, kind: "message", revision: 1 } });
+  /** The read route over one log; every call is recorded by `mocks.read`. */
+  function serve(rows: ReturnType<typeof row>[]) {
+    mocks.read.mockReset();
+    mocks.read.mockImplementation(async (_id: string, params: { anchor?: number; before?: number; after?: number }) => {
+      const head = rows.at(-1)?.seq ?? 0;
+      const anchor = params.anchor ?? head;
+      const before = params.before ? rows.filter(entry => entry.seq <= anchor).slice(-params.before) : [];
+      const after = params.after ? rows.filter(entry => entry.seq > anchor).slice(0, params.after) : [];
+      return { entries: [...before, ...after], head_seq: head, log_version: 1, has_more_before: false, has_more_after: false };
+    });
+    return { write: (entry: ReturnType<typeof row>) => { rows.push(entry); } };
+  }
+  const seeded = (entries = [row(1), row(2)]) => new IssueLogReplica("s", { sessionId: "s", head: null,
+    window: { ...windowOf(entries), head_seq: entries.at(-1)!.seq, has_more_before: false } }, true, false, false);
+
+  it("never reads, holds or shows the seq-0 head; an Issue log still reads it", async () => {
+    serve([row(0, "head"), row(1), row(2)]);
+    const chat = new IssueLogReplica("s", undefined, true, false, false);
+    await chat.loadTail();
+    expect(mocks.read.mock.calls.map(([, params]) => params)).toEqual([{ before: 30 }]);
+    expect(chat.headRow).toBeNull();
+    expect(seqs(chat)).toEqual([1, 2]);
+    await chat.refreshHead();
+    await chat.refreshTailPreservingWindow();
+    expect(chat.headRow).toBeNull();
+    expect(seqs(chat)).toEqual([1, 2]);
+    const cleanup = await chat.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: memory });
+    try {
+      // A head row C7 holds (another log of the session, an older page) stays out.
+      await (chat as unknown as { browser: { loadWindow(id: string, range: { from: number; to: number }): Promise<void> } })
+        .browser.loadWindow("s", { from: 0, to: 0 });
+      await ticks();
+      expect(chat.headRow).toBeNull();
+      expect(seqs(chat)).toEqual([1, 2]);
+    } finally { cleanup(); }
+    expect(mocks.read.mock.calls.some(([, params]) => params.anchor === 0 && params.before === 1)).toBe(false);
+
+    const issue = new IssueLogReplica("s");
+    await issue.loadTail();
+    expect(mocks.read).toHaveBeenCalledWith("s", { anchor: 0, before: 1 });
+    expect(seqs(issue)).toEqual([0, 1, 2]);
+  });
+
+  it("connects again after a release: retained rows stay on screen, the tail refreshes, then the stream resumes", async () => {
+    const log = serve([row(1), row(2)]);
+    const chat = seeded();
+    const first = vi.fn();
+    const cleanup = await chat.connect({ userId: "u", workspaceId: "w", subscribe: first, unsubscribe: vi.fn(), env: memory });
+    expect(first).toHaveBeenCalledWith("s", 3);
+    log.write(row(3));
+    await chat.hydratedFrames("s", [live(3)]);
+    await ticks();
+    expect(seqs(chat)).toEqual([1, 2, 3]);
+    // Released into the pool: the connection goes, the rows stay.
+    const late = chat.hydratedFrames("s", [live(4)]);
+    cleanup(); chat.disconnect(); chat.trimRetained();
+    await late;
+    expect(chat.getSnapshot("s").ready).toBe(true);
+    expect(seqs(chat)).toEqual([1, 2, 3]);
+    log.write(row(4)); log.write(row(5));
+    mocks.read.mockClear();
+
+    const refreshed = chat.resume();
+    const second = vi.fn();
+    const connecting = chat.connect({ userId: "u", workspaceId: "w", subscribe: second, unsubscribe: vi.fn(), env: memory });
+    expect(chat.getSnapshot("s").ready).toBe(true);
+    expect(seqs(chat)).toEqual([1, 2, 3]);
+    await refreshed;
+    const reconnected = await connecting;
+    try {
+      expect(mocks.read.mock.calls.map(([, params]) => params)).toEqual([{ before: 30 }]);
+      // Subscribed after the refresh, from its head.
+      expect(second).toHaveBeenCalledExactlyOnceWith("s", 6);
+      await ticks();
+      expect(seqs(chat)).toEqual([1, 2, 3, 4, 5]);
+    } finally { reconnected(); }
+  });
+
+  it("keeps the retained rows and still connects when the background refresh fails", async () => {
+    serve([row(1), row(2)]);
+    const chat = seeded();
+    chat.disconnect(); chat.trimRetained();
+    mocks.read.mockRejectedValue(new ApiError("unavailable", 503, "Unavailable"));
+    const refreshed = chat.resume();
+    const subscribe = vi.fn();
+    const connecting = chat.connect({ userId: "u", workspaceId: "w", subscribe, unsubscribe: vi.fn(), env: memory });
+    await expect(refreshed).rejects.toBeInstanceOf(ApiError);
+    const cleanup = await connecting;
+    try {
+      // The stream resumes from the retained head.
+      expect(subscribe).toHaveBeenCalledWith("s", 3);
+      expect(chat.getSnapshot("s").ready).toBe(true);
+      expect(seqs(chat)).toEqual([1, 2]);
+    } finally { cleanup(); }
+  });
+
+  it("keeps only the current window's read when trimmed, and drops every row when disposed", async () => {
+    serve([row(1), row(2), row(3)]);
+    const chat = seeded([row(2), row(3)]);
+    await chat.earlier();
+    const known = () => (chat as unknown as { knownWindows: Array<{ range: { from: number; to: number } }> }).knownWindows.map(w => w.range);
+    expect(known()).toEqual([{ from: 2, to: 3 }, { from: 1, to: 3 }]);
+    chat.trimRetained();
+    expect(known()).toEqual([{ from: 1, to: 3 }]);
+    chat.dispose();
+    expect(chat.window).toBeNull();
+    expect(known()).toEqual([]);
+    expect(chat.getSnapshot("s")).toMatchObject({ ready: false, entries: [] });
+  });
+});

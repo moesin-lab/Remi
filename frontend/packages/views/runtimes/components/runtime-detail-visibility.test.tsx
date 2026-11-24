@@ -2,7 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import type { AgentRuntime } from "@multiremi/core/types";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import enCommon from "../../locales/en/common.json";
@@ -21,6 +21,9 @@ const TEST_RESOURCES = {
 
 const mockUpdateRuntime = vi.hoisted(() => vi.fn());
 const mockUpdateDedicated = vi.hoisted(() => vi.fn());
+const membersRef = vi.hoisted(() => ({
+  current: [{ user_id: "local", role: "owner" }] as Array<{ user_id: string; role: string }>,
+}));
 
 vi.mock("@multiremi/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
@@ -56,7 +59,9 @@ vi.mock("@tanstack/react-query", async () => {
   return {
     ...actual,
     useQuery: vi.fn((options: { queryKey?: readonly unknown[] }) =>
-      options.queryKey?.includes("routing")
+      options.queryKey?.includes("members")
+        ? { data: membersRef.current, isLoading: false, isError: false }
+        : options.queryKey?.includes("routing")
         ? {
             data: {
               workspace_id: "ws-1",
@@ -71,7 +76,9 @@ vi.mock("@tanstack/react-query", async () => {
             isLoading: false,
             isError: false,
           }
-        : { data: [], isLoading: false, isError: false },
+        : options.queryKey?.includes("execution-groups")
+          ? { data: { groups: [] }, isLoading: false, isError: false }
+          : { data: [], isLoading: false, isError: false },
     ),
   };
 });
@@ -82,7 +89,9 @@ vi.mock("@multiremi/core/auth", () => ({
 }));
 
 vi.mock("@multiremi/core/runtimes", () => ({
+  runtimeHealthReasons: () => "",
   deriveRuntimeHealth: () => "online",
+  executionGroupListOptions: (wsId: string) => ({ queryKey: ["runtimes", wsId, "execution-groups"] }),
 }));
 
 vi.mock("@multiremi/core/agents", () => ({
@@ -92,6 +101,7 @@ vi.mock("@multiremi/core/agents", () => ({
 vi.mock("@multiremi/core/paths", () => ({
   useWorkspacePaths: () => ({
     runtimes: () => "/runtimes",
+    executionGroups: () => "/execution-groups",
     runtimeMachine: (id: string) => `/runtimes?machine=${encodeURIComponent(id)}`,
     agentDetail: () => "/agents",
   }),
@@ -138,6 +148,11 @@ vi.mock("./update-section", () => ({
   ),
 }));
 vi.mock("./usage-section", () => ({ UsageSection: () => null }));
+vi.mock("./daemon-storage-card", () => ({
+  RuntimeStorageCard: ({ daemonId, canManage }: { daemonId: string; canManage: boolean }) => (
+    <div data-testid="runtime-storage-card">{`${daemonId}:${canManage ? "manage" : "view"}`}</div>
+  ),
+}));
 vi.mock("./runtime-plugins-tab", () => ({
   RuntimePluginsTab: () => <div>runtime-plugins-tab</div>,
 }));
@@ -189,29 +204,51 @@ function renderDetail(runtime: AgentRuntime) {
 }
 
 describe("RuntimeDetail visibility section", () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it("shows owner-editable visibility choices when the caller owns the runtime", () => {
-    renderDetail(makeRuntime({ owner_id: "user-me" }));
-    expect(screen.getByText("Visibility")).toBeInTheDocument();
-    expect(screen.getByText("Private")).toBeInTheDocument();
-    expect(screen.getByText("Public")).toBeInTheDocument();
+  beforeEach(() => {
+    vi.clearAllMocks();
+    membersRef.current = [{ user_id: "local", role: "owner" }];
   });
 
-  it("flips visibility to public when the owner clicks the Public choice", async () => {
-    renderDetail(makeRuntime({ owner_id: "user-me", visibility: "private" }));
-    fireEvent.click(screen.getByText("Public"));
-    await waitFor(() =>
-      expect(mockUpdateRuntime).toHaveBeenCalledWith("rt-1", { visibility: "public" }),
-    );
+  it("shows the machine's storage card only for a runtime that belongs to a daemon", () => {
+    const { unmount } = renderDetail(makeRuntime({ daemon_id: "daemon-1" }));
+    expect(screen.getByTestId("runtime-storage-card")).toHaveTextContent("daemon-1:manage");
+    unmount();
+    renderDetail(makeRuntime({ daemon_id: null }));
+    expect(screen.queryByTestId("runtime-storage-card")).toBeNull();
   });
 
-  it("renders a read-only visibility chip when the caller cannot edit", () => {
-    renderDetail(makeRuntime({ owner_id: "someone-else", visibility: "public" }));
-    expect(screen.getByText("Public")).toBeInTheDocument();
-    // The editor's "Private" choice button must not render in read-only mode.
-    expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  it("keeps storage read-only for the shared operator without borrowing the login account role", () => {
+    membersRef.current = [
+      { user_id: "local", role: "member" },
+      { user_id: "user-me", role: "owner" },
+    ];
+    renderDetail(makeRuntime({ daemon_id: "daemon-1" }));
+    expect(screen.getByTestId("runtime-storage-card")).toHaveTextContent("daemon-1:view");
   });
+
+  it("shares the runtime without personal visibility controls: shows owner-editable visibility choices when the caller owns the runtime", () => {
+  renderDetail(makeRuntime({ owner_id: "historical-owner", visibility: "private" }));
+  expect(screen.queryByText("Public")).not.toBeInTheDocument();
+  expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  expect(screen.queryByText("Owner")).not.toBeInTheDocument();
+  expect(mockUpdateRuntime).not.toHaveBeenCalled();
+});
+
+  it("shares the runtime without personal visibility controls: flips visibility to public when the owner clicks the Public choice", () => {
+  renderDetail(makeRuntime({ owner_id: "historical-owner", visibility: "private" }));
+  expect(screen.queryByText("Public")).not.toBeInTheDocument();
+  expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  expect(screen.queryByText("Owner")).not.toBeInTheDocument();
+  expect(mockUpdateRuntime).not.toHaveBeenCalled();
+});
+
+  it("shares the runtime without personal visibility controls: renders a read-only visibility chip when the caller cannot edit", () => {
+  renderDetail(makeRuntime({ owner_id: "historical-owner", visibility: "private" }));
+  expect(screen.queryByText("Public")).not.toBeInTheDocument();
+  expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  expect(screen.queryByText("Owner")).not.toBeInTheDocument();
+  expect(mockUpdateRuntime).not.toHaveBeenCalled();
+});
 
   it("switches from Overview to the reciprocal Plugins tab", () => {
     renderDetail(makeRuntime({ owner_id: "user-me" }));

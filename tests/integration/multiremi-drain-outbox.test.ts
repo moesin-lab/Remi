@@ -3,33 +3,68 @@
 // generation; an already-claimed task keeps running through a drain; a 10-30s
 // API outage mid-stream neither kills the provider session nor loses/reorders
 // messages; release restores claiming.
+import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openIntegrationDatabase, type IntegrationDatabase, useMigratedIntegrationDatabases } from "../helpers/integration-database.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentResponse } from "@shared/contracts/provider-types.js";
-import { startMultiremiServer } from "@multiremi/api.js";
-import { MultiremiDaemon, type MultiremiDaemonProviderFactory } from "@multiremi/daemon.js";
+import { actualUnit } from "@acp/usage-collector.js";
+import { startMultiremiServer as startFixtureServer, TestMultiremiDaemon } from "../fixtures/daemon-protocol.js";
+import type { MultiremiDaemonOptions, MultiremiDaemonProviderFactory } from "@multiremi/daemon.js";
+import type { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
+import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { MultiremiTaskReportOutbox } from "@multiremi/worker/outbox.js";
+import { isTraceEvent } from "@multiremi/contracts/trace.js";
+import { applyTurnTraceEvents, EMPTY_TURN_TRACE } from "@shared/turn-trace.js";
 
-let db: Database | null = null;
+useMigratedIntegrationDatabases();
+
+let database: IntegrationDatabase | null = null;
 let workDir: string | null = null;
+const daemons: TestMultiremiDaemon[] = [];
+const servers: ReturnType<typeof startFixtureServer>[] = [];
+const layers: DaemonProtocolLayer[] = [];
+const proxies: Bun.Server<ProxySocketData>[] = [];
 
-afterEach(() => {
-  db?.close();
-  db = null;
+class MultiremiDaemon extends TestMultiremiDaemon {
+  constructor(options: MultiremiDaemonOptions) { super(options); daemons.push(this); }
+}
+
+function startMultiremiServer(options: Parameters<typeof startFixtureServer>[0]) {
+  const server = startFixtureServer({ ...options, onDaemonProtocol: layer => { layers.push(layer); } });
+  servers.push(server);
+  return server;
+}
+
+afterEach(async () => {
+  for (const daemon of daemons.splice(0)) await daemon.stopAndDrainTestWork();
+  for (const layer of layers) { layer.closeAll(); await layer.drain(); }
+  for (const proxy of proxies.splice(0)) proxy.stop(true);
+  for (const server of servers.splice(0)) server.stop(true);
+  for (const layer of layers.splice(0)) await layer.drain();
+  await database?.close();
+  database = null;
   if (workDir) {
     rmSync(workDir, { recursive: true, force: true });
     workDir = null;
   }
 });
 
-function testBed(prefix: string): { store: MultiremiStore; root: string } {
-  db = new Database(":memory:");
+function newDaemon(options: ConstructorParameters<typeof MultiremiDaemon>[0]): MultiremiDaemon {
+  return new MultiremiDaemon({ ...options, sshMeshManager: options.sshMeshManager ?? disabledSshMeshRuntime() });
+}
+
+function newServer(options: Parameters<typeof startMultiremiServer>[0]): ReturnType<typeof startMultiremiServer> {
+  return startMultiremiServer({ ...options, backgroundJobs: false });
+}
+
+async function testBed(prefix: string): Promise<{ store: MultiremiStore; root: string }> {
+  database = await openIntegrationDatabase();
   workDir = mkdtempSync(join(tmpdir(), prefix));
-  return { store: new MultiremiStore(db), root: workDir };
+  return { store: new MultiremiStore(database.db), root: workDir };
 }
 
 async function until(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_000, label = "condition"): Promise<void> {
@@ -55,19 +90,30 @@ function gate(): StreamGate {
 }
 
 type ApiProxyInterceptor = (request: Request, url: URL) => Response | null | Promise<Response | null>;
+type FrameInterceptor = (frame: Record<string, any>, direction: "up" | "down", socket: Bun.ServerWebSocket<ProxySocketData>) => boolean | void;
+interface ProxySocketData { upstream: WebSocket; pending: string[] }
 
 function apiProxy(
   serverPort: number | undefined,
   intercept: ApiProxyInterceptor,
-): ReturnType<typeof Bun.serve> {
+  frames?: FrameInterceptor,
+): Bun.Server<ProxySocketData> {
   if (serverPort === undefined) throw new Error("test server did not bind a port");
-  return Bun.serve({
+  const proxy = Bun.serve<ProxySocketData>({
     hostname: "127.0.0.1",
     port: 0,
-    async fetch(request) {
+    async fetch(request, proxy) {
       const url = new URL(request.url);
       const intercepted = await intercept(request, url);
       if (intercepted) return intercepted;
+      if (url.pathname === "/api/daemon/ws" && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        const upstream = new WebSocket(`ws://127.0.0.1:${serverPort}${url.pathname}${url.search}`, {
+          headers: { Authorization: request.headers.get("authorization") ?? "" },
+        } as never);
+        if (proxy.upgrade(request, { data: { upstream, pending: [] } })) return;
+        upstream.close();
+        return new Response("upgrade failed", { status: 400 });
+      }
       const body = request.method === "GET" || request.method === "HEAD"
         ? undefined
         : await request.arrayBuffer();
@@ -77,16 +123,49 @@ function apiProxy(
         ...(body !== undefined ? { body } : {}),
       });
     },
+    websocket: {
+      open(socket) {
+        const { upstream, pending } = socket.data;
+        upstream.addEventListener("open", () => { for (const frame of pending.splice(0)) upstream.send(frame); });
+        upstream.addEventListener("message", event => {
+          if (frames?.(JSON.parse(String(event.data)), "down", socket) !== false) socket.send(String(event.data));
+        });
+        upstream.addEventListener("close", () => socket.close(4001, "upstream closed"));
+        upstream.addEventListener("error", () => socket.close(4001, "upstream unavailable"));
+      },
+      message(socket, message) {
+        const frame = typeof message === "string" ? message : new TextDecoder().decode(message);
+        if (frames?.(JSON.parse(frame), "up", socket) === false) return;
+        if (socket.data.upstream.readyState === WebSocket.OPEN) socket.data.upstream.send(frame);
+        else socket.data.pending.push(frame);
+      },
+      close(socket) { socket.data.upstream.close(); },
+    },
   });
+  proxies.push(proxy);
+  return proxy;
 }
 
-function taskReportOutageProxy(serverPort: number | undefined): ReturnType<typeof Bun.serve> {
+function taskReportOutageProxy(serverPort: number | undefined): ReturnType<typeof apiProxy> {
   return apiProxy(serverPort, (request, url) => {
-    if (request.method === "POST" && url.pathname.startsWith("/api/daemon/tasks/")) {
+    if (request.method === "POST" && url.pathname.startsWith("/api/daemon/tasks/") && !url.pathname.endsWith("/start")) {
       return new Response("report API unavailable", { status: 503 });
     }
     return null;
+  }, (frame, direction, socket) => {
+    // Execution must have an acknowledged run before the provider consumes.
+    // The fixture models a reporting outage after that acceptance.
+    if (direction === "up" && frame.t.startsWith("task.") && frame.t !== "task.start" && typeof frame.seq === "number") {
+      socket.send(JSON.stringify({ v: 2, t: "res", re: String(frame.seq), ts: Date.now(),
+        p: { ok: false, code: "server_error", message: "injected report outage", retryable: true } }));
+      return false;
+    }
   });
+}
+
+function persistedOutbox(daemon: MultiremiDaemon): MultiremiTaskReportOutbox {
+  return new MultiremiTaskReportOutbox({ path: (daemon as unknown as { outboxPath: string }).outboxPath,
+    canSend: () => false, deliver: async () => {} });
 }
 
 const RESPONSE: AgentResponse = {
@@ -101,11 +180,11 @@ const RESPONSE: AgentResponse = {
 
 describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
   it("pauses claims while draining, acks the generation over heartbeats, and resumes on release", async () => {
-    const { store, root } = testBed("multiremi-drain-claims-");
+    const { store, root } = await testBed("multiremi-drain-claims-");
     const agent = store.createAgent({ name: "Drain Claim Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "wait out the drain" });
     const daemonToken = await store.createAccessToken({ name: "drain daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-drain-secret", hostname: "127.0.0.1", port: 0 });
+    const server = newServer({ store, scheduler: null, authToken: "root-drain-secret", hostname: "127.0.0.1", port: 0 });
 
     // Drain is active BEFORE the daemon comes online.
     store.beginPlatformDrain({ operationId: "pop_e2e", reason: "e2e", ttlMs: 120_000 });
@@ -120,10 +199,12 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       close: async () => {},
     });
 
-    const daemon = new MultiremiDaemon({
+    const protocolClock = new ManualDaemonProtocolClock();
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       daemonId: "daemon-drain-claims",
+      protocolClientOptions: { clock: protocolClock },
       provider: "claude",
       workspaceId: "local",
       pollIntervalMs: 25,
@@ -136,6 +217,9 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     });
     const run = daemon.start().catch(() => {});
     try {
+      await until(() => daemon.daemonProtocolClient().connectionState() === "connected");
+      await daemon.daemonProtocolClient().drain();
+      protocolClock.advance(15_000);
       // The daemon heartbeats, acks the drain generation, and does NOT claim.
       await until(() => store.getPlatformDrainStatus().ackedDaemons === 1, 5_000, "drain ack");
       await Bun.sleep(150);
@@ -156,11 +240,11 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
   }, 15_000);
 
   it("lets an already-claimed task run to completion while a drain waits for it", async () => {
-    const { store, root } = testBed("multiremi-drain-running-");
+    const { store, root } = await testBed("multiremi-drain-running-");
     const agent = store.createAgent({ name: "Drain Run Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "keep running through the drain" });
     const daemonToken = await store.createAccessToken({ name: "drain-run daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-drain-run-secret", hostname: "127.0.0.1", port: 0 });
+    const server = newServer({ store, scheduler: null, authToken: "root-drain-run-secret", hostname: "127.0.0.1", port: 0 });
 
     const firstChunk = gate();
     const finish = gate();
@@ -175,10 +259,12 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       close: async () => {},
     });
 
-    const daemon = new MultiremiDaemon({
+    const protocolClock = new ManualDaemonProtocolClock();
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       daemonId: "daemon-drain-running",
+      protocolClientOptions: { clock: protocolClock },
       provider: "claude",
       workspaceId: "local",
       pollIntervalMs: 25,
@@ -198,6 +284,9 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       // Drain begins mid-task: the daemon acks but the gate stays closed while
       // the task is in flight, and the task is NOT interrupted.
       store.beginPlatformDrain({ operationId: "pop_running", ttlMs: 120_000 });
+      await until(() => (daemon as unknown as { serverDrainActive: boolean }).serverDrainActive,
+        5_000, "platform.drain applied");
+      protocolClock.advance(15_000);
       await until(() => store.getPlatformDrainStatus().ackedDaemons === 1, 8_000, "drain ack");
       expect(store.getPlatformDrainStatus()).toMatchObject({ activeTasks: 1, ready: false });
       await Bun.sleep(100);
@@ -211,28 +300,32 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       store.releasePlatformDrain("pop_running");
     } finally {
       daemon.stop();
+      finish.release();
       await run;
       server.stop(true);
     }
   }, 20_000);
 
-  it("keeps pre-terminal report drain active so a CLI update remains blocked", async () => {
-    const { store, root } = testBed("multiremi-preterminal-active-");
+  it("keeps the ordered terminal result wait active so a CLI update remains blocked", async () => {
+    const { store, root } = await testBed("multiremi-preterminal-active-");
     const agent = store.createAgent({ name: "Pre-terminal Active Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "finish after reports catch up" });
     const daemonToken = await store.createAccessToken({ name: "pre-terminal daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-preterminal-secret", hostname: "127.0.0.1", port: 0 });
-    let rejectMessages = true;
-    let messageAttempts = 0;
-    const proxy = apiProxy(server.port, (request, url) => {
-      if (request.method === "POST" && url.pathname === `/api/daemon/tasks/${task.id}/messages`) {
-        messageAttempts++;
-        if (rejectMessages) return new Response("messages unavailable", { status: 503 });
+    const server = newServer({ store, scheduler: null, authToken: "root-preterminal-secret", hostname: "127.0.0.1", port: 0 });
+    let rejectComplete = true;
+    let completeAttempts = 0;
+    const proxy = apiProxy(server.port, () => null, (frame, direction, socket) => {
+      if (direction === "up" && frame.t === "turn.complete") {
+        completeAttempts++;
+        if (rejectComplete) {
+          socket.send(JSON.stringify({ v: 2, t: "res", re: String(frame.seq), ts: Date.now(),
+            p: { ok: false, code: "server_error", retryable: true } }));
+          return false;
+        }
       }
-      return null;
     });
     const outboxPath = join(root, "outbox.db");
-    const daemon = new MultiremiDaemon({
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       daemonId: "daemon-preterminal-active",
@@ -256,20 +349,25 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     });
     const daemonRun = daemon.start();
     try {
-      await until(() => messageAttempts > 0, 5_000, "pre-terminal message delivery attempt");
+      await until(() => completeAttempts > 0, 5_000, "ordered completion delivery attempt");
       const state = daemon as unknown as {
         activeTaskCount: number;
         drainingTaskCount: number;
-        tryPauseClaimsForUpdate(scope: "cli"): { ok: boolean; error?: string };
+        claimsPaused: boolean;
+        pauseCliClaimsUntilIdle(deadline: string): Promise<{ ok: boolean; error?: string }>;
       };
       expect(state.activeTaskCount).toBe(1);
       expect(state.drainingTaskCount).toBe(0);
-      expect(state.tryPauseClaimsForUpdate("cli")).toEqual({
+      const pausing = state.pauseCliClaimsUntilIdle(new Date(Date.now() + 30).toISOString());
+      expect(state.claimsPaused).toBe(true);
+      expect(await pausing).toEqual({
         ok: false,
-        error: "daemon is busy; retry update when idle",
+        error: `CLI update drain deadline exceeded; remaining tasks: claude: ${task.id}`,
       });
+      expect(state.claimsPaused).toBe(false);
+      expect(state.activeTaskCount).toBe(1);
 
-      rejectMessages = false;
+      rejectComplete = false;
       await daemonRun;
       expect(store.getTask(task.id)).toMatchObject({ status: "completed", result: "finished" });
     } finally {
@@ -280,26 +378,39 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     }
   }, 10_000);
 
-  it("purges stale reports after their task reaches a terminal state", async () => {
-    const { store, root } = testBed("multiremi-terminal-report-purge-");
+  it("retains a completed task's unacknowledged terminal row for reconnect replay without a status query", async () => {
+    const { store, root } = await testBed("multiremi-terminal-report-purge-");
     const agent = store.createAgent({ name: "Terminal Purge Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "finish despite stale transcript reports" });
     const daemonToken = await store.createAccessToken({ name: "terminal purge daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-terminal-purge-secret", hostname: "127.0.0.1", port: 0 });
+    const server = newServer({ store, scheduler: null, authToken: "root-terminal-purge-secret", hostname: "127.0.0.1", port: 0 });
+    let completeSeq: string | null = null;
+    let startSeq: string | null = null;
+    let startAckReleased = false;
+    let startAckTimer: ReturnType<typeof setTimeout> | undefined;
+    let statusReads = 0;
     const proxy = apiProxy(server.port, (request, url) => {
-      if (request.method === "POST" && url.pathname === `/api/daemon/tasks/${task.id}/messages`) {
-        return new Response("messages unavailable", { status: 503 });
-      }
+      if (request.method === "GET" && url.pathname === `/api/daemon/tasks/${task.id}/status`) statusReads++;
       return null;
+    }, (frame, direction, socket) => {
+      if (direction === "up" && frame.t === "task.start") startSeq = String(frame.seq);
+      if (direction === "down" && frame.t === "res" && frame.re === startSeq && !startAckReleased) {
+        // Startup authority uses the request budget, even with a 50ms terminal
+        // drain budget. The provider must await this deliberately slower ACK.
+        startAckTimer = setTimeout(() => { startAckReleased = true; socket.send(JSON.stringify(frame)); }, 100);
+        return false;
+      }
+      if (direction === "up" && frame.t === "turn.complete") completeSeq = String(frame.seq);
+      if (direction === "down" && frame.t === "res" && frame.re === completeSeq) return false;
     });
     const outboxPath = join(root, "outbox.db");
-    const daemon = new MultiremiDaemon({
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       daemonId: "daemon-terminal-report-purge",
       provider: "claude",
       workspaceId: "local",
-      once: true,
+      once: false,
       pollIntervalMs: 25,
       daemonPort: 0,
       workspacesRoot: join(root, "workspaces"),
@@ -309,51 +420,52 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       taskDrainTimeoutMs: 50,
       providerFactory: () => ({
         async *sendStream() {
+          expect(startAckReleased).toBe(true);
           yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "done" }] } as any;
         },
         getLastResponse: () => RESPONSE,
         close: async () => {},
       }),
     });
+    const run = daemon.start();
     try {
-      await daemon.start();
+      await until(() => store.getTask(task.id)?.status === "completed", 5_000, "terminal report committed with its acknowledgement withheld");
+      await until(() => (daemon as unknown as { activeTaskCount: number }).activeTaskCount === 0,
+        5_000, "local terminal result wait expired");
+      daemon.stop();
+      await run;
 
       expect(store.getTask(task.id)).toMatchObject({ status: "completed", result: "done" });
-      const persisted = new MultiremiTaskReportOutbox({ path: outboxPath, deliver: async () => {} });
-      expect(persisted.stats()).toMatchObject({ pending: 0, pendingTasks: 0 });
+      expect(statusReads).toBe(0);
+      const persisted = persistedOutbox(daemon);
+      expect(persisted.stats()).toMatchObject({ pendingTerminal: 1, pendingTasks: 1 });
+      const rows = (persisted as any).db.query("SELECT kind FROM outbox_events ORDER BY id").all() as { kind: string }[];
+      expect(rows[0]?.kind).toBe("turn.complete");
+      expect(rows.slice(1).every(row => row.kind === "usage")).toBe(true);
+      expect(rows.slice(1).length).toBeGreaterThan(0);
       await persisted.close();
     } finally {
       daemon.stop();
+      await run;
+      clearTimeout(startAckTimer);
       proxy.stop(true);
       server.stop(true);
     }
   }, 10_000);
 
   it("survives an API outage mid-stream: provider session lives on, messages land in order", async () => {
-    const { store, root } = testBed("multiremi-outage-");
+    const { store, root } = await testBed("multiremi-outage-");
     const agent = store.createAgent({ name: "Outage Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "stream through the outage" });
     const daemonToken = await store.createAccessToken({ name: "outage daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-outage-secret", hostname: "127.0.0.1", port: 0 });
+    const server = newServer({ store, scheduler: null, authToken: "root-outage-secret", hostname: "127.0.0.1", port: 0 });
 
     // Reverse proxy that can simulate the API container being replaced.
     let apiDown = false;
-    const proxy = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      async fetch(request) {
-        if (apiDown) return new Response("upstream restarting", { status: 503 });
-        const url = new URL(request.url);
-        const body = request.method === "GET" || request.method === "HEAD"
-          ? undefined
-          : await request.arrayBuffer();
-        return await fetch(`http://127.0.0.1:${server.port}${url.pathname}${url.search}`, {
-          method: request.method,
-          headers: request.headers,
-          ...(body !== undefined ? { body } : {}),
-        });
-      },
-    });
+    const proxy = apiProxy(server.port, () => apiDown ? new Response("upstream restarting", { status: 503 }) : null,
+      (_frame, direction, socket) => {
+        if (direction === "up" && apiDown) { socket.close(4001, "upstream restarting"); return false; }
+      });
 
     let providerClosedDuringOutage = false;
     let streamCompleted = false;
@@ -381,7 +493,7 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       };
     };
 
-    const daemon = new MultiremiDaemon({
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       daemonId: "daemon-outage",
@@ -405,20 +517,22 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
 
       const completed = store.getTask(task.id)!;
       expect(completed.status).toBe("completed");
-      expect(completed.result).toBe("before during after");
+      // Tool activity separates messages; replay preserves every segment in the trace below.
+      expect(completed.result).toBe("after");
 
-      // Replayed messages arrive complete and in the original seq order.
-      const messages = store.listTaskMessages(task.id);
-      expect(messages.map((message) => [message.seq, message.type, message.content ?? ""])).toEqual([
-        [1, "execution", ""],
-        [2, "text", "before during "],
-        [3, "tool_use", ""],
-        [4, "tool_result", ""],
-        [5, "text", "after"],
-        [6, "execution", ""],
+      // The trace is written locally through the outage, densely and in order.
+      const events = daemon.traceStore().read(task.id).events;
+      expect(events.map((event) => event.seq)).toEqual(Array.from({ length: events.length }, (_, i) => i + 1));
+      const state = applyTurnTraceEvents(EMPTY_TURN_TRACE, events.filter(isTraceEvent));
+      expect(state.items.map((item) => [item.id, item.type, item.status])).toEqual([
+        [`in:${task.id}`, "user_message", "completed"],
+        ["msg:1", "agent_message", "completed"],
+        ["syn_0", "tool", "stopped"],
+        ["msg:2", "agent_message", "completed"],
       ]);
-      expect(messages[0]?.meta).toEqual({ agentName: "Outage Bot", provider: "claude" });
-      expect(messages[5]?.meta?.model).toBeTruthy();
+      expect(state.items[1]).toMatchObject({ text: "before during " });
+      expect(state.items[3]).toMatchObject({ text: "after", phase: "final" });
+      expect(state.turn).toMatchObject({ agent_name: "Outage Bot", provider: "claude", status: "completed", final_item_id: "msg:2" });
     } finally {
       daemon.stop();
       proxy.stop(true);
@@ -426,21 +540,24 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     }
   }, 20_000);
 
-  it("purges queued reports and releases active execution when the server cancels a task", async () => {
-    const { store, root } = testBed("multiremi-outbox-cancel-");
+  it("purges operational reports while retaining observed usage and releases execution after server cancellation", async () => {
+    const { store, root } = await testBed("multiremi-outbox-cancel-");
     const agent = store.createAgent({ name: "Cancelled Outbox Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "wait to be cancelled" });
     const daemonToken = await store.createAccessToken({ name: "cancel daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-cancel-secret", hostname: "127.0.0.1", port: 0 });
+    const server = newServer({ store, scheduler: null, authToken: "root-cancel-secret", hostname: "127.0.0.1", port: 0 });
 
-    // Keep task status reads and claims available while every task report is
-    // rejected transiently, creating the historical backlog from the incident.
+    // Accept start, then reject subsequent reports to create a durable backlog.
     const proxy = taskReportOutageProxy(server.port);
 
     const providerStarted = gate();
     const providerFactory: MultiremiDaemonProviderFactory = () => ({
       async *sendStream(_message, options) {
         providerStarted.release();
+        yield { sessionUpdate: "usage_update", used: 12, size: 200000, _meta: { remiUsageUnits: [actualUnit({
+          unitId: "cancelled-request", provider: "claude", model: "opus", scope: "request", source: "provider_request",
+          inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 12,
+        })] } } as any;
         await new Promise<void>((resolve) => {
           if (options?.signal?.aborted) resolve();
           else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
@@ -450,7 +567,7 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       getLastResponse: () => null,
       close: async () => {},
     });
-    const daemon = new MultiremiDaemon({
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       daemonId: "daemon-outbox-cancel",
@@ -469,6 +586,8 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     const daemonRun = daemon.start();
     try {
       await providerStarted.yielded;
+      await until(() => (daemon as any).outbox?.db.query("SELECT id FROM outbox_events WHERE kind='usage'").get() != null,
+        5_000, "observed request durable before cancellation");
       expect((daemon as unknown as { activeTaskCount: number }).activeTaskCount).toBe(1);
       expect(daemon.outboxStats()?.pendingNonTerminal).toBeGreaterThan(0);
 
@@ -480,11 +599,14 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       );
       await daemonRun;
       expect(store.getTask(task.id)?.status).toBe("cancelled");
-      const persisted = new MultiremiTaskReportOutbox({
-        path: join(root, "outbox.db"),
-        deliver: async () => {},
-      });
-      expect(persisted.stats()).toMatchObject({ pending: 0, pendingTasks: 0 });
+      const persisted = persistedOutbox(daemon);
+      expect(persisted.stats()).toMatchObject({ pendingTerminal: 0, pendingTasks: 1 });
+      const rows = (persisted as any).db.query("SELECT kind,payload FROM outbox_events ORDER BY id").all() as { kind: string; payload: string }[];
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every(row => row.kind === "usage")).toBe(true);
+      expect(rows.flatMap(row => JSON.parse(row.payload).usageSnapshot.units)).toContainEqual(expect.objectContaining({
+        unitId: "cancelled-request", inputTokens: 10, outputTokens: 2,
+      }));
       await persisted.close();
     } finally {
       daemon.stop();
@@ -494,26 +616,24 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     }
   }, 10_000);
 
-  it("requires a second status check before a transient watcher 404 can purge reports", async () => {
-    const { store, root } = testBed("multiremi-outbox-transient-404-");
+  it("does not probe status or purge reports after a transient connection loss", async () => {
+    const { store, root } = await testBed("multiremi-outbox-transient-404-");
     const agent = store.createAgent({ name: "Transient 404 Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "survive one missing response" });
     const daemonToken = await store.createAccessToken({ name: "transient 404 daemon", type: "daemon", workspaceId: "local" });
     const server = startMultiremiServer({ store, scheduler: null, authToken: "root-transient-404-secret", hostname: "127.0.0.1", port: 0 });
-    let returnMissingOnce = true;
     let statusReads = 0;
     const proxy = apiProxy(server.port, (request, url) => {
       if (request.method === "GET" && url.pathname === `/api/daemon/tasks/${task.id}/status`) {
         statusReads++;
-        if (returnMissingOnce) {
-          returnMissingOnce = false;
-          return new Response("task temporarily not routed", { status: 404 });
-        }
+        return new Response("task temporarily not routed", { status: 404 });
       }
       return null;
     });
     const providerStarted = gate();
+    const providerFinished = gate();
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       daemonId: "daemon-transient-404",
@@ -529,10 +649,10 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       providerFactory: () => ({
         async *sendStream(_message, options) {
           providerStarted.release();
-          await new Promise<void>((resolve) => {
+          await Promise.race([providerFinished.yielded, new Promise<void>((resolve) => {
             if (options?.signal?.aborted) resolve();
             else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
-          });
+          })]);
           throw new Error("provider interrupted after transient 404");
         },
         getLastResponse: () => null,
@@ -542,8 +662,16 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     const daemonRun = daemon.start();
     try {
       await providerStarted.yielded;
+      await until(() => store.getTask(task.id)?.status === "running", 5_000, "task start report");
+      const layer = layers[layers.length - 1]!;
+      layer.closeAll("injected transient connection loss");
+      await until(() => daemon.daemonProtocolClient().connectionState() !== "connected", 5_000, "socket disconnected");
+      await until(() => daemon.daemonProtocolClient().connectionState() === "connected", 5_000, "socket reconnected");
+      expect(store.getTask(task.id)?.status).toBe("running");
+      expect((daemon as unknown as { activeTaskCount: number }).activeTaskCount).toBe(1);
+      providerFinished.release();
       await daemonRun;
-      expect(statusReads).toBeGreaterThanOrEqual(2);
+      expect(statusReads).toBe(0);
       expect(store.getTask(task.id)).toMatchObject({
         status: "failed",
         error: "provider interrupted after transient 404",
@@ -556,14 +684,15 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       await persisted.close();
     } finally {
       daemon.stop();
+      providerFinished.release();
       await daemonRun.catch(() => {});
       proxy.stop(true);
       server.stop(true);
     }
   }, 10_000);
 
-  it("reconciles missing historical tasks before replay and reaches ready without draining them", async () => {
-    const { store, root } = testBed("multiremi-outbox-restart-");
+  it("purges missing historical tasks from native task_not_found replies after startup reaches ready", async () => {
+    const { store, root } = await testBed("multiremi-outbox-restart-");
     const outboxPath = join(root, "outbox.db");
     const historical = new MultiremiTaskReportOutbox({
       path: outboxPath,
@@ -571,16 +700,14 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       deliver: async () => { throw new Error("old API unavailable"); },
     });
     for (let index = 0; index < 100; index += 1) {
-      historical.enqueue("tsk_deleted_history", "messages", {
-        messages: [{ seq: index + 1, type: "text", content: `old-${index}` }],
-      });
+      historical.enqueue("tsk_deleted_history", "progress", { summary: `old-${index}` });
     }
     await Bun.sleep(20);
     await historical.close();
 
     const daemonToken = await store.createAccessToken({ name: "restart daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-restart-secret", hostname: "127.0.0.1", port: 0 });
-    const daemon = new MultiremiDaemon({
+    const server = newServer({ store, scheduler: null, authToken: "root-restart-secret", hostname: "127.0.0.1", port: 0 });
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       daemonId: "daemon-outbox-restart",
@@ -618,14 +745,14 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
   }, 10_000);
 
   it("moves a finished agent into bounded drain accounting without losing its terminal report", async () => {
-    const { store, root } = testBed("multiremi-outbox-drain-accounting-");
+    const { store, root } = await testBed("multiremi-outbox-drain-accounting-");
     const agent = store.createAgent({ name: "Drain Accounting Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "finish while reports are offline" });
     const daemonToken = await store.createAccessToken({ name: "drain accounting daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-drain-accounting-secret", hostname: "127.0.0.1", port: 0 });
+    const server = newServer({ store, scheduler: null, authToken: "root-drain-accounting-secret", hostname: "127.0.0.1", port: 0 });
     const proxy = taskReportOutageProxy(server.port);
     const outboxPath = join(root, "outbox.db");
-    const daemon = new MultiremiDaemon({
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       daemonId: "daemon-outbox-drain-accounting",
@@ -669,7 +796,7 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       });
 
       await daemonRun;
-      const persisted = new MultiremiTaskReportOutbox({ path: outboxPath, deliver: async () => {} });
+      const persisted = persistedOutbox(daemon);
       expect(persisted.stats()).toMatchObject({
         pendingTerminal: 1,
         pendingNonTerminal: expect.any(Number),
@@ -686,8 +813,8 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     }
   }, 10_000);
 
-  it("delivers a persisted terminal result before orphan recovery despite the history timeout", async () => {
-    const { store, root } = testBed("multiremi-outbox-terminal-replay-");
+  it("replays a persisted terminal result after bounded startup skips orphan recovery", async () => {
+    const { store, root } = await testBed("multiremi-outbox-terminal-replay-");
     const daemonId = "daemon-terminal-replay";
     const runtime = store.registerRuntime({
       id: "rt_terminal_replay",
@@ -701,6 +828,11 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     const task = store.createTask({ agentId: agent.id, prompt: "already finished locally" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
+    const bridge = store.getDaemonTurnBridge();
+    const input = bridge.offerInput(store.getTaskWithAgent(task.id)!);
+    expect(bridge.rpc("turn.input", { turn_id: input.turn_id, attempt_id: task.id,
+      input_to_seq: input.input_to_seq, message_ids: input.input_messages.map(message => message.id) },
+    { runtimeId: runtime.id, daemonId, workspaceId: "local" }).ok).toBe(true);
 
     const outboxPath = join(root, "outbox.db");
     const historical = new MultiremiTaskReportOutbox({
@@ -711,10 +843,12 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     historical.enqueue(task.id, "messages", {
       messages: [{ seq: 1, type: "text", content: "last buffered message" }],
     });
-    historical.enqueue(task.id, "complete", {
-      output: "replayed completion",
-      sessionId: "sess-terminal-replay",
-      workDir: root,
+    historical.enqueue(task.id, "turn.complete", {
+      turn_id: input.turn_id,
+      input_to_seq: input.input_to_seq,
+      reply: { body_md: "replayed completion", message_kind: "final" },
+      session_id: "sess-terminal-replay",
+      work_dir: root,
     });
     await Bun.sleep(20);
     await historical.close();
@@ -725,24 +859,29 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       workspaceId: "local",
       daemonId,
     });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-terminal-replay-secret", hostname: "127.0.0.1", port: 0 });
-    let delayedMessages = 0;
-    const proxy = apiProxy(server.port, async (request, url) => {
-      if (request.method === "POST" && url.pathname === `/api/daemon/tasks/${task.id}/messages`) {
-        delayedMessages++;
-        await Bun.sleep(300);
-      }
+    const server = newServer({ store, scheduler: null, authToken: "root-terminal-replay-secret", hostname: "127.0.0.1", port: 0 });
+    let completeAttempts = 0;
+    let recoverOrphansCalls = 0;
+    let heldComplete: { frame: Record<string, any>; socket: Bun.ServerWebSocket<ProxySocketData> } | null = null;
+    const proxy = apiProxy(server.port, (request, url) => {
+      if (request.method === "POST" && url.pathname.includes("recover-orphans")) recoverOrphansCalls++;
       return null;
+    }, (frame, direction, socket) => {
+      if (direction === "up" && frame.t === "turn.complete") {
+        completeAttempts++;
+        heldComplete = { frame, socket };
+        return false;
+      }
     });
     store.beginPlatformDrain({ operationId: "pop_terminal_replay", ttlMs: 120_000 });
-    const daemon = new MultiremiDaemon({
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       runtimeId: runtime.id,
       daemonId,
       provider: "claude",
       workspaceId: "local",
-      once: true,
+      once: false,
       pollIntervalMs: 25,
       daemonPort: 0,
       workspacesRoot: join(root, "workspaces"),
@@ -755,26 +894,38 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
         getLastResponse: () => null,
       }),
     });
+    const run = daemon.start();
     try {
-      await daemon.start();
-      expect(delayedMessages).toBe(1);
+      await until(() => heldComplete !== null && daemon.localPort() !== null, 5_000, "bounded startup with pending completion");
+      expect(recoverOrphansCalls).toBe(0);
+      expect(store.getTask(task.id)?.status).toBe("running");
+      const held = heldComplete as unknown as { frame: Record<string, any>; socket: Bun.ServerWebSocket<ProxySocketData> };
+      held.socket.data.upstream.send(JSON.stringify(held.frame));
+      await until(() => store.getTask(task.id)?.status === "completed", 5_000, "historical terminal replay");
+      await until(() => daemon.outboxStats()?.pending === 0, 5_000, "historical report acknowledgement");
+      expect(completeAttempts).toBe(1);
+      // The v1 queue's fragment message cannot enter a turn + items trace: it is
+      // dropped (with a warning), so this daemon never held a trace for the task.
+      expect(daemon.traceStore().head(task.id)).toBeNull();
+      expect(daemon.traceStore().read(task.id).events).toEqual([]);
       expect(store.getTask(task.id)).toMatchObject({
         status: "completed",
         result: "replayed completion",
       });
       expect(store.listTasks().filter((candidate) => candidate.parentTaskId === task.id)).toHaveLength(0);
-      const persisted = new MultiremiTaskReportOutbox({ path: outboxPath, deliver: async () => {} });
+      const persisted = persistedOutbox(daemon);
       expect(persisted.stats()).toMatchObject({ pending: 0, pendingTerminal: 0, pendingTasks: 0 });
       await persisted.close();
     } finally {
       daemon.stop();
+      await run;
       proxy.stop(true);
       server.stop(true);
     }
   }, 10_000);
 
   it("bounds startup replay while preserving reports for a non-terminal task", async () => {
-    const { store, root } = testBed("multiremi-outbox-startup-timeout-");
+    const { store, root } = await testBed("multiremi-outbox-startup-timeout-");
     const agent = store.createAgent({ name: "Startup Replay Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "stay queued during startup" });
     const outboxPath = join(root, "outbox.db");
@@ -783,17 +934,15 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       backoffScheduleMs: [60_000],
       deliver: async () => { throw new Error("old API unavailable"); },
     });
-    historical.enqueue(task.id, "messages", {
-      messages: [{ seq: 1, type: "text", content: "must survive" }],
-    });
+    historical.enqueue(task.id, "progress", { summary: "must survive" });
     await Bun.sleep(20);
     await historical.close();
 
     const daemonToken = await store.createAccessToken({ name: "startup timeout daemon", type: "daemon", workspaceId: "local" });
-    const server = startMultiremiServer({ store, scheduler: null, authToken: "root-startup-timeout-secret", hostname: "127.0.0.1", port: 0 });
+    const server = newServer({ store, scheduler: null, authToken: "root-startup-timeout-secret", hostname: "127.0.0.1", port: 0 });
     const proxy = taskReportOutageProxy(server.port);
     store.beginPlatformDrain({ operationId: "pop_startup_timeout", ttlMs: 120_000 });
-    const daemon = new MultiremiDaemon({
+    const daemon = newDaemon({
       serverUrl: `http://127.0.0.1:${proxy.port}`,
       token: daemonToken.token,
       daemonId: "daemon-outbox-startup-timeout",

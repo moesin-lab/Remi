@@ -16,6 +16,7 @@ function withFeishuBot<T>(
       agentId: input.agentId,
       runtimeId: input.runtimeId,
       appId: "cli_wire_topic",
+      senderAccessPolicy: "agent",
       appSecretOp: "set",
       appSecret: "test-wire-topic-secret",
       domain: "feishu",

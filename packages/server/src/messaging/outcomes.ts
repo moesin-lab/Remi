@@ -10,8 +10,11 @@ import type {
 } from "@multiremi/contracts/messaging.js";
 import { nowIso } from "@multiremi/ids.js";
 import { createLogger } from "@shared/logger.js";
-import type { StoreContext } from "@multiremi/store/context.js";
+import { createCommitEventQueue, type CommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
+import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
+import { advisoryXactLock, afterCommit } from "@multiremi/store/db/postgres.js";
 import { INBOX_ROUTING } from "@multiremi/store/inbox-routing.js";
+import type { ChildStatusChangeCollector } from "@multiremi/store/repos/tasks-repo.js";
 import type { MessagingRepo } from "@multiremi/store/repos/messaging-repo.js";
 import type { StoredCanonicalMessage } from "@multiremi/store/repos/messaging-repo.js";
 
@@ -24,7 +27,18 @@ import type { StoredCanonicalMessage } from "@multiremi/store/repos/messaging-re
  */
 export type MessagingOutcomeHost = Pick<
   StoreContext,
-  "db" | "createInboxItem" | "resolveWorkspaceMemberForNotification" | "isNotificationMuted" | "issues"
+  | "db"
+  | "createInboxItem"
+  | "resolveWorkspaceMemberForNotification"
+  | "isNotificationMuted"
+  | "issues"
+  | "tasks"
+  | "inbox"
+  | "emitCommitEvents"
+  // MUL-405: the outcome service creates Issues, so it takes the workspace
+  // lifecycle row lock before the number lock like every other creating path.
+  | "lockWorkspaceRuntimeLifecycle"
+
 >;
 
 export interface MessageRef {
@@ -81,7 +95,7 @@ export const MESSAGING_INBOX_TYPES: readonly string[] = [
  * Restating the severity here would let the two drift, and the table is the
  * side that other subsystems and the frontend already agree on.
  */
-function inboxSeverity(type: string): "info" | "attention" {
+function inboxSeverity(type: string): "info" | "attention" | "action" {
   const registered = INBOX_ROUTING[type];
   if (!registered) throw new Error(`Unregistered inbox type: ${type}`);
   return registered.severity;
@@ -263,7 +277,7 @@ export class MessagingOutcomeService {
       const taskId = cleanText(input.taskId);
       this.assertTaskWorkspace(taskId, input.workspaceId);
       const createdAt = nowIso();
-      const outcome = this.repo.recordOutcome({
+      const outcome = this.repo.recordOutcomeWithinTransaction({
         workspaceId: input.workspaceId,
         connectionId: ref.connectionId,
         externalMessageId: ref.externalMessageId,
@@ -314,7 +328,7 @@ export class MessagingOutcomeService {
         throw new MessagingOutcomeError("Inbox recipient is unavailable");
       }
       const createdAt = nowIso();
-      const outcome = this.repo.recordOutcome({
+      const outcome = this.repo.recordOutcomeWithinTransaction({
         workspaceId: input.workspaceId,
         connectionId: ref.connectionId,
         externalMessageId: ref.externalMessageId,
@@ -335,18 +349,34 @@ export class MessagingOutcomeService {
   /** Creates the Issue directly. Reserved for a human who may approve. */
   createIssue(ref: MessageRef, input: MessageIssueOutcomeInput): MessageIssueOutcomeResult {
     const issueInput = normalizeIssueInput(input);
-    return this.ctx.db.transaction(() => this.createIssueWithinTransaction(ref, {
-      ...issueInput,
-      workspaceId: input.workspaceId,
-      taskId: cleanText(input.taskId),
-      createdBy: cleanText(input.createdBy),
-    }))();
+    const childStatusChanges: ChildStatusChangeCollector = [];
+    const deferredEvents = createCommitEventQueue();
+    // Global lock order (MUL-405): W then N, before the message row lock
+    // `createIssueWithinTransaction` takes. Whether an Issue is created is only
+    // known inside the transaction, so both locks are taken unconditionally at
+    // the top; they are per workspace and held only for this call.
+    const createWithinTransaction = () => {
+      this.lockWorkspace(input.workspaceId);
+      this.lockIssueNumber(input.workspaceId);
+      return this.createIssueWithinTransaction(ref, {
+        ...issueInput,
+        workspaceId: input.workspaceId,
+        taskId: cleanText(input.taskId),
+        createdBy: cleanText(input.createdBy),
+      }, childStatusChanges, deferredEvents);
+    };
+    const result = this.ctx.db.inTransaction ? createWithinTransaction() : this.ctx.db.transaction(createWithinTransaction)();
+
+    this.ctx.emitCommitEvents(deferredEvents);
+    afterCommit(this.ctx.db, () => this.ctx.tasks().runCollectedChildStatusChanges(childStatusChanges));
+    return result;
   }
 
   /** Asks a person to approve creating an Issue, without creating one yet. */
   proposeIssue(ref: MessageRef, input: MessageIssueProposalInput): MessageIssueProposalResult {
     const issueInput = normalizeIssueInput(input);
     return this.ctx.db.transaction(() => {
+      this.lockWorkspace(input.workspaceId);
       const message = this.requireMessage(ref, input.workspaceId);
       const taskId = cleanText(input.taskId);
       this.assertTaskWorkspace(taskId, input.workspaceId);
@@ -376,7 +406,7 @@ export class MessagingOutcomeService {
       });
       if (this.ctx.isNotificationMuted(input.workspaceId, recipient, inboxType)) return muted();
       const createdAt = nowIso();
-      const outcome = this.repo.recordOutcome({
+      const outcome = this.repo.recordOutcomeWithinTransaction({
         workspaceId: input.workspaceId,
         connectionId: ref.connectionId,
         externalMessageId: ref.externalMessageId,
@@ -420,7 +450,12 @@ export class MessagingOutcomeService {
   }
 
   approveProposal(proposalId: string, input: { workspaceId: string; approvedBy: string }): ResolveMessageProposalResult {
-    return this.ctx.db.transaction(() => {
+    const deferredEvents = createCommitEventQueue();
+    const childStatusChanges: ChildStatusChangeCollector = [];
+    const result = this.ctx.db.transaction(() => {
+      // Global lock order (MUL-405): W then N before any domain row lock.
+      this.lockWorkspace(input.workspaceId);
+      this.lockIssueNumber(input.workspaceId);
       const proposal = this.requireProposal(proposalId, input.workspaceId);
       const ref = { connectionId: proposal.connectionId, externalMessageId: proposal.externalMessageId };
       this.lockMessage(ref);
@@ -433,7 +468,7 @@ export class MessagingOutcomeService {
         workspaceId: input.workspaceId,
         taskId: null,
         createdBy: input.approvedBy,
-      });
+      }, childStatusChanges, deferredEvents);
       this.repo.resolveProposal({
         id: proposalId,
         workspaceId: input.workspaceId,
@@ -443,10 +478,14 @@ export class MessagingOutcomeService {
       this.markProposalInboxHandled(current.ref);
       return { ...result, proposal: this.requireProposal(proposalId, input.workspaceId) };
     })();
+    this.ctx.emitCommitEvents(deferredEvents);
+    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChanges);
+    return result;
   }
 
   rejectProposal(proposalId: string, input: { workspaceId: string; rejectedBy: string }): ResolveMessageProposalResult {
     return this.ctx.db.transaction(() => {
+      this.lockWorkspace(input.workspaceId);
       const proposal = this.requireProposal(proposalId, input.workspaceId);
       const ref = { connectionId: proposal.connectionId, externalMessageId: proposal.externalMessageId };
       this.lockMessage(ref);
@@ -459,7 +498,7 @@ export class MessagingOutcomeService {
         .listOutcomes(ref.connectionId, ref.externalMessageId)
         .find((entry) => entry.outcomeKind === "dismissed" && entry.reason === "proposal_rejected");
       const createdAt = nowIso();
-      const outcome = existing ?? this.repo.recordOutcome({
+      const outcome = existing ?? this.repo.recordOutcomeWithinTransaction({
         workspaceId: input.workspaceId,
         connectionId: ref.connectionId,
         externalMessageId: ref.externalMessageId,
@@ -488,6 +527,8 @@ export class MessagingOutcomeService {
   private createIssueWithinTransaction(
     ref: MessageRef,
     input: MessageIssueInput & { workspaceId: string; taskId: string | null; createdBy: string | null },
+    childStatusChanges: ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
   ): MessageIssueOutcomeResult {
     const message = this.requireMessage(ref, input.workspaceId);
     this.assertTaskWorkspace(input.taskId, input.workspaceId);
@@ -501,7 +542,8 @@ export class MessagingOutcomeService {
       }
       return { message, outcome: existing, issue, created: false };
     }
-    const issue = this.ctx.issues().createIssue({
+    // The routes' human-approver rule decides who may create; the Issue needs no designated human.
+    const issue = this.ctx.issues().createIssueWithinTransaction({
       title: input.title,
       description: input.description ?? null,
       priority: input.priority ?? undefined,
@@ -518,9 +560,9 @@ export class MessagingOutcomeService {
         message_url: message.url,
       }],
       createdBy: input.createdBy,
-    });
+    }, childStatusChanges, deferredEvents);
     const createdAt = nowIso();
-    const outcome = this.repo.recordOutcome({
+    const outcome = this.repo.recordOutcomeWithinTransaction({
       workspaceId: input.workspaceId,
       connectionId: ref.connectionId,
       externalMessageId: ref.externalMessageId,
@@ -539,7 +581,7 @@ export class MessagingOutcomeService {
     message: StoredCanonicalMessage,
   ): MessageOutcomeResult {
     const createdAt = nowIso();
-    const outcome = this.repo.recordOutcome({
+    const outcome = this.repo.recordOutcomeWithinTransaction({
       workspaceId,
       connectionId: ref.connectionId,
       externalMessageId: ref.externalMessageId,
@@ -602,6 +644,16 @@ export class MessagingOutcomeService {
     return this.repo.updateMessageProcessingState({ ...ref, processedAt }) ?? message;
   }
 
+  /** W: workspace lifecycle row lock (MUL-405 lock order, step 1). */
+  private lockWorkspace(workspaceId: string): void {
+    this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+  }
+
+  /** N: this workspace's issue number lock (MUL-405 lock order, step 2). */
+  private lockIssueNumber(workspaceId: string): void {
+    advisoryXactLock(this.ctx.db, numberAllocationLockKey(`issue:${workspaceId}`));
+  }
+
   private lockMessage(ref: MessageRef): void {
     // A no-op UPDATE: it exists to take a row lock on Postgres so two callers
     // racing on the same message serialize instead of both creating an Issue.
@@ -614,16 +666,17 @@ export class MessagingOutcomeService {
 
   private markProposalInboxHandled(outcomeRef: string | null): void {
     if (!outcomeRef?.startsWith("inbox:")) return;
-    this.ctx.db.run(
-      "UPDATE multiremi_inbox_items SET read = 1, archived = 1 WHERE id = ?",
-      [outcomeRef.slice("inbox:".length)],
-    );
+    const id = outcomeRef.slice("inbox:".length);
+    const message = this.ctx.inbox().getMessage(id);
+    if (!message?.to_member_id) return;
+    this.ctx.inbox().readMessageInbox(message.to_member_id, message.session_id, message.seq);
+    this.ctx.inbox().resolveMessage(id, { type: "member", id: message.to_member_id });
   }
 
   private assertTaskWorkspace(taskId: string | null, workspaceId: string): void {
     if (!taskId) return;
     const row = this.ctx.db.query(
-      "SELECT workspace_id FROM multiremi_tasks WHERE id = ?",
+      "SELECT workspace_id FROM multiremi_turn_execution_records WHERE id = ?",
     ).get(taskId) as { workspace_id?: unknown } | null;
     if (!row || String(row.workspace_id ?? "") !== workspaceId) {
       throw new MessagingOutcomeError("task_id must reference a task in this workspace");

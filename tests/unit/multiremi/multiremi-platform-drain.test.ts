@@ -1,3 +1,5 @@
+import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Platform drain (MUL-74): persistent maintenance state, lease TTL recovery,
 // the daemon heartbeat ack directive, the updater drain endpoints, and the
 // operator cancel flow. The invariant under test: the switch gate only opens
@@ -51,6 +53,24 @@ describe("platform maintenance store", () => {
     expect(store.renewPlatformDrain("pop_crash")).toBeNull();
   });
 
+  it("keeps scheduling paused beyond the lease while the host switches or restores both services", () => {
+    const store = createLocalStore();
+    const operation = store.createPlatformOperation({ kind: "update", targetVersion: "1.0.0" }, "local");
+    store.claimPlatformOperation();
+    store.beginPlatformDrain({ operationId: operation.id, ttlMs: 30_000 });
+    for (const status of ["switching", "verifying", "rolling_back"] as const) {
+      store.reportPlatformOperation(operation.id, { status });
+      // Old releases only check expiry, so the persisted switch fence must
+      // remain readable after rolling back to one of those releases.
+      expect(store.getPlatformMaintenance().expiresAt).toBe("9999-12-31T23:59:59.999Z");
+      db!.run("UPDATE multiremi_platform_maintenance SET expires_at = ? WHERE id = 'platform'", [new Date(0).toISOString()]);
+      expect(store.getPlatformMaintenance()).toMatchObject({ mode: "draining", operationId: operation.id });
+      expect(store.releasePlatformDrain(operation.id)).toMatchObject({ mode: "draining", operationId: operation.id });
+    }
+    store.reportPlatformOperation(operation.id, { status: "rolled_back" });
+    expect(store.getPlatformMaintenance()).toMatchObject({ mode: "normal", operationId: null });
+  });
+
   it("gates readiness on daemon acks of the current generation AND zero in-flight tasks", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_drain", name: "drain", provider: "claude", workspaceId: "local" });
@@ -71,6 +91,9 @@ describe("platform maintenance store", () => {
     expect(status).toMatchObject({ ackedDaemons: 1, activeTasks: 1, ready: false });
 
     store.completeTask(task.id, { output: "done" });
+    // Completion can arrive before provider teardown / outbox flush finishes.
+    expect(store.getPlatformDrainStatus().ready).toBe(false);
+    store.recordRuntimeDrainAck(runtime.id, status.maintenance.generation, 0);
     expect(store.getPlatformDrainStatus()).toMatchObject({ ackedDaemons: 1, activeTasks: 0, ready: true });
 
     // A stale ack from a previous generation does not count after re-drain.
@@ -100,7 +123,7 @@ describe("platform maintenance store", () => {
     // task does not block (queued is not in-flight)...
     expect(status).toMatchObject({ onlineDaemons: 1, ackedDaemons: 1, activeTasks: 0, ready: true });
     // ...but once dispatched/running it holds the gate (fail-safe).
-    db!.run("UPDATE multiremi_tasks SET status = 'running' WHERE id = ?", [task.id]);
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [task.id]);
     expect(store.getPlatformDrainStatus()).toMatchObject({ activeTasks: 1, ready: false });
   });
 });
@@ -108,7 +131,7 @@ describe("platform maintenance store", () => {
 describe("daemon heartbeat drain directive", () => {
   it("carries the drain directive in the ack and records the daemon's ack + active count", async () => {
     const { app, store } = updaterApp();
-    const runtime = store.registerRuntime({ id: "rt_hb", name: "hb", provider: "claude", workspaceId: "local" });
+    const runtime = store.registerRuntime({ id: "rt_hb", name: "hb", provider: "claude", workspaceId: "local", metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
 
     const heartbeat = (body: Record<string, unknown>) => app.request("/api/daemon/heartbeat", {
       method: "POST",
@@ -130,7 +153,7 @@ describe("daemon heartbeat drain directive", () => {
 
   it("flips an expired drain back to normal on the very next heartbeat", async () => {
     const { app, store } = updaterApp();
-    const runtime = store.registerRuntime({ id: "rt_hb2", name: "hb2", provider: "claude", workspaceId: "local" });
+    const runtime = store.registerRuntime({ id: "rt_hb2", name: "hb2", provider: "claude", workspaceId: "local", metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
     store.beginPlatformDrain({ operationId: "pop_exp" });
     db!.run("UPDATE multiremi_platform_maintenance SET expires_at = ? WHERE id = 'platform'", [
       new Date(Date.now() - 1_000).toISOString(),
@@ -229,8 +252,11 @@ describe("operator cancel", () => {
     expect((await response.json()).operation).toMatchObject({ status: "preparing", cancelRequested: true });
 
     // From the switch phase on, cancellation is rejected.
-    store.reportPlatformOperation(claimed.id, { status: "switching" });
-    response = await app.request(`/api/multiremi/platform/operations/${claimed.id}/cancel`, {
+    expect(() => store.reportPlatformOperation(claimed.id, { status: "switching" })).toThrow();
+    store.reportPlatformOperation(claimed.id, { status: "cancelled" });
+    const switching = store.createPlatformOperation({ kind: "restart" }, "tester");
+    store.reportPlatformOperation(switching.id, { status: "switching" });
+    response = await app.request(`/api/multiremi/platform/operations/${switching.id}/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer master-secret" },
     });

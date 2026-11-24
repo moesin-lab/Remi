@@ -13,6 +13,13 @@ export type IssuePriority = "urgent" | "high" | "medium" | "low" | "none";
 
 export type IssueAssigneeType = "member" | "agent" | "squad";
 
+/** Creation acknowledgement; a dispatched task may still be waiting to start. */
+export type CreatedIssue = Issue & {
+  task_id?: string | null;
+  dispatch_status?: string;
+  dispatch_skipped_reason?: string | null;
+};
+
 export interface IssueReaction {
   id: string;
   issue_id: string;
@@ -47,6 +54,10 @@ export interface Issue {
   creator_type: IssueAssigneeType;
   creator_id: string;
   parent_issue_id: string | null;
+  /** Detail-only count of this Issue's questions at the human stage; Agent-stage questions are excluded. */
+  pending_decision_count?: number;
+  /** Unmet prerequisite keys on child-list responses. */
+  blocked_by?: string[];
   issue_kind?: "execution" | "intake";
   source_issue_id?: string | null;
   project_id: string | null;
@@ -63,6 +74,16 @@ export interface Issue {
   archived_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface IssueDependency {
+  id: string;
+  issue_id: string;
+  depends_on_issue_id: string;
+  direction: "blocked_by" | "blocks" | null;
+  issue: Issue | null;
+  depends_on_issue: Issue | null;
+  created_at: string;
 }
 
 export type IssueWorkspaceStatus = "preparing" | "ready" | "in_use" | "dirty" | "runtime_offline" | "cleaned" | "error";

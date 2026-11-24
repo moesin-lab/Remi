@@ -15,7 +15,9 @@
     "plugins": "插件",
     "skills": "Skills",
     "settings": "设置",
-    "chat": "对话"
+    "chat": "对话",
+    "execution_groups": "执行能力组",
+    "magpie": "Magpie"
   },
   "help": {
     "trigger": "帮助",
@@ -41,6 +43,8 @@
     "pinned_label": "固定",
     "workspace_group": "工作区",
     "configure_group": "配置",
-    "unread_overflow": "99+"
+    "unread_overflow": "99+",
+    "collapse": "收起侧边栏",
+    "expand": "展开侧边栏"
   }
 }

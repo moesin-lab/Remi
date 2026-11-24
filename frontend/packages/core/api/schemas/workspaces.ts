@@ -3,6 +3,17 @@
 // so an older/newer server never white-screens the settings page.
 import { z } from "zod";
 
+export const WorkspaceOperatorSchema = z.object({
+  userId: z.literal("local"),
+  memberId: z.string().min(1),
+});
+
+export const WorkspaceMemberSchema = z.object({
+  id: z.string().min(1), workspace_id: z.string().min(1), user_id: z.string().min(1),
+  role: z.enum(["owner", "admin", "member"]), name: z.string(),
+  email: z.string().optional(), avatar_url: z.string().nullable(), created_at: z.string(),
+}).loose();
+
 export const WorkspaceEnvResponseSchema = z.object({
   workspace_id: z.string().default(""),
   env: z.record(z.string(), z.string()).default({}),
@@ -12,23 +23,34 @@ export type WorkspaceEnvResponse = z.infer<typeof WorkspaceEnvResponseSchema>;
 
 export const EMPTY_WORKSPACE_ENV: WorkspaceEnvResponse = { workspace_id: "", env: {} };
 
+/**
+ * `/api/workspaces/:id/prompts`. Parsed strictly: the editor saves against
+ * `revision`, so a body it cannot read must not become an empty prompt.
+ */
+export const WorkspacePromptSettingsSchema = z.object({
+  prompt: z.string(),
+  revision: z.number().int().nonnegative(),
+  updatedAt: z.string().nullable().default(null),
+  updatedBy: z.string().nullable().default(null),
+}).loose();
+
 const PromptTemplateSha256Schema = z.object({
-  bootstrap: z.string().regex(/^[a-f0-9]{64}$/),
-  delta: z.string().regex(/^[a-f0-9]{64}$/),
+  instructions: z.string().regex(/^[a-f0-9]{64}$/),
+  input: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
 export const PlatformPromptTemplatePreviewSchema = z.object({
-  bootstrap: z.string(),
-  delta: z.string(),
+  instructions: z.string(),
+  input: z.string(),
   sha256: PromptTemplateSha256Schema,
 }).loose();
 
 export type PlatformPromptTemplatePreview = z.infer<typeof PlatformPromptTemplatePreviewSchema>;
 
 export const EMPTY_PLATFORM_PROMPT_TEMPLATE: PlatformPromptTemplatePreview = {
-  bootstrap: "",
-  delta: "",
-  sha256: { bootstrap: "", delta: "" },
+  instructions: "",
+  input: "",
+  sha256: { instructions: "", input: "" },
 };
 
 const BotMenuBehaviorSchema = z.object({
@@ -51,38 +73,28 @@ const BotMenuItemSchema: z.ZodType<unknown> = z.lazy(() => z.object({
   children: z.array(BotMenuItemSchema).optional(),
 }).loose());
 
-const BotMenuTargetSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("member"), memberId: z.string() }).loose(),
-  z.object({ type: z.literal("role"), role: z.enum(["owner", "admin", "member"]) }).loose(),
-  z.object({
-    type: z.literal("external"),
-    userId: z.string(),
-    userIdType: z.enum(["open_id", "union_id", "user_id"]),
-  }).loose(),
-]);
-
 export const BotMenuConfigSchema = z.object({
   default: z.array(BotMenuItemSchema).optional(),
-  users: z.array(z.object({
-    target: BotMenuTargetSchema,
-    label: z.string().optional(),
-    items: z.array(BotMenuItemSchema),
-  }).loose()).optional(),
 }).loose();
 
 export const BotMenuResponseSchema = z.object({
   workspace_id: z.string(),
+  bot_id: z.string(),
+  legacy_target_count: z.number().int().nonnegative(),
   bot_menu: BotMenuConfigSchema,
 }).loose();
 
 export const BotMenuPublishResponseSchema = z.object({
   id: z.string(),
+  bot_id: z.string(),
   workspace_id: z.string(),
   dry_run: z.boolean(),
   status: z.enum(["pending", "running", "completed", "failed", "timeout"]),
   result: z.object({
     defaultPublished: z.boolean(),
     userMenuCount: z.number(),
+    clearedUserMenuCount: z.number().optional(),
+    unresolvedLegacyTargetCount: z.number().optional(),
     dryRun: z.boolean(),
   }).loose().nullable(),
   error: z.string().nullable(),
@@ -91,11 +103,14 @@ export const BotMenuPublishResponseSchema = z.object({
 }).loose();
 
 export const EMPTY_BOT_MENU_RESPONSE = {
+  bot_id: "default",
+  legacy_target_count: 0,
   workspace_id: "",
   bot_menu: {},
 };
 
 export const EMPTY_BOT_MENU_PUBLISH_RESPONSE = {
+  bot_id: "default",
   id: "",
   workspace_id: "",
   dry_run: true,
@@ -105,3 +120,5 @@ export const EMPTY_BOT_MENU_PUBLISH_RESPONSE = {
   created_at: "",
   updated_at: "",
 };
+
+export const MagpieServiceSchema = z.object({ url: z.string().url().refine(value => /^https?:\/\//.test(value)).nullable() });

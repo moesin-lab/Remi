@@ -54,7 +54,6 @@ function renderDropdown(onSelect = vi.fn()) {
       <AgentDropdown
         agents={agents}
         activeAgent={agents[0]!}
-        userId="user-1"
         onSelect={onSelect}
       />
     </I18nProvider>,
@@ -71,7 +70,7 @@ describe("AgentDropdown", () => {
     expect(dialog).toHaveAttribute("data-side", "top");
   });
 
-  it("filters both My agents and Others by agent name", async () => {
+  it("filters the shared workspace agents by name without owner groups", async () => {
     renderDropdown();
 
     const input = await screen.findByRole("textbox", { name: "Filter options" });
@@ -82,10 +81,10 @@ describe("AgentDropdown", () => {
     expect(within(dialog).queryByText("张三")).not.toBeInTheDocument();
     expect(within(dialog).getByText("Beta")).toBeInTheDocument();
     expect(within(dialog).queryByText("Gamma")).not.toBeInTheDocument();
-    expect(within(dialog).getByText("Others")).toBeInTheDocument();
+    expect(within(dialog).queryByText("Others")).not.toBeInTheDocument();
   });
 
-  it("matches My agents by pinyin", async () => {
+  it("matches shared agents by pinyin", async () => {
     renderDropdown();
 
     const input = await screen.findByRole("textbox", { name: "Filter options" });
@@ -93,7 +92,7 @@ describe("AgentDropdown", () => {
     const dialog = screen.getByRole("dialog");
 
     expect(within(dialog).getByText("张三")).toBeInTheDocument();
-    expect(within(dialog).getByText("My agents")).toBeInTheDocument();
+    expect(within(dialog).queryByText("My agents")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("Alpha")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("Beta")).not.toBeInTheDocument();
   });

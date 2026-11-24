@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareIssueWikiWorkspace } from "@daemon/agent-runtime/workspace/wiki.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
-import { buildTaskPrompt } from "@multiremi/prompt.js";
+import { buildAgentInstructions, buildTaskPrompt } from "@multiremi/prompt.js";
 import { writeProjectResourceContext } from "@daemon/agent-runtime/skills/ephemeral.js";
 
 const roots: string[] = [];
@@ -39,6 +39,67 @@ describe("Issue Wiki workspace", () => {
     await prepareIssueWikiWorkspace(root, task("remote v3", 3));
     expect(readFileSync(join(root, "wiki", "guide.md"), "utf8")).toBe("local edit\n");
     expect(readFileSync(join(root, ".multiremi", "wiki-base", "files", "guide.md"), "utf8")).toBe("remote v2\n");
+  });
+
+  test("drops a doc the claim omitted, keeping an edited copy and removing a clean one", async () => {
+    // MUL-389: an over-cap Project Wiki doc is dropped whole from the claim rather than sent
+    // with an empty body. The daemon must therefore treat it as "not in this update": a clean
+    // local copy goes away, and an edited one stays. Writing an empty body here would put the
+    // empty text into the local copy AND the baseline that `remi wiki push` merges from.
+    const cleanRoot = mkdtempSync(join(tmpdir(), "multiremi-issue-wiki-dropped-clean-"));
+    roots.push(cleanRoot);
+    await prepareIssueWikiWorkspace(cleanRoot, task("remote v1", 1));
+    expect(readFileSync(join(cleanRoot, "wiki", "guide.md"), "utf8")).toBe("remote v1\n");
+    await prepareIssueWikiWorkspace(cleanRoot, { ...task("remote v1", 1), projectWikiDocs: [] });
+    expect(existsSync(join(cleanRoot, "wiki", "guide.md"))).toBe(false);
+
+    const editedRoot = mkdtempSync(join(tmpdir(), "multiremi-issue-wiki-dropped-edited-"));
+    roots.push(editedRoot);
+    await prepareIssueWikiWorkspace(editedRoot, task("remote v1", 1));
+    writeFileSync(join(editedRoot, "wiki", "guide.md"), "local edit\n");
+    await prepareIssueWikiWorkspace(editedRoot, { ...task("remote v1", 1), projectWikiDocs: [] });
+    // The edit survives, and the earlier remote text is still the base push will merge against.
+    expect(readFileSync(join(editedRoot, "wiki", "guide.md"), "utf8")).toBe("local edit\n");
+    expect(readFileSync(join(editedRoot, ".multiremi", "wiki-base", "files", "guide.md"), "utf8")).toBe("remote v1\n");
+    const manifest = JSON.parse(readFileSync(join(editedRoot, ".multiremi", "wiki-base", "manifest.json"), "utf8"));
+    expect(manifest.docs.map((doc: { slug: string }) => doc.slug)).toEqual(["guide"]);
+  });
+
+  test("keeps the previous Repository Wiki copy when the claim marks the doc unavailable", async () => {
+    // MUL-389: an over-cap Repository Wiki doc arrives as metadata plus `status: unavailable`
+    // and an empty body. `prepareRepositoryWikiWorkspaces` must keep the prior manifest entry
+    // and leave the local file alone rather than writing the empty body over it.
+    const root = mkdtempSync(join(tmpdir(), "multiremi-repo-wiki-unavailable-"));
+    roots.push(root);
+    const repository = { id: "repo_1", name: "app", url: "https://github.com/example/app", defaultBranch: "main" };
+    const healthy = {
+      ...task("unused", 1),
+      project: null,
+      projectWikiDocs: [],
+      repositoryWikiContexts: [{
+        repository,
+        docs: [{
+          id: "rwdoc_1", repositoryId: "repo_1", workspaceId: "local",
+          path: "docs/architecture.md", slug: "docs/architecture", title: "Architecture",
+          summary: null, body: "prior body\n", tags: [], refs: [], status: "healthy",
+          version: 1, updatedAt: "2026-09-26T00:00:00.000Z",
+        }],
+      }],
+    } as unknown as AgentTask;
+    await prepareIssueWikiWorkspace(root, healthy);
+    const localPath = join(root, "wiki", "repositories", "app-" + "repo_1".slice(-8), "docs", "architecture.md");
+    expect(readFileSync(localPath, "utf8")).toBe("prior body\n");
+
+    const unavailable = {
+      ...healthy,
+      repositoryWikiContexts: [{
+        repository,
+        docs: [{ ...healthy.repositoryWikiContexts![0]!.docs[0]!, body: "", status: "unavailable" }],
+      }],
+    } as unknown as AgentTask;
+    await prepareIssueWikiWorkspace(root, unavailable);
+    // The prior body is still there, and the manifest still tracks the page.
+    expect(readFileSync(localPath, "utf8")).toBe("prior body\n");
   });
 
   test("materializes nested Project Wiki paths and rejects unsafe paths", async () => {
@@ -255,14 +316,14 @@ describe("Issue Wiki workspace", () => {
     expect(manifest.docs).toMatchObject([{ id: "rwdoc_prior", version: 1 }]);
     expect(manifest.docs.some((doc: { id: string }) => doc.id === "rwdoc_missing")).toBeFalse();
 
+    // ADR 0023: what this turn could not provide is turn input; AGENTS.md does not change with it.
+    expect(buildAgentInstructions(value)).not.toContain("暂不可用");
     const prompt = buildTaskPrompt(value);
-    expect(prompt).toContain("## Repository Wiki Availability Warnings");
-    expect(prompt).toContain("were not materialized as empty files");
-    expect(prompt).toContain("architecture/overview.md");
-    expect(prompt).toContain("checksum mismatch");
-    expect(prompt).toContain("operations/missing.md");
-    expect(prompt).toContain("object not found");
-    expect(prompt).toContain("report the page as blocked");
+    expect(prompt).toContain("2 页暂不可用，用 remi wiki 取");
+    expect(prompt.match(/暂不可用/g)).toHaveLength(1);
+    expect(prompt).not.toContain("checksum mismatch");
+    expect(prompt).not.toContain("object not found");
+    expect(prompt).not.toContain("## Repository Wiki Availability Warnings");
   });
 
   test("materializes repository Wiki for an SCM task without an Issue or Project", async () => {

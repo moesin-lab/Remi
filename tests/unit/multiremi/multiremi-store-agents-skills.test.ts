@@ -1,7 +1,7 @@
 // Agent lifecycle from the scheduling surfaces plus workspace skill attachment
 // and squad membership.
 import { afterEach, describe, expect, it } from "bun:test";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -47,11 +47,10 @@ describe("Multiremi store — agents, workspace skills, and members", () => {
 
     const owner = store.createWorkspaceMember({ name: "Owner", role: "owner" });
     const member = store.createWorkspaceMember({ name: "Project Member", role: "member" });
-    const memberProject = store.createProject({
-      title: "Member project",
-      defaultAssigneeType: "member",
-      defaultAssigneeId: member.id,
-    });
+    const memberProject = store.createProject({ title: "Historical member project" });
+    // Retain an actual pre-responsibility default; new member execution defaults are rejected.
+    db!.run("UPDATE multiremi_projects SET default_assignee_type='member',default_assignee_id=? WHERE id=?",
+      [member.id, memberProject.id]);
 
     store.archiveWorkspaceMember(member.id);
     expect(store.getProject(memberProject.id)).toMatchObject({
@@ -80,7 +79,8 @@ describe("Multiremi store — agents, workspace skills, and members", () => {
 
     const attached = store.setAgentSkills(agent.id, { skill_ids: [skill.id!] });
     expect(attached[0].name).toBe("Review Helper");
-    expect(store.getAgent(agent.id)?.skills[0].files?.[0].content).toBe("Check list");
+    expect(store.getAgent(agent.id)?.skills[0].files).toEqual([]);
+    expect(store.getAgent(agent.id, { includeFiles: true })?.skills[0].files?.[0].content).toBe("Check list");
 
     const task = store.createTask({ agentId: agent.id, prompt: "Review this" });
     const runtime = store.registerRuntime({ name: "local", provider: "claude" });
@@ -97,22 +97,22 @@ describe("Multiremi store — agents, workspace skills, and members", () => {
     expect(store.listAgentSkills(agent.id)).toHaveLength(0);
   });
 
-  it("manages workspace members and squad membership", () => {
+  it("retains historical workspace and squad membership alongside the shared operator", () => {
     const store = createStore();
     const squad = store.createSquad({ name: "Product squad" });
     const member = store.createWorkspaceMember({ name: "Ada Lovelace", email: "ada@example.com", role: "owner" });
 
-    expect(store.listWorkspaceMembers()).toHaveLength(1);
-    expect(() => store.updateWorkspaceMember(member.id, { role: "reviewer" })).toThrow("workspace must have at least one owner");
-    expect(() => store.archiveWorkspaceMember(member.id)).toThrow("workspace must have at least one owner");
+    const operator = store.getWorkspaceOperator("local")!;
+    expect(store.listWorkspaceMembers().map(row => row.id).sort()).toEqual([operator.id, member.id].sort());
     const backupOwner = store.createWorkspaceMember({ name: "Backup Owner", email: "backup@example.com", role: "owner" });
     expect(store.updateWorkspaceMember(member.id, { role: "reviewer" }).role).toBe("reviewer");
     expect(store.addSquadMember(squad.id, { memberType: "member", memberId: member.id, role: "reviewer" }).memberType).toBe("member");
     expect(store.listSquadMembers(squad.id)[0]?.memberId).toBe(member.id);
 
     expect(store.archiveWorkspaceMember(member.id).archivedAt).toBeString();
-    expect(store.listWorkspaceMembers()).toHaveLength(1);
-    expect(() => store.archiveWorkspaceMember(backupOwner.id)).toThrow("workspace must have at least one owner");
+    expect(store.listWorkspaceMembers().map(row => row.id).sort()).toEqual([operator.id, backupOwner.id].sort());
+    expect(store.archiveWorkspaceMember(backupOwner.id).archivedAt).toBeString();
+    expect(() => store.archiveWorkspaceMember(operator.id)).toThrow("workspace must have at least one owner");
     expect(() => store.addSquadMember(squad.id, { memberType: "member", memberId: member.id })).toThrow("Member is archived");
   });
 });

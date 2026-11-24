@@ -38,7 +38,7 @@ export function ModelDropdown({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
 
-  const { models, modelCatalogStatus, isLoading, isError } = useExecutionTargetModels(wsId, provider, runtimeId, executionGroupId, agentId);
+  const { models, modelCatalogStatus, blockedModels = [], isLoading, isError } = useExecutionTargetModels(wsId, provider, runtimeId, executionGroupId, agentId);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -56,9 +56,10 @@ export function ModelDropdown({
   );
   const authoritative = isModelCatalogRestricted(provider, models, modelCatalogStatus);
   const unknown = !!value && isModelExecutionUnknown(provider, value, models, modelCatalogStatus);
-  const isUnavailable = (id: string) => fallback
+  const blocked = !!value && blockedModels.includes(value);
+  const isUnavailable = (id: string) => blockedModels.includes(id) || (fallback
     ? isFallbackModelUnavailable(provider, id, models, modelCatalogStatus)
-    : isModelUnavailable(provider, id, models, modelCatalogStatus);
+    : isModelUnavailable(provider, id, models, modelCatalogStatus));
   const unavailable = isUnavailable(value);
   const canCreate = !isLoading && !authoritative && trimmedSearch.length > 0 && !exactMatch && trimmedSearch !== excludedModel && !isUnavailable(trimmedSearch);
 
@@ -73,6 +74,7 @@ export function ModelDropdown({
 
   return (
     <div className="flex flex-col min-w-0">
+      {blocked && <p role="alert" className="text-xs text-destructive">{t(($) => $.model_dropdown.blocked_by_policy)}</p>}
       <div className="flex h-6 items-center justify-between">
         <Label className="text-xs text-muted-foreground">{fallback ? t(($) => $.fallback.model_label) : t(($) => $.model_dropdown.label)}</Label>
         {isError && (

@@ -1,3 +1,5 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -9,7 +11,7 @@ describe("Chat completion across Issue decoupling", () => {
     store.ensureLocalWorkspace();
     const runtime = store.registerRuntime({ name: "Legacy Chat runtime", provider: "codex" });
     const agent = store.createAgent({ name: "Legacy Chat", provider: "codex", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "Former Chat binding" });
+    const issue = createResponsibleTestIssue(store, { title: "Former Chat binding" });
     const chat = store.createChatSession({ agentId: agent.id });
     const task = store.sendChatMessage(chat.id, { body: "Already running before migration" }).task;
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
@@ -17,7 +19,7 @@ describe("Chat completion across Issue decoupling", () => {
 
     // Migration retains the running task's Issue audit and Chat work directory,
     // but clears the provider pointer that included the old Issue bootstrap.
-    db!.run("UPDATE multiremi_tasks SET issue_id = ? WHERE id = ?", [issue.id, task.id]);
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET issue_id = ? WHERE id = ?", [issue.id, task.id]);
     db!.run("UPDATE multiremi_chat_sessions SET work_dir = ? WHERE id = ?", ["/work/legacy-chat", chat.id]);
     if (status === "completed") {
       store.completeTask(task.id, { output: "Finished after migration", sessionId: "old-issue-provider-session", workDir: "/work/legacy-chat" });

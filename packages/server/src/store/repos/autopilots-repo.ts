@@ -1,8 +1,15 @@
+import { isDatabaseConnectionError } from "@shared/db/recovery.js";
+import { afterCommit } from '../db/postgres.js';
+import { sendMessageWithinTransaction } from '../inbox/send-message.js';
+import { clampEnvelopeBody } from '@multiremi/store/envelope-body.js';
+import { autopilotSessionId } from "@multiremi/contracts/unified-model.js";
+import { runAutopilotRunMutation } from "@multiremi/store/autopilot-run-records.js";
 // Autopilots domain (autopilots, schedule/webhook triggers, runs and webhook deliveries),
 // extracted verbatim from MultiremiStore (the facade delegates every public method here).
 import { computeScheduleNextRun } from "@multiremi/store/schedule.js";
 import { availableScheduleTargets, normalizeScheduleTargets } from "@multiremi/store/schedule-targets.js";
 import { createId, nowIso } from "@multiremi/ids.js";
+import { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
 import {
   cleanOptionalString,
   isRecord,
@@ -12,7 +19,9 @@ import {
   parseJson,
   toJson,
 } from "@multiremi/store/helpers.js";
-import { type StoreContext } from "@multiremi/store/context.js";
+import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
+import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
+import { advisoryXactLock } from "@multiremi/store/db/postgres.js";
 import { SCM_PROVIDER_CAPABILITIES } from "@multiremi/scm/capabilities.js";
 import { resolveRepositoryWikiAutomation } from "@multiremi/repository-wiki/automation.js";
 import type {
@@ -24,6 +33,7 @@ import type {
   MultiremiAutopilotRun,
   MultiremiAutopilotScmEventConfig,
   MultiremiAutopilotSystemEventConfig,
+  MultiremiChatSession,
   MultiremiScmCanonicalEventType,
   MultiremiAutopilotTrigger,
   MultiremiScheduleTargets,
@@ -61,6 +71,8 @@ export type RunAutopilotStoreInput = RunAutopilotInput & {
 export interface MultiremiAutopilotRunRecord extends MultiremiAutopilotRun {
   repositoryId: string | null;
   dedupeKey: string | null;
+  /** The agent reported nothing worth surfacing (`remi automation quiet`). */
+  quiet: boolean;
   /** Set (not persisted) when runAutopilot returned an existing run instead of creating one. */
   deduplicated?: boolean;
 }
@@ -106,6 +118,7 @@ export function autopilotRunSourceRevision(
 const AUTOPILOT_FAILURE_MONITOR_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTOPILOT_FAILURE_MONITOR_MIN_RUNS = 50;
 const AUTOPILOT_FAILURE_MONITOR_FAIL_RATIO = 0.9;
+export const DEPENDENCY_AUTO_START_REPLAY_DELAY_MS = 5_000;
 
 export interface MultiremiAutopilotFailureThresholdOptions {
   since?: Date | string;
@@ -154,6 +167,7 @@ export class AutopilotsRepo {
     }
     const createdByType = normalizeAutopilotCreatorType(input.createdByType ?? input.created_by_type);
     const createdById = cleanOptionalString(input.createdById ?? input.created_by_id) ?? "local";
+    // `responsibleMemberId` is deprecated: accepted, never validated or persisted.
     const issueCreationRestricted = Boolean(input.issueCreationRestricted ?? input.issue_creation_restricted);
     const issueCreationRestrictedByTaskId = issueCreationRestricted
       ? cleanOptionalString(input.issueCreationRestrictedByTaskId)
@@ -161,6 +175,8 @@ export class AutopilotsRepo {
     const issueCreationRestrictionReason = issueCreationRestricted
       ? input.issueCreationRestrictionReason ?? (issueCreationRestrictedByTaskId ? "restricted_task" : "human_policy")
       : null;
+    const deliveryChatSessionId = input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id;
+    this.assertDeliveryTarget(workspaceId, executionMode, deliveryChatSessionId, input.deliveryAuthorizedBy);
     const id = input.id ?? createId("aut");
     const now = nowIso();
     this.ctx.db.run(
@@ -169,8 +185,8 @@ export class AutopilotsRepo {
         assignee_id, status, execution_mode, session_policy, workspace_policy, issue_title_template,
         trigger_kind, trigger_label, cron_expression, issue_creation_restricted,
         issue_creation_restriction_reason, issue_creation_restricted_by_task_id, created_by_type,
-        created_by_id, last_run_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+        created_by_id, last_run_at, created_at, updated_at, delivery_chat_session_id, delivery_authorized_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       [
         id,
         input.title.trim(),
@@ -194,11 +210,97 @@ export class AutopilotsRepo {
         createdById,
         now,
         now,
+        deliveryChatSessionId ?? null,
+        deliveryChatSessionId ? input.deliveryAuthorizedBy : null,
       ],
     );
+    const sessionId=autopilotSessionId(id);
+    this.ctx.db.run('UPDATE multiremi_autopilots SET session_id=? WHERE id=?',[sessionId,id]);
+    this.ctx.conversationLog().ensureSessionHeadWithinTransaction(sessionId,{bodyMd:input.title,title:input.title});
     const autopilot = this.getAutopilot(id)!;
     this.ctx.analytics().recordAutopilotCreatedAnalytics(autopilot);
     return autopilot;
+  }
+
+  private assertDeliveryTarget(workspaceId: string, mode: string, chatId: string | null | undefined, memberId: string | null | undefined): void {
+    if (chatId == null) return;
+    const chat = typeof chatId === "string" ? this.ctx.chat().getChatSession(chatId) : null;
+    const member = memberId ? this.ctx.workspaces().getWorkspaceMember(memberId) : null;
+    if (mode !== "run_only" || !chat || chat.workspaceId !== workspaceId || chat.status !== "active"
+      || !member || member.workspaceId !== workspaceId || member.archivedAt) {
+      throw new Error("Autopilot delivery requires run_only, an active Chat and an authorizing operator in this workspace");
+    }
+  }
+
+  /** Server-owned reporting path; never grants the running Task access to the target. */
+  deliverRunReportWithinTransaction(autopilot: MultiremiAutopilot, run: MultiremiAutopilotRunRecord, body: string): void {
+    const targetId = autopilot.deliveryChatSessionId;
+    if (!targetId || (run.quiet && run.status === "completed")) return;
+    const target = this.ctx.chat().getChatSession(targetId);
+    const member = autopilot.deliveryAuthorizedBy ? this.ctx.workspaces().getWorkspaceMember(autopilot.deliveryAuthorizedBy) : null;
+    const valid = target?.workspaceId === autopilot.workspaceId && target.status === "active"
+      && member?.workspaceId === autopilot.workspaceId && !member.archivedAt;
+    const events = createCommitEventQueue();
+    // Timer replies bypass the platform status/report clamp in the inbox writer.
+    // Bound the delivery copy once; the source Task retains the full output/error.
+    const reportBody = clampEnvelopeBody(valid ? body : `Run ${run.id}: report delivery skipped because the authorized Chat or operator is unavailable.`);
+    sendMessageWithinTransaction(this.ctx, {
+      id: `msg_autopilot_delivery_${run.id}`,
+      session_id: valid ? targetId : autopilotSessionId(autopilot.id),
+      sender: { type: "timer", id: autopilot.id },
+      to: valid ? { type: "member", ref: member!.id } : { type: "none" },
+      message_kind: "reply", wake_requested: "inbox_only",
+      body_md: reportBody,
+      metadata: { autopilot_id: autopilot.id, run_id: run.id, task_id: run.taskId,
+        delivery_chat_session_id: targetId, delivery_authorized_by: autopilot.deliveryAuthorizedBy,
+        delivery_status: valid ? "queued" : "skipped" },
+    }, events);
+    if (valid) this.ctx.feishuBot().enqueueAutopilotReportWithinTransaction(targetId, run.id, reportBody);
+    afterCommit(this.ctx.db, () => this.ctx.emitCommitEvents(events));
+  }
+
+  /**
+   * The request goes into the conversation that runs it (an Issue session or the run's Chat);
+   * the `auto_<id>` log keeps a trigger entry that points at that conversation.
+   */
+  private appendAutomationRequestWithinTransaction(autopilotId:string,agentId:string,prompt:string,sessionId:string,turnId:string):number {
+    const autoSession=autopilotSessionId(autopilotId),events=createCommitEventQueue();
+    const request=sendMessageWithinTransaction(this.ctx,{session_id:sessionId,sender:{type:'timer',id:autopilotId},to:{type:'agent',ref:agentId},
+      message_kind:'request',wake_requested:'next_turn',body_md:prompt},events);
+    sendMessageWithinTransaction(this.ctx,{session_id:autoSession,sender:{type:'timer',id:autopilotId},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:prompt,metadata:{turn_id:turnId,session_id:sessionId}},events);
+    afterCommit(this.ctx.db,()=>this.ctx.emitCommitEvents(events));return request.message.seq;
+  }
+  /**
+   * The Chat a `run_only` run executes in. `reuse_latest` continues the Chat of the
+   * automation's latest run while it still exists and belongs to the same agent;
+   * otherwise each run opens a new Chat owned by the automation's responsible member.
+   */
+  private openRunChatWithinTransaction(autopilot:MultiremiAutopilot,agent:{id:string},runId:string,reuseLatest:boolean):MultiremiChatSession {
+    if(reuseLatest){
+      const latest=this.ctx.db.query('SELECT chat_session_id FROM multiremi_autopilot_runs WHERE autopilot_id=? AND id<>? ORDER BY created_at DESC,id DESC LIMIT 1').get(autopilot.id,runId);
+      const chat=latest?.chat_session_id?this.ctx.chat().getChatSession(String(latest.chat_session_id)):null;
+      if(chat&&chat.agentId===agent.id&&chat.workspaceId===autopilot.workspaceId){
+        this.ctx.db.run('UPDATE multiremi_autopilot_runs SET chat_session_id=? WHERE id=?',[chat.id,runId]);
+        return chat;
+      }
+    }
+    const chat=this.ctx.chat().createChatSessionWithinTransaction({workspaceId:autopilot.workspaceId,agentId:agent.id,
+      creatorId:this.runChatCreator(autopilot),title:`${autopilot.title} · ${formatLocalMinute(new Date())}`});
+    this.ctx.db.run('UPDATE multiremi_chat_sessions SET origin_autopilot_id=?,origin_run_id=? WHERE id=?',[autopilot.id,runId,chat.id]);
+    this.ctx.db.run('UPDATE multiremi_autopilot_runs SET chat_session_id=? WHERE id=?',[chat.id,runId]);
+    return this.ctx.chat().getChatSession(chat.id)!;
+  }
+  /** The member who created the automation, else the workspace owner (as a user id). */
+  private runChatCreator(autopilot:MultiremiAutopilot):string {
+    const workspaces=this.ctx.workspaces();
+    const creator=autopilot.createdByType==='member'?this.ctx.resolveWorkspaceMemberForNotification(autopilot.workspaceId,autopilot.createdById):null;
+    const member=(creator&&!creator.archivedAt?creator:null)
+      ??workspaces.listWorkspaceMembers(autopilot.workspaceId).find(candidate=>candidate.role==='owner'&&!candidate.archivedAt);
+    if(!member)throw new Error(`Automation ${autopilot.id} has no member to own its Chat`);
+    return member.userId??member.id;
+  }
+  private bindAutomationInputWithinTransaction(attemptId:string,requestSeq:number):void {
+    this.ctx.db.run('UPDATE multiremi_turns SET wake_seq=? WHERE current_attempt_id=?',[requestSeq,attemptId]);
   }
 
   getAutopilot(id: string): MultiremiAutopilot | null {
@@ -288,8 +390,14 @@ export class AutopilotsRepo {
         this.assertFeishuEventConfigScope(trigger.eventConfig, { ...current, projectId: nextProjectId });
       }
     }
+    const targetInput = input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id;
+    const deliveryTarget = targetInput === undefined ? current.deliveryChatSessionId : targetInput;
+    const deliveryAuthorizedBy = targetInput === undefined ? current.deliveryAuthorizedBy : input.deliveryAuthorizedBy;
+    // Unrelated updates remain possible after a target is archived/deleted.
+    if (targetInput !== undefined || nextExecutionMode !== current.executionMode) this.assertDeliveryTarget(current.workspaceId, nextExecutionMode, deliveryTarget, deliveryAuthorizedBy);
     const now = nowIso();
     this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(current.workspaceId);
       this.ctx.db.run(
         `UPDATE multiremi_autopilots SET
         title = ?,
@@ -308,6 +416,8 @@ export class AutopilotsRepo {
         issue_creation_restricted = ?,
         issue_creation_restriction_reason = ?,
         issue_creation_restricted_by_task_id = ?,
+        delivery_chat_session_id = CASE WHEN ? = 1 THEN ? ELSE delivery_chat_session_id END,
+        delivery_authorized_by = CASE WHEN ? = 1 THEN ? ELSE delivery_authorized_by END,
         updated_at = ?
        WHERE id = ?`,
       [
@@ -327,10 +437,25 @@ export class AutopilotsRepo {
         nextIssueCreationRestricted ? 1 : 0,
         nextIssueCreationRestrictionReason,
         nextIssueCreationRestrictedByTaskId,
+        targetInput !== undefined ? 1 : 0,
+        deliveryTarget ?? null,
+        targetInput !== undefined ? 1 : 0,
+        deliveryTarget ? deliveryAuthorizedBy : null,
         now,
         id,
         ],
       );
+      if (current.status !== "active" && (input.status ?? current.status) === "active") {
+        // Resume from now: scheduled runs missed while inactive are not replayed.
+        for (const trigger of existingTriggers) {
+          if (trigger.kind !== "schedule" || !trigger.enabled || !trigger.cronExpression) continue;
+          const nextRunAt = computeScheduleNextRun(trigger.cronExpression, trigger.timezone, new Date(now));
+          this.ctx.db.run(
+            "UPDATE multiremi_autopilot_triggers SET next_run_at = ?, updated_at = ? WHERE id = ?",
+            [nextRunAt, now, trigger.id],
+          );
+        }
+      }
       if (restrictionInput === false) {
         this.ctx.db.run(
           `UPDATE multiremi_autopilot_triggers
@@ -392,16 +517,24 @@ export class AutopilotsRepo {
   }
 
   private enqueueScheduleTargets(trigger: MultiremiAutopilotTrigger, input: RunAutopilotStoreInput): MultiremiAutopilotRunRecord {
+    const triggerWorkspaceId = this.getAutopilot(trigger.autopilotId)?.workspaceId ?? null;
     const firstId = this.ctx.db.transaction(() => {
+      // Global lock order (MUL-405): workspace lifecycle row lock first, then
+      // the per-autopilot row lock. `advanceScheduledTargetRuns` follows the
+      // same order because dispatch ends in `createTaskWithinTransaction`.
+      if (triggerWorkspaceId) this.ctx.lockWorkspaceRuntimeLifecycle(triggerWorkspaceId);
       // Serialize expansion and dispatch across scheduler/API processes.
       this.ctx.db.run("UPDATE multiremi_autopilots SET updated_at = updated_at WHERE id = ?", [trigger.autopilotId]);
-      const autopilot = this.getAutopilot(trigger.autopilotId)!;
+      const autopilot = this.getAutopilot(trigger.autopilotId);
+      if (!autopilot || (triggerWorkspaceId && autopilot.workspaceId !== triggerWorkspaceId)) {
+        throw new Error(`Autopilot not found: ${trigger.autopilotId}`);
+      }
       const current = this.getAutopilotTrigger(trigger.id);
       if (!current?.enabled || !current.scheduleTargets || autopilot.status !== "active") {
         throw new Error("schedule_targets trigger is not active");
       }
       const active = this.ctx.db.query(
-        "SELECT id FROM multiremi_autopilot_runs WHERE autopilot_id = ? AND trigger_id = ? AND schedule_batch_id IS NOT NULL AND status IN ('queued', 'running') ORDER BY created_at, schedule_position LIMIT 1",
+        "SELECT id FROM multiremi_autopilot_run_records WHERE autopilot_id = ? AND trigger_id = ? AND schedule_batch_id IS NOT NULL AND status IN ('queued', 'running') ORDER BY created_at, schedule_position LIMIT 1",
       ).get(autopilot.id, trigger.id) as { id: string } | null;
       if (active) return active.id;
       const sourceTaskId = input.sourceTaskId ?? input.source_task_id ?? null;
@@ -422,8 +555,7 @@ export class AutopilotsRepo {
       for (const [position, target] of (targets.length ? targets : [null]).entries()) {
         const id = createId("run");
         ids.push(id);
-        this.ctx.db.run(
-          `INSERT INTO multiremi_autopilot_runs
+        runAutopilotRunMutation(this.ctx.db, `INSERT INTO multiremi_autopilot_run_records
            (id, autopilot_id, source, status, trigger_id, source_task_id, triggered_at, completed_at, failure_reason,
             schedule_target, schedule_batch_id, schedule_prompt, schedule_position, payload, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -441,22 +573,29 @@ export class AutopilotsRepo {
 
   advanceScheduledTargetRuns(): void {
     const autopilots = this.ctx.db.query(
-      "SELECT DISTINCT autopilot_id FROM multiremi_autopilot_runs WHERE status = 'queued' AND schedule_batch_id IS NOT NULL",
+      "SELECT DISTINCT autopilot_id FROM multiremi_autopilot_run_records WHERE status = 'queued' AND schedule_batch_id IS NOT NULL",
     ).all() as Array<{ autopilot_id: string }>;
     for (const { autopilot_id: autopilotId } of autopilots) {
       for (;;) {
+        const dispatchWorkspaceId = this.getAutopilot(autopilotId)?.workspaceId ?? null;
+        const scheduledChanges: import("./tasks-repo.js").ChildStatusChangeCollector = [];
+        const scheduledEvents = createCommitEventQueue();
         const task = this.ctx.db.transaction(() => {
+          // Global lock order (MUL-405): the workspace row lock precedes the
+          // autopilot row lock, matching `runAutopilot`; dispatch ends in
+          // `createTaskWithinTransaction`, which takes the same row lock.
+          if (dispatchWorkspaceId) this.ctx.lockWorkspaceRuntimeLifecycle(dispatchWorkspaceId);
           this.ctx.db.run("UPDATE multiremi_autopilots SET updated_at = updated_at WHERE id = ?", [autopilotId]);
           const autopilot = this.getAutopilot(autopilotId);
           if (!autopilot || autopilot.status === "archived") {
-            this.ctx.db.run("UPDATE multiremi_autopilot_runs SET status = 'skipped', completed_at = ?, failure_reason = 'Automation unavailable' WHERE autopilot_id = ? AND status = 'queued' AND schedule_batch_id IS NOT NULL", [nowIso(), autopilotId]);
+            runAutopilotRunMutation(this.ctx.db, "UPDATE multiremi_autopilot_run_records SET status = 'skipped', completed_at = ?, failure_reason = 'Automation unavailable' WHERE autopilot_id = ? AND status = 'queued' AND schedule_batch_id IS NOT NULL", [nowIso(), autopilotId]);
             return null;
           }
           if (autopilot.status !== "active") return null;
-          const running = (this.ctx.db.query("SELECT * FROM multiremi_autopilot_runs WHERE autopilot_id = ? AND status IN ('running', 'issue_created')").all(autopilotId) as Row[]).map(toAutopilotRun);
+          const running = (this.ctx.db.query("SELECT * FROM multiremi_autopilot_run_records WHERE autopilot_id = ? AND status IN ('running', 'issue_created')").all(autopilotId) as Row[]).map(toAutopilotRun);
           const worker = this.ctx.resolveAutopilotAgent(autopilot);
           if (!worker || running.length >= worker.maxConcurrentTasks) return null;
-          const rows = this.ctx.db.query("SELECT * FROM multiremi_autopilot_runs WHERE autopilot_id = ? AND status = 'queued' AND schedule_batch_id IS NOT NULL ORDER BY created_at, schedule_batch_id, schedule_position").all(autopilotId) as Row[];
+          const rows = this.ctx.db.query("SELECT * FROM multiremi_autopilot_run_records WHERE autopilot_id = ? AND status = 'queued' AND schedule_batch_id IS NOT NULL ORDER BY created_at, schedule_batch_id, schedule_position").all(autopilotId) as Row[];
           const available = availableScheduleTargets(this.ctx, autopilot.workspaceId);
           for (const row of rows) {
             const run = toAutopilotRun(row);
@@ -467,7 +606,7 @@ export class AutopilotsRepo {
             const valid = target && available.some((item) => item.kind === target.kind && item.id === target.id)
               && currentSelection && (currentSelection.all || currentSelection.ids.includes(target.id));
             if (!trigger?.enabled || !valid || !agent || agent.archivedAt) {
-              this.ctx.db.run("UPDATE multiremi_autopilot_runs SET status = 'skipped', completed_at = ?, failure_reason = ? WHERE id = ?", [nowIso(), "Schedule target, trigger or assignee unavailable", run.id]);
+              runAutopilotRunMutation(this.ctx.db, "UPDATE multiremi_autopilot_run_records SET status = 'skipped', completed_at = ?, failure_reason = ? WHERE id = ?", [nowIso(), "Schedule target, trigger or assignee unavailable", run.id]);
               continue;
             }
             // Different targets run independently; never overlap a scheduled
@@ -480,23 +619,32 @@ export class AutopilotsRepo {
             const parentId = nullableString(row.source_task_id);
             const parent = parentId ? this.ctx.tasks().getTask(parentId) : null;
             if (parentId && (!parent || parent.workspaceId !== autopilot.workspaceId)) {
-              this.ctx.db.run("UPDATE multiremi_autopilot_runs SET status = 'skipped', completed_at = ?, failure_reason = 'Source task unavailable' WHERE id = ?", [nowIso(), run.id]);
+              runAutopilotRunMutation(this.ctx.db, "UPDATE multiremi_autopilot_run_records SET status = 'skipped', completed_at = ?, failure_reason = 'Source task unavailable' WHERE id = ?", [nowIso(), run.id]);
               continue;
             }
+            const chat=this.openRunChatWithinTransaction(autopilot,agent,run.id,false);
+            const attemptId=createId('tsk');
+            this.ctx.db.run('UPDATE multiremi_autopilot_runs SET turn_id=? WHERE id=?',[attemptId,run.id]);
+            const requestBody=`${String(row.schedule_prompt)}\n\n## Scheduled Target\n${JSON.stringify(target)}\nThis task is bound to this single target. Do not process other projects or repositories.`;
+            const requestSeq = this.appendAutomationRequestWithinTransaction(autopilot.id,agent.id,requestBody,chat.id,attemptId);
             const created = this.ctx.tasks().createTaskWithinTransaction({
-              agentId: agent.id, workspaceId: autopilot.workspaceId,
-              prompt: `${String(row.schedule_prompt)}\n\n## Scheduled Target\n${JSON.stringify(target)}\nThis task is bound to this single target. Do not process other projects or repositories.`,
+              id:attemptId,agentId: agent.id, workspaceId: autopilot.workspaceId,conversationSessionId:chat.id,chatSessionId:chat.id,
+              triggerCommentId:this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq=?').get(chat.id,requestSeq)?.id,
+              prompt:requestBody,
               parentTaskId: parent?.id ?? null,
               issueCreationRestricted: Boolean(autopilot.issueCreationRestricted || trigger.issueCreationRestricted || parent?.issueCreationRestricted || agent.issueCreationRequiresProposal),
               assignmentAuthorType: "system", assignmentAuthorId: autopilot.id,
-            });
-            this.ctx.db.run("UPDATE multiremi_autopilot_runs SET status = 'running', task_id = ? WHERE id = ? AND status = 'queued'", [created.id, run.id]);
+            }, scheduledChanges, scheduledEvents);
+            this.bindAutomationInputWithinTransaction(created.id, requestSeq);
+            runAutopilotRunMutation(this.ctx.db, "UPDATE multiremi_autopilot_run_records SET status = 'running', task_id = ? WHERE id = ? AND status = 'queued'", [created.id, run.id]);
             return created;
           }
           return null;
         })();
         if (!task) break;
         this.ctx.notifyTaskEnqueued(task);
+        this.ctx.tasks().runCollectedChildStatusChanges(scheduledChanges);
+        this.ctx.emitCommitEvents(scheduledEvents);
       }
     }
   }
@@ -845,8 +993,8 @@ export class AutopilotsRepo {
     actorId?: string | null;
     automationSourceEventId?: string | null;
     automationSourceTaskId?: string | null;
-  }): MultiremiSystemEvent | null {
-    if (input.previousStatus === input.issue.status) return null;
+  }): { event: MultiremiSystemEvent | null; dependencyCheckEventId: string | null } {
+    if (input.previousStatus === input.issue.status) return { event: null, dependencyCheckEventId: null };
     const id = createId("sev");
     const now = nowIso();
     const payload = {
@@ -868,7 +1016,26 @@ export class AutopilotsRepo {
       ) VALUES (?, ?, 'issue', 'status_changed', ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, NULL)`,
       [id, input.issue.workspaceId, input.issue.id, input.issue.projectId, toJson(payload), now, now],
     );
-    return this.getSystemEvent(id);
+    let dependencyCheckEventId: string | null = null;
+    if (input.issue.status === "done") {
+      dependencyCheckEventId = createId("sev");
+      // Give recovery its own lease and retry budget, committed with `done`.
+      this.ctx.db.run(
+        `INSERT INTO multiremi_system_events (
+          id, workspace_id, resource, event, resource_id, project_id, payload,
+          status, attempt_count, available_at, lease_until, last_error, created_at, processed_at
+        ) VALUES (?, ?, 'issue', 'dependency_auto_start_check', ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, NULL)`,
+        [dependencyCheckEventId, input.issue.workspaceId, input.issue.id, input.issue.projectId, toJson({
+          issue_id: input.issue.id,
+          issue_key: input.issue.key,
+          workspace_id: input.issue.workspaceId,
+          project_id: input.issue.projectId,
+          automation_source_task_id: payload.automation_source_task_id,
+          status_changed_event_id: id,
+        }), new Date(Date.parse(now) + DEPENDENCY_AUTO_START_REPLAY_DELAY_MS).toISOString(), now],
+      );
+    }
+    return { event: this.getSystemEvent(id), dependencyCheckEventId };
   }
 
   getSystemEvent(id: string): MultiremiSystemEvent | null {
@@ -903,6 +1070,20 @@ export class AutopilotsRepo {
     const runs: MultiremiAutopilotRun[] = [];
     for (const event of this.claimPendingSystemEvents(now, limit)) {
       try {
+        if (event.resource === "issue_comment") {
+          this.ctx.issues().replayCommentDispatchEvent(event, now.getTime());
+          continue;
+        }
+        if (event.event === "dependency_auto_start_check") {
+          this.ctx.issues().replayDependencyAutoStart(event);
+          this.ctx.db.run(
+            `UPDATE multiremi_system_events
+             SET status = 'processed', processed_at = ?, lease_until = NULL, last_error = NULL
+             WHERE id = ? AND status = 'processing'`,
+            [nowIso(), event.id],
+          );
+          continue;
+        }
         const triggerRows = this.ctx.db.query(
           `SELECT t.*
            FROM multiremi_autopilot_triggers t
@@ -937,15 +1118,20 @@ export class AutopilotsRepo {
           [nowIso(), event.id],
         );
       } catch (error) {
+        if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
         const message = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
         const terminal = event.attemptCount >= 8;
         const delayMs = Math.min(5 * 60_000, 1_000 * (2 ** Math.max(0, event.attemptCount - 1)));
         this.ctx.db.run(
           `UPDATE multiremi_system_events
            SET status = ?, available_at = ?, lease_until = NULL, last_error = ?
-           WHERE id = ? AND status = 'processing'`,
-          [terminal ? "failed" : "pending", new Date(Date.now() + delayMs).toISOString(), message, event.id],
+           WHERE id = ? AND status = 'processing'${event.resource === "issue_comment" ? " AND attempt_count = ?" : ""}`,
+          [terminal ? "failed" : "pending", new Date(now.getTime() + delayMs).toISOString(), message, event.id,
+            ...(event.resource === "issue_comment" ? [event.attemptCount] : [])],
         );
+        if (event.resource === "issue_comment") console.warn("comment dispatch replay failed", {
+          eventId: event.id, attempt: event.attemptCount, terminal,
+        });
       }
     }
     return runs;
@@ -953,7 +1139,7 @@ export class AutopilotsRepo {
 
   listAutopilotRuns(autopilotId: string, limit = 20, offset = 0): MultiremiAutopilotRunRecord[] {
     const rows = this.ctx.db.query(
-      "SELECT * FROM multiremi_autopilot_runs WHERE autopilot_id = ? ORDER BY created_at DESC, schedule_position ASC, id DESC LIMIT ? OFFSET ?",
+      "SELECT * FROM multiremi_autopilot_run_records WHERE autopilot_id = ? ORDER BY created_at DESC, schedule_position ASC, id DESC LIMIT ? OFFSET ?",
     ).all(autopilotId, Math.max(1, Math.min(200, limit)), Math.max(0, offset)) as Row[];
     return rows.map(toAutopilotRun);
   }
@@ -965,13 +1151,59 @@ export class AutopilotsRepo {
    * active run (at most one exists per repository, enforced by runAutopilot).
    */
   listLatestRepositoryAutopilotRuns(workspaceId: string): MultiremiAutopilotRunRecord[] {
+    // Projected, not `SELECT r.*` (MUL-398 A). `result` is never read on this
+    // path, and on 209 it alone accounted for 6.1 MB of the 10.8 MB this
+    // statement shipped across the PG bridge.
+    //
+    // `payload` cannot be dropped outright: `autopilotRunSourceRevision()`
+    // falls back to `payload.data` whenever the dedupe key does not pin a
+    // revision, and that fallback is the summary's `build.source_revision`.
+    //
+    // The CASE is deliberately a superset of that predicate rather than the
+    // obvious `IS NULL OR LIKE '%:head'`: the function reads the text after the
+    // second `:` and falls through when it is empty, which also covers keys with
+    // fewer than two separators (`a:b`) and keys with a trailing separator
+    // (`a:b:`). Nulling `payload` for those would turn a payload-derived
+    // `source_revision` into null, so they keep the column. Rows the guard
+    // excludes are provably pinned and never consult `payload`.
+    //
+    // Row reduction (MUL-398 A2): the caller keeps the newest run per
+    // repository, so the ranking happens here instead of shipping 1.4k rows
+    // across the bridge for a TypeScript Map to discard all but one per
+    // repository. `ROW_NUMBER` is ordered exactly like the loop below, which is
+    // kept because a repository can legitimately span two partitions when its
+    // `schedule_target` JSON changes text (a rename): the surviving rows then
+    // still race by `created_at` / active status the same way they used to.
+    const activeStatuses = ACTIVE_RUN_STATUSES.map((status) => `'${status}'`).join(", ");
     const rows = this.ctx.db.query(
-      `SELECT r.* FROM multiremi_autopilot_runs r
-       JOIN multiremi_autopilots a ON a.id = r.autopilot_id
-       WHERE a.workspace_id = ? AND (r.repository_id IS NOT NULL OR
-         (r.schedule_target IS NOT NULL AND EXISTS (
-           SELECT 1 FROM multiremi_knowledge_compilation_runs k
-           WHERE k.autopilot_run_id = r.id AND k.repository_id IS NOT NULL)))
+      `SELECT r.id, r.autopilot_id, r.source, r.status, r.issue_id, r.task_id,
+         r.trigger_id, r.event_id, r.issue_session_id, r.repository_id,
+         r.dedupe_key, r.schedule_target, r.schedule_batch_id,
+         r.triggered_at, r.completed_at, r.failure_reason, r.created_at,
+         CASE WHEN r.dedupe_key IS NULL
+                   OR r.dedupe_key NOT LIKE '%:%:%'
+                   OR r.dedupe_key LIKE '%:%:'
+                   OR r.dedupe_key LIKE '%:head'
+              THEN r.payload ELSE NULL END AS payload
+       FROM (
+         SELECT r.id, r.autopilot_id, r.source, r.status, r.issue_id, r.task_id,
+           r.trigger_id, r.event_id, r.issue_session_id, r.repository_id,
+           r.dedupe_key, r.schedule_target, r.schedule_batch_id,
+           r.triggered_at, r.completed_at, r.failure_reason, r.created_at, r.payload,
+           ROW_NUMBER() OVER (
+             PARTITION BY COALESCE(r.repository_id, r.schedule_target)
+             ORDER BY r.created_at DESC,
+                      CASE WHEN r.status IN (${activeStatuses}) THEN 0 ELSE 1 END,
+                      r.id DESC
+           ) AS repository_rank
+         FROM multiremi_autopilot_run_records r
+         JOIN multiremi_autopilots a ON a.id = r.autopilot_id
+         WHERE a.workspace_id = ? AND (r.repository_id IS NOT NULL OR
+           (r.schedule_target IS NOT NULL AND EXISTS (
+             SELECT 1 FROM multiremi_knowledge_compilation_runs k
+             WHERE k.autopilot_run_id = r.id AND k.repository_id IS NOT NULL)))
+       ) r
+       WHERE r.repository_rank = 1
        ORDER BY r.created_at DESC, r.id DESC`,
     ).all(workspaceId) as Row[];
     const isActive = (status: MultiremiAutopilotRun["status"]): boolean =>
@@ -996,13 +1228,47 @@ export class AutopilotsRepo {
    * either the current doc or revision history also represents a legitimate
    * no-op: that pinned revision was already published. Agent result text is
    * intentionally not trusted.
+   *
+   * Reads only the columns the decision needs (MUL-398 A2); the full-row
+   * `getAutopilotRun` remains available for callers that need the whole record.
    */
   isRepositoryWikiRunPublished(runId: string): boolean {
-    const run = this.getAutopilotRun(runId);
-    if (!run) return false;
-    run.repositoryId ??= run.scheduleTarget?.kind === "repository" ? run.scheduleTarget.id : null;
-    if (!run.repositoryId) return false;
-    return this.repositoryWikiRunHasPublication(run);
+    // Narrow projection (MUL-398 A2). `getAutopilotRun` reads the whole row,
+    // which on 209 meant `payload` + `result` crossing the PG bridge for every
+    // repository the summary route reports on (~11.7 KB per repository). The
+    // publication decision only needs the scope columns and, for keys that do
+    // not pin a revision, `payload` — guarded exactly like the build-state
+    // projection above so a pinned run never ships its payload either.
+    const row = this.ctx.db.query(
+      `SELECT r.repository_id, r.schedule_target, r.task_id, r.dedupe_key,
+         CASE WHEN r.dedupe_key IS NULL
+                   OR r.dedupe_key NOT LIKE '%:%:%'
+                   OR r.dedupe_key LIKE '%:%:'
+                   OR r.dedupe_key LIKE '%:head'
+              THEN r.payload ELSE NULL END AS payload,
+         a.workspace_id AS workspace_id
+       FROM multiremi_autopilot_run_records r
+       JOIN multiremi_autopilots a ON a.id = r.autopilot_id
+       WHERE r.id = ?`,
+    ).get(runId) as Row | null;
+    if (!row) return false;
+    const workspaceId = nullableString(row.workspace_id);
+    if (!workspaceId) return false;
+    const scheduleTarget = row.schedule_target == null
+      ? null
+      : parseJson<{ kind?: string; id?: string } | null>(row.schedule_target, null);
+    const repositoryId = nullableString(row.repository_id)
+      ?? (scheduleTarget?.kind === "repository" ? nullableString(scheduleTarget.id) : null);
+    if (!repositoryId) return false;
+    return this.repositoryWikiScopeHasPublication(
+      workspaceId,
+      repositoryId,
+      nullableString(row.task_id),
+      autopilotRunSourceRevision({
+        dedupeKey: nullableString(row.dedupe_key),
+        payload: row.payload == null ? null : parseJson(row.payload, null),
+      }),
+    );
   }
 
   selectAutopilotsExceedingFailureThreshold(
@@ -1019,7 +1285,7 @@ export class AutopilotsRepo {
            autopilot_id,
            SUM(CASE WHEN status IN ('completed', 'failed') THEN 1 ELSE 0 END) AS total_runs,
            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_runs
-         FROM multiremi_autopilot_runs
+         FROM multiremi_autopilot_run_records
          WHERE created_at >= ?
          GROUP BY autopilot_id
        )
@@ -1238,10 +1504,30 @@ export class AutopilotsRepo {
     let taskToNotify: MultiremiTask | null = null;
     let createdRun = false;
     let startedAutopilot: MultiremiAutopilot | null = null;
+    const autopilotWorkspaceId = this.getAutopilot(autopilotId)?.workspaceId ?? null;
+    if (!autopilotWorkspaceId) throw new Error(`Autopilot not found: ${autopilotId}`);
+    const autopilotChanges: import("./tasks-repo.js").ChildStatusChangeCollector = [];
+    const autopilotEvents = createCommitEventQueue();
     const run = this.ctx.db.transaction(() => {
+      // Global lock order (MUL-405, see store/advisory-locks.ts): the workspace
+      // lifecycle row lock is always taken before any number-allocation lock.
+      // `create_issue` runs call `createIssue` (issue number lock) and then
+      // `createTaskWithinTransaction` (this same workspace row lock), so taking
+      // the row lock only later would reverse the order Feishu ingest uses and
+      // deadlock the two paths against each other.
+      this.ctx.lockWorkspaceRuntimeLifecycle(autopilotWorkspaceId);
+      // Global lock order (MUL-405): W then N, before the autopilot row lock.
+      // The create_issue mode reaches N again inside createIssue; taking it here
+      // first is what keeps every mode of this method on one order. run_only
+      // modes do not need it, but the lock is per workspace and cheap, and a
+      // conditional form would let the order depend on the execution mode.
+      advisoryXactLock(this.ctx.db, numberAllocationLockKey(`issue:${autopilotWorkspaceId}`));
       this.ctx.db.run("UPDATE multiremi_autopilots SET updated_at = updated_at WHERE id = ?", [autopilotId]);
       const autopilot = this.getAutopilot(autopilotId);
       if (!autopilot) throw new Error(`Autopilot not found: ${autopilotId}`);
+      if (autopilot.workspaceId !== autopilotWorkspaceId) {
+        throw new Error(`Autopilot workspace changed while starting run: ${autopilotId}`);
+      }
       this.assertRepositoryWikiBuildScope(autopilot, repositoryId, dedupeKey);
       let trigger: MultiremiAutopilotTrigger | null = null;
       if (triggerId) {
@@ -1256,7 +1542,7 @@ export class AutopilotsRepo {
 
       if (triggerId && eventId) {
         const duplicate = this.ctx.db.query(
-          "SELECT * FROM multiremi_autopilot_runs WHERE trigger_id = ? AND event_id = ? LIMIT 1",
+          "SELECT * FROM multiremi_autopilot_run_records WHERE trigger_id = ? AND event_id = ? LIMIT 1",
         ).get(triggerId, eventId) as Row | null;
         if (duplicate) return toAutopilotRun(duplicate);
       }
@@ -1276,7 +1562,7 @@ export class AutopilotsRepo {
       // failed / skipped runs are terminal and never block a retry.
       if (repositoryId) {
         const active = this.ctx.db.query(
-          `SELECT * FROM multiremi_autopilot_runs
+          `SELECT * FROM multiremi_autopilot_run_records
            WHERE autopilot_id = ?
              AND status IN (${ACTIVE_RUN_STATUSES.map(() => "?").join(", ")})
            ORDER BY created_at DESC, id DESC`,
@@ -1289,7 +1575,7 @@ export class AutopilotsRepo {
       }
       if (dedupeKey && !dedupeKey.endsWith(":head")) {
         const completed = (this.ctx.db.query(
-          `SELECT * FROM multiremi_autopilot_runs
+          `SELECT * FROM multiremi_autopilot_run_records
            WHERE autopilot_id = ? AND dedupe_key = ? AND status = 'completed'
            ORDER BY created_at DESC, id DESC`,
         ).all(autopilotId, dedupeKey) as Row[])
@@ -1320,8 +1606,7 @@ export class AutopilotsRepo {
         : autopilot.status !== "active"
           ? "Autopilot is not active"
           : null;
-      const inserted = this.ctx.db.run(
-        `INSERT OR IGNORE INTO multiremi_autopilot_runs (
+      const inserted = runAutopilotRunMutation(this.ctx.db, `INSERT OR IGNORE INTO multiremi_autopilot_run_records (
           id, autopilot_id, source, status, issue_id, task_id, source_task_id, trigger_id, event_id,
           issue_session_id, repository_id, dedupe_key, triggered_at, completed_at,
           failure_reason, payload, result, created_at
@@ -1345,7 +1630,7 @@ export class AutopilotsRepo {
       );
       if (inserted.changes === 0 && triggerId && eventId) {
         const duplicate = this.ctx.db.query(
-          "SELECT * FROM multiremi_autopilot_runs WHERE trigger_id = ? AND event_id = ? LIMIT 1",
+          "SELECT * FROM multiremi_autopilot_run_records WHERE trigger_id = ? AND event_id = ? LIMIT 1",
         ).get(triggerId, eventId) as Row | null;
         if (duplicate) return toAutopilotRun(duplicate);
       }
@@ -1365,13 +1650,16 @@ export class AutopilotsRepo {
       let issue: MultiremiIssue | null = null;
       let issueSessionId: string | null = null;
       if (autopilot.executionMode === "create_issue") {
-        issue = this.ctx.issues().createIssue({
+        issue = this.ctx.issues().createIssueWithinTransaction({
           title: prompt,
           description: autopilot.description,
           workspaceId: autopilot.workspaceId,
           projectId: autopilot.projectId,
-          createdBy: autopilot.id,
-        });
+          // Automation-created Issues infer no human: no creator, no designated person.
+          createdBy: null,
+          assigneeType:autopilot.assigneeType,
+          assigneeId:autopilot.assigneeId,
+        }, autopilotChanges, autopilotEvents);
       } else if (autopilot.executionMode === "trigger_issue") {
         if (!triggerIssueId) throw new Error("trigger_issue runs require trigger_issue_id");
         issue = this.ctx.issues().getIssue(triggerIssueId);
@@ -1395,11 +1683,12 @@ export class AutopilotsRepo {
             throw new Error("System event does not belong to the trigger issue");
           }
         }
-        const issueSession = autopilot.sessionPolicy === "reuse_latest"
+        const reusableSession = autopilot.sessionPolicy === "reuse_latest"
           ? this.ctx.issueSessions().getLatestActiveIssueSession(issue.id)
-            ?? this.ctx.issueSessions().getOrCreateDefaultIssueSession(issue.id)
-          : this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
-            title: `${autopilot.title} · ${issue.key}`,
+          : null;
+        const issueSession = reusableSession
+          ?? this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
+            title: autopilot.sessionPolicy === "reuse_latest" ? "Main" : `${autopilot.title} · ${issue.key}`,
             createdByType: "agent",
             createdById: agent.id,
             participantAgentIds: [agent.id],
@@ -1407,29 +1696,54 @@ export class AutopilotsRepo {
         issueSessionId = issueSession.id;
       }
 
-      const task = this.ctx.tasks().createTaskWithinTransaction({
-        agentId: agent.id,
-        issueId: issue?.id ?? null,
-        issueSessionId,
-        workspaceId: autopilot.workspaceId,
-        prompt,
-        assignmentAuthorType: "system",
-        assignmentAuthorId: autopilot.id,
-        assignmentSourceEventId: eventId,
-        parentTaskId: sourceTaskId,
-        issueCreationRestricted,
-      });
+      if(issue&&!issueSessionId)issueSessionId=this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(issue.id,null).id;
+      // Without an Issue the run opens (or, with reuse_latest, continues) a Chat of its own.
+      const chat=issueSessionId?null:this.openRunChatWithinTransaction(autopilot,agent,runId,autopilot.sessionPolicy==='reuse_latest');
+      const requestSessionId=(issueSessionId??chat?.id)!;
+      const attemptId=createId('tsk');
+      this.ctx.db.run('UPDATE multiremi_autopilot_runs SET turn_id=? WHERE id=?',[attemptId,runId]);
+      const requestSeq = this.appendAutomationRequestWithinTransaction(autopilot.id,agent.id,prompt,requestSessionId,attemptId);
+      let task: MultiremiTask;
+      try {
+        // MUL-400 E3 gate 3: a `trigger_issue` autopilot on a waiting issue must
+        // not start it. The run settles as skipped carrying the reason instead of
+        // failing, mirroring the "no runnable agent" skip above, so the operator
+        // sees why nothing ran.
+        task = this.ctx.tasks().createTaskWithinTransaction({
+          id:attemptId,agentId: agent.id,conversationSessionId:requestSessionId,
+          triggerCommentId:this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq=?').get(requestSessionId,requestSeq)?.id,
+          issueId: issue?.id ?? null,
+          issueSessionId,
+          chatSessionId: chat?.id ?? null,
+          workspaceId: autopilot.workspaceId,
+          prompt,
+          assignmentAuthorType: "system",
+          assignmentAuthorId: autopilot.id,
+          assignmentSourceEventId: eventId,
+          parentTaskId: sourceTaskId,
+          issueCreationRestricted,
+        }, autopilotChanges, autopilotEvents);
+        this.bindAutomationInputWithinTransaction(task.id, requestSeq);
+      } catch (err) {
+        if((err as any)?.message_result?.wake_reason!=="dependencies_unmet" && (!(err instanceof IssueDependencyError)||err.code!=="dependencies_unmet"))throw err;
+        this.ctx.db.run('UPDATE multiremi_autopilot_runs SET turn_id=NULL WHERE id=?',[runId]);
+        runAutopilotRunMutation(this.ctx.db, `UPDATE multiremi_autopilot_run_records
+           SET status = 'skipped', completed_at = ?, failure_reason = ?
+           WHERE id = ?`,
+          [nowIso(), "dependencies_unmet", runId],
+        );
+        return this.getAutopilotRun(runId)!;
+      }
       taskToNotify = task;
       issueSessionId = task.issueSessionId ?? issueSessionId;
-      this.ctx.db.run(
-        `UPDATE multiremi_autopilot_runs
+      runAutopilotRunMutation(this.ctx.db, `UPDATE multiremi_autopilot_run_records
          SET issue_id = ?, task_id = ?, issue_session_id = ?, result = ?
          WHERE id = ?`,
         [
           issue?.id ?? null,
           task.id,
           issueSessionId,
-          toJson({ taskId: task.id, issueId: issue?.id ?? null, issueSessionId }),
+          toJson({ taskId: task.id, issueId: issue?.id ?? null, issueSessionId, chatSessionId: chat?.id ?? null }),
           runId,
         ],
       );
@@ -1438,6 +1752,8 @@ export class AutopilotsRepo {
     })();
 
     if (taskToNotify) this.ctx.notifyTaskEnqueued(taskToNotify);
+    this.ctx.tasks().runCollectedChildStatusChanges(autopilotChanges);
+    this.ctx.emitCommitEvents(autopilotEvents);
     if (createdRun && startedAutopilot && run.status === "running") {
       this.ctx.analytics().recordAutopilotRunStartedAnalytics(startedAutopilot, run);
     }
@@ -1448,12 +1764,29 @@ export class AutopilotsRepo {
     if (!run.repositoryId) return false;
     const autopilot = this.getAutopilot(run.autopilotId);
     if (!autopilot) return false;
-    const sourceRevision = autopilotRunSourceRevision(run);
+    return this.repositoryWikiScopeHasPublication(
+      autopilot.workspaceId, run.repositoryId, run.taskId, autopilotRunSourceRevision(run),
+    );
+  }
+
+  /**
+   * Is there a store-attributable write for one repository Wiki scope?
+   *
+   * Shared by `repositoryWikiRunHasPublication` (in-memory run) and
+   * `isRepositoryWikiRunPublished` (run id only) so both answer with the same
+   * predicate after MUL-398 A2 removed the full-row read from the summary path.
+   */
+  private repositoryWikiScopeHasPublication(
+    workspaceId: string,
+    repositoryId: string,
+    taskId: string | null,
+    sourceRevision: string | null,
+  ): boolean {
     const predicates: string[] = [];
-    const params = [autopilot.workspaceId, run.repositoryId];
-    if (run.taskId) {
+    const params = [workspaceId, repositoryId];
+    if (taskId) {
       predicates.push("doc.source_task_id = ?");
-      params.push(run.taskId);
+      params.push(taskId);
     }
     if (sourceRevision) {
       predicates.push("(doc.source_revision = ? OR revision.source_revision = ?)");
@@ -1483,7 +1816,7 @@ export class AutopilotsRepo {
     if (!repositoryId || !dedupeKey) return;
 
     const repositoryAutopilot = resolveRepositoryWikiAutomation({
-      listAgents: () => this.ctx.agents().listAgents(),
+      listAgents: () => this.ctx.agents().listAgentsLite(),
       listAutopilots: (workspaceId) => this.listAutopilots(workspaceId),
       listAgentPlugins: (workspaceId, options) => this.ctx.agentPlugins().listAgentPlugins(workspaceId, options),
       listAgentPluginBindings: (agentId) => this.ctx.agentPlugins().listAgentPluginBindings(agentId),
@@ -1500,8 +1833,40 @@ export class AutopilotsRepo {
   }
 
   getAutopilotRun(id: string): MultiremiAutopilotRunRecord | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_autopilot_runs WHERE id = ?").get(id) as Row | null;
+    const row = this.ctx.db.query("SELECT * FROM multiremi_autopilot_run_records WHERE id = ?").get(id) as Row | null;
     return row ? toAutopilotRun(row) : null;
+  }
+
+  /**
+   * The agent of a run says it found nothing worth reporting. Returns null when
+   * the turn is not an automation run. A completed quiet run archives its Chat.
+   */
+  markAutopilotRunQuiet(turnId: string): MultiremiAutopilotRunRecord | null {
+    return this.ctx.db.transaction(() => {
+      const row = this.ctx.db.query(
+        `SELECT run.id, autopilot.workspace_id FROM multiremi_autopilot_runs run
+         JOIN multiremi_autopilots autopilot ON autopilot.id = run.autopilot_id WHERE run.turn_id = ?`,
+      ).get(turnId) as Row | null;
+      if (!row) return null;
+      this.ctx.lockWorkspaceRuntimeLifecycle(String(row.workspace_id));
+      this.ctx.db.run("UPDATE multiremi_autopilot_runs SET quiet = 1 WHERE id = ?", [row.id]);
+      this.settleQuietRunWithinTransaction(String(row.id));
+      return this.getAutopilotRun(String(row.id));
+    })();
+  }
+
+  /**
+   * A finished quiet run leaves nothing to read: archive the Chat it ran in, already read.
+   * Failed runs are never quiet, and a Chat someone pinned or kept talking in stays active.
+   */
+  settleQuietRunWithinTransaction(runId: string): void {
+    const run = this.getAutopilotRun(runId);
+    if (!run?.quiet || run.status !== "completed" || !run.chatSessionId) return;
+    const chat = this.ctx.chat().getChatSession(run.chatSessionId);
+    if (!chat || chat.status === "archived" || chat.pinned || chat.origin?.autopilot_id !== run.autopilotId) return;
+    if (this.ctx.chat().getPendingChatTask(chat.id)) return;
+    this.ctx.chat().markChatSessionRead(chat.id);
+    this.ctx.chat().updateChatSession(chat.id, { status: "archived" });
   }
 
   listWebhookDeliveries(autopilotId: string, options: { includeRawBody?: boolean; limit?: number } = {}): MultiremiWebhookDelivery[] {
@@ -2173,6 +2538,9 @@ function toAutopilot(row: Row): MultiremiAutopilot {
     id: String(row.id),
     workspaceId,
     workspace_id: workspaceId,
+    deliveryChatSessionId: nullableString(row.delivery_chat_session_id),
+    delivery_chat_session_id: nullableString(row.delivery_chat_session_id),
+    deliveryAuthorizedBy: nullableString(row.delivery_authorized_by),
     title: String(row.title),
     description: nullableString(row.description),
     projectId,
@@ -2266,8 +2634,10 @@ function toAutopilotRun(row: Row): MultiremiAutopilotRunRecord {
     triggerId: nullableString(row.trigger_id),
     eventId: nullableString(row.event_id),
     issueSessionId: nullableString(row.issue_session_id),
+    chatSessionId: nullableString(row.chat_session_id),
     repositoryId: nullableString(row.repository_id),
     dedupeKey: nullableString(row.dedupe_key),
+    quiet: Number(row.quiet ?? 0) === 1,
     triggeredAt: String(row.triggered_at),
     completedAt: nullableString(row.completed_at),
     failureReason: nullableString(row.failure_reason),
@@ -2345,4 +2715,10 @@ function toWebhookDelivery(row: Row): MultiremiWebhookDelivery {
     lastAttemptAt: String(row.last_attempt_at),
     createdAt: String(row.created_at),
   };
+}
+
+/** `YYYY-MM-DD HH:mm` in the server's local time, for Chat titles. */
+function formatLocalMinute(date: Date): string {
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
 }

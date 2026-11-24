@@ -67,7 +67,6 @@ function handler(store: MultiremiStore, revision: number) {
     getFeishuBotHumanRequest: async () => null,
     respondFeishuBotHumanRequest: async () => { throw new Error("not expected"); },
     uploadFeishuBotAttachment: async () => { throw new Error("not expected"); },
-    listFeishuBotTaskMessages: async () => [],
     getFeishuBotTaskSnapshot: async () => ({ taskId: "unused", status: "running", result: null,
       error: null, sessionId: null, workDir: null, usage: [] }),
   } as unknown as MultiremiDaemon;
@@ -84,9 +83,12 @@ async function run(
   const text: string[] = [];
   await handle(message, sessionKey, async (stream) => {
     for await (const event of stream as AsyncIterable<TaskStreamEvent>) {
-      if (event.kind === "message" && event.message.content) text.push(event.message.content);
+      // A command reply is one final agent message.
+        if (event.kind === "message" && event.message.type === "item.completed" && event.message.item.type === "agent_message") {
+          text.push(event.message.item.text);
+        }
     }
-    meta.push({ taskId: "captured", respondHumanRequest: async () => { throw new Error("not expected"); } });
+    meta.push({ taskId: "captured" });
   });
   return { meta, text };
 }
@@ -277,7 +279,10 @@ describe("Feishu Task command handler", () => {
       `${CHAT}:thread:omt_fail_click`,
       async (stream) => {
         for await (const event of stream as AsyncIterable<TaskStreamEvent>) {
-          if (event.kind === "message" && event.message.content) text.push(event.message.content);
+          // A command reply is one final agent message.
+        if (event.kind === "message" && event.message.type === "item.completed" && event.message.item.type === "agent_message") {
+          text.push(event.message.item.text);
+        }
         }
       },
     );

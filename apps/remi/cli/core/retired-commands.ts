@@ -1,0 +1,132 @@
+import { CliError } from "./errors.js";
+import type { CommandSpec } from "./command-registry.js";
+
+/** Single inventory for dispatch, manifests, documentation guards and data rewrites. */
+const retiredCommands: Record<string, string> = {
+  "member create": "remi workspace operator (all operators share one identity)",
+  "member delete": "remi workspace operator (all operators share one identity)",
+  "workspace leave": "remi workspace list (workspaces are shared)",
+  "invite": "remi workspace list (workspace invitations are no longer needed)",
+  "invite list": "remi workspace list",
+  "invite get": "remi workspace list",
+  "invite create": "remi workspace list",
+  "invite accept": "remi workspace list",
+  "invite decline": "remi workspace list",
+  "invite revoke": "remi workspace list",
+  "task create": "remi message send --to <agent> --kind request",
+  "task continue": "remi message send --to <agent> --kind request",
+  "session task create": "remi message send <conversation> --to <agent> --kind request",
+  "issue session task create": "remi message send <conversation> --to <agent> --kind request",
+  "issue rerun": "remi message send <conversation> --to issue-owner --kind request --content <prompt>",
+  "task steer": "remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)",
+  "issue task steer": "remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)",
+  "task steer list": "remi message list <conversation> --unread-by <agent>",
+  "issue task steers": "remi message list <conversation> --unread-by <agent>",
+  "comment add": "remi message send <conversation>",
+  "issue comment add": "remi message send <conversation>",
+  "session message create": "remi message send <conversation>",
+  "issue session message create": "remi message send <conversation>",
+  "chat message create": "remi message send <conversation>",
+  "chat attachment send": "remi message send --attachment <path>",
+  "issue decision request": "原生 AskUserQuestion；先用 remi issue responsibility <issue> 查看责任归属",
+  "issue decision answer": "remi message question answer <question> --revision <route_revision> --data <json>",
+  "issue decision list": "remi issue question list <issue>",
+  "issue decision escalate": "remi message question escalate <question> --revision <route_revision> --reason <reason>",
+  "issue decision withdraw": "remi message question close <question> --revision <route_revision> --reason <reason>",
+  "task request list": "remi inbox",
+  "task request respond": "remi message question answer <question> --revision <route_revision> --data <json>",
+  "comment list": "remi message list <conversation>",
+  "comment update": "remi message edit <message>",
+  "comment delete": "remi message delete <message>",
+  "comment resolve": "remi message resolve <message>",
+  "comment unresolve": "remi message resolve <message> --no-resolved",
+  "comment reaction list": "remi message get <message>",
+  "comment reaction add": "remi message react <message> --emoji <emoji>",
+  "comment reaction remove": "remi message react <message> --emoji <emoji> --remove",
+  "comment attachment list": "remi message get <message>",
+  "session log get": "remi message get <message>",
+  "session log window": "remi message list <conversation>",
+  "session log locate": "remi message get <message>",
+  "session event list": "remi message list <conversation>",
+  "issue session event list": "remi message list <conversation>",
+  "chat message list": "remi message list <conversation>",
+  "chat queue list": "remi message list <conversation> --unread-by <agent>",
+  "chat queue update": "remi message edit <message>",
+  "chat queue remove": "remi message delete <message>",
+  "chat queue clear": "remi message list <conversation> --unread-by <agent> 后逐条 remi message delete <message>",
+  "chat queue prioritize": "remi message delete <message> 后重新 remi message send <conversation>（按消息顺序）",
+  "chat pending": "remi message list <conversation> --unread-by <agent>",
+  "chat read": "remi inbox read <conversation>",
+  "inbox list": "remi inbox",
+  "inbox page": "remi inbox --limit <n> --cursor <cursor>",
+  "inbox summary": "remi inbox",
+  "inbox unread-count": "remi inbox",
+  "inbox archive": "remi inbox read <conversation>",
+  "inbox mark-all-read": "remi inbox read-all",
+  "inbox archive-all": "remi inbox read-all",
+  "inbox archive-all-read": "remi inbox read-all",
+  "inbox archive-completed": "remi inbox read-all",
+  "task list": "remi turn list",
+  "task get": "remi turn get <turn>",
+  "task inspect": "remi turn get <turn> --attempts",
+  "task cancel": "remi turn cancel <turn>",
+  "task prompt": "remi turn get <turn> --input",
+  "task redispatch": "remi turn retry <turn> --cold",
+  "task trace read": "remi turn trace read <turn>",
+  "task message list": "remi turn trace read <turn>",
+  "task messages": "remi turn trace read <turn>",
+  "issue run-messages": "remi turn trace read <turn>",
+  "issue runs": "remi turn list --issue <issue>",
+  "issue active-task": "remi turn list --issue <issue>",
+  "issue cancel-task": "remi turn cancel <turn>",
+  "session task list": "remi turn list --session <conversation>",
+  "issue session task list": "remi turn list --session <conversation>",
+  "session archive": "remi runtime storage <runtime>（Session 归档已取消，执行记录留在 daemon 本机）",
+  "issue archive": "remi runtime storage <runtime>（Session 归档已取消，执行记录留在 daemon 本机）",
+  "session config": "remi workspace storage get|set <workspace>（Session 归档设置已取消，存储策略见 workspace storage）",
+  // ADR 0017: no designated human, formal delivery or parent-done grant remains.
+  "issue delivery list": "remi issue get <issue>（正式交付已移除；执行负责人这一轮的最后一条回复就是总结）",
+  "issue delivery submit": "这一轮的最后一条回复就是总结；本轮结束后 Issue 自动进入 in_review",
+  "issue delivery accept": "remi issue status <issue> done；有问题用 remi message send <conversation> --to issue-owner --kind request",
+  "issue delivery return": "remi issue status <issue> done；有问题用 remi message send <conversation> --to issue-owner --kind request",
+  "issue delivery authorize": "remi issue status <child> done（父单执行负责人直接关闭子单）",
+  "issue responsibility-unassigned list": "remi issue responsibility <issue>（Issue 不再配置指定人类）",
+  "issue responsibility-unassigned map": "remi issue assign <issue> --to <agent|squad>（配置执行负责人）",
+  "issue responsible set": "remi issue assign <issue> --to <agent|squad>（Issue 不再指定人类，只配置执行负责人）",
+  "issue responsible clear": "remi issue responsibility <issue>（Issue 不再配置指定人类）",
+  "autopilot responsible clear": "remi autopilot update <autopilot>（自动化建单不再需要指定人类）",
+  "autopilot responsible set": "remi autopilot update <autopilot>（自动化建单不再需要指定人类）",
+  "issue done-grant add": "remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）",
+  "issue done-grant remove": "remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）",
+  "message question transfer": "责任变更后问题自动重新路由；remi message question get <question> 查看当前处理者",
+};
+
+// Aliases are separate entries, so no alias warning precedes the removal error.
+export const RETIRED_CLI_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
+  ...retiredCommands,
+  ...Object.fromEntries(["list", "update", "delete", "resolve", "unresolve"].map((action) =>
+    [`issue comment ${action}`, retiredCommands[`comment ${action}`]!])),
+});
+
+export function retiredSpec(path: readonly string[], replacement: string): CommandSpec {
+  return {
+    id: `retired.${path.join(".")}`, path, description: `已移除：改用 ${replacement}`,
+    retired: { replacement }, parse: "passthrough", hidden: true,
+    run: async () => { throw new CliError("usage", `已移除：改用 ${replacement}`); },
+  };
+}
+
+export function assertNotRetired(argv: readonly string[]): void {
+  if (argv[0] === "inbox" && argv[1] === "read" && argv[2]?.startsWith("inb_")) {
+    throw new CliError("usage", "已移除：改用 remi inbox read <conversation>");
+  }
+  const path = Object.keys(RETIRED_CLI_COMMANDS).sort((a, b) => b.split(" ").length - a.split(" ").length)
+    .find((candidate) => candidate.split(" ").every((segment, i) => argv[i] === segment));
+  if (path) throw new CliError("usage", `已移除：改用 ${RETIRED_CLI_COMMANDS[path]}`);
+}
+
+export function replaceRetiredSpecs(specs: readonly CommandSpec[]): CommandSpec[] {
+  return specs.filter((spec) => !(spec.path.join(" ") in RETIRED_CLI_COMMANDS)
+    && !["inbox", "inbox.group", "inbox.read", "task", "comment", "chat.attachment", "chat.queue"].includes(spec.id))
+    .map((spec) => ({ ...spec, aliases: spec.aliases?.filter((alias) => !(alias.path.join(" ") in RETIRED_CLI_COMMANDS)) }));
+}

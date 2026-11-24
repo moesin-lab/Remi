@@ -14,6 +14,17 @@ export const INBOX_ROUTE_BY_TYPE = {
   autopilot_run_failed: "inbox_ledger",
   autopilot_run_overdue: "inbox_ledger",
   organizer_action: "inbox_ledger",
+  // MUL-400 E2: a child issue reached a terminal/parked state while the parent
+  // is owned by a human, so the parent owner hears about it directly instead
+  // of only through the parent's activity feed.
+  child_issue_terminal: "inbox_action",
+  // MUL-400 E3: a prerequisite of this issue failed or was cancelled, or all of
+  // its prerequisites finished while the owner is a human. Either way the human
+  // owns the next decision, so it belongs in the actionable inbox rather than
+  // only in the issue activity feed.
+  dependency_prerequisite_failed: "inbox_action",
+  dependency_satisfied: "inbox_action",
+  decision_requested: "inbox_action",
 } as const satisfies Record<string, RegisteredInboxRoute>;
 
 export type RegisteredInboxType = keyof typeof INBOX_ROUTE_BY_TYPE;
@@ -36,4 +47,65 @@ const INBOX_LEDGER_TYPE_SET: ReadonlySet<string> = new Set(
 
 export function isInboxLedgerType(type: string): boolean {
   return INBOX_LEDGER_TYPE_SET.has(type);
+}
+
+export type EnvelopeKind =
+  | "request"
+  | "reply"
+  | "report"
+  | "decision_needed"
+  | "lifecycle"
+  | "final";
+export type EnvelopeWake = "now" | "next_turn" | "inbox_only";
+export type EnvelopePriority = 1 | 2 | 3 | 4;
+
+export type EnvelopeAddress =
+  | { role: "issue_owner"; issueId: string }
+  | { role: "parent_owner"; childIssueId: string }
+  | { role: "delegator"; delegationId: string }
+  | { role: "relay"; issueId: string }
+  | { role: "agent"; agentId: string; issueSessionId: string }
+  | { role: "chat"; chatSessionId: string; agentId: string };
+
+export interface Envelope {
+  to: EnvelopeAddress;
+  kind: EnvelopeKind;
+  wake: EnvelopeWake;
+  dedupeKey?: string;
+  replyTo?: string;
+  grantRef?: string;
+  body: string;
+  outcome?: "done" | "failed" | "blocked" | "cancelled";
+  source: { issueId?: string; taskId?: string; commentId?: string; decisionId?: string };
+}
+
+export interface EnvelopeMetadata {
+  envelope: Omit<Envelope, "body" | "to"> & {
+    to: EnvelopeAddress;
+    priority: EnvelopePriority;
+    /** Agent resolved when a symbolic address was written, before ownership can change. */
+    recipient_agent_id?: string;
+  };
+}
+
+export type EnvelopePriorityEntry = Pick<Envelope, "kind" | "wake" | "outcome"> & {
+  /** Source author, before an envelope is persisted as a system log entry. */
+  senderType?: string;
+  /** Only terminal task events escalate a lifecycle notice; outcome does not. */
+  lifecycleEvent?: string;
+};
+
+export function envelopePriority(entry: EnvelopePriorityEntry): EnvelopePriority {
+  if (entry.wake === "inbox_only") return 4;
+  switch (entry.kind) {
+    case "decision_needed": return 1;
+    case "request": return entry.senderType === "member" ? 1 : 3;
+    case "lifecycle":
+      return entry.lifecycleEvent === "task_failed" || entry.lifecycleEvent === "task_cancelled" ? 2 : 4;
+    case "report":
+    case "final":
+      return entry.outcome === "failed" || entry.outcome === "blocked" || entry.outcome === "cancelled" ? 2 : 3;
+    case "reply": return 3;
+  }
+  return 4;
 }

@@ -1,47 +1,12 @@
 import type { Context, Hono } from "hono";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
-import {
-  bindDaemonTokenIdentityOrDeny,
-  daemonLocalSkillImportReportBody,
-  daemonLocalSkillListReportBody,
-  daemonRegisterOwnerContext,
-  denyCurrentUserWorkspaceAccess,
-  denyDaemonOwnerWorkspaceMembership,
-  denyUnprivilegedOwnerlessDaemonClaim,
-  denyDaemonRuntimeObservedStateAccess,
-  denyDaemonTokenRuntimeIdentity,
-  denyDaemonTokenRuntimeWorkspace,
-  denyDaemonTokenWorkspace,
-  isJsonApiError,
-  isTerminalRuntimeRequestForDaemon,
-  isValidRuntimeUpdateReportStatus,
-  listRuntimesForCurrentUser,
-  loadRuntimeForCurrentEditor,
-  loadRuntimeForCurrentOwner,
-  loadRuntimeForCurrentUser,
-  workspaceRuntimeModelCatalog,
-  runtimeTargetModelCatalog,
-  executionGroupRuntimes,
-  executionGroupModelCatalog,
-  executionGroupRequestOwner,
-  canCurrentUserUseRuntime,
-  parseExpectedActiveAgentIds,
-  promoteLegacyCliPatForDaemonHeartbeat,
-  promoteLegacyCliPatForDaemonRegistration,
-  readJson,
-  readJsonStrict,
-  readJsonStrictAllowEmpty,
-  requireWorkspaceAdmin,
-  safeCreateRuntimeUpdateRequest,
-  usageQuery,
-  validateMultiremiRuntimeProvider,
-  validateRuntimeExecutionGroupInput,
-} from "../helpers.js";
+import { bindDaemonTokenIdentityOrDeny, daemonRegisterOwnerContext, denyCurrentUserWorkspaceAccess, denyDaemonOwnerWorkspaceMembership, denyUnprivilegedOwnerlessDaemonClaim, denyDaemonRuntimeObservedStateAccess, denyDaemonTokenRuntimeIdentity, denyDaemonTokenRuntimeWorkspace, denyDaemonTokenWorkspace, isJsonApiError, isTerminalRuntimeRequestForDaemon, isValidRuntimeUpdateReportStatus, listRuntimesForCurrentUser, loadRuntimeForCurrentEditor, loadRuntimeForCurrentOwner, loadRuntimeForCurrentUser, workspaceRuntimeModelCatalog, runtimeTargetModelCatalog, executionGroupRuntimes, executionGroupModelCatalog, executionGroupRequestOwner, canCurrentUserUseRuntime, parseExpectedActiveAgentIds, promoteLegacyCliPatForDaemonHeartbeat, promoteLegacyCliPatForDaemonRegistration, readJson, readJsonStrict, readJsonStrictAllowEmpty, requireWorkspaceAdmin, safeCreateRuntimeUpdateRequest, usageQuery, validateMultiremiRuntimeProvider, validateRuntimeExecutionGroupInput } from "../helpers.js";
 import {
   authenticatedRequestUserId,
   cleanString,
   compareRuntimeUsageDailyCompatibilityRows,
   currentAccessToken,
+  currentWorkspaceRoleStrict,
   currentRequestUserId,
   directoryScanErrorResponse,
   hasRequestField,
@@ -61,26 +26,22 @@ import {
   runtimeUsageDailyCompatibilityResponse,
   runtimeWorkspaceId,
 } from "../wire/index.js";
-import type {
-  CreateRuntimeDirectoryScanInput,
-  CreateRuntimeCommandInput,
-  CreateRuntimeLocalSkillImportInput,
-  CreateRuntimeLocalSkillListInput,
-  CreateRuntimeUpdateInput,
-  RegisterRuntimeInput,
-  ReportRuntimeDirectoryScanInput,
-  ReportRuntimeCommandInput,
-  ReportRuntimeLocalSkillImportInput,
-  ReportRuntimeLocalSkillListInput,
-  ReportRuntimeModelListInput,
-  ReportRuntimeUpdateInput,
-  MultiremiRuntimeModel,
-  UpdateRuntimeInput,
-} from "@multiremi/contracts/types.js";
+import type { CreateRuntimeDirectoryScanInput, CreateRuntimeCommandInput, CreateRuntimeLocalSkillImportInput, CreateRuntimeLocalSkillListInput, CreateRuntimeUpdateInput, RegisterRuntimeInput, ReportRuntimeUpdateInput, UpdateRuntimeInput } from "@multiremi/contracts/types.js";
 import type { RouterDeps } from "./deps.js";
 
 export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
+  app.get("/api/daemon/runtimes/:id/endpoint-key", (c) => {
+    if (currentAccessToken(c)?.type !== "daemon") return c.json({ error: "daemon token required" }, 403);
+    const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    try {
+      const key = store.executionProfilesRepo().getKeyForRuntime(loaded.runtime.id, c.req.query("credential_id") ?? "");
+      if (key === null) return c.json({ error: "Endpoint credential not found" }, 404);
+      c.header("Cache-Control", "no-store");
+      return c.json({ api_key: key });
+    } catch { return c.json({ error: "Endpoint credential is unavailable; check server encryption configuration" }, 503); }
+  });
 
   app.get("/api/runtimes/:id/codex-profile", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
@@ -298,37 +259,14 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (!request) return c.json({ error: "request not found" }, 404);
     return c.json(runtimeModelListRequestCompatibilityResponse(request));
   });
-  app.put("/api/daemon/runtimes/:runtimeId/models", async (c) => {
-    const runtimeId = c.req.param("runtimeId");
-    const denied = denyDaemonRuntimeObservedStateAccess(c, store, runtimeId, authToken);
-    if (denied) return denied;
-    const body = await readJsonStrict<Pick<ReportRuntimeModelListInput, "models" | "supported" | "model_profile">>(c);
-    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    return c.json({
-      runtime_id: runtimeId,
-      supported: body.supported !== false,
-      models: store.updateRuntimeModels(runtimeId, body.models ?? [], body.model_profile),
-    });
-  });
+
   app.post("/api/daemon/runtimes/:runtimeId/models/claim", (c) => {
     const runtimeId = c.req.param("runtimeId");
     const denied = denyDaemonRuntimeObservedStateAccess(c, store, runtimeId, authToken);
     if (denied) return denied;
     return c.json({ request: store.claimRuntimeModelListRequest(runtimeId) });
   });
-  app.post("/api/daemon/runtimes/:runtimeId/models/:requestId/result", async (c) => {
-    const runtimeId = c.req.param("runtimeId");
-    const denied = denyDaemonRuntimeObservedStateAccess(c, store, runtimeId, authToken);
-    if (denied) return denied;
-    const requestId = c.req.param("requestId");
-    const request = store.getRuntimeModelListRequest(runtimeId, requestId);
-    if (!request) return c.json({ error: "request not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
-    const body = await readJsonStrict<ReportRuntimeModelListInput>(c);
-    if ("apiError" in body) return c.json({ error: body.apiError }, body.statusCode);
-    store.reportRuntimeModelListResult(runtimeId, requestId, body);
-    return c.json({ status: "ok" });
-  });
+
   app.post("/api/multiremi/runtimes/:id/update", async (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
@@ -350,7 +288,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<CreateRuntimeUpdateInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    const result = safeCreateRuntimeUpdateRequest(store, loaded.runtime.id, { target_version: body.target_version, scope: body.scope });
+    const result = safeCreateRuntimeUpdateRequest(store, loaded.runtime.id, { target_version: body.target_version, target_commit: body.target_commit, scope: body.scope });
     if ("apiError" in result) return c.json({ error: result.apiError }, result.statusCode);
     return c.json(runtimeUpdateRequestCompatibilityResponse(result));
   });
@@ -369,13 +307,20 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const updateId = c.req.param("updateId");
     const request = store.getRuntimeUpdateRequest(runtimeId, updateId);
     if (!request) return c.json({ error: "update not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
     const body = await readJsonStrict<ReportRuntimeUpdateInput>(c);
     if ("apiError" in body) return c.json({ error: body.apiError }, body.statusCode);
+    if (isTerminalRuntimeRequestForDaemon(request.status) && !(request.scope === "cli" && body.status === "running")) return c.json({ status: "ok" });
     if (!isValidRuntimeUpdateReportStatus(body.status)) {
       return c.json({ error: `invalid status: ${String(body.status ?? "")}` }, 400);
     }
-    store.reportRuntimeUpdateResult(runtimeId, updateId, body);
+    try {
+      store.reportRuntimeUpdateResult(runtimeId, updateId, body);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
     return c.json({ status: "ok" });
   });
   app.post("/api/runtimes/:id/commands", async (c) => {
@@ -415,22 +360,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     return c.json({ request: store.claimRuntimeCommandRequest(runtimeId) });
   });
-  app.post("/api/daemon/runtimes/:runtimeId/commands/:requestId/result", async (c) => {
-    const runtimeId = c.req.param("runtimeId");
-    const denied = denyDaemonRuntimeObservedStateAccess(c, store, runtimeId, authToken);
-    if (denied) return denied;
-    const requestId = c.req.param("requestId");
-    const request = store.getRuntimeCommandRequest(runtimeId, requestId);
-    if (!request) return c.json({ error: "request not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
-    const body = await readJsonStrict<ReportRuntimeCommandInput>(c);
-    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    if (body.status !== "completed" && body.status !== "failed" && body.status !== "timeout") {
-      return c.json({ error: `invalid status: ${String(body.status ?? "")}` }, 400);
-    }
-    store.reportRuntimeCommandResult(runtimeId, requestId, body);
-    return c.json({ status: "ok" });
-  });
+
   app.post("/api/multiremi/runtimes/:id/local-skills", async (c) => {
     const loaded = loadRuntimeForCurrentOwner(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
@@ -494,32 +424,12 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/daemon/runtimes/:runtimeId/local-skills/claim", (c) => {
     return c.json({ request: store.claimRuntimeLocalSkillListRequest(c.req.param("runtimeId"), c.req.query("supports_skill_directory") === "true") });
   });
-  app.post("/api/daemon/runtimes/:runtimeId/local-skills/:requestId/result", async (c) => {
-    const runtimeId = c.req.param("runtimeId");
-    const requestId = c.req.param("requestId");
-    const request = store.getRuntimeLocalSkillListRequest(runtimeId, requestId);
-    if (!request) return c.json({ error: "request not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
-    const body = await readJsonStrict<ReportRuntimeLocalSkillListInput>(c);
-    if ("apiError" in body) return c.json({ error: body.apiError }, body.statusCode);
-    store.reportRuntimeLocalSkillListResult(runtimeId, requestId, daemonLocalSkillListReportBody(body));
-    return c.json({ status: "ok" });
-  });
+
   app.post("/api/daemon/runtimes/:runtimeId/local-skills/import/claim", (c) => {
     const limit = parseOptionalInt(c.req.query("limit")) ?? 10;
     return c.json({ requests: store.claimRuntimeLocalSkillImportRequests(c.req.param("runtimeId"), limit, c.req.query("supports_skill_directory") === "true") });
   });
-  app.post("/api/daemon/runtimes/:runtimeId/local-skills/import/:requestId/result", async (c) => {
-    const runtimeId = c.req.param("runtimeId");
-    const requestId = c.req.param("requestId");
-    const request = store.getRuntimeLocalSkillImportRequest(runtimeId, requestId);
-    if (!request) return c.json({ error: "request not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
-    const body = await readJsonStrict<ReportRuntimeLocalSkillImportInput>(c);
-    if ("apiError" in body) return c.json({ error: body.apiError }, body.statusCode);
-    store.reportRuntimeLocalSkillImportResult(runtimeId, requestId, daemonLocalSkillImportReportBody(body));
-    return c.json({ status: "ok" });
-  });
+
   app.post("/api/multiremi/runtimes/:id/directory-scans", async (c) => {
     const loaded = loadRuntimeForCurrentOwner(c, store, c.req.param("id"), "directory scans");
     if (loaded instanceof Response) return loaded;
@@ -565,17 +475,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/daemon/runtimes/:runtimeId/directory-scans/claim", (c) => {
     return c.json({ request: store.claimRuntimeDirectoryScanRequest(c.req.param("runtimeId")) });
   });
-  app.post("/api/daemon/runtimes/:runtimeId/directory-scans/:requestId/result", async (c) => {
-    const runtimeId = c.req.param("runtimeId");
-    const requestId = c.req.param("requestId");
-    const request = store.getRuntimeDirectoryScanRequest(runtimeId, requestId);
-    if (!request) return c.json({ error: "request not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
-    const body = await readJsonStrict<ReportRuntimeDirectoryScanInput>(c);
-    if ("apiError" in body) return c.json({ error: body.apiError }, body.statusCode);
-    store.reportRuntimeDirectoryScanResult(runtimeId, requestId, body);
-    return c.json({ status: "ok" });
-  });
+
   app.get("/api/multiremi/runtimes/:id/usage", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
@@ -613,12 +513,16 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const visibleIds = new Set(loaded.runtimes.map((runtime) => runtime.id));
     const groups = store.listExecutionGroups(loaded.workspaceId).flatMap((group) => {
       const runtimes = executionGroupRuntimes(store, loaded.workspaceId, group.id, ownerId).filter((runtime) => visibleIds.has(runtime.id)).sort((a, b) => a.id.localeCompare(b.id));
-      if (!runtimes.length) return [];
+      if (!runtimes.length && !group.managed) return [];
       const machine = runtimes[0];
       return [{
+        members: store.getExecutionGroupMembers(group.id,loaded.workspaceId).filter(member => ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") || visibleIds.has(member.runtime_id)),
         id: group.id, workspace_id: loaded.workspaceId, provider: group.provider,
-        name: group.machineId ? `${machine?.daemonDisplayName ?? machine?.name ?? group.machineId} / ${group.provider}` : group.id,
-        runtime_ids: runtimes.map((runtime) => runtime.id),
+        description: group.description,
+        profile_id: group.profileId, profile_revision: group.profileRevision, managed: group.managed,
+        endpoint_id: group.endpointId, connection_mode: group.connectionMode, model_policy: group.modelPolicy,
+        name: group.managed ? group.name : group.machineId ? `${machine?.daemonDisplayName ?? machine?.name ?? group.machineId} / ${group.provider}` : group.id,
+        runtime_ids: ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") ? group.runtimeIds : runtimes.map((runtime) => runtime.id),
         online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
         is_default: group.machineId !== null,
       }];
@@ -640,7 +544,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       if (!store.getExecutionGroup(groupId, workspaceId)) return c.json({ error: "invalid execution_group_id" }, 400);
       const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId);
       const visibleIds = new Set(loaded.runtimes.map((runtime) => runtime.id));
-      if (!runtimes.length || runtimes.some((runtime) => !visibleIds.has(runtime.id))) return c.json({ error: "no accessible execution group members" }, 403);
+      if (!runtimes.length || runtimes.some((runtime) => !visibleIds.has(runtime.id) || !canCurrentUserUseRuntime(c, store, runtime))) return c.json({ error: "no accessible execution group members" }, 403);
       return c.json({ providers: executionGroupModelCatalog(store, workspaceId, groupId, ownerId) });
     }
     if (runtimeId) {
@@ -723,7 +627,20 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const activeAgents = store.listActiveAgentsByRuntime(loaded.runtime.id);
     if (activeAgents.length) return c.json(runtimeHasActiveAgentsResponse(activeAgents), 409);
-    const result = store.deleteRuntimeWithArchivedAgentCleanup(loaded.runtime.id);
+    const abandon = c.req.query("abandon_issue_workspaces");
+    if (abandon !== undefined && abandon !== "true" && abandon !== "false") {
+      return c.json({ error: "abandon_issue_workspaces must be true or false" }, 400);
+    }
+    const result = store.deleteRuntimeWithArchivedAgentCleanup(loaded.runtime.id, {
+      abandonIssueWorkspaces: abandon === "true",
+    });
+    if (result.status === "active_issue_workspaces") {
+      return c.json({
+        error: "cannot delete runtime while it has active issue workspaces; review and explicitly abandon them",
+        code: "runtime_has_active_issue_workspaces",
+        issues: result.issues,
+      }, 409);
+    }
     if (result.status === "active_agents") return c.json(runtimeHasActiveAgentsResponse(result.activeAgents), 409);
     if (result.status === "active_tasks") {
       return c.json({
@@ -739,16 +656,28 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       }, 409);
     }
     if (result.status === "not_found") return c.json({ error: "runtime not found" }, 404);
-    return c.json({ status: "ok" });
+    return c.json({ status: "ok", issue_workspaces_abandoned: result.issueWorkspacesAbandoned });
   });
   app.post("/api/runtimes/:id/archive-agents-and-delete", async (c) => {
-    const body = await readJsonStrict<{ expected_active_agent_ids?: string[] }>(c);
+    const body = await readJsonStrict<{ expected_active_agent_ids?: string[]; abandon_issue_workspaces?: boolean }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const loaded = loadRuntimeForCurrentEditor(c, store, c.req.param("id"), "delete");
     if (loaded instanceof Response) return loaded;
     const expectedIds = parseExpectedActiveAgentIds(c, body.expected_active_agent_ids ?? []);
     if (expectedIds instanceof Response) return expectedIds;
-    const result = store.archiveAgentsAndDeleteRuntime(loaded.runtime.id, expectedIds);
+    if (body.abandon_issue_workspaces !== undefined && typeof body.abandon_issue_workspaces !== "boolean") {
+      return c.json({ error: "abandon_issue_workspaces must be a boolean" }, 400);
+    }
+    const result = store.archiveAgentsAndDeleteRuntime(loaded.runtime.id, expectedIds, {
+      abandonIssueWorkspaces: body.abandon_issue_workspaces === true,
+    });
+    if (result.status === "active_issue_workspaces") {
+      return c.json({
+        error: "cannot delete runtime while it has active issue workspaces; review and explicitly abandon them",
+        code: "runtime_has_active_issue_workspaces",
+        issues: result.issues,
+      }, 409);
+    }
     if (result.status === "daemon_last_runtime") {
       return c.json({
         error: "cannot delete the last runtime of a daemon; retire the machine instead",
@@ -767,6 +696,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       status: "ok",
       agents_archived: result.agentsArchived,
       tasks_cancelled: result.tasksCancelled,
+      issue_workspaces_abandoned: result.issueWorkspacesAbandoned,
     });
   });
   app.post("/api/multiremi/runtimes/:id/heartbeat", (c) => {

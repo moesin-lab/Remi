@@ -17,29 +17,35 @@ export interface Workspace {
   avatar_url: string | null;
   created_at: string;
   updated_at: string;
+  operator?: { userId: string; memberId: string };
 }
 
+/**
+ * The workspace's own prompt (ADR 0023): written into every Agent session's
+ * `AGENTS.md` together with Remi's notes. Remi's built-in rules are not part of it.
+ */
 export interface WorkspacePromptSettings {
-  bootstrapPrompt: string;
-  deltaPrompt: string;
+  prompt: string;
   revision: number;
   updatedAt: string | null;
   updatedBy: string | null;
 }
 
+/** Read-only platform templates with `{{placeholders}}`. */
 export interface PlatformPromptTemplatePreview {
-  bootstrap: string;
-  delta: string;
+  /** The session's `AGENTS.md` template. */
+  instructions: string;
+  /** One turn's input template. */
+  input: string;
   sha256: {
-    bootstrap: string;
-    delta: string;
+    instructions: string;
+    input: string;
   };
 }
 
 export interface UpdateWorkspacePromptSettingsRequest {
-  bootstrapPrompt: string;
-  deltaPrompt: string;
-  expectedRevision: number;
+  prompt: string;
+  expected_revision: number;
 }
 
 export type BotMenuUserIdType = "open_id" | "union_id" | "user_id";
@@ -60,33 +66,24 @@ export interface BotMenuItem {
   children?: BotMenuItem[];
 }
 
-export type BotMenuTarget =
-  | { type: "member"; memberId: string }
-  | { type: "role"; role: MemberRole }
-  | { type: "external"; userId: string; userIdType: BotMenuUserIdType };
-
-export interface BotMenuAudience {
-  target: BotMenuTarget;
-  label?: string;
-  items: BotMenuItem[];
-}
-
 export interface BotMenuConfig {
   default?: BotMenuItem[];
-  users?: BotMenuAudience[];
 }
 
 export interface BotMenuResponse {
+  bot_id: string;
+  legacy_target_count: number;
   workspace_id: string;
   bot_menu: BotMenuConfig;
 }
 
 export interface BotMenuPublishResponse {
+  bot_id: string;
   id: string;
   workspace_id: string;
   dry_run: boolean;
   status: "pending" | "running" | "completed" | "failed" | "timeout";
-  result: { defaultPublished: boolean; userMenuCount: number; dryRun: boolean } | null;
+  result: { defaultPublished: boolean; userMenuCount: number; dryRun: boolean; clearedUserMenuCount?: number; unresolvedLegacyTargetCount?: number } | null;
   error: string | null;
   created_at: string;
   updated_at: string;

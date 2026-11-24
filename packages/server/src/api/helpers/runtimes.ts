@@ -1,6 +1,7 @@
 // Runtime and daemon request plumbing: provider validation, the ownership-scoped runtime loaders,
 // the daemon install instructions, and the registration/deregistration paths the daemon calls.
 import type { Context } from "hono";
+import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection.js";
 import { MultiremiStore, daemonRuntimeId } from "@multiremi/store/store.js";
 import {
   DaemonIdentityOwnerConflictError,
@@ -14,6 +15,7 @@ import {
   hasRequestField,
   currentAccessToken,
   currentRequestUserId,
+  isHumanOperatorRequest,
   daemonRuntimeResponse,
   runtimeCompatibilityResponse,
   runtimeWorkspaceId,
@@ -52,6 +54,9 @@ export type DaemonRegisterRequestBody = {
     parallel_agent_execution?: number;
     codex_profiles?: number;
     claude_profiles?: number;
+    execution_endpoints?: number;
+    execution_endpoint_options?: number;
+    antigravity_native?: number;
     agent_plugins?: number;
   };
   runtimes?: Array<{
@@ -155,9 +160,12 @@ export function listRuntimesForCurrentUser(c: Context, store: MultiremiStore): {
     ? denyDaemonTokenWorkspace(c, workspaceId)
     : denyCurrentUserWorkspaceAccess(c, store, workspaceId);
   if (denied) return denied;
-  const ownerFilter = c.req.query("owner") === "me" ? currentRequestUserId(c) : null;
-  const runtimes = store.listRuntimes().filter((runtime) => {
-    if (runtimeWorkspaceId(runtime) !== workspaceId) return false;
+  // The old human "mine" selector aliases the shared workspace fleet.
+  const ownerFilter = c.req.query("owner") === "me" && !isHumanOperatorRequest(c) ? currentRequestUserId(c) : null;
+  // MUL-473: the workspace filter is the SQL predicate now, so the other
+  // workspaces' Runtimes are neither read nor hydrated. The remaining filters
+  // are request-scoped (token binding, owner) and stay here.
+  const runtimes = store.listRuntimesForWorkspace(workspaceId).filter((runtime) => {
     const token = currentAccessToken(c);
     if (token?.type === "daemon" && (!token.daemonId || runtime.daemonId !== token.daemonId)) return false;
     return ownerFilter ? runtimeOwnerId(runtime) === ownerFilter : true;
@@ -194,21 +202,23 @@ export function loadRuntimeForCurrentEditor(
 export function loadRuntimeForCurrentOwner(c: Context, store: MultiremiStore, runtimeId: string, feature = "local skills"): { runtime: MultiremiRuntime } | Response {
   const loaded = loadRuntimeForCurrentUser(c, store, runtimeId);
   if (loaded instanceof Response) return loaded;
-  if (runtimeOwnerId(loaded.runtime) !== currentRequestUserId(c)) {
+  if (!isHumanOperatorRequest(c) && runtimeOwnerId(loaded.runtime) !== currentRequestUserId(c)) {
     return c.json({ error: `you can only access ${feature} from your own runtimes` }, 403);
   }
   return loaded;
 }
 
 export function canCurrentUserEditRuntime(c: Context, store: MultiremiStore, runtime: MultiremiRuntime): boolean {
-  const role = currentWorkspaceRole(c, store, runtimeWorkspaceId(runtime));
+  if (isHumanOperatorRequest(c)) return true;
+  const role = store.getUserRoleInWorkspace(currentRequestUserId(c), runtimeWorkspaceId(runtime));
   if (role === "owner" || role === "admin") return true;
   return runtimeOwnerId(runtime) === currentRequestUserId(c);
 }
 
 export function canCurrentUserUseRuntime(c: Context, store: MultiremiStore, runtime: MultiremiRuntime): boolean {
+  if (isHumanOperatorRequest(c)) return true;
   const workspaceId = runtime.workspaceId ?? "local";
-  const role = currentWorkspaceRole(c, store, workspaceId);
+  const role = store.getUserRoleInWorkspace(currentRequestUserId(c), workspaceId);
   if (role === "owner" || role === "admin") return true;
   if (runtime.visibility === "public") return true;
   return runtime.ownerId === currentRequestUserId(c);
@@ -247,11 +257,11 @@ export function deregisterDaemonRuntimes(c: Context, store: MultiremiStore, runt
 }
 
 export function isTerminalRuntimeRequestForDaemon(status: string): boolean {
-  return status === "completed" || status === "failed" || status === "timeout";
+  return status === "completed" || status === "rolled_back" || status === "failed" || status === "timeout";
 }
 
-export function isValidRuntimeUpdateReportStatus(status: unknown): status is "completed" | "failed" | "running" {
-  return status === "completed" || status === "failed" || status === "running";
+export function isValidRuntimeUpdateReportStatus(status: unknown): status is "completed" | "failed" | "running" | "restarting" | "rolled_back" {
+  return status === "completed" || status === "failed" || status === "running" || status === "restarting" || status === "rolled_back";
 }
 
 export function daemonLocalSkillListReportBody(input: ReportRuntimeLocalSkillListInput): ReportRuntimeLocalSkillListInput {
@@ -369,6 +379,9 @@ export function registerDaemonRuntimes(
           runtime_workspaces: body.capabilities?.runtime_workspaces === 1 ? 1 : 0,
           codex_profiles: body.capabilities?.codex_profiles === 1 ? 1 : 0,
           claude_profiles: body.capabilities?.claude_profiles === 1 ? 1 : 0,
+          execution_endpoints: body.capabilities?.execution_endpoints === 1 ? 1 : 0,
+          execution_endpoint_options: body.capabilities?.execution_endpoint_options === 1 ? 1 : 0,
+          antigravity_native: body.capabilities?.antigravity_native === 1 ? 1 : 0,
           ...(body.capabilities?.parallel_agent_execution === 1 ? { parallel_agent_execution: 1 } : {}),
           ...(typeof runtime.acpVersion === "string" && runtime.acpVersion ? { acp_version: runtime.acpVersion } : {}),
           ...(typeof runtime.agentVersion === "string" && runtime.agentVersion ? { agent_version: runtime.agentVersion } : {}),
@@ -460,7 +473,11 @@ export function registerDaemonRuntimes(
     });
   }
   return {
-    runtimes: registered.map(runtime => ({ ...runtime, codex_profile: store.getRuntimeCodexProfile(runtime.id), claude_profile: store.getRuntimeClaudeProfile(runtime.id) })),
+    runtimes: registered.map(runtime => ({
+      ...runtime,
+      codex_profile: runtimeConnectionSnapshot(store.getRuntimeCodexProfile(runtime.id)),
+      claude_profile: runtimeConnectionSnapshot(store.getRuntimeClaudeProfile(runtime.id)),
+    })),
     repos: repos.repos,
     repos_version: repos.repos_version,
     settings: repos.settings,
@@ -499,9 +516,7 @@ export function daemonRegisterOwnerContext(
   if (token.type === "daemon") {
     const ownerId = cleanString(token.userId);
     if (
-      ownerId
-      && ownerId !== "local"
-      && !store.getUserRoleInWorkspace(ownerId, targetWorkspaceId)
+      token.workspaceId !== targetWorkspaceId || !store.getWorkspace(targetWorkspaceId)
     ) {
       return { error: "forbidden for token workspace", status: 403 };
     }
@@ -512,8 +527,7 @@ export function daemonRegisterOwnerContext(
   }
   const ownerId = cleanString(token.userId) ?? "local";
   if (
-    ownerId !== "local"
-    && !store.getUserRoleInWorkspace(ownerId, targetWorkspaceId)
+    !store.getWorkspace(targetWorkspaceId)
   ) {
     return { error: "forbidden for token workspace", status: 403 };
   }

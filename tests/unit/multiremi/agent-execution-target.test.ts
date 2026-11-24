@@ -1,5 +1,7 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it } from "bun:test";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -58,7 +60,7 @@ describe("Agent execution target", () => {
     const task = store.createTask({ agentId: agent.id, prompt: "Lost response" });
     store.claimTask(first.id);
     db!.run("UPDATE multiremi_agents SET runtime_id = ?, execution_group_id = ? WHERE id = ?", [second.id, second.executionGroupIds![0], agent.id]);
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     expect(store.claimTask(first.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
     expect(store.claimTask(second.id)?.id).toBe(task.id);
@@ -70,11 +72,11 @@ describe("Agent execution target", () => {
       title: "Local files",
       resources: [{ resourceType: "local_directory", resourceRef: { local_path: "/first/files", daemon_id: first.daemonId! } }],
     });
-    const localIssue = store.createIssue({ title: "Local issue", projectId: localProject.id });
+    const localIssue = createResponsibleTestIssue(store, { title: "Local issue", projectId: localProject.id });
     const local = store.createTask({ agentId: agent.id, issueId: localIssue.id, prompt: "Local" });
     const project = store.createProject({ title: "First project" });
     store.createProjectDevice(project.id, { daemonId: first.daemonId! });
-    const issue = store.createIssue({ title: "Bound issue", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Bound issue", projectId: project.id });
     const projectTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Project" });
     store.updateAgent(agent.id, { runtimeId: second.id });
     expect(store.claimTask(first.id)).toBeNull();
@@ -83,7 +85,7 @@ describe("Agent execution target", () => {
     expect(store.getTask(projectTask.id)?.status).toBe("queued");
   });
 
-  it("allows metadata edits after the selected Runtime becomes private without releasing its target", () => {
+  it("keeps the selected Runtime usable after its legacy visibility becomes private", () => {
     const { store, second } = fixture();
     const shared = store.registerRuntime({ name: "Shared", provider: "codex", visibility: "public", ownerId: "other" });
     const agent = store.createAgent({ name: "Shared target", provider: "codex", runtimeId: shared.id });
@@ -91,17 +93,21 @@ describe("Agent execution target", () => {
     store.updateRuntime(shared.id, { visibility: "private" });
     const renamed = store.updateAgent(agent.id, { name: "Renamed", provider: agent.provider });
     expect(renamed).toMatchObject({ name: "Renamed", runtimeId: shared.id });
-    expect(store.claimTask(shared.id)).toBeNull();
+    expect(store.claimTask(shared.id)?.id).toBe(task.id);
     expect(store.claimTask(second.id)).toBeNull();
-    expect(store.getTask(task.id)?.status).toBe("queued");
+    expect(store.getTask(task.id)?.status).toBe("dispatched");
   });
 
-  it("validates provider and owner and prevents deletion from silently removing the target", () => {
+  it("validates provider and workspace and prevents deletion from silently removing the target", () => {
     const { store, first, agent } = fixture();
     const claude = store.registerRuntime({ name: "Claude", provider: "claude" });
     const privateRuntime = store.registerRuntime({ name: "Other owner", provider: "codex", ownerId: "other" });
     expect(() => store.updateAgent(agent.id, { runtimeId: claude.id })).toThrow("provider");
-    expect(() => store.updateAgent(agent.id, { runtimeId: privateRuntime.id })).toThrow("owner");
+    expect(store.updateAgent(agent.id, { runtimeId: privateRuntime.id })?.runtimeId).toBe(privateRuntime.id);
+    store.updateAgent(agent.id, { runtimeId: first.id });
+    const otherWorkspace = store.createWorkspace({ name: "Other", slug: "other-runtime" });
+    const foreignRuntime = store.registerRuntime({ name: "Other workspace", provider: "codex", workspaceId: otherWorkspace.id });
+    expect(() => store.updateAgent(agent.id, { runtimeId: foreignRuntime.id })).toThrow("Runtime not found");
     expect(() => store.createAgent({ name: "Invalid", provider: "claude", runtimeId: first.id })).toThrow("provider");
     store.registerRuntime({ name: "First Claude", daemonId: first.daemonId!, provider: "claude" });
     expect(store.deleteRuntime(first.id)).toBe(false);

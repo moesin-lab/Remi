@@ -1,7 +1,14 @@
 import type { Context, Hono } from "hono";
 import {
+  canCurrentUserAccessAgent,
+  canCurrentUserAccessAgentChecker,
   canCurrentUserAccessChatSessionAgent,
+  canTaskCoordinateSession,
+  currentTaskParentId,
   denyCurrentUserWorkspaceAccess,
+  denySessionAccess,
+  denySideSessionAgentDispatch,
+  denyTaskChatContentAccess,
   loadChatSessionForCurrentUser,
   normalizeSendChatMessageInput,
   readJson,
@@ -13,36 +20,94 @@ import {
   chatMessageCompatibilityResponse,
   chatSessionCompatibilityResponse,
   currentRequestUserId,
+  issueSessionCompatibilityResponse,
+  sessionEventCompatibilityResponse,
+  sessionParticipantCompatibilityResponse,
+  sessionResultCompatibilityResponse,
+  sessionTaskMetadataResponse,
   sendChatMessageCompatibilityResponse,
   taskPublicResponse,
 } from "../wire/index.js";
 import type {
+  AddSessionParticipantInput,
   CreateChatSessionInput,
+  CreateIssueSessionInput,
+  CreateSessionTaskInput,
   MultiremiChatSession,
+  MultiremiIssueSession,
+  PublishSessionResultInput,
   SendChatMessageInput,
   UpdateChatSessionInput,
+  UpdateIssueSessionInput,
 } from "@multiremi/contracts/types.js";
 import type { RouterDeps } from "./deps.js";
-import { ChatConflictError, ChatValidationError } from "@multiremi/store/repos/chat-repo.js";
+import { stripServerOwnedSessionTaskFields } from "../wire/issues.js";
+import {
+  CHAT_ORIGIN_FILTERS,
+  ChatConflictError,
+  ChatValidationError,
+  type ChatOriginFilter,
+} from "@multiremi/store/repos/chat-repo.js";
+import { BackgroundTaskError } from "@multiremi/store/repos/background-tasks-repo.js";
+import { currentWorkspaceMember } from "../wire/context.js";
+
+function sessionMutationActor(c: Context): { actorType: "agent" | "member" | "system"; actorId: string | null } {
+  const taskAgentId = currentTaskAccessToken(c)?.agentId ?? null;
+  if (taskAgentId) return { actorType: "agent", actorId: taskAgentId };
+  const userId = currentRequestUserId(c);
+  return userId
+    ? { actorType: "member", actorId: userId }
+    : { actorType: "system", actorId: null };
+}
 
 export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  const loadWorkSession = (c: Context, allowCoordination = false): MultiremiIssueSession | Response => {
+    const session = store.getIssueSession(c.req.param("sessionId") ?? "");
+    if (!session || session.chatId !== c.req.param("id")) return c.json({ error: "session not found" }, 404);
+    return allowCoordination && canTaskCoordinateSession(c, store, session)
+      ? session : denySessionAccess(c, store, session) ?? session;
+  };
   // Feishu conversations share transport storage with Chat, but belong to
   // Feishu — an Issue topic to the Issue discussion surface, a private Feishu
   // thread to Feishu itself — never to the user's Web conversation list.
-  const isListedSession = (c: Context, session: MultiremiChatSession): boolean =>
-    !store.isFeishuTransportChatSession(session.id)
-      && canCurrentUserAccessChatSessionAgent(c, store, session);
+  const listedSessions = (c: Context, workspaceId: string, origin: ChatOriginFilter): MultiremiChatSession[] => {
+    const sessions = store.listChatSessions(workspaceId, {
+      origin,
+      creatorId: currentTaskAccessToken(c) ? currentRequestUserId(c) : undefined,
+      includeArchived: c.req.query("status") === "all" || c.req.query("status") === "archived",
+      excludeTransportSessions: true,
+    });
+    const agentsById = new Map(store.listAgentsLiteByIds(sessions.map(session => session.agentId))
+      .map(agent => [agent.id, agent]));
+    const canAccess = canCurrentUserAccessAgentChecker(c, store);
+    return sessions.filter(session => {
+      const agent = agentsById.get(session.agentId);
+      return (c.req.query("status") !== "archived" || session.status === "archived")
+        && Boolean(agent && agent.workspaceId === session.workspaceId && canAccess(agent));
+    });
+  };
+
+  // Automation-opened Chats stay out of the default list; `origin=all` or `automation` shows them.
+  const requestedOrigin = (c: Context): ChatOriginFilter | Response => {
+    const origin = c.req.query("origin") ?? "user";
+    return (CHAT_ORIGIN_FILTERS as readonly string[]).includes(origin)
+      ? origin as ChatOriginFilter : c.json({ error: "origin must be user, automation or all" }, 400);
+  };
 
   app.get("/api/multiremi/chats", (c) => {
     const workspaceId = requestedChatWorkspaceId(c, store);
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const sessions = store.listChatSessions(workspaceId, {
-      creatorId: currentRequestUserId(c),
-      includeArchived: c.req.query("status") === "all" || c.req.query("status") === "archived",
-    }).filter((session) => (c.req.query("status") !== "archived" || session.status === "archived") && isListedSession(c, session));
+    const origin = requestedOrigin(c);
+    if (origin instanceof Response) return origin;
+    const taskToken = currentTaskAccessToken(c);
+    const task = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
+    if (taskToken && !task?.chatSessionId) return c.json({ sessions: [], total: 0 });
+    const contentDenied = denyTaskChatContentAccess(c, store, task?.chatSessionId ?? "");
+    if (contentDenied) return contentDenied;
+    const sessions = listedSessions(c, workspaceId, origin).filter((session) => !task || session.id === task.chatSessionId);
     return c.json({ sessions, total: sessions.length });
   });
   app.post("/api/multiremi/chats", async (c) => {
@@ -51,11 +116,106 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     if (input instanceof Response) return input;
     return chatMutation(c, () => c.json({ session: store.createChatSession(input) }, 201));
   });
+  app.get("/api/multiremi/chats/:id/sessions", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"), { scope: "owner" });
+    if (loaded instanceof Response) return loaded;
+    const sessions = store.listChatOwnedSessions(loaded.session.id, c.req.query("include_archived") === "true");
+    return c.json({
+      sessions: sessions.map((session) => issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id))),
+    });
+  });
+  app.post("/api/multiremi/chats/:id/sessions", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"), { scope: "owner" });
+    if (loaded instanceof Response) return loaded;
+    const body = await readJson<CreateIssueSessionInput>(c);
+    if (body.id && store.getIssueSession(body.id)) return c.json({ error: "Session id already exists" }, 409);
+    return sessionMutation(c, () => {
+      const taskAgentId = currentTaskAccessToken(c)?.agentId ?? null;
+      const userId = currentRequestUserId(c);
+      const session = store.createSession(loaded.session.id, {
+        ...body,
+        chatId: loaded.session.id,
+        createdByType: taskAgentId ? "agent" : userId ? "member" : "system",
+        createdById: taskAgentId ?? userId,
+      });
+      return c.json({ session: issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)) }, 201);
+    });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/adopt", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"), { scope: "owner" });
+    if (loaded instanceof Response) return loaded;
+    return sessionMutation(c, () => {
+      const session = store.adoptLegacySession(loaded.session.id, c.req.param("sessionId"));
+      return c.json({ session: issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)) });
+    });
+  });
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId", (c) => {
+    const session = loadWorkSession(c, true);
+    if (session instanceof Response) return session;
+    return c.json({ session: issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)) });
+  });
+  app.patch("/api/multiremi/chats/:id/sessions/:sessionId", async (c) => {
+    const session = loadWorkSession(c);
+    if (session instanceof Response) return session;
+    const body = await readJson<UpdateIssueSessionInput>(c);
+    return sessionMutation(c, () => c.json({
+      session: issueSessionCompatibilityResponse(
+        store.updateIssueSession(session.id, body),
+        store.listSessionParticipants(session.id),
+      ),
+    }));
+  });
+
+
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId/participants", (c) => {
+    const session = loadWorkSession(c);
+    if (session instanceof Response) return session;
+    return c.json({ participants: store.listSessionParticipants(session.id).map(sessionParticipantCompatibilityResponse) });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/participants", async (c) => {
+    const session = loadWorkSession(c);
+    if (session instanceof Response) return session;
+    const body = await readJson<AddSessionParticipantInput>(c);
+    const participantType = body.participantType ?? body.participant_type;
+    const participantId = body.participantId ?? body.participant_id;
+    if (participantType === "agent" && participantId) {
+      const agent = store.getAgent(participantId);
+      if (!agent || !canCurrentUserAccessAgent(c, store, agent)) return c.json({ error: "you do not have access to this agent" }, 403);
+    }
+    return sessionMutation(c, () => c.json({
+      participant: sessionParticipantCompatibilityResponse(store.addSessionParticipant(session.id, body)),
+    }, 201));
+  });
+  app.delete("/api/multiremi/chats/:id/sessions/:sessionId/participants/:participantType/:participantId", (c) => {
+    const session = loadWorkSession(c);
+    if (session instanceof Response) return session;
+    store.removeSessionParticipant(session.id, c.req.param("participantType"), c.req.param("participantId"));
+    return c.body(null, 204);
+  });
+
+
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId/results", (c) => {
+    const session = loadWorkSession(c);
+    if (session instanceof Response) return session;
+    return c.json({ results: store.listSessionResults(session.id).map(sessionResultCompatibilityResponse) });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/results", async (c) => {
+    const session = loadWorkSession(c);
+    if (session instanceof Response) return session;
+    const body = await readJson<PublishSessionResultInput>(c);
+    const actor = sessionMutationActor(c);
+    return sessionMutation(c, () => c.json({ result: sessionResultCompatibilityResponse(store.publishSessionResult(session.id, {
+      ...body,
+      publishedByType: actor.actorType,
+      publishedById: actor.actorId,
+      sourceTaskId: currentTaskParentId(c),
+    })) }, 201));
+  });
   app.get("/api/multiremi/chats/:id", (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { session } = loaded;
-    return c.json({ session, messages: store.listChatMessages(session.id) });
+    return c.json({ session, messages: store.listChatMessagesFromLog(session.id) });
   });
   app.patch("/api/multiremi/chats/:id", async (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
@@ -65,45 +225,37 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     if (invalid) return invalid;
     return chatMutation(c, () => c.json({ session: store.updateChatSession(loaded.session.id, body) }));
   });
-  app.get("/api/multiremi/chats/:id/messages", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
-    if (loaded instanceof Response) return loaded;
-    return c.json({ messages: store.listChatMessages(loaded.session.id) });
-  });
-  app.post("/api/multiremi/chats/:id/messages", async (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
-    if (loaded instanceof Response) return loaded;
-    const body = await readJson<SendChatMessageInput>(c);
-    const message = normalizeSendChatMessageInput(c, body);
-    if (message instanceof Response) return message;
-    return chatMutation(c, () => {
-      const result = store.sendChatMessage(loaded.session.id, {
-        ...message,
-        parentTaskId: currentTaskAccessToken(c)?.taskId ?? null,
-      });
-      return c.json({ ...result, supports_queue: true, task: taskPublicResponse(result.task) }, 201);
-    });
-  });
+  // PR 6: every session response carries its running background tasks, one batched read per response.
+  const sessionResponses = (sessions: MultiremiChatSession[]) => {
+    const counts = store.countRunningBackgroundTasksBySession(sessions.map(session => session.id));
+    return sessions.map(session => chatSessionCompatibilityResponse(session, { runningBackgroundTasks: counts.get(session.id) ?? 0 }));
+  };
+  const sessionResponse = (session: MultiremiChatSession) => sessionResponses([session])[0]!;
+
   app.get("/api/chat/sessions", (c) => {
     const workspaceId = requestedChatWorkspaceId(c, store);
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    return c.json(store.listChatSessions(workspaceId, {
-      creatorId: currentRequestUserId(c),
-      includeArchived: c.req.query("status") === "all" || c.req.query("status") === "archived",
-    }).filter((session) => (c.req.query("status") !== "archived" || session.status === "archived") && isListedSession(c, session)).map(chatSessionCompatibilityResponse));
+    const origin = requestedOrigin(c);
+    if (origin instanceof Response) return origin;
+    const taskToken = currentTaskAccessToken(c);
+    const task = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
+    if (taskToken && !task?.chatSessionId) return c.json([]);
+    const contentDenied = denyTaskChatContentAccess(c, store, task?.chatSessionId ?? "");
+    if (contentDenied) return contentDenied;
+    return c.json(sessionResponses(listedSessions(c, workspaceId, origin).filter((session) => !task || session.id === task.chatSessionId)));
   });
   app.post("/api/chat/sessions", async (c) => {
     const body = await readJson<CreateChatSessionInput>(c);
     const input = withChatSessionRequestContext(c, store, body);
     if (input instanceof Response) return input;
-    return chatMutation(c, () => c.json(chatSessionCompatibilityResponse(store.createChatSession(input)), 201));
+    return chatMutation(c, () => c.json(sessionResponse(store.createChatSession(input)), 201));
   });
   app.get("/api/chat/sessions/:sessionId", (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
     if (loaded instanceof Response) return loaded;
-    return c.json(chatSessionCompatibilityResponse(loaded.session));
+    return c.json(sessionResponse(loaded.session));
   });
   app.patch("/api/chat/sessions/:sessionId", async (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
@@ -111,7 +263,72 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<UpdateChatSessionInput>(c);
     const invalid = invalidChatUpdate(c, body);
     if (invalid) return invalid;
-    return chatMutation(c, () => c.json(chatSessionCompatibilityResponse(store.updateChatSession(loaded.session.id, body))));
+    return chatMutation(c, () => c.json(sessionResponse(store.updateChatSession(loaded.session.id, body))));
+  });
+  /**
+   * PR 6 §7: the session's background tasks, from the registry (no trace
+   * read): the running and paused rows, `unknown` ones, then the last 20 that
+   * ended. `{session_id, running, rows}`, the shape `chat:background_tasks`
+   * patches.
+   */
+  app.get("/api/chat/sessions/:sessionId/background-tasks", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
+    if (loaded instanceof Response) return loaded;
+    return c.json(store.listSessionBackgroundTasks(loaded.session.id));
+  });
+  /**
+   * ADR 0025: the agent's command catalogue for the Chat menu,
+   * `ChatSlashCommandsResponse`. Human operators share workspace Chats;
+   * with `session_id`, the Chat's own list (`agent_id` may be left out),
+   * otherwise a workspace preview for `agent_id`. Task credentials do not use
+   * this Web menu. The blocked and hidden commands are already taken out.
+   */
+  app.get("/api/chat/slash-commands", (c) => {
+    if (currentTaskAccessToken(c)) return c.json({ error: "forbidden for task token" }, 403);
+    const sessionId = c.req.query("session_id")?.trim() || null;
+    let agentId = c.req.query("agent_id")?.trim() || null;
+    if (sessionId) {
+      const loaded = loadChatSessionForCurrentUser(c, store, sessionId);
+      if (loaded instanceof Response) return loaded;
+      if (agentId && agentId !== loaded.session.agentId) return c.json({ error: "agent_id is not this chat session's agent" }, 400);
+      agentId = loaded.session.agentId;
+    }
+    if (!agentId) return c.json({ error: "agent_id or session_id is required" }, 400);
+    const agent = store.getAgent(agentId);
+    if (!agent) return c.json({ error: "agent not found" }, 404);
+    if (!sessionId) {
+      const denied = denyCurrentUserWorkspaceAccess(c, store, agent.workspaceId);
+      if (denied) return denied;
+      if (!canCurrentUserAccessAgentChecker(c, store)(agent)) return c.json({ error: "you do not have access to this agent" }, 403);
+    }
+    return c.json(store.getChatSlashCommands({ agent, sessionId }));
+  });
+  /**
+   * PR 6 §6.1: stop one running task (`{task_id}`: the row's `task_id` or
+   * `id`) or all of them (`{all: true}`). Uses the Chat access guard. 202 with
+   * the request time and the rows it marked; 409 `task_not_running` when no
+   * matching task runs, 409 `runtime_offline` when its computer is offline.
+   * The daemon answers through its next snapshot.
+   */
+  app.post("/api/chat/sessions/:sessionId/background-tasks/stop", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
+    if (loaded instanceof Response) return loaded;
+    const body = await readJson<{ task_id?: unknown; all?: unknown }>(c);
+    const all = body.all === true;
+    const taskId = typeof body.task_id === "string" ? body.task_id.trim() : "";
+    if (all === Boolean(taskId) || taskId.length > 512 || (body.all !== undefined && typeof body.all !== "boolean")) {
+      return c.json({ error: "send either task_id or all: true", code: "invalid_request" }, 400);
+    }
+    try {
+      const result = store.requestBackgroundTaskStop(loaded.session.id, all ? { all: true } : { taskId },
+        currentWorkspaceMember(c, store, loaded.session.workspaceId)?.id ?? null);
+      return c.json(result, 202);
+    } catch (error) {
+      if (error instanceof BackgroundTaskError && (error.code === "task_not_running" || error.code === "runtime_offline")) {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
   });
   app.delete("/api/chat/sessions/:sessionId", (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"), { requireAgentAccess: false });
@@ -120,124 +337,14 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     if (!deleted) return c.json({ error: "chat session not found" }, 404);
     return c.body(null, 204);
   });
-  app.get("/api/chat/sessions/:sessionId/messages", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const messages = store.listChatMessages(loaded.session.id);
-    const attachments = store.listAttachmentsForChatMessages(messages.map((message) => message.id));
-    return c.json(messages.map((message) => chatMessageCompatibilityResponse(message, attachments.get(message.id) ?? [])));
-  });
-  app.get("/api/chat/sessions/:sessionId/messages/page", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const rawLimit = c.req.query("limit");
-    let limit = 50;
-    if (rawLimit != null && rawLimit !== "") {
-      const parsedLimit = Number(rawLimit);
-      if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
-        return c.json({ error: "invalid limit" }, 400);
-      }
-      limit = parsedLimit;
-    }
-    const beforeCreatedAt = c.req.query("before_created_at");
-    const beforeId = c.req.query("before_id");
-    if ((!beforeCreatedAt && beforeId) || (beforeCreatedAt && !beforeId)) {
-      return c.json({ error: "invalid cursor" }, 400);
-    }
-    if (beforeCreatedAt && Number.isNaN(Date.parse(beforeCreatedAt))) {
-      return c.json({ error: "invalid cursor" }, 400);
-    }
-    const sessionMessages = store.listChatMessages(loaded.session.id);
-    const attachments = store.listAttachmentsForChatMessages(sessionMessages.map((message) => message.id));
-    const messages = sessionMessages.map((message) => chatMessageCompatibilityResponse(message, attachments.get(message.id) ?? []));
-    const cursorIndex = beforeCreatedAt
-      ? messages.findIndex((message) => message.id === beforeId && message.created_at === beforeCreatedAt)
-      : messages.length;
-    if (cursorIndex < 0) return c.json({ error: "invalid cursor" }, 400);
-    const filtered = messages.slice(0, cursorIndex);
-    const pageMessages = filtered.slice(Math.max(0, filtered.length - limit));
-    const hasMore = filtered.length > pageMessages.length;
-    const nextCursor = hasMore && pageMessages[0]
-      ? { created_at: pageMessages[0].created_at, id: pageMessages[0].id }
-      : null;
-    return c.json({
-      messages: pageMessages,
-      limit,
-      has_more: hasMore,
-      next_cursor: nextCursor,
-    });
-  });
-  app.post("/api/chat/sessions/:sessionId/messages", async (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const body = await readJson<SendChatMessageInput>(c);
-    const message = normalizeSendChatMessageInput(c, body);
-    if (message instanceof Response) return message;
-    return chatMutation(c, () => c.json(sendChatMessageCompatibilityResponse(store.sendChatMessage(loaded.session.id, {
-      ...message,
-      parentTaskId: currentTaskAccessToken(c)?.taskId ?? null,
-    })), 201));
-  });
-  app.get("/api/chat/sessions/:sessionId/pending-task", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const task = store.getPendingChatTask(loaded.session.id);
-    return c.json({
-      ...(task ? { task_id: task.id, status: task.status, created_at: task.createdAt } : {}),
-      ...(task?.waitReason ? { wait_reason: task.waitReason } : {}),
-      ...(task && !task.issueId && loaded.session.projectId && task.progressSummary
-        ? { progress_summary: task.progressSummary } : {}),
-      supports_queue: true,
-      queued_tasks: store.listQueuedChatTasks(loaded.session.id),
-    });
-  });
-  app.patch("/api/chat/sessions/:sessionId/queue/:taskId", async (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const body = await readJson<{ content?: unknown }>(c);
-    if (typeof body.content !== "string" || !body.content.trim()) return c.json({ error: "content is required" }, 400);
-    return chatMutation(c, () => c.json(store.updateQueuedChatTask(loaded.session.id, c.req.param("taskId"), body.content as string)));
-  });
-  app.delete("/api/chat/sessions/:sessionId/queue/:taskId", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    return chatMutation(c, () => {
-      store.removeQueuedChatTasks(loaded.session.id, c.req.param("taskId"));
-      return c.body(null, 204);
-    });
-  });
-  app.delete("/api/chat/sessions/:sessionId/queue", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    return chatMutation(c, () => {
-      store.removeQueuedChatTasks(loaded.session.id);
-      return c.body(null, 204);
-    });
-  });
-  app.post("/api/chat/sessions/:sessionId/queue/:taskId/prioritize", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    return chatMutation(c, () => c.json(store.prioritizeQueuedChatTask(loaded.session.id, c.req.param("taskId"))));
-  });
-  app.post("/api/chat/sessions/:sessionId/read", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    store.markChatSessionRead(loaded.session.id);
-    return c.body(null, 204);
-  });
-  app.get("/api/chat/pending-tasks", (c) => {
-    const workspaceId = requestedChatWorkspaceId(c, store);
-    if (workspaceId instanceof Response) return workspaceId;
-    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
-    if (denied) return denied;
-    const tasks = store.listPendingChatTasks(workspaceId, { creatorId: currentRequestUserId(c) })
-      .filter((task) => {
-        const session = task.chatSessionId ? store.getChatSession(task.chatSessionId) : null;
-        return session ? isListedSession(c, session) : false;
-      })
-      .map((task) => ({ task_id: task.id, status: task.status, chat_session_id: task.chatSessionId }));
-    return c.json({ tasks });
-  });
+}
+
+function sessionMutation(c: Context, operation: () => Response): Response {
+  try {
+    return chatMutation(c, operation);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
 }
 
 function chatMutation(c: Context, operation: () => Response): Response {

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { stringify } from "smol-toml";
 import type { RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { mergeCodexConfig } from "@daemon/agent-runtime/relay-sync.js";
+import { proxyFetch } from "@shared/proxy-fetch.js";
 import { readCapped } from "@multiremi/relay/http.js";
 import { validateCodexModelCatalog } from "@acp/model-catalog-validation.js";
 import { writePrivateFileIfChanged } from "@daemon/agent-runtime/workspace/session-home.js";
@@ -15,12 +16,13 @@ export async function prepareRuntimeCodexModelCatalog(
   signal: AbortSignal,
   validate: typeof validateCodexModelCatalog = validateCodexModelCatalog,
 ): Promise<void> {
+  if (profile.endpoint_options?.fetch_models === false) return;
   let response: Response | undefined;
   let text: string;
   try {
-    response = await fetch(profile.base_url.replace(/\/+$/, "") + "/models", {
-      headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
-      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    response = await proxyFetch(profile.endpoint_options?.models_url ?? profile.base_url.replace(/\/+$/, "") + "/models", {
+      headers: { ...profile.endpoint_options?.headers, Accept: "application/json", Authorization: `Bearer ${token}` },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(profile.endpoint_options?.timeout_ms ?? 10_000)]),
       redirect: "error",
     });
     if (!response.ok) {

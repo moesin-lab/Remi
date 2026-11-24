@@ -281,6 +281,51 @@ describe("issue archive cache updates", () => {
   });
 });
 
+describe("first-screen notice cache updates", () => {
+  it("preserves detail-only notices when an issue update omits them", () => {
+    const qc = new QueryClient();
+    qc.setQueryData<Issue>(issueKeys.detail(WS_ID, ISSUE_ID), {
+      ...baseIssue, pending_decision_count: 2, blocked_by: ["MUL-1"],
+    });
+    onIssueUpdated(qc, WS_ID, { id: ISSUE_ID, title: "Updated" });
+    expect(qc.getQueryData<Issue>(issueKeys.detail(WS_ID, ISSUE_ID))).toMatchObject({
+      title: "Updated", pending_decision_count: 2, blocked_by: ["MUL-1"],
+    });
+  });
+});
+
+describe("issue closure cache updates", () => {
+  it("patches a done status in place without refetching the detail", () => {
+    const qc = new QueryClient();
+    qc.setQueryData<Issue>(issueKeys.detail(WS_ID, ISSUE_ID), {
+      ...baseIssue, status: "in_review", pending_decision_count: 0,
+    });
+
+    onIssueUpdated(qc, WS_ID, { id: ISSUE_ID, status: "done" });
+
+    expect(qc.getQueryData<Issue>(issueKeys.detail(WS_ID, ISSUE_ID))).toMatchObject({
+      status: "done", pending_decision_count: 0,
+    });
+    expect(qc.getQueryState(issueKeys.detail(WS_ID, ISSUE_ID))?.isInvalidated)
+      .toBe(false);
+  });
+
+  it("does not treat retired grant columns from an older server as a refresh signal", () => {
+    const qc = new QueryClient();
+    qc.setQueryData<Issue>(issueKeys.detail(WS_ID, ISSUE_ID), baseIssue);
+
+    onIssueUpdated(qc, WS_ID, {
+      id: ISSUE_ID,
+      title: "Updated",
+      ...{ parent_done_grant_at: "2026-09-28T00:00:00.000Z", parent_done_grant_agent_id: "agent-new" },
+    });
+
+    expect(qc.getQueryData<Issue>(issueKeys.detail(WS_ID, ISSUE_ID))?.title).toBe("Updated");
+    expect(qc.getQueryState(issueKeys.detail(WS_ID, ISSUE_ID))?.isInvalidated)
+      .toBe(false);
+  });
+});
+
 describe("generated issue cache invalidation", () => {
   const SOURCE_ISSUE_ID = "source-1";
   const NEW_SOURCE_ISSUE_ID = "source-2";

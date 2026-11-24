@@ -1,15 +1,21 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { createResponsibleTestIssue } from './helpers.js';
+import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
+import { reportFrame } from "../../fixtures/report-session.js";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
+import { receiveTaskOffer } from "../../fixtures/task-offer.js";
+import { requestRuntimeRpc, receiveRuntimeInputs } from "../../fixtures/runtime-downlinks.js";
+import { normalizeDaemonClaimTask } from "@multiremi/client.js";
 import { createHash } from "node:crypto";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiDaemonClient } from "@multiremi/client.js";
 import type { ResolveAgentPluginGitSourceInput } from "@multiremi/agent-plugins/git-import.js";
-import { createStore, mockFetch, resetMultiremiTestEnv, signTestJwt } from "./helpers.js";
+import { snapshotStatsForFile, createLocalSnapshotStore as createSnapshotStore, mockFetch, resetMultiremiTestEnv, signTestJwt } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi API — agent plugins", () => {
   it("lists disabled plugins and allows switching back through the public Agent API", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Leader", provider: "claude" });
     const plugin = store.importAgentPlugin({ provider: "claude", name: "test-disabled",
       manifest: { name: "test-disabled", version: "1.0.0" },
@@ -30,7 +36,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("inspects and imports a Git Plugin source as an immutable artifact", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const resolverCalls: ResolveAgentPluginGitSourceInput[] = [];
     const resolveAgentPluginGitSource = async (input: ResolveAgentPluginGitSourceInput) => {
       resolverCalls.push(input);
@@ -154,7 +160,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("selects provider manifests precisely when they share a repository directory", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({
       store,
       resolveAgentPluginGitSource: async () => ({
@@ -226,7 +232,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("inherits the stored Git source identity when importing a new version", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const plugin = store.importAgentPlugin({
       workspaceId: "local",
       provider: "claude",
@@ -282,8 +288,8 @@ describe("Multiremi API — agent plugins", () => {
     }]);
   });
 
-  it("does not reveal cross-workspace Plugin ids through Git version imports", async () => {
-    const store = createStore();
+  it("rejects cross-workspace Plugin/source combinations before resolving Git", async () => {
+    const store = createSnapshotStore();
     const owner = store.getOrCreateUser({
       externalId: "plugin-owner",
       email: "plugin-owner@example.com",
@@ -324,10 +330,10 @@ describe("Multiremi API — agent plugins", () => {
         throw new Error("resolver must not run");
       },
     });
-    const request = (id: string) => app.request("/api/multiremi/agent-plugins/import", {
+    const request = (id: string, credential = token.token) => app.request("/api/multiremi/agent-plugins/import", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token.token}`,
+        Authorization: `Bearer ${credential}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -340,21 +346,25 @@ describe("Multiremi API — agent plugins", () => {
 
     const known = await request(plugin.id);
     const unknown = await request("apl_does_not_exist");
-    expect(known.status).toBe(404);
+    expect(known.status).toBe(400);
     expect(unknown.status).toBe(404);
     expect(await known.json()).toEqual({
-      error: "plugin not found",
-      code: "plugin_not_found",
+      error: "plugin and import source must belong to the same workspace",
+      code: "workspace_mismatch",
     });
     expect(await unknown.json()).toEqual({
       error: "plugin not found",
       code: "plugin_not_found",
     });
+    const scoped = await store.createAccessToken({
+      name: "Workspace-scoped integration", type: "pat", workspaceId: callerWorkspace.id, userId: "local",
+    });
+    expect((await request(plugin.id, scoped.token)).status).toBe(404);
     expect(resolverCalls).toBe(0);
   });
 
   it("rejects a Git import when the branch changes after inspection", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({
       store,
       resolveAgentPluginGitSource: async () => ({
@@ -399,7 +409,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("keeps duplicate Runtime state reports idempotent", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_plugin_idempotent",
       name: "Idempotent runtime",
@@ -459,7 +469,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("imports, binds and exposes provider-specific plugins", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const claude = store.createAgent({ name: "Claude", provider: "claude" });
     const codex = store.createAgent({ name: "Codex", provider: "codex" });
     const app = createMultiremiApp({ store });
@@ -538,8 +548,8 @@ describe("Multiremi API — agent plugins", () => {
     expect((await list.json()).plugins[0]).toMatchObject({ id: plugin.id, bindingCount: 1 });
   });
 
-  it("requires access to an Agent move's target workspace", async () => {
-    const store = createStore();
+  it("allows human Agent moves across workspaces while enforcing scoped credentials", async () => {
+    const store = createSnapshotStore();
     const user = store.getOrCreateUser({
       externalId: "plugin-move-user",
       email: "plugin-move@example.com",
@@ -569,6 +579,16 @@ describe("Multiremi API — agent plugins", () => {
     });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
 
+    const scoped = await store.createAccessToken({
+      name: "Workspace-scoped integration", type: "pat", workspaceId: source.id, userId: "local",
+    });
+    const denied = await app.request(`/api/multiremi/agents/${agent.id}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${scoped.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: target.id }),
+    });
+    expect(denied.status).toBe(404);
+    expect(store.getAgent(agent.id)?.workspaceId).toBe(source.id);
     const response = await app.request(`/api/multiremi/agents/${agent.id}`, {
       method: "PATCH",
       headers: {
@@ -577,13 +597,12 @@ describe("Multiremi API — agent plugins", () => {
       },
       body: JSON.stringify({ workspaceId: target.id }),
     });
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "workspace not found" });
-    expect(store.getAgent(agent.id)?.workspaceId).toBe(source.id);
+    expect(response.status).toBe(200);
+    expect(store.getAgent(agent.id)?.workspaceId).toBe(target.id);
   });
 
   it("rejects Plugin connection and config values until Runtime injection exists", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const agent = store.createAgent({ name: "Claude", provider: "claude" });
     const plugin = store.importAgentPlugin({
       provider: "claude",
@@ -619,7 +638,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("serves desired state, observed reports, retry generations and exact artifact bytes to daemons", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtimeStateEvents: any[] = [];
     store.onWorkspaceEvent((event) => {
       if (event.type === "agent_plugin:runtime_state") runtimeStateEvents.push(event);
@@ -645,6 +664,7 @@ describe("Multiremi API — agent plugins", () => {
       daemonId: "daemon-local",
       workspaceId: "local",
     });
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const remoteToken = await store.createAccessToken({
       name: "Remote daemon",
       type: "daemon",
@@ -679,8 +699,6 @@ describe("Multiremi API — agent plugins", () => {
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const daemonHeaders = { Authorization: `Bearer ${daemonToken.token}` };
 
-    const desiredPath = `/api/daemon/runtimes/${runtime.id}/agent-plugins/desired`;
-    const statePath = `/api/daemon/runtimes/${runtime.id}/agent-plugins/${plugin.activeVersionId}/state`;
     const rejectedCredentials = [
       ["same-workspace PAT", localPat.token],
       ["cross-workspace PAT", remotePat.token],
@@ -691,21 +709,14 @@ describe("Multiremi API — agent plugins", () => {
       ["unbound daemon identity", unboundDaemon.token],
     ] as const;
     for (const [label, token] of rejectedCredentials) {
-      const deniedDesired = await app.request(desiredPath, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      expect(deniedDesired.status, `${label} desired state`).toBe(403);
-      const deniedReport = await app.request(statePath, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }),
-      });
-      expect(deniedReport.status, `${label} state report`).toBe(403);
+      const deniedDesired = await requestRuntimeRpc(store, runtime.id, "plugin.desired", {}, token);
+      expect(deniedDesired.ok, `${label} desired state`).toBe(false);
+      expect(deniedDesired.plugins).toBeUndefined();
+      const deniedReport = await reportFrame(store, "plugin.state", { runtime_id: runtime.id, version_id: plugin.activeVersionId, status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }, { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, authToken: "root-secret" });
+      expect(deniedReport).toMatchObject({ ok: false, code: "authority_revoked", retryable: false });
     }
-    const masterDesired = await app.request(desiredPath, {
-      headers: { Authorization: "Bearer root-secret" },
-    });
-    expect(masterDesired.status).toBe(200);
+    const masterDesired = await requestRuntimeRpc(store, runtime.id, "plugin.desired");
+    expect(masterDesired.ok).toBe(true);
     const deniedHeartbeat = await app.request("/api/daemon/heartbeat", {
       method: "POST",
       headers: {
@@ -741,6 +752,30 @@ describe("Multiremi API — agent plugins", () => {
     expect(store.getRuntime(runtime.id)?.metadata.agent_plugin_protocol).toBe(1);
     expect(store.getRuntimeAgentPluginDesiredSnapshot(runtime.id).plugins[0]?.status).toBe("pending");
 
+    const desiredBody = await requestRuntimeRpc(store, runtime.id, "plugin.desired", {}, daemonToken.token);
+    expect(desiredBody.ok).toBe(true);
+    expect(desiredBody.runtime_id).toBe(runtime.id);
+    expect(desiredBody.revision).toMatch(/^[0-9a-f]{64}$/);
+    expect(desiredBody.plugins[0]).toMatchObject({
+      plugin_id: plugin.id,
+      version_id: plugin.activeVersionId,
+      digest: plugin.activeVersion!.artifactDigest,
+      retry_generation: 0,
+      status: "pending",
+    });
+
+    const reported = await reportFrame(store, "plugin.state", { runtime_id: runtime.id, version_id: plugin.activeVersionId, status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }, { headers: { ...daemonHeaders, "Content-Type": "application/json" }, authToken: "root-secret", capabilities: { agent_plugin_protocol: 1 } });
+    expect(reported.ok).toBe(true);
+    expect(store.listAgentPluginRuntimeStates({ runtimeId: runtime.id })[0]).toMatchObject({ status: "ready", observedDigest: plugin.activeVersion!.artifactDigest });
+    const eventsAfterFirstReport = runtimeStateEvents.length;
+    const repeatedReport = await reportFrame(store, "plugin.state", { runtime_id: runtime.id, version_id: plugin.activeVersionId, status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }, { headers: { ...daemonHeaders, "Content-Type": "application/json" }, authToken: "root-secret", capabilities: { agent_plugin_protocol: 1 } });
+    expect(repeatedReport.ok).toBe(true);
+    expect(runtimeStateEvents.filter(event => event.payload.state.status === "ready")).toHaveLength(1);
+    expect(runtimeStateEvents).toHaveLength(eventsAfterFirstReport);
+
+    // With v2, each new socket's hello counts as a runtime heartbeat. Verify
+    // master capability writes after the daemon reports ready so this auth check
+    // does not trip the separate three-heartbeat reconciliation timeout.
     const masterHeartbeat = await app.request("/api/daemon/heartbeat", {
       method: "POST",
       headers: {
@@ -752,56 +787,12 @@ describe("Multiremi API — agent plugins", () => {
     expect(masterHeartbeat.status).toBe(200);
     expect(store.getRuntime(runtime.id)?.metadata.agent_plugin_protocol).toBe(2);
 
-    const desired = await app.request(desiredPath, {
-      headers: daemonHeaders,
-    });
-    expect(desired.status).toBe(200);
-    const desiredBody = await desired.json();
-    expect(desiredBody.runtime_id).toBe(runtime.id);
-    expect(desiredBody.revision).toMatch(/^[0-9a-f]{64}$/);
-    expect(desiredBody.plugins[0]).toMatchObject({
-      plugin_id: plugin.id,
-      version_id: plugin.activeVersionId,
-      digest: plugin.activeVersion!.artifactDigest,
-      retry_generation: 0,
-      status: "pending",
-    });
+    const masterReport = await reportFrame(store, "plugin.state", { runtime_id: runtime.id, version_id: plugin.activeVersionId, status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }, { headers: { Authorization: "Bearer root-secret", "Content-Type": "application/json" }, authToken: "root-secret", capabilities: { agent_plugin_protocol: 2 } });
+    expect(masterReport.ok).toBe(true);
 
-    const reported = await app.request(
-      statePath,
-      {
-        method: "POST",
-        headers: { ...daemonHeaders, "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }),
-      },
-    );
-    expect(reported.status).toBe(200);
-    expect((await reported.json()).state).toMatchObject({ status: "ready", observed_digest: plugin.activeVersion!.artifactDigest });
-    const repeatedReport = await app.request(statePath, {
-      method: "POST",
-      headers: { ...daemonHeaders, "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }),
-    });
-    expect(repeatedReport.status).toBe(200);
-    expect(runtimeStateEvents).toHaveLength(1);
-
-    const masterReport = await app.request(statePath, {
-      method: "POST",
-      headers: { Authorization: "Bearer root-secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }),
-    });
-    expect(masterReport.status).toBe(200);
-
-    const openApp = createMultiremiApp({ store, authToken: "" });
-    expect((await openApp.request(desiredPath)).status).toBe(200);
-    expect((await openApp.request(statePath, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }),
-    })).status).toBe(200);
-    expect((await openApp.request(desiredPath, {
-      headers: { Authorization: `Bearer ${localPat.token}` },
-    })).status).toBe(403);
+    expect((await requestRuntimeRpc(store, runtime.id, "plugin.desired", {}, "", "")).ok).toBe(true);
+    expect((await reportFrame(store, "plugin.state", { runtime_id: runtime.id, version_id: plugin.activeVersionId, status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }, { headers: { "Content-Type": "application/json" }, authToken: "", capabilities: { agent_plugin_protocol: 2 } })).ok).toBe(true);
+    expect((await requestRuntimeRpc(store, runtime.id, "plugin.desired", {}, localPat.token, "")).ok).toBe(false);
 
     const retry = await app.request(`/api/multiremi/agent-plugins/${plugin.id}/runtimes/retry`, {
       method: "POST",
@@ -836,7 +827,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("binds legacy daemon tokens on first registration and rejects identity changes", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const capabilityEvents: any[] = [];
     store.onWorkspaceEvent((event) => {
       if (event.type === "agent_plugin:runtime_capability") capabilityEvents.push(event);
@@ -934,10 +925,8 @@ describe("Multiremi API — agent plugins", () => {
     expect(forgedRuntimeIdentity.status).toBe(403);
     expect(store.getRuntime("rt_forged_daemon_identity")).toBeNull();
 
-    const desired = await app.request(`/api/daemon/runtimes/${runtimeId}/agent-plugins/desired`, {
-      headers: { Authorization: `Bearer ${daemonToken.token}` },
-    });
-    expect(desired.status).toBe(200);
+    const desired = await requestRuntimeRpc(store, runtimeId, "plugin.desired", {}, daemonToken.token);
+    expect(desired.ok).toBe(true);
 
     const identityChange = await app.request("/api/daemon/register", {
       method: "POST",
@@ -957,7 +946,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("ignores forged execution snapshots submitted through the public task API", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_api_plugin_forgery",
       name: "Plugin forgery runtime",
@@ -982,10 +971,10 @@ describe("Multiremi API — agent plugins", () => {
     });
     const app = createMultiremiApp({ store });
 
-    const response = await app.request("/api/multiremi/tasks", {
+    const response = await app.request(taskRequestPath(store, {issueId:createResponsibleTestIssue(store, {title:"Dispatch fixture",workspaceId:"local"}).id}), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(requestMessageBody(store, {
         agentId: agent.id,
         prompt: "bypass the required Plugin",
         provider: "claude",
@@ -1004,11 +993,11 @@ describe("Multiremi API — agent plugins", () => {
           config: {},
           connectionId: null,
         }],
-      }),
+      })),
     });
 
-    expect(response.status).toBe(201);
-    expect((await response.json()).task).toMatchObject({
+    expect(response.status).toBe(200);
+    expect(sentTask(store, (await response.json()))).toMatchObject({
       pluginSnapshot: [],
       executionFingerprint: null,
       assignmentSourceEventId: null,
@@ -1017,7 +1006,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("includes the frozen Plugin snapshot in daemon claim wire and client models", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_api_plugin_claim",
       name: "Plugin claim runtime",
@@ -1046,12 +1035,12 @@ describe("Multiremi API — agent plugins", () => {
       const parsed = new URL(url);
       return app.request(`${parsed.pathname}${parsed.search}`, init);
     });
-    const claimed = await new MultiremiDaemonClient("https://remi.example").claimTask(runtime.id);
+    const claimed = normalizeDaemonClaimTask((await receiveTaskOffer(store, runtime.id))!);
 
     expect(claimed).toMatchObject({
-      id: task.id,
-      executionFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
-      pluginSnapshot: [{
+      attempt_id: task.id,
+      execution_fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+      plugin_snapshot: [{
         bindingId: binding.id,
         pluginId: plugin.id,
         versionId: plugin.activeVersionId,
@@ -1064,8 +1053,8 @@ describe("Multiremi API — agent plugins", () => {
     });
   });
 
-  it("echoes the desired Plugin revision in the heartbeat ack without extra work", async () => {
-    const store = createStore();
+  it("pushes the desired Plugin revision separately from the upgrade-only heartbeat ack", async () => {
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_api_plugin_ack",
       name: "Plugin ack runtime",
@@ -1090,9 +1079,9 @@ describe("Multiremi API — agent plugins", () => {
     const headers = { Authorization: `Bearer ${daemonToken.token}`, "Content-Type": "application/json" };
 
     const desiredRevision = async () => {
-      const response = await app.request(`/api/daemon/runtimes/${runtime.id}/agent-plugins/desired`, { headers });
-      expect(response.status).toBe(200);
-      return (await response.json()).revision as string;
+      const response = await requestRuntimeRpc(store, runtime.id, "plugin.desired", {}, daemonToken.token);
+      expect(response.ok).toBe(true);
+      return response.revision as string;
     };
     const heartbeat = async (protocol: number | undefined = 1) => {
       const response = await app.request("/api/daemon/heartbeat", {
@@ -1104,7 +1093,11 @@ describe("Multiremi API — agent plugins", () => {
         }),
       });
       expect(response.status).toBe(200);
-      return await response.json() as Record<string, any>;
+      const ack = await response.json();
+      expect(ack.agent_plugins).toBeUndefined();
+      if (protocol === 0) return ack;
+      return await receiveRuntimeInputs(store, runtime.id,
+        { identity: { accessToken: await store.verifyAccessToken(daemonToken.token), masterToken: false } });
     };
 
     // The ack revision and the desired snapshot must be the same token, or a
@@ -1115,15 +1108,8 @@ describe("Multiremi API — agent plugins", () => {
 
     // Daemon-observed state is excluded: the daemon produces it, so reporting it
     // must not look like a control-plane change and re-trigger the desired GET.
-    const report = await app.request(
-      `/api/daemon/runtimes/${runtime.id}/agent-plugins/${plugin.activeVersionId}/state`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }),
-      },
-    );
-    expect(report.status).toBe(200);
+    const report = await reportFrame(store, "plugin.state", { runtime_id: runtime.id, version_id: plugin.activeVersionId, status: "ready", observed_digest: plugin.activeVersion!.artifactDigest }, { headers: headers, authToken: "root-secret", capabilities: { agent_plugin_protocol: 1 } });
+    expect(report.ok).toBe(true);
     expect(await desiredRevision()).toBe(initialRevision);
     expect((await heartbeat()).agent_plugins).toEqual({ revision: initialRevision });
 
@@ -1179,7 +1165,7 @@ describe("Multiremi API — agent plugins", () => {
   });
 
   it("blocks activation until online runtimes report the candidate digest ready", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_api_activate", name: "Runtime", provider: "codex", workspaceId: "local" });
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
     const plugin = store.importAgentPlugin({
@@ -1222,3 +1208,8 @@ describe("Multiremi API — agent plugins", () => {
     expect((await activated.json()).plugin).toMatchObject({ activeVersionId: version.id, candidateVersionId: null });
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

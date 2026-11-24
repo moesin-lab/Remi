@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Issue } from "@multiremi/core/types";
+import { isShellGatePassedForTest, markRouteContentReady, resetAfterFirstScreenForTest } from "@multiremi/core/platform/use-after-first-screen";
+import { ApiError } from "@multiremi/core/api";
+import { toast } from "sonner";
 
 vi.mock("@multiremi/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
@@ -18,7 +21,7 @@ vi.mock("@multiremi/core/modals", () => ({
   ),
 }));
 
-const mockAuthState = { user: { id: "user-1" }, isAuthenticated: true };
+const mockAuthState: { user: { id: string } | null; isAuthenticated: boolean } = { user: { id: "user-1" }, isAuthenticated: true };
 vi.mock("@multiremi/core/auth", () => ({
   useAuthStore: Object.assign(
     (selector?: any) => (selector ? selector(mockAuthState) : mockAuthState),
@@ -104,11 +107,16 @@ function wrapper({ children }: { children: React.ReactNode }) {
   return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  mockAuthState.user = { id: "user-1" };
+  resetAfterFirstScreenForTest();
+  act(() => markRouteContentReady("/test/issues/issue-1"));
+  await waitFor(() => expect(isShellGatePassedForTest()).toBe(true));
   mockOpenModal.mockReset();
   mockUpdateMutate.mockReset();
   mockCreatePinMutate.mockReset();
   mockDeletePinMutate.mockReset();
+  vi.mocked(toast.error).mockClear();
   pinListRef.value = [];
   localStorage.clear();
   Object.defineProperty(navigator, "clipboard", {
@@ -129,6 +137,50 @@ describe("useIssueActions", () => {
       { id: "issue-1", status: "done" },
       expect.any(Object),
     );
+  });
+
+  it.each([
+    { code: "issue_status_held", reason: "children_open", open_children: 2 },
+    { code: "final_summary_missing", reason: "final_summary_missing", open_children: 0, data: { lastChildClosedAt: "2026-10-08T07:43:00.000Z" } },
+  ])("offers a member force confirmation for $code", (body) => {
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+    act(() => result.current.updateField({ status: "done" }));
+    const callbacks = mockUpdateMutate.mock.calls[0]?.[1];
+    act(() => callbacks.onError(new ApiError("held", 409, "Conflict", body)));
+    expect(mockOpenModal).toHaveBeenCalledWith("issue-force-status", {
+      issueId: "issue-1", identifier: "TES-1", status: "done", reason: body.reason, openChildren: body.open_children,
+    });
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("uses the shared operator for force confirmation independently of the login account", () => {
+  mockAuthState.user = null;
+  const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+  act(() => result.current.updateField({ status: "done" }));
+  const callbacks = mockUpdateMutate.mock.calls[0]?.[1];
+  act(() => callbacks.onError(new ApiError("summary missing", 409, "Conflict", { code: "final_summary_missing", reason: "final_summary_missing", open_children: 0 })));
+  expect(mockOpenModal).toHaveBeenCalled();
+});
+
+  it("shows a normal error for a malformed summary refusal", () => {
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+    act(() => result.current.updateField({ status: "done" }));
+    const callbacks = mockUpdateMutate.mock.calls[0]?.[1];
+    act(() => callbacks.onError(new ApiError("malformed summary refusal", 409, "Conflict", {
+      code: "final_summary_missing", reason: "final_summary_missing", open_children: "0",
+    })));
+    expect(mockOpenModal).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith("malformed summary refusal");
+  });
+
+  it("keeps an agent rejection on the denied path without opening force confirmation", () => {
+    mockAuthState.user = null;
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+    act(() => result.current.updateField({ status: "done" }));
+    const callbacks = mockUpdateMutate.mock.calls[0]?.[1];
+    act(() => callbacks.onError(new ApiError("member required", 403, "Forbidden", { code: "parent_done_requires_member" })));
+    expect(mockOpenModal).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith("member required");
   });
 
   it("assigning an agent to a backlog issue opens the backlog-hint modal", () => {

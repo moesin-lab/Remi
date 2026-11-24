@@ -8,6 +8,7 @@ function createLogger(_: string) { return _log; }
 
 import { resolveAcpProcessLaunch } from "./launch.js";
 import { isolateProcessTmp, mapPrivateTmpPath } from "./private-tmp.js";
+import { AcpRpcError, airMetadata } from "./session-failure.js";
 
 import type {
   JsonRpcRequest,
@@ -16,6 +17,7 @@ import type {
   JsonRpcMessage,
   InitializeParams,
   InitializeResult,
+  AuthenticateParams,
   NewSessionParams,
   NewSessionResult,
   PromptParams,
@@ -27,6 +29,7 @@ import type {
   ElicitationCreateParams,
   ElicitationResult,
   SetSessionModeParams,
+  SetSessionModelParams,
   SetSessionConfigOptionParams,
   SetSessionConfigOptionResult,
   CancelParams,
@@ -36,7 +39,25 @@ import type {
   CloseSessionParams,
   McpServerConfig,
   PromptContent,
+  AgentSteering,
+  AgentNativeSubagents,
+  AsyncTaskStopParams,
+  AsyncTaskStopResult,
+  SteerParams,
+  SteerResponse,
 } from "@shared/contracts/acp-protocol.js";
+
+/** The AIR capability that turns on codex-acp's child sessions (and is accepted by claude-agent-acp). */
+export const AIR_NATIVE_SUBAGENT_SESSIONS = "nativeSubagentSessions";
+/**
+ * The AIR capability that makes both pinned bridges publish background work as
+ * `async_task_*` updates and serve `_session/async_task/stop` (PR 6 §1;
+ * claude-agent-acp 0.90 dist/air-extension.js `AIR_ASYNC_TASKS_CAPABILITY`,
+ * codex-acp 2.2.2 dist/index.js `AIR_ASYNC_TASKS_KEY`).
+ */
+export const AIR_ASYNC_TASKS = "asyncTasks";
+/** Stops one background task without cancelling the prompt (both pinned bridges). */
+export const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
 
 export interface AcpClientOptions {
   /** An isolated probe supervisor already owns the process group. */
@@ -47,10 +68,27 @@ export interface AcpClientOptions {
   args?: string[];
   /** Agent flavor ("claude" | "codex"); gates claude-only client capabilities. */
   agentType?: string;
+  /**
+   * Ask for native child sessions (PR 5): `subagents: {}`, plus the AIR
+   * `nativeSubagentSessions` capability when the adapter needs it (Codex).
+   * Absent: the client advertises neither, and subagent frames stay on the root.
+   */
+  nativeSubagents?: AgentNativeSubagents | null;
+  /**
+   * Ask for background tasks (PR 6 §3.1): append the AIR `asyncTasks`
+   * capability, so the bridge publishes `async_task_*` updates and Claude its
+   * "backgrounded" marker. Absent: neither bridge sends them.
+   */
+  asyncTasks?: boolean;
   /** Working directory for the agent process. */
   cwd?: string;
-  /** Daemon-owned directory mounted as this task execution's literal /tmp. */
+  /**
+   * Daemon-owned directory bound to this task execution. Linux mounts it as the
+   * literal /tmp; macOS (MUL-449) exports it through TMPDIR/TMP/TEMP instead.
+   */
   privateTmpDirectory?: string;
+  /** Platform override for the private-/tmp contract (test injection). */
+  privateTmpPlatform?: NodeJS.Platform;
   /** Additional MCP servers to configure. */
   mcpServers?: McpServerConfig[];
   /** Environment variables for the agent process. */
@@ -92,6 +130,7 @@ export class AcpClient {
   private _options: AcpClientOptions;
   private _serverSessionId: string | null = null;
   private _initializeResult: InitializeResult | null = null;
+  private _requestedSessionFailures = false;
   /**
    * Inbound requests we are serving and haven't answered yet, keyed by the
    * agent's request id. The value settles the request as cancelled; the agent
@@ -119,6 +158,65 @@ export class AcpClient {
     return this._initializeResult;
   }
 
+  /**
+   * Native steering, advertised as top-level `InitializeResponse._meta.steering
+   * .supported: true` by both pinned bridges (claude-agent-acp 0.90
+   * dist/acp-agent.js:1427-1429; codex-acp 2.2.2 dist/index.js:42474-42477).
+   */
+  get steeringSupported(): boolean {
+    const steering = this._initializeResult?._meta?.steering;
+    return !!steering && typeof steering === "object" && (steering as { supported?: unknown }).supported === true;
+  }
+
+  get typedSessionFailures(): boolean {
+    const capabilities = airMetadata(this._initializeResult?._meta)?.capabilities
+      ?? airMetadata(this._initializeResult?.agentCapabilities?._meta)?.capabilities;
+    return this._requestedSessionFailures && Array.isArray(capabilities) && capabilities.includes("sessionFailure");
+  }
+
+  /**
+   * Native child sessions are on: the client asked for them and the agent
+   * advertises `agentCapabilities.sessionCapabilities.subagents` or the AIR
+   * `nativeSubagentSessions` capability. Both pinned bridges advertise both,
+   * asked or not (live probe), so the request is what decides.
+   */
+  get nativeSubagentsEnabled(): boolean {
+    if (!this._options.nativeSubagents || !this._initializeResult) return false;
+    const marker = this._initializeResult.agentCapabilities?.sessionCapabilities?.subagents;
+    if (marker && typeof marker === "object" && !Array.isArray(marker)) return true;
+    const capabilities = airMetadata(this._initializeResult._meta)?.capabilities
+      ?? airMetadata(this._initializeResult.agentCapabilities?._meta)?.capabilities;
+    return Array.isArray(capabilities) && capabilities.includes(AIR_NATIVE_SUBAGENT_SESSIONS);
+  }
+
+  /**
+   * Background tasks are on (PR 6): the client asked for them and the agent
+   * lists the AIR `asyncTasks` capability. Both pinned bridges list it for
+   * any AIR client (claude-agent-acp 0.90 dist/acp-agent.js:1421).
+   */
+  get asyncTasksEnabled(): boolean {
+    if (!this._options.asyncTasks || !this._initializeResult) return false;
+    const capabilities = airMetadata(this._initializeResult._meta)?.capabilities
+      ?? airMetadata(this._initializeResult.agentCapabilities?._meta)?.capabilities;
+    return Array.isArray(capabilities) && capabilities.includes(AIR_ASYNC_TASKS);
+  }
+
+  /** The agent process id while it runs; null otherwise. */
+  get processId(): number | null {
+    const pid = this._process?.pid;
+    return this._process && !this._process.killed && typeof pid === "number" && pid > 0 ? pid : null;
+  }
+
+  /**
+   * The agent's own POSIX process group (the process is its leader when
+   * spawned detached), for the daemon's crash sweep; null when it shares the
+   * caller's group, on Windows, or when nothing runs.
+   */
+  get processGroupId(): number | null {
+    if (process.platform === "win32" || this._options.inheritProcessGroup) return null;
+    return this.processId;
+  }
+
   private _log(...args: unknown[]) {
     this._options.log?.("[AcpClient]", ...args);
   }
@@ -142,7 +240,13 @@ export class AcpClient {
       resolveAcpProcessLaunch(executable, this._options.args ?? []),
       this._options.privateTmpDirectory,
       env,
+      this._options.privateTmpPlatform,
     );
+    // A platform downgrade (macOS) hands back the environment it needs; the
+    // caller's own `env` object is never mutated.
+    if (launch.env) Object.assign(env, launch.env);
+    // Drop the retired identity after every overlay, including machine env.
+    delete env.MULTIREMI_TASK_ID;
     this._process = Bun.spawn([launch.executable, ...launch.args], {
       stdin: "pipe",
       stdout: "pipe",
@@ -370,7 +474,7 @@ export class AcpClient {
     this._pending.delete(msg.id);
 
     if (msg.error) {
-      pending.reject(new Error(`RPC error ${msg.error.code}: ${msg.error.message}`));
+      pending.reject(new AcpRpcError(msg.error.code, msg.error.message, msg.error.data));
     } else {
       pending.resolve(msg.result);
     }
@@ -464,7 +568,10 @@ export class AcpClient {
         // `line` is 1-based and `limit` caps the returned line count
         // (sdk schema.json ReadTextFileRequest); both are optional.
         const { path, line, limit } = msg.params as { path: string; line?: number | null; limit?: number | null };
-        let content = readFileSync(mapPrivateTmpPath(path, this._options.privateTmpDirectory), "utf-8");
+        let content = readFileSync(
+          mapPrivateTmpPath(path, this._options.privateTmpDirectory, this._options.privateTmpPlatform),
+          "utf-8",
+        );
         if (line != null || limit != null) {
           const start = line != null && line > 0 ? line - 1 : 0;
           const lines = content.split("\n");
@@ -473,7 +580,11 @@ export class AcpClient {
         this._respond(msg.id, { content });
       } else if (msg.method === "fs/write_text_file") {
         const { path, content } = msg.params as { path: string; content: string };
-        writeFileSync(mapPrivateTmpPath(path, this._options.privateTmpDirectory), content, "utf-8");
+        writeFileSync(
+          mapPrivateTmpPath(path, this._options.privateTmpDirectory, this._options.privateTmpPlatform),
+          content,
+          "utf-8",
+        );
         this._respond(msg.id, {});
       }
     } catch (err: any) {
@@ -487,7 +598,17 @@ export class AcpClient {
 
   // ── ACP protocol methods ───────────────────────────────────────
 
-  async initialize(): Promise<InitializeResult> {
+  async initialize(meta?: Record<string, unknown>): Promise<InitializeResult> {
+    const native = this._options.nativeSubagents ?? null;
+    const air = (capabilities: string[]) => ({
+      version: 1,
+      capabilities: [
+        ...capabilities,
+        ...(native?.airCapability ? [AIR_NATIVE_SUBAGENT_SESSIONS] : []),
+        // PR 6 §3.1: both bridges gate `async_task_*` and the Bash marker on it.
+        ...(this._options.asyncTasks ? [AIR_ASYNC_TASKS] : []),
+      ],
+    });
     const params: InitializeParams = {
       protocolVersion: 1,
       clientInfo: { name: "remi", version: "0.1.0" },
@@ -500,22 +621,47 @@ export class AcpClient {
         _meta: {
           terminal_output: true,
           ...(this._options.agentType === "codex"
-            ? { jetbrains: { air: { version: 1, capabilities: ["recommendedValue"] } } }
-            : { "subagent-transcript": true }),
+            ? { jetbrains: { air: air(["recommendedValue", "sessionFailure"]) } }
+            : { "subagent-transcript": true, jetbrains: { air: air(["sessionFailure"]) } }),
         },
+        // Native child sessions (PR 5): each subagent's frames arrive on its own
+        // session, announced by `subagent_spawned` (claude-agent-acp 0.90
+        // dist/acp-subagents.js; codex-acp 2.2.2 also needs the AIR capability).
+        ...(native ? { subagents: {} } : {}),
         fs: { readTextFile: true, writeTextFile: true },
+        // ACP session lifecycle reports (PR 2 decision R11). Both pinned bridges
+        // need an object: with `compaction` they send `compaction_update` /
+        // `compaction_summary_chunk` instead of a "Compact conversation" tool call
+        // or banner text (claude-agent-acp 0.89 dist/context-compaction.js:3-6,
+        // acp-agent.js:2536-2541; codex-acp 2.2.2 dist/index.js:42231-42233,
+        // 44875); with `notices` they send `notice` updates instead of message
+        // text that would pollute the final reply (dist/session-notices.js:6-35;
+        // dist/index.js:30671-30682, 31504-31517, 31702-31711).
+        session: { compaction: {}, notices: {} },
         // Form-elicitation support: the agent keeps AskUserQuestion enabled and
         // sends it to us as `elicitation/create` instead of disabling the tool.
         // NOTE: `form` must be an object — the agent's zod schema silently
         // drops a boolean here.
         elicitation: { form: {} },
       },
+      ...(meta ? { _meta: meta } : {}),
     };
 
+    const capabilities = airMetadata(params.clientCapabilities?._meta)?.capabilities;
+    this._requestedSessionFailures = Array.isArray(capabilities) && capabilities.includes("sessionFailure");
     const result = await this._request<InitializeResult>("initialize", params);
     this._initialized = true;
     this._initializeResult = result;
     return result;
+  }
+
+  async authenticate(methodId: string, meta?: Record<string, unknown>): Promise<void> {
+    const params: AuthenticateParams = { methodId, ...(meta ? { _meta: meta } : {}) };
+    await this._request("authenticate", params);
+  }
+
+  async listGrokModels(): Promise<unknown> {
+    return this._request("x.ai/models/list", {});
   }
 
   async newSession(params?: Partial<NewSessionParams>): Promise<NewSessionResult> {
@@ -544,9 +690,28 @@ export class AcpClient {
     return this._request<PromptResult>("session/prompt", params);
   }
 
+  /**
+   * Inject `text` into the session's running turn (ADR 0020). With the idle
+   * opt-in, an idle Claude session answers `promptRequired` and leaves the text
+   * to us; codex-acp has no opt-in and drops `_meta` (dist/index.js:43989-43998).
+   */
+  async steer(sessionId: string, text: string, steering: AgentSteering): Promise<SteerResponse> {
+    const params: SteerParams = {
+      sessionId,
+      prompt: [{ type: "text", text }],
+      ...(steering.idleOptIn ? { _meta: { steering: { idleBehavior: "promptRequired" as const } } } : {}),
+    };
+    return this._request<SteerResponse>(steering.method, params);
+  }
+
   async setMode(sessionId: string, modeId: string): Promise<void> {
     const params: SetSessionModeParams = { sessionId, modeId };
     await this._request("session/set_mode", params);
+  }
+
+  async setModel(sessionId: string, modelId: string, meta?: Record<string, unknown>): Promise<void> {
+    const params: SetSessionModelParams = { sessionId, modelId, ...(meta ? { _meta: meta } : {}) };
+    await this._request("session/set_model", params);
   }
 
   /**
@@ -592,11 +757,31 @@ export class AcpClient {
    * `cwd` and `mcpServers` are required by the schema — callers must supply
    * both or the agent rejects the load with -32602 (see {@link LoadSessionParams}).
    */
-  async loadSession(sessionId: string, cwd: string, mcpServers: McpServerConfig[]): Promise<NewSessionResult> {
-    const params: LoadSessionParams = { sessionId, cwd, mcpServers };
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    mcpServers: McpServerConfig[],
+    extra?: Pick<LoadSessionParams, "additionalDirectories" | "_meta">,
+  ): Promise<NewSessionResult> {
+    const params: LoadSessionParams = {
+      sessionId, cwd, mcpServers,
+      ...(extra?.additionalDirectories?.length ? { additionalDirectories: extra.additionalDirectories } : {}),
+      _meta: extra?._meta,
+    };
     const result = await this._request<NewSessionResult>("session/load", params);
     this._serverSessionId = result.sessionId ?? sessionId;
     return { ...result, sessionId: result.sessionId ?? sessionId };
+  }
+
+  /**
+   * `_session/async_task/stop` (PR 6 §1): `sessionId` is the root session, even
+   * for a task started inside a native child. `{stopped: false}` when the task
+   * was never announced, has ended, or is already stopping.
+   */
+  async stopAsyncTask(sessionId: string, asyncTaskId: string): Promise<AsyncTaskStopResult> {
+    const params: AsyncTaskStopParams = { sessionId, asyncTaskId };
+    const result = await this._request<AsyncTaskStopResult | null>(ASYNC_TASK_STOP_METHOD, params);
+    return { stopped: result?.stopped === true };
   }
 
   async closeSession(sessionId: string): Promise<void> {

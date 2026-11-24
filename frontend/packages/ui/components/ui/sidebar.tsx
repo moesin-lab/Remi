@@ -27,7 +27,7 @@ import {
 import { PanelLeftIcon } from "lucide-react"
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
-const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
+const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 const SIDEBAR_WIDTH_DEFAULT = 256
 const SIDEBAR_WIDTH_MIN = 200
 const SIDEBAR_WIDTH_MAX = 360
@@ -81,10 +81,14 @@ function SidebarProvider({
   const [openMobile, setOpenMobile] = React.useState(false)
 
   const [width, _setWidth] = React.useState(SIDEBAR_WIDTH_DEFAULT)
+  // The SSR log can only position against the persisted width after this
+  // restore. Its positioning script also waits for the existing CSS animation.
+  const [widthRestored, setWidthRestored] = React.useState(false)
   const [isResizing, setIsResizing] = React.useState(false)
   React.useEffect(() => {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)
     if (stored) _setWidth(Number(stored))
+    setWidthRestored(true)
   }, [])
   const setWidth = React.useCallback((w: number) => {
     const clamped = Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, w))
@@ -141,6 +145,7 @@ function SidebarProvider({
     <SidebarContext.Provider value={contextValue}>
       <div
         data-slot="sidebar-wrapper"
+        data-sidebar-width-ready={widthRestored ? "1" : "0"}
         style={
           {
             "--sidebar-width": `${width}px`,

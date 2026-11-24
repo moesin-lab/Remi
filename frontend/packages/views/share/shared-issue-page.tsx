@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Bot,
@@ -18,6 +19,9 @@ import type {
   SharedIssueBundle,
   TimelineEntry,
 } from "@multiremi/core/types";
+import type { TraceItem } from "@multiremi/contracts/trace";
+import { applyTurnTracePage, EMPTY_TURN_TRACE } from "@multiremi/shared/turn-trace";
+import { describeStep } from "@multiremi/shared/trace-step-copy";
 import { api } from "@multiremi/core/api";
 import { Badge } from "@multiremi/ui/components/ui/badge";
 import { Markdown } from "@multiremi/ui/markdown";
@@ -55,10 +59,10 @@ export function SharedIssuePage({ token }: { token: string }) {
     );
   }
 
-  return <SharedIssueDocument bundle={query.data} />;
+  return <SharedIssueDocument bundle={query.data} token={token} />;
 }
 
-function SharedIssueDocument({ bundle }: { bundle: SharedIssueBundle }) {
+function SharedIssueDocument({ bundle, token }: { bundle: SharedIssueBundle; token: string }) {
   const { t } = useT("issues");
   const { issue } = bundle;
   const actorName = (type: string | null, id: string | null) => {
@@ -177,13 +181,13 @@ function SharedIssueDocument({ bundle }: { bundle: SharedIssueBundle }) {
                         </div>
                       ))}
                       {session.tasks.map((task) => (
-                        <SharedTask key={task.id} task={task} actors={bundle.actors} />
+                        <SharedTask key={task.id} task={task} actors={bundle.actors} token={token} />
                       ))}
                     </div>
                   </section>
                 ))}
                 {bundle.tasks.map((task) => (
-                  <SharedTask key={task.id} task={task} actors={bundle.actors} />
+                  <SharedTask key={task.id} task={task} actors={bundle.actors} token={token} />
                 ))}
               </div>
             </DocumentSection>
@@ -310,30 +314,76 @@ function SharedTimelineEntry({
   );
 }
 
-function SharedTask({
+/** Pages a shared trace reads at most; the cursor must advance on each. */
+const MAX_SHARED_TRACE_PAGES = 200;
+
+export function SharedTask({
   task,
   actors,
+  token,
 }: {
-  task: AgentTask & { messages?: Array<Record<string, unknown>> };
+  task: AgentTask;
   actors: SharedIssueActor[];
+  token: string;
 }) {
+  const { t } = useT("issues");
+  const { t: tc } = useT("chat");
+  const [open, setOpen] = useState(false);
+  const [requestVersion, setRequestVersion] = useState(0);
+  const trace = useQuery({
+    queryKey: ["shared-task-trace", token, task.id, requestVersion],
+    enabled: open,
+    retry: false,
+    queryFn: async () => {
+      let state = EMPTY_TURN_TRACE;
+      let cursor: number | null = 0;
+      for (let pages = 0; cursor !== null && pages < MAX_SHARED_TRACE_PAGES; pages++) {
+        const page = await api.getSharedTaskTrace(token, task.id, cursor);
+        if (page.state !== "ok") return { items: [] as readonly TraceItem[], state: page.state, runtimeName: page.runtime_name };
+        state = applyTurnTracePage(state, page);
+        if (page.next_item_cursor !== null && page.next_item_cursor <= cursor) throw new Error("trace cursor did not advance");
+        cursor = page.next_item_cursor;
+      }
+      return { items: state.items, state: "ok" as const, runtimeName: null };
+    },
+  });
   const agent = findActor(actors, "agent", task.agent_id);
+  const state = trace.data?.state;
+  const stateText = state === "unreachable"
+    ? t(($) => $.share.trace_unreachable, { name: trace.data?.runtimeName ?? "?" })
+    : state === "lost" ? t(($) => $.share.trace_lost)
+    : null;
+  const items = trace.data?.items ?? [];
+  const ids = new Set(items.map((item) => item.id));
+  const depth = (item: TraceItem): number => item.parent_id && ids.has(item.parent_id)
+    ? 1 + depth(items.find((parent) => parent.id === item.parent_id)!) : 0;
   return (
-    <details className="border-y py-2 text-sm">
+    <details className="border-y py-2 text-sm" onToggle={(event) => {
+      const expanded = event.currentTarget.open;
+      setOpen(expanded);
+      if (expanded) setRequestVersion((version) => version + 1);
+    }}>
       <summary className="flex cursor-pointer list-none items-center gap-2">
         <Bot className="size-4 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate">{agent?.name ?? task.agent_id}</span>
         <span className="text-xs text-muted-foreground">{task.status}</span>
       </summary>
-      <div className="mt-3 space-y-3 pl-6">
-        {(task.messages ?? []).map((message, index) => (
-          <div key={String(message.id ?? message.seq ?? index)} className="overflow-hidden">
-            <div className="mb-1 text-[11px] uppercase text-muted-foreground">{String(message.type ?? "event")}</div>
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-3 text-xs">
-              {messageText(message)}
-            </pre>
-          </div>
-        ))}
+      <div className="mt-3 space-y-1 pl-6">
+        {open && trace.isPending && <p>{t(($) => $.share.trace_loading)}</p>}
+        {open && trace.isError && <p>{t(($) => $.share.trace_failed)}</p>}
+        {open && stateText && <p>{stateText}</p>}
+        {open && items.map((item) => {
+          // One line per item, in the words Chat and Feishu use for it.
+          const descriptor = describeStep(item);
+          const text = tc(($) => $.steps[descriptor.key], descriptor.args);
+          return (
+            <p key={item.id} data-shared-trace-item={item.type} title={text}
+              style={{ paddingLeft: `${depth(item) * 16}px` }}
+              className="truncate text-sm text-muted-foreground">
+              {text}
+            </p>
+          );
+        })}
       </div>
     </details>
   );
@@ -342,15 +392,6 @@ function SharedTask({
 function findActor(actors: SharedIssueActor[], type: string, id: string | null): SharedIssueActor | null {
   if (!id) return null;
   return actors.find((actor) => actor.type === type && actor.id === id) ?? null;
-}
-
-function messageText(message: Record<string, unknown>): string {
-  for (const key of ["content", "output", "text", "body", "input"]) {
-    const value = message[key];
-    if (typeof value === "string" && value) return value;
-    if (value && typeof value === "object") return JSON.stringify(value, null, 2);
-  }
-  return JSON.stringify(message, null, 2);
 }
 
 function formatDateTime(value: string): string {

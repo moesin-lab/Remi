@@ -6,7 +6,7 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 
 # 本机双环境
 
-使用 [本机管理脚本](../../scripts/local-profile.mjs)和 [Compose 模板](../../deploy/docker/compose.local.yml)。需要 Node.js 22+、Git、tar 与运行中的 Docker Desktop（Linux 容器）；Windows 固定使用 `desktop-linux` context。Bun 1.3.14 和 Linux 依赖在镜像内安装，不要求宿主安装 Bun，也不使用宿主 Windows 的 node_modules。
+首次部署使用 [本机管理脚本](../../scripts/local-profile.mjs)和 [Compose 模板](../../deploy/docker/compose.local.yml)，需要 Node.js 22+、Git、tar 与运行中的 Docker Desktop（Linux 容器）；Windows 固定使用 `desktop-linux` context。stable 首次部署默认下载 CI 镜像，还需已登录的 GitHub CLI（`gh auth login`）读取当前 origin 仓库的 Actions 产物；私有 GHCR 镜像需预先 `docker login ghcr.io`，使用有 read:packages 权限的凭据。Bun 1.3.14 和 Linux 依赖在 CI 镜像内安装，不使用宿主 Windows 的 node_modules。接入下文内部更新模式后，日常升级由 Compose 中独立 updater 下载应用及 Bun/Node，不再要求宿主 Git、Node、Bun 或 Docker CLI 参与更新。
 
 | 内容 | stable | dev |
 |---|---|---|
@@ -14,21 +14,52 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 | API / daemon 入口 | LAN 模式：`http://<内网IP>:16120`；默认 `http://127.0.0.1:16120` | `http://localhost:16220`，仅本机 |
 | Compose 项目 | `remi-stable` | `remi-dev` |
 | 配置及备份目录 | `~/.remi/profiles/stable/` | `~/.remi/profiles/dev/` |
-| 源码 | `releases/<完整提交>/` 的 Git 快照 | 当前开发仓库 |
+| 源码 | 首次部署为 Git 快照；内部更新使用 `remi-stable_program` 卷，宿主应用模式使用 `remi-stable_application-releases` | 当前开发仓库 |
 | Web | 固定提交的生产构建 | Next dev，配合 Compose watch |
-| API | 固定镜像 | Bun watch，配合 Compose watch |
+| API | 固定基础镜像，应用更新后运行持久卷中的选定版本 | Bun watch，配合 Compose watch |
 | PostgreSQL / 文件卷 | `remi-stable_postgres-data` / `remi-stable_api-home` | `remi-dev_postgres-data` / `remi-dev_api-home` |
 | 自动任务与轮询 | 默认开启 | 默认关闭 |
 
 这里的 `~` 是当前用户目录。Windows 示例：`C:\Users\sentuix\.remi\profiles\stable`。配置、源码快照和备份在该目录；数据库与运行文件保存在 Docker 管理的上述独立 Linux 卷中，不是仓库内的普通目录。
 
-目录隔离不能代替数据和登录隔离。两个 API 的数据库、token、JWT secret、home、uploads 和 session archives 独立；PostgreSQL 不发布宿主端口。浏览器使用不同 hostname，因为现有 Cookie 不按端口隔离。保持表中入口，不要将两边都改成 localhost。每套网络中的 `api` 和 `postgres` 只指向该套环境。
+目录隔离不能代替数据和登录隔离。两个 API 的数据库、token、JWT secret、home 和 uploads 独立；PostgreSQL 不发布宿主端口。浏览器使用不同 hostname，因为现有 Cookie 不按端口隔离。保持表中入口，不要将两边都改成 localhost。每套网络中的 `api` 和 `postgres` 只指向该套环境。
 
-WebSocket 通过 `NEXT_PUBLIC_WS_URL` 直连所选环境的 API 端口，LAN 模式使用内网 IP，默认使用 loopback，避免 Next dev 的 `/ws` 代理握手阻塞；普通 HTTP API 仍走 Web 的同源代理。`MULTIREMI_DAEMON_DIRECT_BASE_URL` 使用同一个 API origin，供 daemon 连接及归档直接上传；`/api/config` 的 `daemon_server_url` 和 CLI 安装说明一起返回它，所以即使从本机页面打开安装弹窗，也不会给远程机器生成 localhost 地址。默认发行构建保留原来的 WebSocket URL 推导行为。
+WebSocket 通过 `NEXT_PUBLIC_WS_URL`（应用更新模式为运行时 `REMI_WEB_WS_URL`）直连所选环境的 API 端口，LAN 模式使用内网 IP，默认使用 loopback，避免 Next dev 的 `/ws` 代理握手阻塞；普通 HTTP API 仍走 Web 的同源代理。`MULTIREMI_DAEMON_DIRECT_BASE_URL` 使用同一个 API origin，供 daemon 连接；`/api/config` 的 `daemon_server_url` 和 CLI 安装说明一起返回它，所以即使从本机页面打开安装弹窗，也不会给远程机器生成 localhost 地址。默认发行构建保留原来的 WebSocket URL 推导行为。
 
-两套 API 都保持生产鉴权检查，dev 的开发模式只用于源码重载和 Web 编译。默认使用 SQL 项目知识库，不运行 OpenViking、SSH Mesh 控制面或 platform-updater；没有把远端部署需要的服务全部拉到本机。需要这些能力时，应分别配置，不能共用 stable 的状态目录或飞书/SCM 凭据。
+两套 API 都保持生产鉴权检查，dev 的开发模式只用于源码重载和 Web 编译。默认使用 SQL 项目知识库，不运行 OpenViking 或 SSH Mesh 控制面。dev 不运行 platform-updater；stable 按下文显式接入内部或宿主更新器。两套环境不能共用 updater 状态、飞书/SCM 凭据或 profile 数据。
 
 ## 启动和开发
+
+### CI 日常构建
+
+[Platform images 工作流](../../.github/workflows/platform-images.yml)每天 UTC 20:17（北京时间次日 04:17）构建 `main` 的 API 和 Web，也支持 Actions 页面的 **Run workflow**，输入分支、tag 或提交。工作流须存在于默认分支且保持启用；GitHub 定时任务可能延迟。构建不创建版本号、Git tag 或 Release，也不会自动部署本机。
+
+在仓库 Actions variables 设置 `REMI_STABLE_HOST` 为 stable 的实际内网 IPv4；未设置时使用 `127.0.0.1`。手动构建的 `hostname` 可覆盖该变量。地址会编入 Web 镜像，必须与部署地址一致。可用 GitHub CLI 手动触发（仓库名替换为自己的 fork）：
+
+```powershell
+gh workflow run platform-images.yml --repo OWNER/Remi -f ref=main
+```
+
+CI 固定 Bun 版本并使用公共依赖源，发布唯一 `ci-<提交>-<run>-<attempt>` 镜像 tag；随后按 digest 拉取，验证容器健康、登录 Cookie 和 WebSocket 鉴权。成功运行提供保留 90 天的 `stable-images-<完整提交>` artifact，其中 `stable-images.json` 记录 API/Web digest、提交及访问地址。部署会自动查找当前 origin 仓库中该提交的成功构建；也可显式传 `--image-manifest <下载的文件路径>`。过期或不存在的产物需重新触发构建。下载、提交或地址校验失败时不会停止旧服务，也不会退回本地编译。
+
+仅在明确需要宿主编译时使用 `stable deploy --ref <提交> --build-local true`。dev 仍在本机构建和 watch；stable 的日常构建内存开销由 CI 承担，Docker Desktop 在本机只需运行服务。
+
+### 本地构建代理
+
+`build`、`deploy --build-local true`、dev deploy 和 dev watch（包括后续依赖重建）继承当前进程的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 及其小写形式，作为 API/Web 的 build args。无代理时保持原有构建网络和参数。POSIX 上大小写变量分别按原值传入，请避免同时设置互相冲突的值；Windows 环境变量名不区分大小写，每项只生成一个大写 build arg，小写环境变量同样有效。
+
+Linux 原生 Docker 上，代理 URL 指向 `localhost`、`127.0.0.0/8` 或 `[::1]` 时自动使用 `build.network: host`，让构建步骤能访问宿主回环代理。例如（Bash）：
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:17890
+export HTTPS_PROXY=http://127.0.0.1:17890
+export NO_PROXY=localhost,127.0.0.1,::1
+node scripts/local-profile.mjs stable deploy --ref HEAD --build-local true
+```
+
+可用进程环境变量 `REMI_BUILD_NETWORK=host|default|none` 显式选择构建网络；`default` 可覆盖 Linux 的自动 host 选择。Docker Desktop 的回环地址通常属于 Linux VM，不能假定等于宿主回环：请将代理地址改为容器可达地址（如 `host.docker.internal`，并配置代理监听），或在 Docker Desktop 已启用 host networking 时显式设置 `REMI_BUILD_NETWORK=host`。host 构建需要本机 builder 允许 host 网络；脚本不会修改 builder 权限。此配置只影响构建步骤，不改变运行容器的网络。基础镜像拉取由 Docker daemon / BuildKit 自身的代理设置负责，build args 不负责镜像仓库连接。
+
+脚本通过 stdin 临时 Compose 覆盖只传代理变量名，不把代理值写入命令参数、profile 配置、备份或脚本日志。Dockerfile 不声明代理 `ARG` / `ENV`，使用 Docker 预定义代理参数，使其不进入最终镜像环境、history 和构建缓存键；不要为排障加入 `env`、`set -x` 或打印代理值的构建指令。代理仅供构建使用，不注入 API/Web 运行环境。自动检查见 `node --test scripts/local-profile.test.mjs`，覆盖参数生成、回环与显式网络、watch 重建、敏感值不落盘/输出及 Dockerfile 约束。
 
 从仓库根目录运行：
 
@@ -40,6 +71,55 @@ node scripts/local-profile.mjs dev watch
 
 stable 只打包已提交的 Git 内容；未提交修改不会进入快照。`--ref` 可以指定已检查的 commit。dev 读取当前工作树；watch 运行期间同步源码并在依赖清单改变时重建，忽略 node_modules、`.next`、Git 元数据和环境文件。Compose 2.30 不支持首次自动全量同步，因此每次启动 watch 都先构建；关闭 watch 终端只停止同步，不停止容器。
 
+## API 运行时宿主代理
+
+构建代理与运行时代理独立。默认不向容器注入代理；在部署进程设置
+`HTTP_PROXY` / `HTTPS_PROXY`（也支持小写），然后显式开启：
+
+```bash
+# 只在专用的隔离 profile 根目录演练；不要指向已有 stable 数据。
+export REMI_PROFILES_ROOT="$HOME/.remi/proxy-validation"
+export HTTPS_PROXY=http://127.0.0.1:17890
+node scripts/local-profile.mjs dev deploy --runtime-proxy true
+# 已 prepare 的配置也可用：
+node scripts/local-profile.mjs dev up --runtime-proxy true
+```
+
+`deploy`、`up`、`watch` 支持 `--runtime-proxy true|false`。开关不保存；每次重建
+容器都须重新传入开关和环境变量，普通 restart 保留现有容器环境。
+同一变量同时提供大小写时，大写非空值优先；API 内注入一致的大小写变量。
+只支持 HTTP/HTTPS 代理 URL。`localhost`、IPv4 回环（含 `127.0.0.1`）、`::1`
+改写为 `host.docker.internal`，同时加入 `host-gateway` 映射。
+
+**改写不能让只监听回环的代理自动对容器开放。** 宿主代理（例如 mihomo）需额外
+监听 Docker 网桥地址，或监听 `0.0.0.0` 并用防火墙限制仅 Docker 网段访问。
+监听与防火墙调整由宿主所有者执行；本脚本不修改它们。Docker 需支持
+`host-gateway`。Docker Desktop 也使用相同映射，实际可达性需在该机器验证。
+
+默认 `NO_PROXY` / `no_proxy` 合并两种大小写的用户条目，去重并保留 `postgres`、
+`api`、`web`、`updater`、loopback、宿主网关及 RFC 1918、链路本地和 IPv6 私网段。
+内部域名的直连不依赖客户端是否支持 CIDR；不同工具的 CIDR 匹配能力仍需各自验证。
+Web、PostgreSQL 和 updater 不注入运行时代理。
+
+代理只经当前 Compose 进程环境和标准输入覆盖传递，不写入 profile、备份或镜像层。
+运行时 Compose 输出中的代理 URL 与凭据会脱敏；不要使用 `docker inspect`、
+非 quiet 的 `compose config` 或 `env` 把容器凭据打印到共享日志。Docker 管理员仍可
+读取容器环境。带凭据 URL 应由私有环境注入，避免直接输入 shell 历史。
+
+在上述隔离 dev 环境验证（如镜像中有 curl，也可用 curl）：
+
+```bash
+docker exec remi-dev-api-1 bun -e 'for (const u of ["https://raw.githubusercontent.com/moesin-lab/Remi/main/README.md", "https://api.github.com/repos/moesin-lab/Remi"]) { const r = await fetch(u, {signal: AbortSignal.timeout(15000)}); console.log(new URL(u).hostname, r.status); }'
+# 检查真实 HTTP 内部请求绕过代理：对照代理访问日志，应无 api:6120 请求。
+docker exec remi-dev-api-1 bun -e 'const r = await fetch("http://api:6120/readyz"); console.log(r.status)'
+# 停止隔离测试用代理后确认数据库仍可直连（不修改线上代理）：
+docker exec remi-dev-api-1 bun -e 'import { SQL } from "bun"; const db = new SQL(process.env.MULTIREMI_DATABASE_URL); console.log(await db`SELECT 1`); await db.close()'
+```
+
+GitHub 的 403/429 仅证明 HTTP 可达，不等于成功导入；结合代理访问日志确认请求实际
+经宿主代理。PostgreSQL 驱动使用直连 TCP；HTTP 内部服务还需检查代理日志。
+验证后扫描隔离 profile 和部署日志是否含测试代理 URL/凭据，勿把扫描匹配内容输出。
+
 ## stable 内网访问
 
 在主机选择实际的 RFC 1918 内网 IPv4 地址，然后部署；下面的 IP 仅为示例，需要替换：
@@ -48,7 +128,7 @@ stable 只打包已提交的 Git 内容；未提交修改不会进入快照。`-
 node scripts/local-profile.mjs stable deploy --ref HEAD --lan-host 192.168.40.12
 ```
 
-该选项把 stable 的 Web `13000` 和 API `16120` 宿主端口一起绑定到 `0.0.0.0`，但浏览器和 daemon 使用实际内网 IP，不能用 `0.0.0.0` 连接。PostgreSQL 仍不发布端口。dev 不接受该选项，始终绑定 loopback。监听地址和对外地址保存在 profile 的 `deployment.json` / `active.json`，后续省略 `--lan-host` 的 stable 升级保留配置；IP 改变时以新地址重新部署，同时重建内嵌 WebSocket 和登录地址的 Web 镜像。构建失败会恢复原配置，未切换运行中的服务。
+该选项把 stable 的 Web `13000` 和 API `16120` 宿主端口一起绑定到 `0.0.0.0`，但浏览器和 daemon 使用实际内网 IP，不能用 `0.0.0.0` 连接。PostgreSQL 仍不发布端口。dev 不接受该选项，始终绑定 loopback。监听地址和对外地址保存在 profile 的 `deployment.json` / `active.json`。未接入应用更新时，后续省略 `--lan-host` 的 stable 镜像部署保留配置；IP 改变需以新地址构建、部署镜像。接入应用更新后，Web 从 `compose.application.json` 中的 `REMI_WEB_SITE_URL` / `REMI_WEB_WS_URL` 读取地址，变更地址应同步 profile 配置和该覆盖文件，在维护窗口受控重建 API/Web；无需重新编译 Web 应用包。
 
 Windows 防火墙需要允许内网客户端访问这两个端口；只在需要时由管理员创建私有网络规则，例如：
 
@@ -62,7 +142,7 @@ Docker Desktop 运行时，容器按 `unless-stopped` 自动恢复；主机重�
 
 ## 本机登录
 
-本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`，在 `127.0.0.1` 或 `localhost` 页面增加账号密码和“本机会话密钥（24 小时）”登录入口。stable 还在 `NEXT_PUBLIC_SITE_URL` 配置的内网主机名显示账密入口，本机会话密钥入口仍只在 loopback 页面显示；API 始终独立验证凭据。飞书入口保留，默认发行构建和未配置的主机名保持原来的登录页面。
+本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`；应用更新模式在运行时设置 `REMI_WEB_LOCAL_PROFILE=stable` 和 `REMI_WEB_SITE_URL`。页面在 `127.0.0.1` 或 `localhost` 增加账号密码和“本机会话密钥（24 小时）”登录入口。stable 还在上述站点 URL 配置的内网主机名显示账密入口，本机会话密钥入口仍只在 loopback 页面显示；API 始终独立验证凭据。飞书入口保留，默认发行构建和未配置的主机名保持原来的登录页面。
 
 本机 Compose 启用 `MULTIREMI_ALLOW_PASSWORD_LOGIN=1`，其他部署默认关闭密码登录；同时关闭会在响应中返回验证码的旧邮箱/Google 测试 fallback，避免它绕过密码校验。账号需要部署管理员预先配置，没有公开注册入口。密码使用 Argon2id 加盐哈希，保存在该环境的私有数据库表中，源码、镜像及 `api.env` 都不包含账号密码。支持普通邮箱和 `user@localhost` 形式的本机账号。
 
@@ -92,12 +172,214 @@ node scripts/local-profile.mjs stable backup
 
 开发流程：在分支修改 → dev 验证 → 运行对应测试和文档检查 → 提交 → 使用具体 commit 更新 stable。stable 的源码和镜像不会跟随开发目录或分支切换自动变化。部署本机提交不等于创建 GitHub Release；正式发版仍遵循 [仓库规则](../../AGENTS.md)。
 
-`deploy` 更新已激活的环境时先构建候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。完整备份带有 `complete.json`，中途失败的目录不能当作可恢复备份。稳定环境升级前还应结束正在执行的 Agent 任务；API 启动会自动迁移数据库，关闭后台任务也不会跳过迁移。
+存在 `compose.application.json` 或 `compose.internal-updates.yml` 时，`stable deploy` 拒绝覆盖应用更新配置，请使用下文 Web/CLI 更新入口。内部模式还阻止直接 `restart`、`backup` 和宿主更新命令，避免与内部操作竞争。尚未接入时，`deploy` 先拉取并核验候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。新备份的 `complete.json` 包含每个恢复文件的大小和 SHA-256；旧版只有时间戳的 marker 不满足自动恢复校验。中途失败的目录不能当作可恢复备份。手动部署或备份前应等待正在执行的 Agent 任务结束；已登记的库在 API 启动时执行版本化加法迁移，关闭后台任务也不会跳过迁移。历史 level 0 首次升级 B1 必须先离线 prepare，详见 [B1 首次升级手册](b1-schema-upgrade.md)。deploy 在停旧容器前检查目标声明及当前库，缺少准备或元数据损坏时保留旧服务并拒绝部署。
 
-备份保存在 profile 的 `backups/<时间>/`。停止、重建和升级命令保留命名卷；脚本不提供删除卷操作。回滚涉及数据库模式时，先停止该环境 API/Web，恢复匹配备份的 PostgreSQL 和 API home，再使用备份配置启动旧镜像；只切旧代码不能保证与已迁移数据兼容。备份和旧镜像都应保留到升级后的实际使用验证完成。
+所有 `docker compose up` 调用遇到明确的端口绑定冲突（例如 `bind: address already in use` 或 `port is already allocated`）时，按 1、2、4 秒短退避最多重试三次，等待旧容器释放端口；其他错误立即失败。冲突持续时报告端口占用，需检查占用进程后重试。只有启动成功才写入 `active.json`。启动失败会自动恢复上一版本容器并检查健康，保留当前数据库与 API home；不会恢复数据库备份。回退失败则报告人工恢复要求和备份位置。启动失败本身不能证明迁移已执行。
+
+手动备份保存在 profile 的 `backups/<时间>/`，应用更新备份在 `application-backups/`。停止、重建和升级命令保留命名卷；脚本不提供删除卷操作。默认应用回滚保留当前数据库和文件，必须先验证迁移兼容。恢复旧 PostgreSQL/API home 快照属于独立的手动灾难恢复，会覆盖备份后的写入，不能用作常规版本回滚。备份和旧代码应保留到升级后的实际使用验证完成。
+
+## 容器内部自更新
+
+已有手工布局的实例先按[自用实例迁移手册](self-hosted-update-adoption.md)准备并审批维护窗口。
+该手册列出 internal 与宿主 application 的取舍、固定手动 feed、完整持久卷与备份边界、
+daemon 稳定 launcher 的接入和退回步骤。配置示例不是已执行迁移或验收通过的证据。
+
+接入 [内部 Compose 更新器](../../deploy/README.md#internal-compose-updater) 后，
+Web「设置 → 系统 → 版本与服务」仍然创建同一个持久化操作。Compose 中的 updater
+领取请求，向 API/Web 的监管进程发送共享卷指令。应用和 Bun/Node 都从版本卷启动，
+容器、基础镜像、监管进程不随应用更新重启。Windows/macOS/Linux 均运行此 Linux
+容器流程，不挂载 Docker socket。当前覆盖标准 API/Web/PostgreSQL 拓扑。
+
+首次安装需配置 [覆盖文件](../../deploy/docker/compose.internal-updates.yml)、
+[外部凭据文件](../../deploy/docker/internal-updater.env.example) 及同一构建的 API/Web/
+updater 镜像。正式 release manifest 和新的 CI `stable-images.json` 都提供
+`updaterImage`；日常应用升级下载包而非这些镜像。配置方法与旧实例接入边界由部署手册
+维护。旧实例须先在维护窗口接入监管进程，不能直接对旧镜像打开设置就获得此能力。
+启用前完成旧更新操作并关闭宿主 updater，不叠加 `compose.application.json` 或
+`compose.host-control.yml`。管理脚本自动保留内部覆盖文件，阻止旧部署命令覆盖它。
+
+更新先下载、校验 SHA-256 并在容器内执行候选运行时版本探测，再 drain 等待所有
+活动任务自然完成。写入闸门落盘后才停 API/Web 子进程、备份数据库和 API home。
+隔离演练容器完整恢复备份，运行新旧迁移；验证成功后启动新子进程。API/Web 在此
+期间短暂不可用，Agent 和数据库进程保持运行。失败回退保留当前数据库及文件，
+同时恢复旧代码和旧 Bun/Node；恢复失败时继续保留维护状态和闸门。
+
+保留卷：`remi-stable_program`、`remi-stable_api-seed`、`remi-stable_web-seed`、
+`remi-stable_update-control`、`remi-stable_update-state`；原 PostgreSQL/API home 卷
+继续使用。备份位于 update-state 的 `backups/`，初始凭据/Compose 配置需另行保存。
+旧代码和备份不自动删除，空间不足会阻止更新。容器 OS、原生工具、监管器及 updater
+本身仍需单独维护基础镜像；CPU/ABI 或监管协议不兼容也会明确阻止更新。
+
+真实流程验证命令是 `bun run tests/integration/platform-application-smoke.ts --internal`，
+依赖及验证边界见 [TESTING.md](../../TESTING.md)。它实际更换应用包内的 Bun/Node，
+检查容器/监管 PID、测试 Agent 连续运行、操作持久化、失败恢复和新增数据保留。
+
+### 保留宿主更新器的安装
+
+生产自更新由[独立宿主更新器](../../deploy/README.md#windows-stable-local-profile-host)执行。
+API 已提供 `POST /api/multiremi/platform/operations`，浏览器和 CLI 创建持久化请求；
+API 不持有 Docker socket，也不负责结束并重启自身。
+
+Web「设置 → 系统 → 版本与服务」显示更新器实际报告的更新模式，并提供目标模式的切换步骤与更新源内容检查。
+`local_profile` 是部署驱动，不足以区分镜像更新和宿主应用更新；旧更新器未上报时显示未知。
+目标模式选择仅生成迁移指引，不会修改运行环境。各模式共用已保存的更新地址，旧镜像源缺少应用包时会明确阻止内部更新。
+配置更改、首次内部接入和备份边界以[更新部署契约](../../deploy/README.md#internal-compose-updater)为准。
+
+默认 `MULTIREMI_PLATFORM_UPDATE_MODE=application`。更新器下载含 API 源码/Linux 依赖和
+Web standalone 产物的应用包，校验 SHA-256、CPU、Bun、Node、glibc 和迁移兼容声明，
+放入独立命名卷 `remi-stable_application-releases`。数据库和 API home 仍使用原来的卷。
+
+第一次更新复制旧应用作为恢复版本，用**相同镜像 ID**为 API/Web 接入只读版本卷和启动器；
+以后仅切换版本目录并重启原 API/Web 容器，不拉镜像、不构建、不更换容器 ID。
+`compose.application.json` 是必须保留的启动配置；本机管理脚本会自动合并它。
+接入后 `stable deploy` 会拒绝覆盖该配置，日常升级走 Web 或 CLI。基础运行环境不兼容时，
+需要单独维护基础镜像及其安装记录。
+
+```mermaid
+sequenceDiagram
+  participant UI as Web / CLI
+  participant API as API
+  participant DB as PostgreSQL
+  participant Host as 独立 updater
+  participant Docker as Docker
+  UI->>API: 创建 update operation
+  API->>DB: 持久化请求与 requestId
+  Host->>API: 双凭据领取 operation
+  Host->>Host: 下载校验应用包，保留旧版本
+  Host->>API: drain，等待任务和本地执行归零
+  Host->>Host: 持久化切换日志与写入闸门
+  Host->>Docker: 停止 API/Web 写入，备份数据
+  Host->>Docker: 在独立 PostgreSQL 验证新旧迁移
+  Host->>Docker: 切换应用并启动 API/Web
+  Note over Host,Docker: 失败切回旧代码，保留当前业务数据
+  Host->>API: 确认终态并解除维护
+  Host->>Host: 移除宿主写入闸门
+```
+
+drain 默认无限等待运行中任务完成，不强杀任务或 daemon。备份与迁移演练期间
+API/Web 暂时不可用，daemon/provider 进程保持独立；其上报由持久 outbox 重试。
+恢复失败会保留维护状态、备份和写入闸门，不自动恢复旧数据库，也不删除数据卷。
+
+Web 入口为「设置 → 系统 → 版本与服务」，可保存自定义 HTTPS 更新源、检查阻塞原因、
+升级、重启或回滚。宿主更新器一次性安装并常驻后，检查和升级都从此入口发起，
+不需要再登录宿主运行 Docker 命令。API 返回持久化操作 ID，API/Web 重启期间页面
+自动重连并继续读取同一操作的结果；请求使用 `requestId` 可防止网络重试重复升级。
+首次检查可以在更新器首次心跳前排队。CLI 仍使用：
+
+```powershell
+remi platform status --json
+remi platform operation create --file update.json --yes --json
+remi platform operation list --json
+remi platform operation cancel <operation-id> --yes --json
+```
+
+`update.json` 包含 `kind: "update"`、目标正式版本 `targetVersion`、
+该版本的 `platform-release.json` URL（`targetRef`）和可选 `requestId`。
+自定义源也可直接返回完整 manifest，或用 `{ "latest": <manifest> }` 包裹；
+未提供 `manifestUrl` 时沿用更新源地址。执行时再次校验目标版本与 ref，源已变化则
+拒绝此次升级并要求重新检查，不会静默升级到另一个版本。
+回滚使用 `kind: "rollback"` 并指定保留版本的 commit 或版本号，同样重新备份和验证。
+仅有镜像、没有 `application` 产物的旧 Release 不能在此模式下更新。
+
+应用模式的宿主日志、版本记录与备份目录见[部署手册](../../deploy/README.md#windows-stable-local-profile-host)。
+启动先恢复 committed 日志，再确认终态；即使上次 API 上报成功后 updater 退出，
+也会补做维护解除和闸门清理。API/Web 的运行进程目录必须匹配所选版本，
+单独 HTTP 健康检查不算成功。
+
+安装器与首次凭据配置保持独立于 API/daemon；Windows 计划任务使用跨会话互斥锁，
+宿主配置需保存在 Git 之外。应用模式不需要 gh、Git 或宿主 Node；运行环境和依赖
+由基础镜像及应用包提供。Web 的 LAN 地址通过运行时公开配置传入，不需要重新编译应用包。
+
+显式 `MULTIREMI_PLATFORM_UPDATE_MODE=images` 保留旧镜像执行器及其
+`host-operations/`、`host-operation-receipts/`、`host-control/` 协议。
+替换更新器前，必须先用原执行器完成旧操作或故障恢复；旧手工灾难恢复命令会恢复
+历史数据，不能当作应用版本回滚使用。
+
+隔离 Docker 验证入口为 `bun run tests/integration/platform-application-smoke.ts`，
+预先准备 Bun 1.3.14、Node 22 和 pgvector/pgvector:pg17 镜像。该测试创建独立项目，
+通过 Web 代理调用真实鉴权 API，将请求写入 PostgreSQL，再由实际宿主 worker 领取。
+覆盖自定义源、活动任务等待、首次接入、原容器升级、API 重启后的操作记录与请求去重、
+失败回退、升级后的写入保留和独立 daemon 测试进程；Web 页面点击接线另由组件测试覆盖。
+不访问实际 stable 数据库，也不证明真实模型或外部集成的业务执行。
 
 ## 验证范围
 
 `status` 检查 API `/readyz` 和 Web `/login`，只能证明服务启动。还应验证登录、旧工作区与 Issue 数量、浏览器 API/WS，以及 dev token 无法访问 stable。Agent 执行还需要给对应环境单独注册 Runtime；宿主 Codex 已登录不等于平台已有可用 Runtime。真实 provider、飞书、SSH Mesh 与外部同步各自需要对应验证。
 
 配置隔离测试：`bun test tests/arch/deploy-local-profiles.test.ts`。实际部署版本、迁移备份和本次测试结果记录在任务中，本页只维护操作方法。
+
+## Daemon 有期限排空（MUL-68）
+
+`local-profile.mjs restart` 只重启 API/Web，不包含 daemon 重启。手工维护或部署 daemon
+时，成员先执行以下操作（`--daemon-id` 为 `remi daemon list` 中的机器 ID）：
+
+```bash
+remi daemon drain --daemon-id <id> --deadline 5m --reason deploy
+remi daemon drain status --daemon-id <id> --output json
+# 轮询 status，直到 status 为 drained 或 drained_forced，再重启 daemon 服务。
+# 确认新 daemon 已上线后恢复接单：
+remi daemon undrain --daemon-id <id>
+```
+
+省略 `--deadline` 时默认 **5 分钟**；服务端环境变量
+`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可调整默认毫秒数。时长支持 `ms`、`s`、`m`、`h`，
+范围为 1ms–24h。重复 drain 保留原来的开始时间、期限及原因，防止反复请求延长期限。
+排空状态保存在数据库，平台及 daemon 重启后仍阻止整台机器的所有 runtime 接单；
+同一工作区其他 daemon 继续接单。`MULTIREMI_DAEMON_ID` 可代替每次传 `--daemon-id`。
+
+status 返回 `remaining_tasks`、`started_at`、`deadline`、`reason`、`expiry_action`
+和 `awaiting_daemon_ack`。到期通过 `planned_restart` 请求 provider 关闭、报告/trace 确认和
+持久化 checkpoint。重启后解除围栏，在同一 Turn/attempt 恢复，不消耗重试次数。
+provider 不响应取消/close 时按 daemon stop budget 终止进程，继续按 MUL-45 崩溃重试。
+只有服务端未挂起任务归零且 daemon 报告本地执行归零，强制排空才报告 `drained_forced`。
+失联 daemon 未确认时仍显示等待，不能把数据库已恢复任务当作本地进程已停止。
+
+CLI 更新创建同样的排空状态，归零或到期取消并确认后再下发更新。更新结束或请求超时
+只释放更新自己创建的排空；已有 manual/deploy 排空需成员显式 undrain。
+更新处于 pending/running/restarting/verifying 任一非终态时 undrain 返回冲突。
+重启后目标版本 hello 与启动自检确认成功（completed），或回滚完成（rolled_back）后，
+释放 cli_update 自有围栏；restarting/verifying 阶段由更新确认期限管理，不再触发排空期限的强制恢复。成员可 drain/undrain，任务凭据仅可查询。
+此排空与平台更新的 maintenance drain 独立；解除一方不会绕过另一方的派发限制。
+
+API：`GET /api/daemons/:daemonId/drain` 查询，`POST` 同路径发起
+（JSON 如 `{"deadline":"5m","reason":"manual"}`），`DELETE` 同路径解除；
+支持 `workspace_id` 查询参数。Agent 发起权限留待 MUL-29，停止服务上限与 unit 契约由 MUL-28 负责。
+
+协议拒绝后的 `upgrade_wait` 使用 HTTP 升级探测，不再有 WebSocket 取消下行。
+支持本排空协议的 daemon 会随探测报告本 runtime 的在途 attempt ID，消费服务端返回的
+终态取消后再报告零在途；新版 HTTP 探测显式报告当前进程所有 lane（含正在停止的 lane）的总数，
+以全机确认排除已停用 provider 的历史行；未声明范围的旧局部报告按 runtime 保守汇总，
+不能用空闲 provider 的零值替代全机确认。此路径的到期取消最多额外等待一次既有升级探测周期（60 秒），
+更新下发还可能等待下一次零在途探测。未安装本功能的旧 daemon 不会消费新增取消字段，
+平台无法仅靠数据库恢复终止其本地进程：这类实例需在维护窗口人工停止旧 daemon 后升级，
+不能把服务端任务归零当作已完成本地排空。
+
+## 发布源码保留
+
+stable 解压源码快照并写入 `.remi-profile-source` 后立即删除对应 SHA tar。
+成功 deploy、up 或宿主激活后，在主机锁内自动修剪 `releases/`。
+手动预览与执行（也可用于旧部署遗留的 tar）：
+
+```bash
+node scripts/local-profile.mjs stable prune-releases --dry-run
+node scripts/local-profile.mjs stable prune-releases
+```
+
+只删除完整小写 40 位 SHA 命名的真实目录或 `<sha>.tar` 普通文件，真实路径必须仍在
+`releases/` 内。符号链接（包括指向 releases 内部的链接）不进入 dry-run 或实际删除计划；
+手工命名目录始终保留。保留 active、deployment、compose.env
+引用的源码，以及 running / recovery_required 宿主操作 previous / candidate
+快照引用的源码。另按备份目录时间名倒序保留最新 3 个不同 ref 的源码；
+`REMI_RELEASES_KEEP` 可设为非负整数覆盖此数量（0 表示不额外保留备份或 daemon 历史 ref）。
+同时读取 `${XDG_CONFIG_HOME:-~/.config}/systemd/user/multiremi-daemon.service`
+及其 `.d/*.conf`（按文件名字典序，空 `ExecStart=` 清空先前命令），保护生效的
+ExecStart 在本 profile releases 下引用的 SHA，以及从新到旧最近 N 个不同 daemon SHA。
+N 同样使用 `REMI_RELEASES_KEEP`，默认 3；回滚到更早的 daemon 版本需重新部署。
+daemon 生效与历史引用同时保护路径中的 SHA 和符号链接解析后仍在 `releases/` 下的 SHA。
+引用的 SHA 目录不存在时忽略；若目录或链接存在但真实路径无法解析（如断链、循环或权限错误），
+则在任何删除之前警告并放弃整次修剪，dry-run 也遵循相同规则。解析到 releases 外的目标不加入保护。
+dry-run 输出会注明 daemon 引用的保留原因。unit 或 drop-in 目录不存在视为无引用；
+存在但无法读取、语法错误或 executable 使用无法解析的扩展时，警告并放弃整次修剪。
+受保护 ref 对应的 tar 也保留；新解压的 tar 始终立即删除。
+元数据读取或路径校验失败会停止本次修剪并警告，修剪失败不影响部署结果。
+不清理 Docker 镜像、backups 或 ACP bundles。首次真实环境清理需由运维授权。

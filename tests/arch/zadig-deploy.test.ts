@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { readFileSync as readRawFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parseAllDocuments } from 'yaml';
+
+const readFileSync = (path: string, encoding: "utf8") => readRawFileSync(path, encoding).replaceAll("\r\n", "\n");
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const deployRoot = resolve(repoRoot, "deploy/zadig");
@@ -26,6 +30,58 @@ const workflow = readFileSync(resolve(deployRoot, "ppe/workflow.sh"), "utf8");
 const collector = readFileSync(resolve(deployRoot, "ppe/gc.sh"), "utf8");
 const dockerfileWeb = readFileSync(resolve(repoRoot, "deploy/docker/Dockerfile.web"), "utf8");
 const nextConfig = readFileSync(resolve(repoRoot, "frontend/apps/web/next.config.ts"), "utf8");
+const deployValidationStart = workflow.indexOf('if [[ "${PPE_ACTION}" == "deploy" ]]; then');
+const deployValidation = workflow.slice(
+  deployValidationStart,
+  workflow.indexOf("\nselect_slot\n", deployValidationStart),
+);
+const versionResolutionStart = workflow.indexOf('  package_json_url=');
+const versionResolution = workflow.slice(
+  versionResolutionStart,
+  workflow.indexOf('\nelse\n  : "${PPE_LEASE_ID', versionResolutionStart),
+);
+
+function renderPpeRuntimeManifest() {
+  const start = workflow.lastIndexOf('cat <<YAML | "${kubectl_bin}" -n "${namespace}" apply -f -');
+  const end = workflow.indexOf('\nYAML\n', start);
+  const result = spawnSync('bash', ['-c', `set -euo pipefail\nppe_test_kubectl() { cat; }\nkubectl_bin=ppe_test_kubectl\n${workflow.slice(start, end + 6)}`], {
+    encoding: 'utf8', env: { ...process.env, namespace: 'multiremi-ppe-1', GIT_COMMIT: 'a'.repeat(40),
+      PPE_MODE: 'platform-daemon', PPE_SLOT: '1', multiremi_version: '0.2.89',
+      api_image: 'ppe.test/api:candidate', web_image: 'ppe.test/web:candidate', node_port: '32101', daemon_replicas: '1' },
+  });
+  expect(result.status, result.stderr).toBe(0);
+  return parseAllDocuments(result.stdout).map(document => document.toJS()) as Array<{
+    kind: string; metadata: { name: string }; spec: { replicas: number; strategy?: { type: string };
+      template: { spec: { containers: Array<{ name: string; env: Array<{ name: string; value?: string;
+        valueFrom?: { secretKeyRef: { name: string; key: string } } }>;
+        volumeMounts: Array<{ name: string; mountPath: string }> }>;
+        volumes: Array<{ name: string; persistentVolumeClaim?: { claimName: string } }> } } };
+  }>;
+}
+
+function parsePpeVersion(packageJson: string, curlStatus = 0, action = "deploy") {
+  return spawnSync("bash", ["-c", `
+set -euo pipefail
+curl() {
+  printf '%s\\n' "$PPE_TEST_PACKAGE_JSON"
+  return "$PPE_TEST_CURL_STATUS"
+}
+${deployValidation}
+printf 'Version: %s\\n' "\${multiremi_version:-unset}"
+`], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PPE_ACTION: action,
+      PPE_MODE: action === "deploy" ? "platform" : "",
+      PPE_FAKE_ACP_BASE64: action === "deploy" ? "test" : "",
+      PPE_LEASE_ID: "0".repeat(32),
+      GIT_COMMIT: action === "deploy" ? "adcaf571d842b93578f010f85e7cbcd2231348fd" : "",
+      PPE_TEST_PACKAGE_JSON: packageJson,
+      PPE_TEST_CURL_STATUS: String(curlStatus),
+    },
+  });
+}
 
 describe("Zadig PPE deployment", () => {
   test("pins external dependencies and keeps data on /data00", () => {
@@ -117,6 +173,91 @@ describe("Zadig PPE deployment", () => {
     expect(workflow).toContain("wait-for-postgres");
     expect(workflow).toContain("wait-for-api");
     expect(workflow).toContain("ppe-fake-acp-only");
+  });
+
+  test('keeps API migration evidence and state on the same PPE PVC through Pod replacement', () => {
+    const resources = renderPpeRuntimeManifest();
+    const api = resources.find(resource => resource.kind === 'Deployment' && resource.metadata.name === 'api')!;
+    expect(api.spec.replicas).toBe(1);
+    expect(api.spec.strategy).toEqual({ type: 'Recreate' });
+    const pod = api.spec.template.spec;
+    const container = pod.containers.find(candidate => candidate.name === 'api')!;
+    const paths = ['MULTIREMI_STATE_DIR', 'MULTIREMI_CONFIG', 'MULTIREMI_MIGRATION_REPORT_DIR',
+      'MULTIREMI_UPLOAD_DIR'];
+    for (const name of paths) {
+      const path = container.env.find(variable => variable.name === name)?.value;
+      expect(path, name).toMatch(/^\/srv\/multiremi\//);
+      const mount = container.volumeMounts.find(candidate => path?.startsWith(`${candidate.mountPath}/`))!;
+      expect(pod.volumes.find(volume => volume.name === mount.name)?.persistentVolumeClaim?.claimName).toBe('multiremi-data');
+    }
+    expect(resources.some(resource => resource.kind === 'PersistentVolumeClaim' && resource.metadata.name === 'multiremi-data')).toBe(true);
+    expect(container.env.find(variable => variable.name === 'MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY')?.valueFrom)
+      .toEqual({ secretKeyRef: { name: 'ppe-secrets', key: 'feishu-bot-encryption-key' } });
+    expect(workflow).toContain('feishu_encryption_key="$(openssl rand -base64 32)"');
+    expect(workflow).toContain('--from-literal=feishu-bot-encryption-key="${feishu_encryption_key}"');
+  });
+
+  test("pins API builds and both deployed containers to the target commit version (MUL-502)", () => {
+    expect(versionResolutionStart).toBeGreaterThan(workflow.indexOf('if [[ "${PPE_ACTION}" == "deploy" ]]; then'));
+    expect(versionResolutionStart).toBeLessThan(workflow.indexOf("\nselect_slot\n"));
+    expect(versionResolution).toContain('https://raw.githubusercontent.com/moesin-lab/Remi/${GIT_COMMIT}/package.json');
+    expect(versionResolution).toContain("curl -fsSL --retry 3");
+    expect(versionResolution).toContain("sed -n");
+    expect(versionResolution).toContain('^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$');
+    expect(versionResolution).not.toMatch(/\b(jq|bun)\b/u);
+    expect(workflow).toMatch(/run_build ppe-build-api[^\n]*\\\n\s+"MULTIREMI_VERSION=\$\{multiremi_version\}"/u);
+    for (const name of ["api", "daemon"]) {
+      const deployment = workflow.split(/^---$/mu).find((block) =>
+        block.includes(`kind: Deployment\nmetadata:\n  name: ${name}\n`),
+      );
+      expect(deployment).toContain('- { name: MULTIREMI_VERSION, value: "${multiremi_version}" }');
+    }
+    expect(workflow).toContain("Commit: %s\\nVersion: %s\\nMode: %s");
+    expect(workflow).toContain('"${GIT_COMMIT}" "${multiremi_version}" "${PPE_MODE}"');
+  });
+
+  test.each(["0.2.85", "0.2.85-rc.1", "0.2.85+build.2"])("resolves PPE package version %s", (version) => {
+    const result = parsePpeVersion(JSON.stringify({ name: "remi", version }, null, 2));
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`Version: ${version}\n`);
+  });
+
+  test.each([
+    "",
+    "{}",
+    '{ "name": "remi" }',
+    '  "version": "",',
+    '  "version": "dev",',
+    '  "version": "0.2.85 unsafe",',
+  ])("rejects missing or invalid PPE version: %s", (packageJson) => {
+    const result = parsePpeVersion(packageJson);
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("Missing or invalid package.json version for commit adcaf571");
+    expect(result.stdout).toBe("");
+  });
+
+  test("fails explicitly if the target package.json fetch fails", () => {
+    const result = parsePpeVersion('  "version": "0.2.85",', 22);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Failed to fetch package.json for commit adcaf571");
+    expect(result.stdout).toBe("");
+  });
+
+  test.each(["extend", "release"])("keeps %s independent of commit and version fetching", (action) => {
+    const result = parsePpeVersion("", 22, action);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("Version: unset\n");
+    expect(result.stderr).toBe("");
+  });
+
+  test("returns status before deploy parameter validation and version fetching", () => {
+    const statusBranch = workflow.slice(
+      workflow.indexOf('if [[ "${PPE_ACTION}" == "status" ]]; then'),
+      deployValidationStart,
+    );
+    expect(statusBranch).toContain("exit 0\nfi");
+    expect(statusBranch).not.toContain("package_json");
+    expect(statusBranch).not.toContain("GIT_COMMIT is required");
   });
 
   test("atomically leases PPEs per Issue and reclaims them after 24 hours", () => {

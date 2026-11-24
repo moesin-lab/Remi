@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 
+import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { startMultiremiServer } from "@multiremi/api.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -29,7 +30,7 @@ const cwd = join(workbench, "app");
 const state = join(root, "daemon-state");
 const skill = join(workbench, ".agents", "skills", "runtime-workspace-smoke");
 const expected = Object.fromEntries(["parent", "extra", "skill", "seed", "env"].map(key => [key, `${key}-${randomUUID()}`]));
-const db = new Database(":memory:");
+const db = openSqliteDatabase(":memory:");
 const store = new MultiremiStore(db);
 store.ensureLocalWorkspace();
 const server = startMultiremiServer({ store, scheduler: null, authToken: randomUUID(), hostname: "127.0.0.1", port: 0 });
@@ -68,6 +69,7 @@ try {
   for (const surface of ["chat", "issue"] as const) {
     // Restart the worker between tasks; persistence must not depend on its memory.
     daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`, token: token.token, daemonId,
       provider, runtimeName: `workspace-${provider}-smoke`, workspaceId: "local",
       daemonPort: 0, pollIntervalMs: 50, gcEnabled: false, taskTimeoutMs: timeoutMs,

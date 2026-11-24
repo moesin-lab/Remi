@@ -12,6 +12,8 @@ const OPTS = { daemonPort: 6200, serverUrl: "http://server:6120" };
 function taskWith(overrides: Partial<AgentTask>): AgentTask {
   return {
     id: "tsk_env",
+    turn_id: "turn_env",
+    attempt_id: "tsk_env",
     workspaceId: "local",
     prompt: "env",
     issueId: null,
@@ -34,6 +36,28 @@ function taskWith(overrides: Partial<AgentTask>): AgentTask {
 }
 
 describe("buildTaskEnv", () => {
+  it("preserves proxy configuration and appends platform/helper bypasses in both casings", () => {
+    const previous = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
+    try {
+      process.env.NO_PROXY = "10.0.0.0/8";
+      process.env.no_proxy = ".machine.test";
+      const env = buildTaskEnv(taskWith({
+        workspaceEnv: { NO_PROXY: ".workspace.test", HTTP_PROXY: "http://proxy:8080", ALL_PROXY: "socks5h://proxy:8080" },
+      }), { ...OPTS, serverUrl: "http://10.36.0.223:16120" });
+      expect(env.NO_PROXY).toBe(".workspace.test,10.36.0.223,localhost,127.0.0.1,::1,[::1]");
+      expect(env.no_proxy).toBe(".machine.test,10.36.0.223,localhost,127.0.0.1,::1,[::1]");
+      expect(env.HTTP_PROXY).toBe("http://proxy:8080");
+      expect(env.ALL_PROXY).toBe("socks5h://proxy:8080");
+      const inherited = buildTaskEnv(taskWith({}), { ...OPTS, serverUrl: "http://[fd00::1]:6120" });
+      expect(inherited.NO_PROXY).toBe("10.0.0.0/8,fd00::1,localhost,127.0.0.1,::1,[fd00::1],[::1]");
+      expect(inherited.no_proxy).toBe(".machine.test,fd00::1,localhost,127.0.0.1,::1,[fd00::1],[::1]");
+    } finally {
+      for (const key of ["NO_PROXY", "no_proxy"] as const) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key];
+      }
+    }
+  });
   it("injects workspace env below agent customEnv", () => {
     const env = buildTaskEnv(taskWith({
       workspaceEnv: { GH_TOKEN: "ghp_ws", SHARED: "from-workspace" },
@@ -62,6 +86,21 @@ describe("buildTaskEnv", () => {
     // Empty is intentional: the provider overlays this on process.env, where
     // the daemon credential may exist for supervisor control-plane requests.
     expect(env.MULTIREMI_TOKEN).toBe("");
+  });
+
+  it("names the lane's task context file only when the daemon gives one (PR 6)", () => {
+    const planted = {
+      workspaceEnv: { MULTIREMI_TASK_CONTEXT_FILE: "/tmp/workspace-planted.json" },
+      agent: { customEnv: { MULTIREMI_TASK_CONTEXT_FILE: "/tmp/agent-planted.json" } } as unknown as AgentTask["agent"],
+      authToken: "task-token",
+    };
+    const lane = buildTaskEnv(taskWith(planted), { ...OPTS, taskContextFile: "/tmp/.remi-task-0123/context.json" });
+    expect(lane.MULTIREMI_TASK_CONTEXT_FILE).toBe("/tmp/.remi-task-0123/context.json");
+    expect(lane.MULTIREMI_TOKEN).toBe("task-token");
+    // An Issue lane (no file): exactly as before, and a planted path cannot redirect the credential.
+    const issue = buildTaskEnv(taskWith(planted), OPTS);
+    expect("MULTIREMI_TASK_CONTEXT_FILE" in issue).toBe(false);
+    expect(issue.MULTIREMI_TOKEN).toBe("task-token");
   });
 
   it("never lets workspace or agent env override the Multiremi coordinates", () => {
@@ -103,7 +142,9 @@ describe("buildTaskEnv", () => {
 
     expect(env.MULTIREMI_DAEMON_PORT).toBe("6200");
     expect(env.MULTIREMI_WORKSPACE_ID).toBe("local");
-    expect(env.MULTIREMI_TASK_ID).toBe("tsk_env");
+    expect(env.MULTIREMI_TURN_ID).toBe("turn_env");
+    expect(env.MULTIREMI_ATTEMPT_ID).toBe("tsk_env");
+    expect(env.MULTIREMI_TASK_ID).toBeUndefined();
     expect(env.MULTIREMI_SERVER_URL).toBe("http://server:6120");
     expect(env.MULTIREMI_TOKEN).toBe("real-token");
     expect(env.MULTIREMI_PROJECT_ID).toBe("prj_real");
@@ -146,7 +187,7 @@ describe("buildTaskEnv", () => {
     expect(env).toHaveProperty("OPENAI_API_KEY", "");
   });
 
-  it("builds the same env as before when the task has no workspace env", () => {
+  it("injects only agent and required runtime env when the task has no workspace env", () => {
     const env = buildTaskEnv(taskWith({
       agent: { customEnv: { ONLY_AGENT: "1" } } as unknown as AgentTask["agent"],
     }), OPTS);
@@ -163,13 +204,16 @@ describe("buildTaskEnv", () => {
       "GIT_SSH_COMMAND",
       "GIT_TERMINAL_PROMPT",
       "MULTIREMI_AGENT_NAME",
+      "MULTIREMI_ATTEMPT_ID",
       "MULTIREMI_DAEMON_PORT",
       "MULTIREMI_GIT_CREDENTIAL_TIMEOUT_MS",
       "MULTIREMI_SERVER_URL",
-      "MULTIREMI_TASK_ID",
       "MULTIREMI_TOKEN",
+      "MULTIREMI_TURN_ID",
       "MULTIREMI_WORKSPACE_ID",
+      "NO_PROXY",
       "ONLY_AGENT",
+      "no_proxy",
     ]);
   });
 });

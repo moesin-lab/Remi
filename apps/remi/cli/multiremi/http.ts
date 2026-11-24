@@ -4,9 +4,12 @@
  * Extracted verbatim from the former single-file `cli/multiremi.ts`.
  */
 
+import { cliFetch } from "../core/proxy-fetch.js";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { loadMultiremiConfig } from "@multiremi/config.js";
+import { remiCliUserAgent } from "../core/user-agent.js";
+import { taskCredential } from "../core/task-context.js";
 import { type CliOptions, stringOpt, stringListOption } from "./options.js";
 
 export interface CliAttachmentFile {
@@ -56,8 +59,9 @@ export async function multiremiApiUploadFile(attachmentFile: CliAttachmentFile, 
   if (issueId) form.append("issue_id", issueId);
   if (connection.workspaceId) form.append("workspace_id", connection.workspaceId);
   const headers: Record<string, string> = {};
+  headers["User-Agent"] = remiCliUserAgent();
   if (connection.token) headers.Authorization = `Bearer ${connection.token}`;
-  const response = await fetch(`${connection.serverUrl}/api/upload-file`, {
+  const response = await cliFetch(`${connection.serverUrl}/api/upload-file`, {
     method: "POST",
     headers,
     body: form,
@@ -72,8 +76,9 @@ export async function multiremiApiDownloadFile(downloadUrl: string, options: Cli
   const isRelative = !/^https?:\/\//i.test(downloadUrl);
   const url = isRelative ? `${connection.serverUrl}${downloadUrl.startsWith("/") ? "" : "/"}${downloadUrl}` : downloadUrl;
   const headers: Record<string, string> = {};
+  headers["User-Agent"] = remiCliUserAgent();
   if (isRelative && connection.token) headers.Authorization = `Bearer ${connection.token}`;
-  const response = await fetch(url, { method: "GET", headers });
+  const response = await cliFetch(url, { method: "GET", headers });
   if (!response.ok) {
     const text = await response.text();
     throw new MultiremiCliHttpError("GET", downloadUrl, response.status, text);
@@ -89,7 +94,7 @@ export function multiremiApiConnection(options: CliOptions): MultiremiApiConnect
       ?? config.server_url
       ?? `http://127.0.0.1:6120`
     ).replace(/\/+$/, ""),
-    token: stringOpt(options.token, process.env.MULTIREMI_TOKEN) ?? config.token ?? null,
+    token: stringOpt(options.token) ?? stringOpt(taskCredential()) ?? config.token ?? null,
     workspaceId: stringOpt(options.workspace ?? options["workspace-id"], process.env.MULTIREMI_WORKSPACE_ID) ?? config.workspace_id ?? null,
   };
 }
@@ -178,9 +183,10 @@ export async function multiremiApiFetch<T = unknown>(
 ): Promise<{ data: T; headers: Headers }> {
   const connection = multiremiApiConnection(options);
   const headers: Record<string, string> = {};
+  headers["User-Agent"] = remiCliUserAgent();
   if (connection.token) headers.Authorization = `Bearer ${connection.token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(connection.serverUrl + path, {
+  const response = await cliFetch(connection.serverUrl + path, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),

@@ -2,7 +2,8 @@
 // Drives the carved-out repo directly over its StoreContext (not through the
 // MultiremiStore facade) so a broken delegation cannot mask a broken move.
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { StoreContext } from "@multiremi/store/context.js";
 import {
@@ -14,7 +15,7 @@ let db: Database | null = null;
 let store: MultiremiStore | null = null;
 
 function createRepo(): ProjectsRepo {
-  db = new Database(":memory:");
+  db = openSqliteDatabase(":memory:");
   // The store owns migrations and is the lazy cross-domain host the context resolves.
   store = new MultiremiStore(db);
   return new ProjectsRepo(new StoreContext(db, () => store!));
@@ -58,15 +59,16 @@ describe("ProjectsRepo", () => {
       { instructionsUpdatedBy: "usr_creator" },
     );
     expect(project.description).toBe("Human-readable summary");
-    expect(project.instructions).toBe("First line\nSecond line");
-    expect(project.deltaInstructions).toBe("Check updates.\nStay focused.");
+    // ADR 0023: one instructions field; the delta half a client still sends is appended to it.
+    expect(project.instructions).toBe("First line\nSecond line\n\nCheck updates.\nStay focused.");
+    expect(project.deltaInstructions).toBe("");
     expect(project.instructionsRevision).toBe(1);
     expect(project.instructionsUpdatedAt).toBeString();
     expect(project.instructionsUpdatedBy).toBe("usr_creator");
 
     const unchangedInstructions = repo.updateProject(
       project.id,
-      { title: "Directed renamed", instructions: "First line\r\nSecond line", expectedInstructionsRevision: 1 },
+      { title: "Directed renamed", instructions: "First line\r\nSecond line\r\n\r\nCheck updates.\r\nStay focused.", expectedInstructionsRevision: 1 },
       { instructionsUpdatedBy: "usr_editor" },
     );
     expect(unchangedInstructions.title).toBe("Directed renamed");
@@ -79,8 +81,8 @@ describe("ProjectsRepo", () => {
       { instructions: "Replacement", delta_instructions: "New delta", expected_instructions_revision: 1 },
       { instructionsUpdatedBy: "usr_editor" },
     );
-    expect(updated.instructions).toBe("Replacement");
-    expect(updated.deltaInstructions).toBe("New delta");
+    expect(updated.instructions).toBe("Replacement\n\nNew delta");
+    expect(updated.deltaInstructions).toBe("");
     expect(updated.instructionsRevision).toBe(2);
     expect(updated.instructionsUpdatedAt).toBeString();
     expect(updated.instructionsUpdatedBy).toBe("usr_editor");
@@ -91,7 +93,7 @@ describe("ProjectsRepo", () => {
       { instructionsUpdatedBy: "usr_stale" },
     )).toThrow(ProjectInstructionsRevisionConflictError);
     expect(repo.getProject(project.id)).toMatchObject({
-      instructions: "Replacement",
+      instructions: "Replacement\n\nNew delta",
       instructionsRevision: 2,
       instructionsUpdatedBy: "usr_editor",
     });

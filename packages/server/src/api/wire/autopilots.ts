@@ -12,7 +12,7 @@ import type {
   UpdateAutopilotTriggerInput,
 } from "@multiremi/contracts/types.js";
 import type { Context } from "hono";
-import { cleanString, currentAccessToken, currentRequestUserId, hasOwn } from "./context.js";
+import { cleanString, currentAccessToken, currentRequestUserId, currentTaskAccessToken, authenticatedRequestUserId, hasOwn } from "./context.js";
 import { autopilotRunSourceRevision } from "@multiremi/store/repos/autopilots-repo.js";
 
 export function autopilotCreateInput(c: Context, input: CreateAutopilotInput): CreateAutopilotInput {
@@ -23,8 +23,10 @@ export function autopilotCreateInput(c: Context, input: CreateAutopilotInput): C
   return {
     ...input,
     workspaceId,
-    createdByType: input.createdByType ?? input.created_by_type ?? "member",
-    createdById: input.createdById ?? input.created_by_id ?? currentRequestUserId(c),
+    createdByType: currentTaskAccessToken(c) ? 'agent' : 'member',
+    createdById: currentTaskAccessToken(c)?.agentId ?? authenticatedRequestUserId(c) ?? currentRequestUserId(c),
+    created_by_type: currentTaskAccessToken(c) ? 'agent' : 'member',
+    created_by_id: currentTaskAccessToken(c)?.agentId ?? authenticatedRequestUserId(c) ?? currentRequestUserId(c),
   };
 }
 
@@ -74,6 +76,7 @@ export function autopilotCompatibilityResponse(
     execution_mode: autopilot.executionMode,
     session_policy: autopilot.sessionPolicy,
     workspace_policy: autopilot.workspacePolicy,
+    delivery_chat_session_id: autopilot.deliveryChatSessionId ?? null,
     issue_title_template: autopilot.issueTitleTemplate,
     created_by_type: autopilot.createdByType,
     created_by_id: autopilot.createdById,
@@ -113,6 +116,7 @@ export function autopilotCreateCompatibilityInput(
   const projectId = cleanString(input.project_id) ?? null;
   return autopilotCreateInput(c, {
     id: input.id,
+    deliveryChatSessionId: input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id,
     title: input.title,
     description: input.description,
     workspace_id: input.workspace_id,
@@ -148,6 +152,9 @@ export function autopilotUpdateCompatibilityInput(
   input: UpdateAutopilotInput & AutopilotCompatibilityUpdateInput,
 ): UpdateAutopilotInput | { apiError: string; statusCode: 400 } {
   const output: UpdateAutopilotInput = {};
+  if (hasOwn(input, "deliveryChatSessionId") || hasOwn(input, "delivery_chat_session_id")) {
+    output.deliveryChatSessionId = input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id;
+  }
   if (hasOwn(input, "title")) output.title = input.title;
   if (hasOwn(input, "description")) output.description = input.description ?? null;
   if (hasOwn(input, "project_id")) output.projectId = cleanString(input.project_id ?? undefined) ?? null;
@@ -276,6 +283,7 @@ export function autopilotRunCompatibilityResponse(
     status: run.status,
     issue_id: run.issueId,
     issue_session_id: run.issueSessionId,
+    chat_session_id: run.chatSessionId,
     task_id: run.taskId,
     triggered_at: run.triggeredAt,
     completed_at: run.completedAt,
@@ -455,6 +463,7 @@ export function autopilotCompatibilityErrorResponse(c: Context, error: unknown):
   if (message.startsWith("Squad not found")) return c.json({ error: "assignee must be a valid squad in this workspace" }, 400);
   if (message === "Autopilot title is required") return c.json({ error: "title is required" }, 400);
   if (message === "Autopilot assignee is required") return c.json({ error: "assignee_id is required" }, 400);
+  if (message.startsWith("Autopilot delivery")) return c.json({ error: message }, 400);
   if (message.startsWith("Invalid Autopilot")) return c.json({ error: message }, 400);
   if (message.includes("schedule_targets") || message.includes("event_filters") || message.includes("event_config") || message.includes("cron_expression") || message.includes("timezone") || message.includes("trigger_issue")) {
     return c.json({ error: message }, 400);

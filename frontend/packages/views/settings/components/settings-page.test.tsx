@@ -43,10 +43,10 @@ vi.mock("./workspace-tab", () => ({ WorkspaceTab: () => <div /> }));
 vi.mock("./prompts-tab", () => ({ PromptsTab: () => <div /> }));
 vi.mock("./members-tab", () => ({ MembersTab: () => <div /> }));
 vi.mock("./source-control-tab", () => ({ SourceControlTab: () => <div /> }));
-vi.mock("./integrations-tab", () => ({ IntegrationsTab: () => <div /> }));
+
 vi.mock("./model-gateway-tab", () => ({ ModelGatewayTab: () => <div /> }));
 vi.mock("./labs-tab", () => ({ LabsTab: () => <div /> }));
-vi.mock("./storage-cleanup-tab", () => ({ StorageCleanupTab: () => <div /> }));
+vi.mock("./storage-tab", () => ({ StorageTab: () => <div /> }));
 vi.mock("./platform-tab", () => ({ PlatformTab: () => <div /> }));
 
 import { SettingsPage } from "./settings-page";
@@ -69,6 +69,11 @@ describe("SettingsPage platform tab visibility", () => {
     render(<SettingsPage />, { wrapper: Wrapper });
     expect(screen.getByRole("tab", { name: /Version & Services/ })).toBeInTheDocument();
     expect(screen.getByText("System")).toBeInTheDocument();
+  });
+
+  it("does not expose member management in workspace settings", () => {
+    render(<SettingsPage />, { wrapper: Wrapper });
+    expect(screen.queryByRole("tab", { name: "Members" })).not.toBeInTheDocument();
   });
 
   it("keeps the tab once status resolves with manage permission", () => {

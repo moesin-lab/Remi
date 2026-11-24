@@ -2,28 +2,40 @@
 
 import { ArrowRightLeft } from "lucide-react";
 import type { TranscriptTask } from "./agent-transcript-dialog";
+import { executionModel as normalizeExecutionModel } from "@multiremi/shared/agent-execution";
 import { useT } from "../../i18n";
 
-export function ExecutionModelInfo({ task, agentModel, agentThinkingLevel, usageModel }: {
+export function ExecutionModelInfo({ task, agentModel, agentThinkingLevel, traceModel }: {
   task: TranscriptTask;
   agentModel?: string | null;
   agentThinkingLevel?: string | null;
-  usageModel?: string | null;
+  traceModel?: string | null;
 }) {
   const { t } = useT("agents");
   const executionModel = [task.executionModel, task.execution_model]
-    .find((value) => typeof value === "string" && value.trim())?.trim();
-  const model = executionModel ?? [usageModel, agentModel]
-    .find((value) => typeof value === "string" && value.trim())?.trim();
+    .map(normalizeExecutionModel).find(Boolean);
+  const observedModel = normalizeExecutionModel(traceModel);
+  const configuredModel = normalizeExecutionModel(agentModel);
+  // Billing usage includes auxiliary calls such as progress summaries.
+  const model = observedModel ?? executionModel ?? configuredModel;
   const switched = task.fallbackSwitched === true || task.fallback_switched === true;
-  const inheritedThinking = !switched && !executionModel && model && model === agentModel?.trim()
+  const inheritedThinking = !switched && !executionModel && model && model === configuredModel
     ? agentThinkingLevel : null;
-  const thinking = [task.executionThinkingLevel, task.execution_thinking_level,
-    inheritedThinking]
+  const snapshotMatches = !observedModel || !executionModel || observedModel === executionModel;
+  const thinking = [snapshotMatches ? task.executionThinkingLevel : null,
+    snapshotMatches ? task.execution_thinking_level : null, inheritedThinking]
     .find((value) => typeof value === "string" && value.trim())?.trim();
   const reason = task.switchReason ?? task.switch_reason;
+  const reasonCode = typeof reason === "string" && reason.startsWith("gateway_resource:")
+    ? reason.slice("gateway_resource:".length).split(";")[0] : null;
   const reasonLabel = typeof reason === "string" && reason.startsWith("gateway_resource:")
-    ? reason.includes("provider_no_available_account")
+    ? reasonCode === "agent_error.model_not_found_or_unavailable"
+      ? t(($) => $.fallback.reason_model_unavailable)
+      : reasonCode === "agent_error.provider_server_error"
+      ? t(($) => $.fallback.reason_server)
+      : reasonCode === "queued_model_unavailable"
+      ? t(($) => $.fallback.reason_queued)
+      : reasonCode === "agent_error.provider_no_available_account"
       ? t(($) => $.fallback.reason_no_account)
       : t(($) => $.fallback.reason_gateway)
     : t(($) => $.fallback.reason_unknown);

@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 
+import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import {
   AcpProvider,
   resolveAcpExecutableForAgent,
@@ -15,7 +16,7 @@ import { MultiremiDaemon } from "@multiremi/daemon.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { MultiremiTaskHumanRequest } from "@multiremi/contracts/types.js";
 
-type SmokeProvider = "claude" | "codex";
+type SmokeProvider = "claude" | "codex" | "grok";
 type SmokeStatus = "passed" | "failed" | "unavailable" | "available";
 
 interface SmokeOptions {
@@ -110,7 +111,7 @@ async function runProviderSmoke(provider: SmokeProvider, options: SmokeOptions):
     };
   }
 
-  const db = new Database(":memory:");
+  const db = openSqliteDatabase(":memory:");
   const workDir = mkdtempSync(join(tmpdir(), `multiremi-acp-${provider}-`));
   const rootToken = `root-${provider}-smoke`;
   const store = new MultiremiStore(db);
@@ -152,6 +153,7 @@ async function runProviderSmoke(provider: SmokeProvider, options: SmokeOptions):
     });
 
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       provider,
@@ -303,14 +305,14 @@ async function answerPendingQuestion(options: {
   const question = questions?.[0]?.question?.question;
   if (!question) throw new Error("Question request did not contain a renderable question");
   const response = await fetch(
-    `${options.baseUrl}/api/tasks/${options.taskId}/human-requests/${request.id}/respond`,
+    `${options.baseUrl}/api/sessions/${options.store.getMessage(request.id)!.session_id}/messages`,
     {
       method: "POST",
       headers: {
         Authorization: `Bearer ${options.authToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ response: { answers: { [question]: options.answer } } }),
+      body: JSON.stringify({ message_kind: "reply", reply_to_id: request.id, body_md: options.answer, response: { answers: { [question]: options.answer } } }),
     },
   );
   if (!response.ok) {
@@ -358,10 +360,12 @@ function parseArgs(args: string[]): SmokeOptions {
   }
 
   const providers = provider === "all"
-    ? ["claude", "codex"] as SmokeProvider[]
+    ? ["claude", "codex", "grok"] as SmokeProvider[]
     : [provider as SmokeProvider];
   for (const item of providers) {
-    if (item !== "claude" && item !== "codex") throw new Error(`Unsupported provider: ${item}`);
+    if (item !== "claude" && item !== "codex" && item !== "grok") {
+      throw new Error(`Unsupported provider: ${item}`);
+    }
   }
   if (!marker.trim()) throw new Error("--marker must not be empty");
   if (!prompt.trim()) throw new Error("--prompt must not be empty");
@@ -402,11 +406,13 @@ function executableUnavailable(command: string): string | null {
 }
 
 function defaultExecutable(provider: SmokeProvider): string {
-  return provider === "claude" ? "claude-agent-acp" : "codex-acp";
+  if (provider === "claude") return "claude-agent-acp";
+  if (provider === "codex") return "codex-acp";
+  return "grok";
 }
 
 function printHelp(): void {
-  console.log(`Usage: bun run tests/integration/smoke-multiremi-acp.ts [--provider=all|claude|codex] [--allow-unavailable] [--check-only]
+  console.log(`Usage: bun run tests/integration/smoke-multiremi-acp.ts [--provider=all|claude|codex|grok] [--allow-unavailable] [--check-only]
 
 Runs a real ACP-backed Multiremi daemon smoke against a local in-memory server.
 The smoke uses a daemon token, creates one agent/task, runs the daemon once, and

@@ -2,10 +2,12 @@
 // Drives the carved-out repo directly over its StoreContext (not through the
 // MultiremiStore facade) so a broken delegation cannot mask a broken move.
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { StoreContext } from "@multiremi/store/context.js";
 import { AnalyticsRepo } from "@multiremi/store/repos/analytics-repo.js";
+import { createResponsibleTestIssue } from './helpers.js';
 import { RUNTIME_HEARTBEAT_STALE_MS as CONTRACT_RUNTIME_HEARTBEAT_STALE_MS } from "@multiremi/contracts/runtime-health";
 import {
   isRuntimeEffectivelyOnline,
@@ -17,7 +19,7 @@ let db: Database | null = null;
 let store: MultiremiStore | null = null;
 
 function createRepo(): RuntimesRepo {
-  db = new Database(":memory:");
+  db = openSqliteDatabase(":memory:");
   // The store owns migrations and is the lazy cross-domain host the context resolves.
   store = new MultiremiStore(db);
   const ctx = new StoreContext(db, () => store!);
@@ -103,7 +105,7 @@ describe("RuntimesRepo", () => {
     expect(repo.reportRuntimeModelListResult("rt_beta", request.id, { status: "failed" }).status).toBe("completed");
   });
 
-  it("hands pending work back on heartbeat and gates the claim predicate on ownership", () => {
+  it("hands pending work back on heartbeat and shares Runtime placement within its workspace", () => {
     const repo = createRepo();
     const runtime = repo.registerRuntime({
       id: "rt_gamma",
@@ -124,7 +126,10 @@ describe("RuntimesRepo", () => {
     const mine = store!.createAgent({ name: "Mine", provider: "claude", workspaceId: "local", ownerId: "usr_owner" });
     const theirs = store!.createAgent({ name: "Theirs", provider: "claude", workspaceId: "local", ownerId: "usr_other" });
     expect(repo.runtimeCanRunAgent(runtime, mine)).toBe(true);
-    expect(repo.runtimeCanRunAgent(runtime, theirs)).toBe(false);
+    expect(repo.runtimeCanRunAgent(runtime, theirs)).toBe(true);
+    const foreign = store!.createWorkspace({ name: "Other runtime workspace" });
+    const foreignAgent = store!.createAgent({ name: "Foreign", provider: "claude", workspaceId: foreign.id, ownerId: "usr_owner" });
+    expect(repo.runtimeCanRunAgent(runtime, foreignAgent)).toBe(false);
 
     expect(repo.getRuntimeByDaemonAndProvider("rt_gamma", "claude")?.id).toBe("rt_gamma");
     expect(repo.deleteRuntime("rt_gamma")).toBe(true);
@@ -145,7 +150,7 @@ describe("RuntimesRepo", () => {
       provider: "claude",
       runtimeId: runtime.id,
     });
-    const issue = store!.createIssue({ title: "Cleanup issue" });
+    const issue = createResponsibleTestIssue(store!,{ title: "Cleanup issue" });
     store!.reportIssueWorkspace({
       issueId: issue.id,
       runtimeId: runtime.id,
@@ -163,9 +168,9 @@ describe("RuntimesRepo", () => {
     const issueSession = store!.getOrCreateDefaultIssueSession(issue.id);
     store!.getOrCreateSessionAgentLane(issueSession.id, agent.id);
     db!.run(
-      `UPDATE multiremi_session_agent_lanes
+      `UPDATE multiremi_session_lanes
        SET provider_session_id = ?, runtime_id = ?, provider = ?, work_dir = ?
-       WHERE session_id = ? AND agent_id = ?`,
+       WHERE session_id = ? AND reader_id = ?`,
       ["sess-cleanup", runtime.id, "claude", "/tmp/cleanup", issueSession.id, agent.id],
     );
     repo.createRuntimeModelListRequest(runtime.id);
@@ -200,11 +205,19 @@ describe("RuntimesRepo", () => {
     store!.cancelTask(runningTask.id);
     expect(repo.deleteRuntime(runtime.id)).toBeFalse();
     store!.updateAgent(agent.id, { runtimeId: null });
-    expect(repo.deleteRuntime(runtime.id)).toBeTrue();
+    expect(repo.deleteRuntime(runtime.id)).toBeFalse();
+    expect(repo.deleteRuntimeWithArchivedAgentCleanup(runtime.id)).toMatchObject({
+      status: "active_issue_workspaces",
+      issues: [{ id: issue.id, key: issue.key, title: issue.title, status: "ready" }],
+    });
+    expect(store!.getIssueWorkspace(issue.id)?.runtimeId).toBe(runtime.id);
+    expect(repo.deleteRuntimeWithArchivedAgentCleanup(runtime.id, { abandonIssueWorkspaces: true })).toEqual({
+      status: "deleted", issueWorkspacesAbandoned: 1,
+    });
     expect(store!.getAgent(agent.id)?.runtimeId).toBeNull();
     expect(store!.getIssueWorkspace(issue.id)).toMatchObject({
       runtimeId: null,
-      status: "runtime_offline",
+      status: "cleaned",
     });
     expect(store!.getChatSession(chat.id)).toMatchObject({
       sessionId: null,
@@ -254,7 +267,7 @@ describe("RuntimesRepo", () => {
       defaultAssigneeType: "agent",
       defaultAssigneeId: agent.id,
     });
-    const issue = store!.createIssue({
+    const issue = createResponsibleTestIssue(store!,{
       title: "Reference cleanup issue",
       assigneeType: "agent",
       assigneeId: agent.id,
@@ -302,9 +315,35 @@ describe("RuntimesRepo", () => {
     expect(store!.getTask(task.id)?.status).toBe("queued");
 
     store!.cancelTask(task.id);
-    expect(repo.deleteRuntimeWithArchivedAgentCleanup(runtime.id)).toEqual({ status: "deleted" });
+    expect(repo.deleteRuntimeWithArchivedAgentCleanup(runtime.id)).toEqual({ status: "deleted", issueWorkspacesAbandoned: 0 });
     expect(repo.getRuntime(runtime.id)).toBeNull();
     expect(store!.getAgent(agent.id)).toMatchObject({ runtimeId: null });
     expect(store!.getAgent(agent.id)?.archivedAt).not.toBeNull();
   });
+});
+
+// CLI success is an observation of the replacement process, never the installer.
+it("requires a target-version hello and self-check; keeps rollback terminal", () => {
+  const repo = createRepo();
+  repo.registerRuntime({ id: "rt_upgrade", name: "upgrade", provider: "codex", workspaceId: "local", daemonId: "daemon_upgrade" });
+  const request = repo.createRuntimeUpdateRequest("rt_upgrade", { target_version: "v9.8.7" });
+  repo.claimRuntimeUpdateRequest("rt_upgrade");
+  expect(() => repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "completed" })).toThrow("hello");
+  repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "restarting" });
+  expect(() => repo.createRuntimeUpdateRequest("rt_upgrade", { target_version: "9.8.8" })).toThrow("already in progress");
+  repo.recordDaemonProtocol("rt_upgrade", "daemon_upgrade", 2, "9.8.6");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", request.id)?.status).toBe("restarting");
+  repo.recordDaemonProtocol("rt_upgrade", "other_daemon", 2, "9.8.7");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", request.id)?.status).toBe("restarting");
+  repo.recordDaemonProtocol("rt_upgrade", "daemon_upgrade", 2, "9.8.7");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", request.id)?.status).toBe("verifying");
+  expect(() => repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "completed" })).toThrow("self-check");
+  expect(repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "completed", self_check: true }).status).toBe("completed");
+  expect(repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "rolled_back", error: "late report" }).status).toBe("completed");
+  const rollback = repo.createRuntimeUpdateRequest("rt_upgrade", { target_version: "9.8.8" });
+  repo.claimRuntimeUpdateRequest("rt_upgrade");
+  repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "restarting" });
+  expect(repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "rolled_back", error: "startup crash" })).toMatchObject({ status: "rolled_back", error: "startup crash" });
+  expect(() => repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "running" })).toThrow("no longer runnable");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", rollback.id)?.status).toBe("rolled_back");
 });

@@ -74,7 +74,7 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
   });
 
   app.post("/api/cli-token", async (c) => {
-    const userId = currentRequestUserId(c);
+    const userId = authenticatedRequestUserId(c) ?? "local";
     if (userId !== "local" && !store.getUser(userId)) return c.json({ error: "unauthorized" }, 401);
     const source = currentAccessToken(c);
     // Keep the migrated owner a verified human without promoting legacy machine

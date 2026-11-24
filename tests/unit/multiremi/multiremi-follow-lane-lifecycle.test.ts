@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -13,7 +14,7 @@ describe("follow lane Runtime lifecycle", () => {
     });
     const survivor = store.registerRuntime({ name: "Surviving host", provider: "claude" });
     const agent = store.createAgent({ name: "Following reader", provider: "claude" });
-    const issue = store.createIssue({ title: "Follow history survives host loss" });
+    const issue = createResponsibleTestIssue(store, { title: "Follow history survives host loss" });
     const parent = store.getOrCreateDefaultIssueSession(issue.id);
     for (const body of ["Original parent decision", "Already delivered decision"]) {
       store.appendSessionEvent(parent.id, { authorType: "agent", authorId: agent.id, body });
@@ -25,11 +26,11 @@ describe("follow lane Runtime lifecycle", () => {
     for (const scope of ["", "delegation:departing", "delegation:surviving"]) {
       store.getOrCreateSessionAgentLane(side.id, agent.id, scope);
       db!.run(
-        `UPDATE multiremi_session_agent_lanes
+        `UPDATE multiremi_session_lanes
          SET provider_session_id = ?, runtime_id = ?, provider = 'claude',
              execution_fingerprint = 'prior-fingerprint', work_dir = '/prior-work',
              cursor_seq = 1, parent_cursor_seq = 2
-         WHERE session_id = ? AND agent_id = ? AND execution_scope = ?`,
+         WHERE session_id = ? AND reader_type = 'agent' AND reader_id = ? AND execution_scope = ?`,
         [
           `provider-${scope || "main"}`,
           scope === "delegation:surviving" ? survivor.id : runtime.id,
@@ -59,7 +60,7 @@ describe("follow lane Runtime lifecycle", () => {
         provider: null,
         executionFingerprint: null,
         workDir: null,
-        cursorSeq: 0,
+        cursorSeq: 1,
         parentCursorSeq: 0,
         generation: before.generation + 1,
       });

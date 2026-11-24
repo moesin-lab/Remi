@@ -1,0 +1,184 @@
+import { createPlan, type Report } from "../../../scripts/ci-backend.js";
+import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { parse } from "yaml";
+import { backendBaselineJobs, failedBackendFiles, verifyRetryChanges, verifyShardedJobs } from "../../../scripts/retry-failed-backend-tests.js";
+
+const finished = `tests/unit/example.test.ts:
+(pass) passing case
+(fail) timed out fixture
+
+1 tests failed:
+(fail) timed out fixture
+1 pass
+0 skip
+1 fail
+Ran 2 tests across 1 file. [8.00s]
+[test-home] residual paths: []
+`;
+const successful = `tests/unit/example.test.ts:
+(pass) passing case
+(skip) environment-specific case
+
+1 tests skipped:
+(skip) environment-specific case
+1 pass
+1 skip
+0 fail
+Ran 2 tests across 1 file. [0.10s]
+[test-home] residual paths: []
+`;
+const shardedWorkflow = "      - name: Backend test suite\n        run: bun run test --shard=${{ matrix.shard }}/4\n";
+const unshardedWorkflow = "      - name: Backend test suite\n        run: bun run test\n";
+function shardedJobs() {
+  return [1, 2, 3, 4].map(shard => ({ id: shard, name: `backend (${shard})`,
+    conclusion: shard === 2 ? "failure" : "success",
+    steps: [{ name: "Backend test suite", conclusion: shard === 2 ? "failure" : "success" }] }))
+    .concat([{ id: 5, name: "build", conclusion: "success", steps: [] }]);
+}
+
+describe("verified backend retry", () => {
+  it("selects files from actual failures without counting the repeated summary", () => {
+    expect(failedBackendFiles(finished)).toEqual(["tests/unit/example.test.ts"]);
+    expect(failedBackendFiles(finished.replace("tests/unit/example", "##[group]tests/unit/example"))).toEqual(["tests/unit/example.test.ts"]);
+    expect(failedBackendFiles(finished.replace("tests/unit/example", "::group::tests/unit/example"))).toEqual(["tests/unit/example.test.ts"]);
+  });
+  it("rejects interrupted suites, missing cleanup and mismatched failure inventories", () => {
+    expect(() => failedBackendFiles(finished.replace("Ran 2 tests", "Ran 3 tests"))).toThrow();
+    expect(() => failedBackendFiles(finished.replace("1 fail", "2 fail").replace("Ran 2 tests", "Ran 3 tests"))).toThrow();
+    expect(() => failedBackendFiles(finished.replace("[test-home] residual paths: []", ""))).toThrow();
+    expect(() => failedBackendFiles(finished.split("1 tests failed:")[0])).toThrow();
+    expect(() => failedBackendFiles(finished.replace("(pass) passing case\n", ""))).toThrow();
+    expect(() => failedBackendFiles(finished.replace("across 1 file", "across 2 files"))).toThrow();
+    expect(() => failedBackendFiles(finished + finished)).toThrow();
+    expect(() => failedBackendFiles(finished + "[test-home] unexpected writes:\n.remi\n")).toThrow();
+  });
+  it("verifies successful shards and ignores the repeated skip summary", () => {
+    expect(failedBackendFiles(successful, false)).toEqual([]);
+    expect(() => failedBackendFiles(successful)).toThrow();
+    expect(() => failedBackendFiles(successful.replace("(skip) environment-specific case\n", ""), false)).toThrow();
+  });
+  it("rejects unknown failure sources and unsafe paths", () => {
+    expect(() => failedBackendFiles(finished.replace("tests/unit/example.test.ts:\n", ""))).toThrow();
+    expect(() => failedBackendFiles(finished.replace("tests/unit/example", "tests/../example"))).toThrow();
+  });
+  it("allows retry infrastructure changes but rejects changed passed code or existing tests", () => {
+    expect(() => verifyRetryChanges([".github/workflows/release-build-check.yml", "TESTING.md"])).not.toThrow();
+    expect(() => verifyRetryChanges(["packages/server/src/worker/outbox.ts"])).toThrow();
+    expect(() => verifyRetryChanges(["tests/unit/example.test.ts"])).toThrow();
+    expect(() => verifyRetryChanges(["bun.lock"])).toThrow();
+  });
+  it("requires all four completed backend shards with other jobs successful", () => {
+    const jobs = shardedJobs();
+    expect(backendBaselineJobs(shardedWorkflow, jobs).map(item => [item.shard, item.job.conclusion]))
+      .toEqual([[1, "success"], [2, "failure"], [3, "success"], [4, "success"]]);
+    expect(() => backendBaselineJobs(shardedWorkflow, jobs.filter(job => job.name !== "backend (4)"))).toThrow();
+    expect(() => backendBaselineJobs(shardedWorkflow, [...jobs, jobs[0]!])).toThrow();
+    const skipped = shardedJobs();
+    skipped[2]!.steps[0]!.conclusion = "skipped";
+    expect(() => backendBaselineJobs(shardedWorkflow, skipped)).toThrow();
+    const cancelled = shardedJobs();
+    cancelled[2]!.conclusion = "cancelled";
+    expect(() => backendBaselineJobs(shardedWorkflow, cancelled)).toThrow();
+    const brokenBuild = shardedJobs();
+    brokenBuild[4]!.conclusion = "failure";
+    expect(() => backendBaselineJobs(shardedWorkflow, brokenBuild)).toThrow();
+  });
+  it("rejects setup failures, diagnostic baselines and partial discovery commands", () => {
+    const setupFailure = shardedJobs();
+    setupFailure[1]!.steps.push({ name: "Install dependencies", conclusion: "failure" });
+    expect(() => backendBaselineJobs(shardedWorkflow, setupFailure)).toThrow();
+    const diagnostic = shardedJobs();
+    diagnostic[0]!.steps.push({ name: "Verify baseline and retry failed backend files", conclusion: "success" });
+    expect(() => backendBaselineJobs(shardedWorkflow, diagnostic)).toThrow();
+    diagnostic[0]!.steps[1]!.conclusion = "skipped";
+    expect(() => backendBaselineJobs(shardedWorkflow, diagnostic)).not.toThrow();
+    expect(() => backendBaselineJobs(shardedWorkflow.replace("--shard=", "tests/unit/example.test.ts --shard="), shardedJobs())).toThrow();
+    expect(() => backendBaselineJobs(shardedWorkflow + unshardedWorkflow, shardedJobs())).toThrow();
+  });
+  it("keeps genuine upstream single-job full-suite baselines", () => {
+    const jobs = [{ id: 1, name: "build", conclusion: "failure",
+      steps: [{ name: "Backend test suite", conclusion: "failure" }] },
+    { id: 2, name: "session-archive-platform", conclusion: "success", steps: [] }];
+    expect(backendBaselineJobs(unshardedWorkflow, jobs).map(item => item.shard)).toEqual([1]);
+    expect(() => backendBaselineJobs(unshardedWorkflow, shardedJobs())).toThrow();
+  });
+  it("executes the gate for full PRs, docs PRs and manual diagnostics without accepting missing evidence", () => {
+    const workflow = parse(readFileSync(new URL("../../../.github/workflows/release-build-check.yml", import.meta.url), "utf8"));
+    const run = (event: string, required: string, retry: string, changes: Record<string, string> = {}, ref = "refs/heads/main") => {
+      const skipped = new Set(["backend-retry"]);
+      if (event === "pull_request" && required === "false") {
+        skipped.add("backend"); skipped.add("backend-evidence");
+      } else if (retry) skipped.delete("backend-retry");
+      const results = Object.fromEntries(workflow.jobs.build.needs.map((job: string) =>
+        [job, { result: changes[job] ?? (skipped.has(job) ? "skipped" : "success") }]));
+      return spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", workflow.jobs.build.steps[0].run], {
+        encoding: "utf8", env: { ...process.env, RESULTS: JSON.stringify(results), BACKEND_REQUIRED: required,
+          EVENT: event, RETRY: retry, REF: ref, GITHUB_SHA: "a".repeat(40) },
+      });
+    };
+    for (const [event, required, retry, mode] of [
+      ["pull_request", "true", "", "full"], ["pull_request", "false", "", "pr-fast"],
+      ["push", "true", "", "full"], ["workflow_dispatch", "true", "123", "full-with-retry"],
+    ]) {
+      const result = run(event!, required!, retry!);
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).mode).toBe(mode);
+      for (const job of ["backend-plan", ...(required === "true" ? ["backend", "backend-evidence"] : [])]) {
+        for (const failure of ["failure", "cancelled", "skipped"]) {
+          expect(run(event!, required!, retry!, { [job]: failure }).status).not.toBe(0);
+        }
+      }
+    }
+    for (const required of ["", "unknown"]) expect(run("pull_request", required, "").status).not.toBe(0);
+    // Even a successful diagnostic cannot replace the full shards or evidence.
+    for (const job of ["backend-retry", "backend", "backend-evidence"]) {
+      expect(run("workflow_dispatch", "true", "123", { [job]: "skipped" }).status).not.toBe(0);
+    }
+    expect(run("workflow_dispatch", "true", "123", {}, "refs/heads/topic").status).not.toBe(0);
+    expect(run("pull_request", "true", "123").status).not.toBe(0);
+    expect(run("pull_request", "true", "", { "backend-retry": "success" }).status).not.toBe(0);
+    expect(run("pull_request", "false", "", { backend: "success" }).status).not.toBe(0);
+  });
+  it("keeps complete evidence mandatory when diagnostic retry is requested", () => {
+    const workflow = parse(readFileSync(new URL("../../../.github/workflows/release-build-check.yml", import.meta.url), "utf8"));
+    expect(workflow.jobs["backend-plan"].if).toBeUndefined();
+    expect(workflow.jobs["backend-plan"].outputs.required).toBe("${{ steps.scope.outputs.required }}");
+    expect(workflow.jobs.backend.if).toBe("needs.backend-plan.outputs.required == 'true'");
+    expect(workflow.jobs["backend-evidence"].needs).toEqual(["backend-plan", "backend"]);
+    expect(workflow.jobs["backend-retry"].if).toBe("github.event_name == 'workflow_dispatch' && inputs.retry_backend_run_id != ''");
+    expect(JSON.stringify(workflow.jobs["backend-plan"])).not.toContain("retry_backend_run_id");
+    expect(JSON.stringify(workflow.jobs.backend)).not.toContain("retry_backend_run_id");
+    expect(workflow.jobs["backend-plan"].env.BACKEND_SHARDS).toBe(8);
+    expect(workflow.jobs.backend.strategy.matrix.shard).toBe("${{ fromJSON(needs.backend-plan.outputs.shards) }}");
+    expect(workflow.jobs["backend-plan"].outputs.shards).toBe("${{ steps.plan.outputs.shards }}");
+    expect(JSON.stringify(workflow.jobs.backend)).not.toContain("continue-on-error");
+    expect(workflow.jobs.build.needs).toContain("backend");
+    expect(workflow.jobs.build.needs).toContain("backend-evidence");
+    expect(workflow.jobs.build.needs).toContain("backend-retry");
+    expect(workflow.jobs.build.steps[0].run).toContain("mode = 'full-with-retry'");
+    expect(workflow.jobs.build.steps[0].run).not.toContain("skipped.remove");
+    expect(JSON.stringify(workflow.jobs["backend-retry"])).not.toContain("continue-on-error");
+    expect(readFileSync(new URL("../../../scripts/retry-failed-backend-tests.ts", import.meta.url), "utf8")).not.toContain('"--timeout"');
+  });
+});
+
+
+it("sharded retry requires completed test failures and every non-backend job green", () => {
+  const sha = "a".repeat(40);
+  const plan = createPlan(["tests/a.test.ts"], 1, {}, sha, "tests", [], {});
+  const report: Report = { schemaVersion: 1, sha, scope: "tests", shard: 0, startedAt: "start", finishedAt: "end", shardExitCode: 1, runner: { childExitCode: 1, homeEmpty: true, observerFailed: false, interrupted: false }, summary: { pass: 1, skip: 0, fail: 1, tests: 2, files: 1 }, files: [{ path: "tests/a.test.ts", seconds: 1, failures: 1 }] };
+  const jobs = ["im-platform-smoke", "execution-configuration", "platform-updater (ubuntu-latest)", "platform-updater (windows-latest)", "platform-updater (macos-latest)", "guards", "frontend-types", "frontend-tests", "cli-build", "api-build", "web-build", "runtime-platform (ubuntu-latest)", "runtime-platform (macos-latest)", "frontend-replica", "backend-plan"].map(name => ({ name, conclusion: "success", steps: [] as { name: string; conclusion: string }[] }));
+  jobs.push(...["backend-evidence", "backend-retry", "candidate-package"].map(name => ({ name, conclusion: "skipped", steps: [] })));
+  jobs.push({ name: "backend (0)", conclusion: "failure", steps: [{ name: "Backend test shard", conclusion: "failure" }, { name: "Upload report", conclusion: "success" }] });
+  jobs.push({ name: "build", conclusion: "failure", steps: [{ name: "Require every applicable check", conclusion: "failure" }] });
+  expect(verifyShardedJobs(plan, [report], jobs)).toEqual(["tests/a.test.ts"]);
+  // A baseline run from before the frontend-zero-jump job was removed (2026-10-21) still carries it green.
+  expect(verifyShardedJobs(plan, [report], [...jobs, { name: "frontend-zero-jump", conclusion: "success", steps: [] }])).toEqual(["tests/a.test.ts"]);
+  expect(() => verifyShardedJobs(plan, [report], jobs.filter(job => job.name !== "web-build"))).toThrow();
+  for (const [name, conclusion] of [["web-build", "failure"], ["backend-retry", "success"], ["backend-evidence", "success"], ["backend (0)", "cancelled"]]) {
+    expect(() => verifyShardedJobs(plan, [report], jobs.map(job => job.name === name ? { ...job, conclusion } : job))).toThrow();
+  }
+  expect(() => verifyShardedJobs(plan, [report], jobs.map(job => job.name === "backend (0)" ? { ...job, steps: [...job.steps, { name: "Upload", conclusion: "failure" }] } : job))).toThrow();
+});

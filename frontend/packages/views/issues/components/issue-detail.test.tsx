@@ -1,21 +1,44 @@
-import { forwardRef, useRef, useState, useImperativeHandle } from "react";
+import { forwardRef, useEffect, useRef, useState, useImperativeHandle } from "react";
+import { renderToString } from "react-dom/server";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { issueKeys } from "@multiremi/core/issues/queries";
 import type { Issue, TimelineEntry } from "@multiremi/core/types";
+import { MemorySessionReplica } from "@multiremi/core/replica";
+import { useWSEvent } from "@multiremi/core/realtime";
+import { SessionLogEntrySchema, type SessionLogRow } from "@multiremi/core/api/schemas/session-log";
+import type { IssueActivityEntry } from "@multiremi/contracts";
+import { ApiError } from "@multiremi/core/api";
+import { activityPreferencesStore } from "@multiremi/core/issues/stores/activity-preferences-store";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import enCommon from "../../locales/en/common.json";
 import enIssues from "../../locales/en/issues.json";
+import zhCommon from "../../locales/zh-Hans/common.json";
+import zhIssues from "../../locales/zh-Hans/issues.json";
 
-const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
+const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues }, "zh-Hans": { common: zhCommon, issues: zhIssues } };
 
 const mockViewport = vi.hoisted(() => ({ isMobile: false }));
 const mockNavigationReplace = vi.hoisted(() => vi.fn());
 const mockToast = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
+const mockWorkspaceMembers = vi.hoisted(() => ({ query: vi.fn() }));
 const timelinePageControl = vi.hoisted(() => ({
   hasMore: false,
   olderEntries: [] as TimelineEntry[],
 }));
+const issueLogOverride = vi.hoisted(() => ({ current: null as any }));
+const mockWS = vi.hoisted(() => ({
+  subscribe: vi.fn(() => () => {}),
+  subscribeStream: vi.fn(() => ({ unsubscribe: vi.fn() })),
+  onReconnect: vi.fn(() => () => {}),
+}));
+
+vi.mock("@multiremi/core/session-log/use-issue-log", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@multiremi/core/session-log/use-issue-log")>();
+  return { ...actual, useIssueLog: (...args: Parameters<typeof actual.useIssueLog>) =>
+    issueLogOverride.current ?? actual.useIssueLog(...args) };
+});
 
 vi.mock("@multiremi/ui/hooks/use-mobile", () => ({
   useIsMobile: () => mockViewport.isMobile,
@@ -66,7 +89,7 @@ vi.mock("@multiremi/core/workspace/hooks", () => ({
 vi.mock("@multiremi/core/workspace/queries", () => ({
   memberListOptions: () => ({
     queryKey: ["workspaces", "ws-1", "members"],
-    queryFn: () => Promise.resolve([{ user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" }]),
+    queryFn: mockWorkspaceMembers.query,
   }),
   agentListOptions: () => ({
     queryKey: ["workspaces", "ws-1", "agents"],
@@ -202,8 +225,11 @@ vi.mock("../../runtimes/components/runtime-workspace-picker", () => ({
 // Mock api
 const mockApiObj = vi.hoisted(() => ({
   getIssue: vi.fn(),
+  getQuestion: vi.fn(),
+  listIssueQuestions: vi.fn().mockResolvedValue([]),
   listIssueSessions: vi.fn().mockResolvedValue([{
     id: "session-main",
+    owner_type: "issue", owner_id: "issue-1",
     issue_id: "issue-1",
     workspace_id: "ws-1",
     title: "Main",
@@ -218,9 +244,12 @@ const mockApiObj = vi.hoisted(() => ({
   }]),
   listSessionTasks: vi.fn().mockResolvedValue([]),
   listIssueSessionResults: vi.fn().mockResolvedValue([]),
+  getIssueWorkspace: vi.fn().mockResolvedValue({ workspace: null }),
   createIssueSession: vi.fn(),
   addSessionParticipant: vi.fn(),
   listTimeline: vi.fn().mockResolvedValue([]),
+  getSessionLog: vi.fn(),
+  locateSessionLogEntry: vi.fn(),
   listTimelinePage: vi.fn(async (
     issueId: string,
     params: { issueSessionId?: string; before?: string | null; limit?: number },
@@ -258,13 +287,14 @@ const mockApiObj = vi.hoisted(() => ({
   unsubscribeFromIssue: vi.fn().mockResolvedValue(undefined),
   getActiveTasksForIssue: vi.fn().mockResolvedValue({ tasks: [] }),
   listTasksByIssue: vi.fn().mockResolvedValue([]),
-  listIssueSessionArchives: vi.fn().mockResolvedValue({
-    archives: [],
-    latest: null,
-    latest_ready: null,
-  }),
   listTaskMessages: vi.fn().mockResolvedValue([]),
   listChildIssues: vi.fn().mockResolvedValue({ issues: [] }),
+  listIssueDependencies: vi.fn().mockResolvedValue([]),
+  listIssueDecisions: vi.fn().mockResolvedValue({
+    waiting_on_human: [],
+    owner_and_answered: { pending: [], answered: [] },
+    count: 0,
+  }),
   listGeneratedIssues: vi.fn().mockResolvedValue({ issues: [] }),
   listIssues: vi.fn().mockResolvedValue({ issues: [], total: 0 }),
   uploadFile: vi.fn(),
@@ -274,13 +304,14 @@ const mockApiObj = vi.hoisted(() => ({
   listAttachments: vi.fn().mockResolvedValue([]),
   addCommentReaction: vi.fn(),
   removeCommentReaction: vi.fn(),
-  listMembers: vi.fn().mockResolvedValue([{ user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" }]),
+  listMembers: vi.fn().mockResolvedValue([{ user_id: "local", name: "Test User", email: "test@test.com", role: "admin" }]),
   listAgents: vi.fn().mockResolvedValue([]),
   getProject: vi.fn(),
   listProjects: vi.fn().mockResolvedValue({ projects: [] }),
 }));
 
-vi.mock("@multiremi/core/api", () => ({
+vi.mock("@multiremi/core/api", async importOriginal => ({
+  ApiError: (await importOriginal<typeof import("@multiremi/core/api")>()).ApiError,
   api: mockApiObj,
   getApi: () => mockApiObj,
   setApiInstance: vi.fn(),
@@ -312,7 +343,8 @@ vi.mock("@multiremi/core/issues/config", () => ({
 
 // Mock recent issues store
 const mockRecordVisit = vi.fn();
-vi.mock("@multiremi/core/issues/stores", () => ({
+vi.mock("@multiremi/core/issues/stores", async importOriginal => ({
+  ...await importOriginal<typeof import("@multiremi/core/issues/stores")>(),
   useIssueDetailPreferencesStore: (selector: any) =>
     selector({
       sessionSidebarOpen: true,
@@ -371,17 +403,30 @@ const virtuosoLatestProps = vi.hoisted(() => ({ current: null as Record<string, 
 
 vi.mock("react-virtuoso", () => ({
   Virtuoso: forwardRef(function MockVirtuoso(
-    props: { data: unknown[]; itemContent: (i: number, item: unknown) => unknown },
+    props: {
+      data: unknown[];
+      itemContent: (i: number, item: unknown) => unknown;
+      totalListHeightChanged?: (height: number) => void;
+      rangeChanged?: (range: { startIndex: number; endIndex: number }) => void;
+    },
     ref: any,
   ) {
-    const { data, itemContent } = props;
+    const { data, itemContent, totalListHeightChanged, rangeChanged } = props;
     virtuosoLatestProps.current = props as Record<string, unknown>;
     useImperativeHandle(ref, () => ({
-      // scrollIntoView is unexercised here — the deep-link cold-path uses
-      // native scrollIntoView on the DOM node instead of the ref.
+      // scrollIntoView is unexercised here — the reveal hook positions the
+      // deep-link target by setting scrollTop on the scroll root.
       scrollIntoView: vi.fn(),
       scrollToIndex: virtuosoScrollToIndexSpy,
     }));
+    // The real component reports its measured height and rendered range once it
+    // has laid out. jsdom gives every element a zero rect, so the real
+    // `Virtuoso` never gets that far and the reveal's layout gate would never
+    // open — this stands in for the measurement the browser actually performs.
+    useEffect(() => {
+      totalListHeightChanged?.(data.length * 40);
+      rangeChanged?.({ startIndex: 0, endIndex: Math.max(0, data.length - 1) });
+    });
     return (
       <div data-testid="virtuoso-mock">
         {data.map((item, i) => (
@@ -424,7 +469,7 @@ vi.mock("@multiremi/core/realtime", () => ({
   useWSEvent: vi.fn(),
   useWSReconnect: vi.fn(),
   useTaskScopeSubscription: vi.fn(),
-  useWS: () => ({ subscribe: vi.fn(() => () => {}), onReconnect: vi.fn(() => () => {}) }),
+  useWS: () => mockWS,
   WSProvider: ({ children }: { children: React.ReactNode }) => children,
   useRealtimeSync: () => {},
 }));
@@ -503,6 +548,7 @@ const mockTimeline: TimelineEntry[] = [
 
 import { useIssueSelectionStore } from "@multiremi/core/issues/stores/selection-store";
 import { IssueDetail } from "./issue-detail";
+import { IssueActivitySection } from "./issue-activity-section";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -521,10 +567,11 @@ function renderIssueDetail(
   issueId = "issue-1",
   initialIssueSessionId?: string,
   onIssueSessionChange?: (sessionId: string) => void,
+  locale: "en" | "zh-Hans" = "en",
 ) {
   const queryClient = createTestQueryClient();
   return render(
-    <I18nProvider locale="en" resources={TEST_RESOURCES}>
+    <I18nProvider locale={locale} resources={TEST_RESOURCES}>
       <QueryClientProvider client={queryClient}>
         <IssueDetail
           issueId={issueId}
@@ -536,40 +583,21 @@ function renderIssueDetail(
   );
 }
 
-function renderIssueDetailWithHighlight(
-  highlightCommentId: string,
-  issueId = "issue-1",
-  options: { seedTimeline?: boolean } = {},
-) {
-  const queryClient = createTestQueryClient();
-  if (options.seedTimeline) {
-    // Pre-populate the timeline cache so the first render sees timeline.length>0.
-    // This reproduces the inbox-click race: timeline data is available before
-    // the issue itself has finished loading, so the effect that scrolls to
-    // the comment fires once with `loading=true` (skeleton still rendered,
-    // no comment DOM) and must re-fire when `loading` flips to false.
-    queryClient.setQueryData(["issues", "timeline", issueId, "session-main"], {
-      pages: [{
-        entries: mockTimeline,
-        limit: 40,
-        has_more: false,
-        has_more_before: false,
-        has_more_after: false,
-        next_cursor: null,
-        prev_cursor: null,
-        issue_session_id: "session-main",
-      }],
-      pageParams: [null],
-    });
-  }
-  const result = render(
-    <I18nProvider locale="en" resources={TEST_RESOURCES}>
-      <QueryClientProvider client={queryClient}>
-        <IssueDetail issueId={issueId} highlightCommentId={highlightCommentId} />
-      </QueryClientProvider>
-    </I18nProvider>,
-  );
-  return { ...result, queryClient };
+/**
+ * Waits for the reveal hook to publish a terminal state on the scroll root.
+ *
+ * MUL-390 hides the whole detail document until its gates hold, so anything
+ * queried by role — or asserted to be visible — has to wait for this first.
+ * `visibility: hidden` is exactly what the recorder reads, so the tests reuse
+ * the same signal rather than a timer.
+ */
+async function waitForReveal() {
+  await waitFor(() => {
+    const state = document
+      .querySelector("[data-tab-scroll-root]")
+      ?.getAttribute("data-perf-state");
+    expect(state === "ready" || state === "ready-forced").toBe(true);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -578,14 +606,20 @@ function renderIssueDetailWithHighlight(
 
 describe("IssueDetail (shared)", () => {
   beforeEach(() => {
+    activityPreferencesStore("local", "ws-1").getState().setShowSystemDetails(false);
     vi.clearAllMocks();
+    issueLogOverride.current = null;
     timelinePageControl.hasMore = false;
     timelinePageControl.olderEntries = [];
     mockViewport.isMobile = false;
     // Default: issue loads successfully
     mockApiObj.getIssue.mockResolvedValue(mockIssue);
+    mockWorkspaceMembers.query.mockResolvedValue([
+      { user_id: "local", name: "Test User", email: "test@test.com", role: "admin" },
+    ]);
     mockApiObj.listIssueSessions.mockResolvedValue([{
       id: "session-main",
+      owner_type: "issue", owner_id: mockIssue.id,
       issue_id: mockIssue.id,
       workspace_id: "ws-1",
       title: "Main",
@@ -602,15 +636,47 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessionResults.mockResolvedValue([]);
     // /timeline returns the entries flat in chronological order (oldest first).
     mockApiObj.listTimeline.mockResolvedValue(mockTimeline);
+    mockApiObj.getSessionLog.mockImplementation(async (sessionId: string, params: { anchor?: number; before?: number; after?: number } = {}) => {
+      const issue = await mockApiObj.getIssue();
+      const timeline = params.anchor !== undefined && params.anchor > 0 && timelinePageControl.olderEntries.length
+        ? timelinePageControl.olderEntries : await mockApiObj.listTimeline("issue-1", sessionId);
+      const rows = (timeline as TimelineEntry[]).map((item, index) => ({
+        session_id: sessionId, id: item.id, seq: index + 1, kind: item.details?.log_kind ?? (item.type === "comment" ? "message" : "system"),
+        revision: 1, visibility: "shown", author_type: item.actor_type ?? "system", author_id: item.actor_id ?? null,
+        task_id: item.task_id ?? null, parent_id: item.parent_id ?? null, body_md: item.content ?? "", body_html: null,
+        render_version: null, metadata: { ...item.details, attachments: item.attachments ?? [], reactions: item.reactions ?? [] },
+        resolved_at: item.resolved_at ?? null, resolved_by_type: item.resolved_by_type ?? null,
+        resolved_by_id: item.resolved_by_id ?? null, created_at: item.created_at ?? "", updated_at: item.updated_at ?? "",
+        deleted_at: null,
+      }));
+      const head = { session_id: sessionId, id: `head-${sessionId}`, seq: 0, kind: "head", revision: 1,
+        visibility: "shown", author_type: "system", author_id: null, task_id: null, parent_id: null,
+        body_md: issue.description ?? "", body_html: null, render_version: null, metadata: {},
+        resolved_at: null, resolved_by_type: null, resolved_by_id: null, created_at: "", updated_at: "", deleted_at: null };
+      return { entries: params.anchor === 0 ? [head] : rows,
+        head_seq: rows.length, log_version: 1, has_more_before: timelinePageControl.hasMore,
+        has_more_after: false };
+    });
+    mockApiObj.locateSessionLogEntry.mockReset().mockImplementation(async (sessionId: string, id: string) => {
+      const window = await mockApiObj.getSessionLog(sessionId);
+      const entry = window.entries.find((row: SessionLogRow) => row.id === id);
+      if (!entry) throw new ApiError("entry not found", 404, "Not Found");
+      return { id, seq: entry.seq, head_seq: window.head_seq };
+    });
     mockApiObj.listIssueReactions.mockResolvedValue([]);
     mockApiObj.listIssueSubscribers.mockResolvedValue([]);
     mockApiObj.listChildIssues.mockResolvedValue({ issues: [] });
+    mockApiObj.listIssueDecisions.mockResolvedValue({
+      waiting_on_human: [],
+      owner_and_answered: { pending: [], answered: [] },
+      count: 0,
+    });
     mockApiObj.listGeneratedIssues.mockResolvedValue({ issues: [] });
     mockApiObj.listIssues.mockResolvedValue({ issues: [], total: 0 });
     mockApiObj.getActiveTasksForIssue.mockResolvedValue({ tasks: [] });
     mockApiObj.listTasksByIssue.mockResolvedValue([]);
     mockApiObj.listMembers.mockResolvedValue([
-      { user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" },
+      { user_id: "local", name: "Test User", email: "test@test.com", role: "admin" },
     ]);
     mockApiObj.listAgents.mockResolvedValue([]);
     // Reset project mock — individual tests override per case. Default fixture
@@ -628,14 +694,161 @@ describe("IssueDetail (shared)", () => {
     ).toBe(true);
   });
 
+  it("keeps optional log metadata behind this detail reveal while its body is pending", async () => {
+    mockApiObj.getIssue.mockReturnValue(new Promise(() => {}));
+    renderIssueDetail();
+    await act(async () => {});
+    expect(mockApiObj.listIssueSessionResults).not.toHaveBeenCalled();
+    expect(mockApiObj.getIssueWorkspace).not.toHaveBeenCalled();
+    expect(mockApiObj.getActiveTasksForIssue).not.toHaveBeenCalled();
+  });
+
+  it("reads the log and task-runs while children still hold the detail render gate", async () => {
+    let release!: (value: { issues: Issue[] }) => void;
+    mockApiObj.listChildIssues.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    renderIssueDetail();
+    await waitFor(() => expect(mockApiObj.getSessionLog).toHaveBeenCalled());
+    expect(mockApiObj.listTasksByIssue).toHaveBeenCalledExactlyOnceWith("issue-1");
+    expect(document.querySelector('[data-perf-scroll="issue-detail"]')).toBeNull();
+    await act(async () => { release({ issues: [] }); });
+    await waitForReveal();
+    expect(mockApiObj.getSessionLog.mock.calls.filter(([, params]) => params?.before === 30)).toHaveLength(1);
+  });
+
+  it.each([false, true])("reuses detail reactions instead of reading Issue again (empty field omitted: %s)", async omitted => {
+    const value = { ...mockIssue, reactions: [] };
+    if (omitted) delete (value as Partial<typeof value>).reactions;
+    mockApiObj.getIssue.mockResolvedValue(value);
+    renderIssueDetail();
+    await waitForReveal();
+    await waitFor(() => expect(mockApiObj.listIssueSubscribers).toHaveBeenCalled());
+    expect(mockApiObj.getIssue.mock.calls.filter(([id]) => id === "issue-1")).toHaveLength(1);
+  });
+
+  describe("first-screen dependencies (MUL-499)", () => {
+    it("does not request dependencies for a top-level issue", async () => {
+      renderIssueDetail();
+      await waitForReveal();
+      expect(mockApiObj.listIssueDependencies).not.toHaveBeenCalled();
+    });
+
+    it("requests dependencies once for the child issue editor", async () => {
+      mockApiObj.getIssue.mockResolvedValue({ ...mockIssue, parent_issue_id: "issue-parent" });
+      renderIssueDetail();
+      await waitForReveal();
+      expect(mockApiObj.listIssueDependencies).toHaveBeenCalledExactlyOnceWith("issue-1");
+    });
+
+    it.each(["backlog", "in_progress"] as const)("uses blocked_by count only in backlog (%s)", async status => {
+      mockApiObj.getIssue.mockResolvedValue({ ...mockIssue, status, blocked_by: ["prerequisite-1", "prerequisite-2"] });
+      renderIssueDetail();
+      await waitForReveal();
+      const count = screen.queryByText("Waiting for 2 prerequisites");
+      if (status === "backlog") {
+        expect(count).toBeInTheDocument();
+        expect(count).toHaveClass("h-[18px]");
+      } else {
+        expect(count).not.toBeInTheDocument();
+      }
+      expect(mockApiObj.listIssueDependencies).not.toHaveBeenCalled();
+    });
+  });
+
+  it("settles a missing task seed before reveal and starts optional reads afterwards", async () => {
+    const phases: Array<{ endpoint: string; state: string | null }> = [];
+    const record = (endpoint: string) => phases.push({ endpoint, state: document.querySelector("[data-perf-scroll='issue-detail']")?.getAttribute("data-perf-state") ?? null });
+    let resolveTasks!: (value: { tasks: [] }) => void;
+    mockApiObj.listTasksByIssue.mockImplementation(() => new Promise(() => {}));
+    mockApiObj.getActiveTasksForIssue.mockImplementation(() => { record("active-task"); return new Promise(resolve => { resolveTasks = resolve; }); });
+    mockApiObj.listIssueSubscribers.mockImplementation(async () => { record("subscribers"); return []; });
+    renderIssueDetail();
+    await waitFor(() => expect(resolveTasks).toBeTypeOf("function"));
+    expect(document.querySelector("[data-perf-scroll='issue-detail']")).toHaveAttribute("data-perf-state", "pending");
+    expect(mockApiObj.listIssueSubscribers).not.toHaveBeenCalled();
+    await act(async () => resolveTasks({ tasks: [] }));
+    await waitFor(() => expect(document.querySelector("[data-perf-scroll='issue-detail']")).toHaveAttribute("data-perf-state", "ready"));
+    await waitFor(() => expect(phases.map(p => p.endpoint)).toEqual(expect.arrayContaining(["active-task", "subscribers"])));
+    expect(phases.filter(p => p.endpoint === "subscribers").every(p => p.state === "ready")).toBe(true);
+    expect(mockApiObj.getActiveTasksForIssue).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[data-agent-card-slot]")).toBeNull();
+    expect(document.querySelector("[data-agent-live-card]")).toBeNull();
+    expect(document.querySelector("[data-agent-stream-slot]")).toHaveClass("min-h-16");
+    expect(document.querySelector("[data-agent-stream-slot]")).toHaveClass("h-16", "overflow-y-auto");
+  });
+
+  it("uses an existing task seed without waiting for the live reconciliation", async () => {
+    mockApiObj.getActiveTasksForIssue.mockImplementation(() => new Promise(() => {}));
+    renderIssueDetail();
+    await waitForReveal();
+    await waitFor(() => expect(mockApiObj.getActiveTasksForIssue).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Started working on this")).toBeVisible();
+  });
+
+  it("reveals comments when the initial active-task read fails", async () => {
+    mockApiObj.listTasksByIssue.mockImplementation(() => new Promise(() => {}));
+    mockApiObj.getActiveTasksForIssue.mockRejectedValue(new Error("fixture status unavailable"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderIssueDetail();
+      await waitForReveal();
+      expect(screen.getByText("Started working on this")).toBeVisible();
+      expect(mockApiObj.getActiveTasksForIssue).toHaveBeenCalledTimes(1);
+    } finally { error.mockRestore(); }
+  });
+
+  it("keeps the live execution bar outside the head row and separates the comment cards", async () => {
+    mockApiObj.getActiveTasksForIssue.mockResolvedValue({ tasks: [{
+      id: "task-live", issue_id: "issue-1", issue_session_id: "session-main", agent_id: "agent-1",
+      status: "running", started_at: new Date().toISOString(), created_at: new Date().toISOString(),
+    }] });
+    renderIssueDetail();
+    await waitForReveal();
+    await waitFor(() => expect(document.querySelector("[data-agent-live-card]")).not.toBeNull());
+    const bar = document.querySelector("[data-agent-live-card]")!;
+    const first = document.getElementById("comment-comment-1")!;
+    expect(bar.parentElement).toBe(first.parentElement);
+    expect(bar.closest('[data-perf-item="message"]')).toBeNull();
+    const separator = document.querySelector("[data-issue-activity-divider]")!;
+    expect(separator.tagName).toBe("HR");
+    expect(separator.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(bar.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(first.querySelector(".group\\/msg")).toHaveClass("border", "rounded-lg");
+    expect(document.querySelector("[data-agent-card-slot]")).toBeNull();
+  });
+
+  it("keeps the detail skeleton until member and child gates resolve", async () => {
+    let resolveMembers!: (members: Array<{ user_id: string; name: string; email: string; role: string }>) => void;
+    let resolveChildren!: (value: { issues: Issue[] }) => void;
+    mockWorkspaceMembers.query.mockReturnValue(new Promise((resolve) => {
+      resolveMembers = resolve;
+    }));
+    mockApiObj.listChildIssues.mockReturnValue(new Promise((resolve) => {
+      resolveChildren = resolve;
+    }));
+
+    renderIssueDetail();
+    await waitFor(() => expect(mockApiObj.listChildIssues).toHaveBeenCalledWith("issue-1"));
+    expect(document.querySelector("[data-tab-scroll-root][data-perf-state='ready']")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveMembers([{ user_id: "local", name: "Test User", email: "test@test.com", role: "admin" }]);
+    });
+    expect(document.querySelector("[data-tab-scroll-root][data-perf-state='ready']")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveChildren({ issues: [] });
+    });
+    expect(await screen.findByRole("button", { name: "Implement authentication" })).toBeInTheDocument();
+  });
+
   it("renders issue title and description after loading", async () => {
     renderIssueDetail();
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue("Implement authentication")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Implement authentication" })).toBeInTheDocument();
     });
 
-    expect(screen.getByDisplayValue("Add JWT auth to the backend")).toBeInTheDocument();
+    expect(screen.getByText("Add JWT auth to the backend")).toBeInTheDocument();
   });
 
   it("shows the completed-without-output empty state for a done intake", async () => {
@@ -725,7 +938,7 @@ describe("IssueDetail (shared)", () => {
 
     await waitFor(() => {
       expect(mockApiObj.retitleIssue).toHaveBeenCalledWith("issue-1");
-      expect(screen.getByDisplayValue("Add JWT authentication")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Add JWT authentication" })).toBeInTheDocument();
     });
     const successCall = mockToast.success.mock.calls.find(
       ([message]) => String(message).includes("Renamed:"),
@@ -739,12 +952,12 @@ describe("IssueDetail (shared)", () => {
       expect(mockApiObj.patchIssue).toHaveBeenCalledWith("issue-1", {
         title: "Implement authentication",
       });
-      expect(screen.getByDisplayValue("Implement authentication")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Implement authentication" })).toBeInTheDocument();
     });
   });
 
-  it("offers result acceptance in the sidebar after the latest agent task completes", async () => {
-    mockApiObj.getIssue.mockResolvedValue({ ...mockIssue, status: "in_review" });
+  it("keeps a finished round in review with only its properties in the sidebar", async () => {
+    mockApiObj.getIssue.mockResolvedValue({ ...mockIssue, status: "in_review", pending_decision_count: 0 });
     mockApiObj.listTasksByIssue.mockResolvedValue([
       {
         id: "task-completed",
@@ -763,12 +976,40 @@ describe("IssueDetail (shared)", () => {
     ]);
     renderIssueDetail();
 
-    const button = await screen.findByRole("button", { name: "Complete issue" });
-    fireEvent.click(button);
+    await screen.findByText("Properties");
+    expect(screen.getByRole("button", { name: "In Review" })).toBeInTheDocument();
+    // No responsibility section, question history entry, delivery card, root human or done grant.
+    expect(document.querySelector("[data-issue-responsibility], [data-issue-delivery], [data-parent-done-grant]")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Questions and history" })).toBeNull();
+    expect(screen.queryByText(/Responsibility and delivery|Designated human|Result reviewer|Accept delivery/)).toBeNull();
+    expect(document.querySelector("[data-issue-notice-slot]")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Complete issue" })).toBeNull();
+    expect(mockApiObj.updateIssue).not.toHaveBeenCalled();
+  });
 
-    await waitFor(() => {
-      expect(mockApiObj.updateIssue).toHaveBeenCalledWith("issue-1", { status: "done" });
-    });
+  it("sets an issue to done straight from the status picker", async () => {
+    mockApiObj.getIssue.mockResolvedValue({ ...mockIssue, status: "in_review" });
+    mockApiObj.updateIssue.mockResolvedValue({ ...mockIssue, status: "done" });
+    renderIssueDetail();
+
+    fireEvent.click(await screen.findByRole("button", { name: "In Review" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Done" }));
+
+    await waitFor(() => expect(mockApiObj.updateIssue).toHaveBeenCalledWith("issue-1", { status: "done" }));
+    expect(mockApiObj.updateIssue).toHaveBeenCalledTimes(1);
+    expect(mockToast.error).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's refusal when an agent-only closure rule rejects done", async () => {
+    mockApiObj.getIssue.mockResolvedValue({ ...mockIssue, status: "in_review" });
+    mockApiObj.updateIssue.mockRejectedValue(new ApiError("Only the parent issue's execution owner can set this issue to done", 403, "Forbidden",
+      { code: "issue_done_requires_parent_owner" }));
+    renderIssueDetail();
+
+    fireEvent.click(await screen.findByRole("button", { name: "In Review" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Done" }));
+
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith("Only the parent issue's execution owner can set this issue to done"));
   });
 
   it("does not offer result acceptance while the latest agent task is active", async () => {
@@ -805,7 +1046,7 @@ describe("IssueDetail (shared)", () => {
     ]);
     renderIssueDetail();
 
-    await screen.findByDisplayValue("Implement authentication");
+    await screen.findByRole("button", { name: "Implement authentication" });
     await waitFor(() => expect(mockApiObj.listTasksByIssue).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: "Complete issue" })).not.toBeInTheDocument();
   });
@@ -844,117 +1085,16 @@ describe("IssueDetail (shared)", () => {
     ]);
     renderIssueDetail();
 
-    await screen.findByDisplayValue("Implement authentication");
+    await screen.findByRole("button", { name: "Implement authentication" });
     await waitFor(() => expect(mockApiObj.listTasksByIssue).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: "Complete issue" })).not.toBeInTheDocument();
-  });
-
-  it("opens the conversation directly at its newest entry without an imperative jump", async () => {
-    renderIssueDetail();
-
-    await waitFor(() => {
-      expect(screen.getByTestId("virtuoso-mock")).toBeInTheDocument();
-    });
-    expect(virtuosoLatestProps.current?.initialTopMostItemIndex).toEqual({
-      index: "LAST",
-      align: "end",
-    });
-    expect(virtuosoScrollToIndexSpy).not.toHaveBeenCalled();
-  });
-
-  it("loads older timeline rows from the top while preserving the logical anchor", async () => {
-    timelinePageControl.hasMore = true;
-    timelinePageControl.olderEntries = [{
-      type: "comment",
-      id: "older-comment",
-      actor_type: "member",
-      actor_id: "user-1",
-      content: "older",
-      parent_id: null,
-      created_at: "2026-01-15T00:00:00Z",
-    }];
-    renderIssueDetail();
-
-    await waitFor(() => expect(virtuosoLatestProps.current?.startReached).toBeTypeOf("function"));
-    await act(async () => {
-      const startReached = virtuosoLatestProps.current?.startReached as () => void;
-      startReached();
-    });
-
-    await waitFor(() => {
-      expect(mockApiObj.listTimelinePage).toHaveBeenCalledWith(
-        "issue-1",
-        expect.objectContaining({ before: "older-cursor", limit: 40 }),
-      );
-      expect(virtuosoLatestProps.current?.firstItemIndex).toBe(999_999);
-    });
-  });
-
-  it("offers a jump-to-latest chip when scrolled away from the newest entry", async () => {
-    renderIssueDetail();
-    await waitFor(() => {
-      expect(screen.getByTestId("virtuoso-mock")).toBeInTheDocument();
-    });
-
-    // No chip while the viewport sits at the bottom (initial state).
-    expect(screen.queryByRole("button", { name: /jump to latest/i })).not.toBeInTheDocument();
-
-    const atBottomStateChange = virtuosoLatestProps.current?.atBottomStateChange as
-      | ((atBottom: boolean) => void)
-      | undefined;
-    expect(atBottomStateChange).toBeTypeOf("function");
-    await waitFor(() => {
-      atBottomStateChange!(false);
-      expect(screen.getByRole("button", { name: /jump to latest/i })).toBeInTheDocument();
-    });
-
-    virtuosoScrollToIndexSpy.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: /jump to latest/i }));
-    expect(virtuosoScrollToIndexSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ index: "LAST", align: "end" }),
-    );
-  });
-
-  it("does not follow realtime output after the viewport moves away from the bottom", async () => {
-    renderIssueDetail();
-    await waitFor(() => {
-      expect(screen.getByTestId("virtuoso-mock")).toBeInTheDocument();
-    });
-
-    const atBottomStateChange = virtuosoLatestProps.current?.atBottomStateChange as
-      | ((atBottom: boolean) => void)
-      | undefined;
-    const followOutput = virtuosoLatestProps.current?.followOutput as
-      | ((isAtBottom: boolean) => "auto" | "smooth" | boolean)
-      | undefined;
-
-    expect(atBottomStateChange).toBeTypeOf("function");
-    expect(followOutput).toBeTypeOf("function");
-    expect(virtuosoLatestProps.current?.atBottomThreshold).toBe(4);
-
-    // Virtuoso derives this boolean from scroll position, so the same path
-    // covers wheel scrolling, scrollbar dragging, PageUp and Home. Exercise
-    // the race that caused the regression: output arrives before React has
-    // committed the atBottomStateChange state update.
-    act(() => {
-      atBottomStateChange!(false);
-      expect(followOutput!(false)).toBe(false);
-      // react-virtuoso treats an in-progress programmatic scroll as being at
-      // the bottom. The synchronous reader-position ref must still win after
-      // the user has moved away.
-      expect(followOutput!(true)).toBe(false);
-    });
-
-    // Realtime entries still follow while the reader genuinely remains at
-    // the bottom, but without a smooth animation that can fight later input.
-    act(() => atBottomStateChange!(true));
-    expect(followOutput!(true)).toBe("auto");
   });
 
   it("switches the visible conversation by product Session", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -969,6 +1109,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -996,14 +1137,9 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail("issue-1", "session-main");
 
     await waitFor(() => {
-      expect(mockApiObj.listTimelinePage).toHaveBeenCalledWith(
-        "issue-1",
-        expect.objectContaining({ issueSessionId: "session-main" }),
-      );
+      expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("session-main", { before: 30, with_activity: 1 });
     });
-    expect(mockApiObj.listTimelinePage.mock.calls.some(([, params]) =>
-      params.issueSessionId === "@default",
-    )).toBe(false);
+    expect(mockApiObj.getSessionLog.mock.calls.some(([sessionId]) => sessionId === "@default")).toBe(false);
   });
 
   it("does not leave an embedding surface when the default Session resolves", async () => {
@@ -1025,20 +1161,17 @@ describe("IssueDetail (shared)", () => {
     expect(mockNavigationReplace).not.toHaveBeenCalled();
   });
 
-  it("keeps the session rail mounted on a single-session issue, with the only New-session control in its header", async () => {
+  it("keeps the linked-session rail mounted on a single-session issue with an Issue-owned create control", async () => {
     // Default fixture: one default "Main" session. The rail still mounts —
-    // it is where sessions are read *and* created, so hiding it on the
-    // single-session case hid the concept from everyone who never had two.
+    // it is where linked Sessions are selected, so hiding it on the
+    // single-session case would hide the relationship from most users.
     renderIssueDetail();
 
-    const railLabel = await screen.findByText("Sessions");
+    await screen.findByText("Sessions");
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
 
-    // Exactly one create-session control in the whole page, and it lives in
-    // the rail header.
-    const newSessionControls = screen.getAllByRole("button", { name: "New session" });
-    expect(newSessionControls).toHaveLength(1);
-    expect(railLabel.parentElement).toContainElement(newSessionControls[0]!);
+    // Issue-owned creation stays reachable even when there is only Main.
+    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
 
   });
 
@@ -1046,13 +1179,13 @@ describe("IssueDetail (shared)", () => {
     // Default fixture: one default "Main" session.
     renderIssueDetail();
 
-    await screen.findByDisplayValue("Implement authentication");
+    await screen.findByRole("button", { name: "Implement authentication" });
     const scrollRoot = document.querySelector<HTMLElement>("[data-tab-scroll-root]");
     expect(scrollRoot).not.toBeNull();
     // Sibling of the scroll container, immediately before it — same slot the
     // multi-session case uses, so the reading column never shifts when a
     // second session appears.
-    expect(scrollRoot!.previousElementSibling).toContainElement(
+    expect(scrollRoot!.parentElement!.parentElement!.previousElementSibling).toContainElement(
       screen.getByText("Sessions"),
     );
   });
@@ -1060,15 +1193,19 @@ describe("IssueDetail (shared)", () => {
   it("explains the rail's scope without widening the column", async () => {
     renderIssueDetail();
 
-    // The header text stays the bare word; the scope rides along as the
-    // tooltip / accessible description.
+    // The header identifies this as an Issue-scoped projection; the tooltip
+    // distinguishes owned Sessions from associated Chat Sessions.
     const railLabel = await screen.findByText("Sessions");
-    expect(railLabel).toHaveAttribute("title", "Sessions on this issue");
+    expect(railLabel).toHaveAttribute(
+      "title",
+      "Sessions owned by or associated with this Issue",
+    );
   });
 
   it("shows the localized default-session name instead of the stored title", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([{
       id: "session-main",
+      owner_type: "issue", owner_id: mockIssue.id,
       issue_id: mockIssue.id,
       workspace_id: "ws-1",
       // Server-side constant nobody typed — it must never reach the screen.
@@ -1093,6 +1230,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main-RAW",
@@ -1107,6 +1245,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1135,67 +1274,11 @@ describe("IssueDetail (shared)", () => {
     expect(mockNavigationReplace).not.toHaveBeenCalled();
   });
 
-  it("creates a second session from the rail header and switches to it", async () => {
-    const sessionMain = {
-      id: "session-main",
-      issue_id: mockIssue.id,
-      workspace_id: "ws-1",
-      title: "Main",
-      status: "active",
-      is_default: true,
-      summary: null,
-      created_by_type: "system",
-      created_by_id: null,
-      created_at: "2025-01-01T00:00:00Z",
-      updated_at: "2025-01-01T00:00:00Z",
-      participants: [],
-    };
-    const sessionReview = {
-      ...sessionMain,
-      id: "session-review",
-      title: "Review",
-      is_default: false,
-      created_by_type: "member",
-      created_by_id: "user-1",
-      created_at: "2025-01-02T00:00:00Z",
-      updated_at: "2025-01-02T00:00:00Z",
-    };
-    mockApiObj.listIssueSessions.mockResolvedValue([sessionMain]);
-    // The mutation invalidates the sessions query on settle, so the refetch
-    // must see the new session — that refetch is what mounts the column.
-    mockApiObj.createIssueSession.mockImplementation(async () => {
-      mockApiObj.listIssueSessions.mockResolvedValue([sessionMain, sessionReview]);
-      return sessionReview;
-    });
-    renderIssueDetail();
-
-    fireEvent.click(await screen.findByRole("button", { name: "New session" }));
-
-    const createDialog = within(await screen.findByRole("dialog"));
-    expect(createDialog.getByText("Create session")).toBeInTheDocument();
-    fireEvent.change(createDialog.getByLabelText("Session name"), {
-      target: { value: "Review" },
-    });
-    fireEvent.click(createDialog.getByRole("button", { name: "Create" }));
-
-    await waitFor(() => {
-      expect(mockApiObj.createIssueSession).toHaveBeenCalledWith("issue-1", {
-        title: "Review",
-        holds_workspace: true,
-      });
-    });
-    // Sessions refetched → the rail gains a second row and the new session
-    // is the one being read.
-    expect(await screen.findByRole("button", { name: /^Review/ })).toBeInTheDocument();
-    await waitFor(() => {
-      expect(mockApiObj.listTimeline).toHaveBeenCalledWith("issue-1", "session-review");
-    });
-  });
-
-  it("renders one rail row per session, one New-session control, and the panel actions", async () => {
+  it("renders one rail row per linked Session with an Issue-owned create control", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1210,6 +1293,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1228,9 +1312,7 @@ describe("IssueDetail (shared)", () => {
     expect(await screen.findByText("Sessions")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Review/ })).toBeInTheDocument();
-    // The + affordance lives in the rail header — and only there, so the
-    // panel must not mount a second copy.
-    expect(screen.getAllByRole("button", { name: "New session" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Session actions" })).toHaveLength(2);
   });
 
@@ -1238,6 +1320,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1252,6 +1335,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1275,15 +1359,16 @@ describe("IssueDetail (shared)", () => {
     // column and left the panel's left gutter empty. It must be a sibling…
     expect(scrollRoot!.contains(sessionsLabel)).toBe(false);
     // …placed immediately before the content, i.e. on the panel's far left.
-    expect(scrollRoot!.previousElementSibling).toContainElement(sessionsLabel);
+    expect(scrollRoot!.parentElement!.parentElement!.previousElementSibling).toContainElement(sessionsLabel);
     // The timeline itself stays inside the scroll container.
-    expect(scrollRoot!.contains(screen.getAllByText("Activity")[0]!)).toBe(true);
+    expect(scrollRoot!.contains(screen.getAllByText("Comments and activity")[0]!)).toBe(true);
   });
 
   it("opens participant management from a session row's actions menu", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1298,6 +1383,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1342,7 +1428,7 @@ describe("IssueDetail (shared)", () => {
     }]);
     renderIssueDetail();
 
-    await screen.findByDisplayValue("Implement authentication");
+    await screen.findByRole("button", { name: "Implement authentication" });
     expect(screen.queryByText("Investigate the flaky test")).not.toBeInTheDocument();
     expect(mockApiObj.listSessionTasks).not.toHaveBeenCalled();
   });
@@ -1351,6 +1437,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1365,6 +1452,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1386,6 +1474,166 @@ describe("IssueDetail (shared)", () => {
     });
   });
 
+  it.each([
+    ["deleted-comment", "session-main"], ["missing-comment", "session-main"],
+    ["deleted-comment", undefined], ["missing-comment", undefined],
+  ])("reveals a normal ready tail for unavailable %s (session: %s)", async (target, sessionId) => {
+    mockApiObj.locateSessionLogEntry.mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    const view = render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={createTestQueryClient()}>
+        <IssueDetail issueId="issue-1" initialIssueSessionId={sessionId} highlightCommentId={target} />
+      </QueryClientProvider>
+    </I18nProvider>);
+    await waitFor(() => expect(view.container.querySelector("[data-tab-scroll-root]"))
+      .toHaveAttribute("data-perf-state", "ready"));
+    const root = view.container.querySelector("[data-tab-scroll-root]")!;
+    expect(root).toHaveAttribute("data-perf-fresh", "1");
+    expect(root).toHaveAttribute("data-stick-state", "pinned");
+    expect(screen.getByText("Started working on this")).toBeVisible();
+    expect(view.container.querySelector('[data-perf-anchor="target-comment"]')).toBeNull();
+    expect(view.container.querySelector(".bg-warning\\/10")).toBeNull();
+    expect(screen.getByRole("switch", { name: "Show system details" })).toHaveAttribute("aria-checked", "false");
+    expect(activityPreferencesStore("local", "ws-1").getState().showSystemDetails).toBe(false);
+    expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("session-main", { before: 30, with_activity: 1 });
+  });
+
+  it.each([undefined, "missing-comment"])("opens the Issue Main before an associated Chat Main (comment: %s)", async highlightCommentId => {
+    const [main] = await mockApiObj.listIssueSessions("issue-1");
+    mockApiObj.listIssueSessions.mockResolvedValue([
+      { ...main, id: "chat-main", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1" }, main,
+    ]);
+    mockApiObj.locateSessionLogEntry.mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={createTestQueryClient()}>
+        <IssueDetail issueId="issue-1" highlightCommentId={highlightCommentId} />
+      </QueryClientProvider>
+    </I18nProvider>);
+    await waitForReveal();
+    expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("session-main", { before: 30, with_activity: 1 });
+    expect(mockApiObj.getSessionLog.mock.calls.some(([sessionId]) => sessionId === "chat-main")).toBe(false);
+  });
+
+  it("opens an explicitly selected Chat Main without Issue activities", async () => {
+    const [main] = await mockApiObj.listIssueSessions("issue-1");
+    mockApiObj.listIssueSessions.mockResolvedValue([
+      { ...main, id: "chat-main", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1" }, main,
+    ]);
+    renderIssueDetail("issue-1", "chat-main");
+    await waitForReveal();
+    expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("chat-main", { before: 30 });
+    expect(mockApiObj.getSessionLog.mock.calls.some(([sessionId, params]) => sessionId === "chat-main" && params?.with_activity)).toBe(false);
+  });
+
+  it.each(["session-main", undefined])("keeps a failed locate retryable (session: %s)", async sessionId => {
+    mockApiObj.locateSessionLogEntry.mockRejectedValue(new TypeError("Failed to fetch"));
+    const view = render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={createTestQueryClient()}>
+        <IssueDetail issueId="issue-1" initialIssueSessionId={sessionId} highlightCommentId="target" />
+      </QueryClientProvider>
+    </I18nProvider>);
+    await screen.findByRole("button", { name: "Try again" });
+    expect(view.container.querySelector("[data-tab-scroll-root]")).toBeNull();
+    expect(mockApiObj.getSessionLog).not.toHaveBeenCalled();
+    mockApiObj.locateSessionLogEntry.mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(view.container.querySelector("[data-tab-scroll-root]"))
+      .toHaveAttribute("data-perf-state", "ready"));
+    expect(screen.getByText("Started working on this")).toBeVisible();
+  });
+
+  it("keeps a valid deep link positioned and highlighted", async () => {
+    const view = render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={createTestQueryClient()}>
+        <IssueDetail issueId="issue-1" highlightCommentId="comment-2" />
+      </QueryClientProvider>
+    </I18nProvider>);
+    await waitFor(() => expect(view.container.querySelector("[data-tab-scroll-root]"))
+      .toHaveAttribute("data-perf-state", "ready"));
+    expect(view.container.querySelector('[data-perf-anchor="target-comment"]'))
+      .toHaveAttribute("id", "comment-comment-2");
+    expect(document.getElementById("comment-comment-2")).toHaveClass("bg-warning/10");
+    expect(view.container.querySelector("[data-tab-scroll-root]")).toHaveAttribute("data-stick-state", "released");
+  });
+
+  it.each([404, 503, 200])("uses the default session only when every candidate returns not-found (side: %s)", async status => {
+    const [main] = await mockApiObj.listIssueSessions("issue-1");
+    mockApiObj.listIssueSessions.mockResolvedValue([{ ...main, id: "session-side", is_default: false }, main]);
+    mockApiObj.locateSessionLogEntry.mockImplementation(async (sessionId: string) => {
+      const code = sessionId === "session-side" ? status : 404;
+      if (code === 200) return { id: "another-comment", seq: 1, head_seq: 1 };
+      throw new ApiError("unavailable", code, "Unavailable");
+    });
+    const view = render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={createTestQueryClient()}>
+        <IssueDetail issueId="issue-1" highlightCommentId="missing" />
+      </QueryClientProvider>
+    </I18nProvider>);
+    if (status !== 404) {
+      await screen.findByRole("button", { name: "Try again" });
+      expect(mockApiObj.getSessionLog).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() => expect(view.container.querySelector("[data-tab-scroll-root]"))
+        .toHaveAttribute("data-perf-state", "ready"));
+      expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("session-main", { before: 30, with_activity: 1 });
+      expect(mockApiObj.getSessionLog).not.toHaveBeenCalledWith("session-side", { before: 30 });
+    }
+  });
+
+  it("replaces a stale SSR anchor with a ready bottom window", async () => {
+    const window = await mockApiObj.getSessionLog("session-main");
+    mockApiObj.locateSessionLogEntry.mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    const view = render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={createTestQueryClient()}>
+        <IssueDetail issueId="issue-1" initialIssueSessionId="session-main" highlightCommentId="deleted"
+          initialLog={{ sessionId: "session-main", head: null, window, targetCommentId: "deleted" }} />
+      </QueryClientProvider>
+    </I18nProvider>);
+    await waitFor(() => expect(view.container.querySelector("[data-tab-scroll-root]"))
+      .toHaveAttribute("data-perf-state", "ready"));
+    expect(view.container.querySelector("[data-tab-scroll-root]")).toHaveAttribute("data-stick-state", "pinned");
+    expect(view.container.querySelector('[data-perf-anchor="target-comment"]')).toBeNull();
+    expect(screen.getByText("Started working on this")).toBeVisible();
+    expect(mockApiObj.locateSessionLogEntry).toHaveBeenCalledWith("session-main", "deleted");
+  });
+
+  it("locates an inbox comment after the Issue resolves behind a ready log window", async () => {
+    let resolveIssue!: (issue: Issue) => void;
+    mockApiObj.getIssue.mockReturnValue(new Promise<Issue>((resolve) => { resolveIssue = resolve; }));
+    const target: SessionLogRow = {
+      session_id: "session-main", seq: 2, id: "comment-2", revision: 1, kind: "message",
+      visibility: "shown", author_type: "agent", author_id: "agent-1", task_id: null,
+      parent_id: null, body_md: "I can help with this", body_html: "<p>I can help with this</p>",
+      render_version: "test", metadata: { attachments: [], reactions: [] }, resolved_at: null,
+      resolved_by_type: null, resolved_by_id: null, created_at: "2026-01-17T00:00:00Z",
+      updated_at: "2026-01-17T00:00:00Z", deleted_at: null,
+    };
+    const replica = new MemorySessionReplica({
+      "session-main": { entries: [target], ready: true, fresh: true },
+    });
+    issueLogOverride.current = { replica, snapshot: replica.getSnapshot("session-main"), error: false };
+    const queryClient = createTestQueryClient();
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={queryClient}>
+          <IssueDetail issueId="issue-1" initialIssueSessionId="session-main"
+            highlightCommentId={target.id} initialLog={{ sessionId: "session-main", head: null,
+              window: { entries: [], head_seq: 2, log_version: 1, has_more_before: false, has_more_after: false } }} />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["workspaces", "ws-1", "members"])?.status).toBe("success");
+    });
+    expect(document.querySelector('[data-slot="skeleton"]')).not.toBeNull();
+    expect(document.getElementById("comment-comment-2")).toBeNull();
+    resolveIssue(mockIssue);
+    await waitForReveal();
+    expect(document.querySelector('[data-perf-anchor="target-comment"]')).toHaveAttribute("id", "comment-comment-2");
+    expect(document.getElementById("comment-comment-2")).toHaveClass("bg-warning/10");
+    expect(document.querySelector('[data-session-log-scroll]')).toHaveAttribute("data-stick-state", "released");
+  });
+
   it("shows reusable Session results without offering to publish one", async () => {
     mockApiObj.listIssueSessionResults.mockResolvedValue([{
       id: "result-1",
@@ -1398,13 +1646,18 @@ describe("IssueDetail (shared)", () => {
       published_by_id: "agent-1",
       created_at: "2025-01-03T00:00:00Z",
     }]);
+    mockApiObj.listTimeline.mockResolvedValue([...mockTimeline, { type: "activity", id: "published-result", actor_type: "system",
+      content: "Duplicate result body", details: { log_kind: "result_published", result_id: "result-1", title: "Architecture decision" } }]);
     renderIssueDetail();
 
     // The result itself lives in the right panel's key-results section; the
     // timeline only carries a one-line pointer at it.
     expect(await screen.findByText("Architecture decision")).toBeInTheDocument();
+    await waitForReveal();
+    expect(screen.queryByText(/published the result/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Show system details" }));
     expect(
-      screen.getByText('published the result "Architecture decision"'),
+      screen.getByText(/published the result "Architecture decision"/),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("Use an append-only canonical event log."),
@@ -1433,19 +1686,24 @@ describe("IssueDetail (shared)", () => {
       published_by_id: "user-1",
       created_at: "2025-01-03T00:00:00Z",
     }]);
+    mockApiObj.listTimeline.mockResolvedValue([...mockTimeline, { type: "activity", id: "published-result", actor_type: "system",
+      content: "Duplicate result body", details: { log_kind: "result_published", result_id: "result-1", title: "Architecture decision" } }]);
     renderIssueDetail();
 
     // Panel section carries the typed card...
     expect(await screen.findByText("Key results")).toBeInTheDocument();
+    await waitForReveal();
     expect(screen.getByRole("img", { name: "Decision" })).toBeInTheDocument();
 
     // ...and the timeline line scrolls to it.
-    fireEvent.click(screen.getByText('published the result "Architecture decision"'));
+    expect(screen.queryByText(/published the result/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Show system details" }));
+    fireEvent.click(screen.getByText(/published the result "Architecture decision"/));
     expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1);
     expect((scrollIntoViewSpy.mock.contexts[0] as HTMLElement).id).toBe("issue-key-results");
   });
 
-  it("gives sub-issue selection localized, design-system checkboxes", async () => {
+  it("keeps the child list in the sidebar and out of the document scroll region", async () => {
     const child: Issue = {
       ...mockIssue,
       id: "issue-2",
@@ -1459,19 +1717,10 @@ describe("IssueDetail (shared)", () => {
     useIssueSelectionStore.getState().clear();
     renderIssueDetail();
 
-    // aria-labels route through t(), so a zh/ja/ko user doesn't get English
-    // accessible names, and both controls are the shadcn Checkbox.
-    const rowBox = await screen.findByRole("checkbox", { name: "Select TES-2" });
-    expect(screen.getByLabelText("Select all sub-issues")).toBeInTheDocument();
-    expect(rowBox).toHaveAttribute("data-slot", "checkbox");
-    expect(rowBox).toHaveAttribute("aria-checked", "false");
-
-    fireEvent.click(rowBox);
-    await waitFor(() => {
-      expect(
-        screen.getByRole("checkbox", { name: "Select TES-2" }),
-      ).toHaveAttribute("aria-checked", "true");
-    });
+    const childLink = (await screen.findByText("Add refresh tokens")).closest("a");
+    expect(childLink).toHaveAttribute("href", "/test/issues/issue-2");
+    expect(childLink!.closest("[data-tab-scroll-root]")).toBeNull();
+    expect(screen.getByText("0/1")).toBeInTheDocument();
     useIssueSelectionStore.getState().clear();
   });
 
@@ -1482,17 +1731,15 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockReturnValue(new Promise(() => {}));
     renderIssueDetail();
 
-    await screen.findByText("Activity");
-    expect(mockApiObj.listTimelinePage).toHaveBeenCalledWith(
-      "issue-1",
-      expect.objectContaining({ issueSessionId: "@default", limit: 40 }),
-    );
-    expect(mockApiObj.listTimeline).not.toHaveBeenCalled();
+    expect(mockApiObj.getSessionLog).not.toHaveBeenCalled();
+    // Two skeletons are up at once now: the activity section's own placeholder
+    // and the reveal overlay that covers the whole document until the gates
+    // hold. Both carry `data-slot="skeleton"`, which is what the probe counts.
+    expect(document.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+    // No log viewport mounts before the Session exists; the skeleton fills its place.
+    expect(document.querySelector("[data-tab-scroll-root]")).toBeNull();
     expect(
-      screen.getAllByRole("generic").some((el) => el.getAttribute("data-slot") === "skeleton"),
-    ).toBe(true);
-    expect(
-      screen.queryByText("Couldn't load this issue's sessions"),
+      screen.queryByText("Couldn't load Sessions linked to this issue"),
     ).not.toBeInTheDocument();
   });
 
@@ -1501,7 +1748,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     expect(
-      await screen.findByText("Couldn't load this issue's sessions"),
+      await screen.findByText("Couldn't load Sessions linked to this issue"),
     ).toBeInTheDocument();
 
     const callsBeforeRetry = mockApiObj.listIssueSessions.mock.calls.length;
@@ -1511,16 +1758,15 @@ describe("IssueDetail (shared)", () => {
     });
   });
 
-  it("treats an empty session list as unavailable rather than as an empty timeline", async () => {
-    // No session id means no timeline query can ever run; silently rendering
-    // an empty activity list would claim the issue has no history.
+  it("distinguishes no visible linked Sessions from a failed Session read", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([]);
     renderIssueDetail();
 
     expect(
-      await screen.findByText("Couldn't load this issue's sessions"),
+      await screen.findByText("No Sessions yet"),
     ).toBeInTheDocument();
-    expect(mockApiObj.listTimeline).toHaveBeenCalledWith("issue-1", undefined);
+    expect(screen.queryByText("Couldn't load Sessions linked to this issue")).not.toBeInTheDocument();
+    expect(mockApiObj.getSessionLog).not.toHaveBeenCalled();
   });
 
   it("renders the issue title leaf as a link to the issue detail page", async () => {
@@ -1529,8 +1775,9 @@ describe("IssueDetail (shared)", () => {
     // The breadcrumb leaf is the whole "identifier + title" string wrapped in a
     // single link to the issue's own detail route (used to open the full page
     // from the inline Inbox pane). A bare issue has no ancestor crumbs.
-    const leaf = await screen.findByText("TES-1 Implement authentication");
-    expect(leaf.closest("a")).toHaveAttribute("href", "/test/issues/issue-1");
+    const identifier = await screen.findByRole("link", { name: "TES-1" });
+    expect(identifier).toHaveAttribute("href", "/test/issues/issue-1");
+    expect(screen.getByRole("button", { name: "Implement authentication" })).toBeInTheDocument();
   });
 
   it("omits the project breadcrumb segment when the issue has no project_id", async () => {
@@ -1538,7 +1785,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     // Leaf renders once loaded; a bare issue has no ancestor crumbs at all.
-    await screen.findByText("TES-1 Implement authentication");
+    await screen.findByRole("link", { name: "TES-1" });
 
     // Project is never fetched and no project crumb appears.
     expect(mockApiObj.getProject).not.toHaveBeenCalled();
@@ -1581,7 +1828,8 @@ describe("IssueDetail (shared)", () => {
 
     // Core rows — always rendered regardless of whether the issue has a value.
     expect(screen.getByText("Status")).toBeInTheDocument();
-    expect(screen.getByText("Assignee")).toBeInTheDocument();
+    expect(screen.getByText("Execution owner")).toBeInTheDocument();
+    expect(screen.queryByText("Execution coordinator")).not.toBeInTheDocument();
     // "Project" appears twice (row label + picker stub), so disambiguate by id.
     expect(screen.getByTestId("project-picker")).toBeInTheDocument();
     // priority="high" + due_date are set in the fixture, so both optional rows show.
@@ -1596,6 +1844,13 @@ describe("IssueDetail (shared)", () => {
     // The "+ Add property" affordance is always offered while any
     // optional field is still hidden.
     expect(screen.getByText("Add property")).toBeInTheDocument();
+  });
+
+  it("labels the execution assignment 执行负责人 in Chinese", async () => {
+    renderIssueDetail("issue-1", undefined, undefined, "zh-Hans");
+
+    expect(await screen.findByText("执行负责人")).toBeInTheDocument();
+    expect(screen.queryByText("本单执行统筹")).not.toBeInTheDocument();
   });
 
   it("hides every optional property row when none are set", async () => {
@@ -1672,7 +1927,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue("Implement authentication")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Implement authentication" })).toBeInTheDocument();
     });
 
     expect(screen.queryByTestId("panel-group")).not.toBeInTheDocument();
@@ -1787,7 +2042,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     await waitFor(() => {
-      expect(screen.getAllByText("Activity").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Comments and activity").length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -1802,6 +2057,430 @@ describe("IssueDetail (shared)", () => {
   });
 
   describe("flat session stream", () => {
+    function activityRow(seq: number, kind: string, extra: Partial<SessionLogRow> = {}): SessionLogRow {
+      return SessionLogEntrySchema.parse({ session_id: "session-main", seq, id: "row-" + seq, revision: 1, kind,
+        author_type: "system", body_md: "Event " + seq, body_html: null, render_version: "test", metadata: {}, ...extra });
+    }
+    function renderActivityRows(entries: SessionLogRow[], userId: string, options: { target?: string; missing?: string; ssr?: boolean;
+      activities?: IssueActivityEntry[]; truncated?: boolean; side?: boolean; chatOwned?: boolean; members?: unknown[] } = {}) {
+      const queryClient = createTestQueryClient();
+      // Match the SSR task seed; these cases isolate log display preferences.
+      queryClient.setQueryData(issueKeys.tasks(mockIssue.id), []);
+      let target = options.target;
+      let activities = options.activities;
+      let currentRows = entries;
+      const heightKeys: string[] = [];
+      const makeView = () => <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={queryClient}>
+          <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null}
+            members={(options.members ?? []) as any} agents={[{ id: "agent-1", name: "QA" } as any]} currentUserId={userId}
+            canModerateComments={false} activeIssueSessionId="session-main" activeIssueSession={options.activities
+              ? { id: "session-main", owner_type: options.chatOwned ? "chat" : "issue",
+                owner_id: options.chatOwned ? "chat-1" : mockIssue.id, is_default: !options.side } as any : null}
+            sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()} onCreateSession={vi.fn()} scrollContainerEl={null}
+            onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()} highlightCommentId={target}
+            initialLog={{ sessionId: "session-main", head: null, targetCommentId: options.missing ? undefined : target,
+              missingCommentId: options.missing,
+              window: { entries: [], head_seq: 10, log_version: 1, has_more_before: false, has_more_after: false } }} />
+        </QueryClientProvider>
+      </I18nProvider>;
+      const install = (rows: SessionLogRow[]) => {
+        const replica = new MemorySessionReplica({ "session-main": { entries: rows, ready: true, fresh: true } });
+        const readHeight = replica.readRowHeight.bind(replica);
+        replica.readRowHeight = (session, seq, key) => { heightKeys.push(key); return readHeight(session, seq, key); };
+        Object.assign(replica, { missingCommentId: options.missing ?? null, window: { entries: rows, activities,
+          activities_truncated: options.truncated, has_more_before: false, has_more_after: false } });
+        issueLogOverride.current = { replica, snapshot: replica.getSnapshot("session-main"), error: false };
+      };
+      install(entries);
+      const serverHtml = options.ssr ? renderToString(makeView()) : undefined;
+      const view = render(makeView());
+      return { ...view, serverHtml, heightKeys,
+        replaceRows: (rows: SessionLogRow[]) => { currentRows = rows; install(rows); view.rerender(makeView()); },
+        replaceActivities: (next: IssueActivityEntry[]) => { activities = next; install(currentRows); view.rerender(makeView()); },
+        changeTarget: (next?: string) => { target = next; view.rerender(makeView()); } };
+    }
+
+    const audit = (id: string, second: number, action: string, details: Record<string, unknown> = {}): IssueActivityEntry => ({
+      type: "activity", id, actor_type: "system", actor_id: null, action, details,
+      created_at: new Date(Date.UTC(2026, 0, 1) + second * 1000).toISOString(),
+    });
+    it("keeps group choices and eight-row truncation after comments and new groups arrive", async () => {
+      const head = activityRow(0, "head", { created_at: audit("", 0, "").created_at });
+      const fields = ["status", "priority", "title", "description", "start_date", "due_date", "project_id", "parent_issue_id"];
+      const activities = Array.from({ length: 10 }, (_, n) => audit(`act_${n}`, n + 1, "issue_updated", { [fields[n % fields.length]!]: "todo" }));
+      const view = renderActivityRows([head], "activity-groups", { activities, ssr: true });
+      await act(async () => {});
+      const group = view.container.querySelector("[data-activity-group]")!;
+      const header = group.querySelector("button[aria-expanded]")!;
+      expect(header).toHaveTextContent("10 activities");
+      expect(header).toHaveAttribute("aria-expanded", "true");
+      expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(8);
+      expect(view.serverHtml).toContain("data-activity-group");
+      const root = view.container.querySelector("[data-tab-scroll-root]")!;
+      expect(root).toHaveAttribute("data-ssr-display-ready", "1");
+      expect(root).toHaveAttribute("data-perf-fresh", "1");
+      const beforeSignature = view.heightKeys.at(-1);
+      fireEvent.click(within(group as HTMLElement).getByText("Show 2 more activities"));
+      expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(10);
+      fireEvent.click(header);
+      expect(header).toHaveAttribute("aria-expanded", "false");
+      expect(view.heightKeys.at(-1)).not.toBe(beforeSignature);
+      view.replaceRows([head, activityRow(1, "message", { author_type: "member", created_at: audit("", 30, "").created_at })]);
+      expect(header).toHaveAttribute("aria-expanded", "false");
+      expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(0);
+      view.replaceActivities([...activities, audit("later", 31, "issue_created")]);
+      expect(header).toHaveAttribute("aria-expanded", "false");
+      expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(1);
+      await act(async () => {});
+    });
+
+    it("groups the A4 assignment and two field changes, preserving the task entry point", async () => {
+      const head = activityRow(0, "head", { created_at: audit("", 0, "").created_at });
+      const turn = activityRow(1, "turn", { created_at: audit("", 1, "").created_at, task_id: "task",
+        body_md: "# Long assignment", metadata: { assignee_agent_id: "agent-1", status: "queued" } });
+      const view = renderActivityRows([head, turn], "activity-assignment", { activities: [
+        audit("assigned", 1, "issue_assigned", { to_type: "agent", to_id: "agent-1" }),
+        audit("status", 2, "issue_updated", { status: "todo" }), audit("priority", 3, "issue_updated", { priority: "high" }),
+      ] });
+      await act(async () => {});
+      const header = view.container.querySelector("[data-activity-group] > button[aria-expanded]")!;
+      expect(header).toHaveTextContent("3 activities");
+      expect(header).toHaveAttribute("aria-expanded", "true");
+      expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(2);
+      expect(document.getElementById("comment-row-1")).toHaveTextContent("Long assignment");
+      expect(view.container.textContent).not.toMatch(/act_|agt_|mem_/);
+      await act(async () => {});
+    });
+
+    it("reveals a grouped delegation deep link before SSR paint with its existing highlight", async () => {
+      const head = activityRow(0, "head", { created_at: audit("", 0, "").created_at });
+      const target = activityRow(1, "turn", { created_at: audit("", 2, "").created_at,
+        task_id: "task", body_md: "# Linked assignment", metadata: { assignee_agent_id: "agent-1", status: "queued" } });
+      const view = renderActivityRows([head, target, activityRow(2, "message", { created_at: audit("", 10, "").created_at })],
+        "grouped-deep-link", { target: target.id, ssr: true, activities: [
+          audit("before", 1, "issue_updated", { status: "todo" }), audit("after", 3, "issue_updated", { priority: "high" }),
+          audit("latest", 11, "issue_created"),
+        ] });
+      const anchor = view.container.querySelector('[data-perf-anchor="target-comment"]')!;
+      expect(anchor).toHaveAttribute("id", "comment-" + target.id);
+      expect(anchor).toHaveClass("bg-warning/10");
+      expect(view.container.querySelector("[data-activity-group] > button[aria-expanded]")).toHaveAttribute("aria-expanded", "true");
+      const server = document.createElement("div");
+      server.innerHTML = view.serverHtml!;
+      expect(server.querySelector('[data-perf-anchor="target-comment"]')).toHaveAttribute("id", "comment-" + target.id);
+      expect(server.querySelector('[data-perf-anchor="target-comment"]')).toHaveClass("bg-warning/10");
+      expect(server.querySelector("[data-tab-scroll-root]")).toHaveAttribute("data-ssr-display-ready", "0");
+      await act(async () => {});
+      expect(view.container.querySelector("[data-tab-scroll-root]")).toHaveAttribute("data-ssr-display-ready", "1");
+    });
+
+    it("renders a member reminder only for the member it reached and only when its original Q is in another session", async () => {
+      const view = (id: string) => ({ kind: "question", id, session_id: id === "row-1" ? "session-main" : "session-side", workspace_id: "ws-1", source_issue_id: mockIssue.id, source_agent_id: "agent-1",
+        source_turn_id: null, source_attempt_id: null, original_questions: [], original_message: id === "row-1" ? "Retire the v1 endpoint?" : "Which side branch?", options: null, summary: null,
+        current_handler: null, stage: "human", route_revision: 2, route_reason: null, answer_revision: 0, status: "pending", wait_status: "waiting", wait_reason: null,
+        answer: null, history: [], actions: { allowed: ["answer"] } });
+      mockApiObj.getQuestion.mockImplementation(async (id: string) => view(id));
+      const reminder = (seq: number, original: string, to: Partial<SessionLogRow>, source?: string) => activityRow(seq, "message", { sender_type: "system", message_kind: "request",
+        body_md: "A question is waiting", metadata: { question_notification: true, root_question_id: original, ...(source ? { source_question_session_id: source } : {}) }, ...to });
+      const rows = [activityRow(0, "head"),
+        activityRow(1, "message", { author_type: "agent", author_id: "agent-1", sender_type: "agent", message_kind: "decision", body_md: "Retire the v1 endpoint?", metadata: { question: { status: "pending" } } }),
+        // The original row above already shows this Q to everyone, the reader included.
+        reminder(2, "row-1", { to_type: "member", to_member_id: "member-me" }, "session-main"),
+        // A Q asked in a side session reaches this log only through its reminder.
+        reminder(3, "q-side", { to_type: "member", to_member_id: "member-me" }, "session-side"),
+        reminder(4, "q-side", { to_type: "member", to_member_id: "member-other" }, "session-side"),
+        reminder(5, "q-side", { to_type: "member", to_ref: "member-other" }),
+        reminder(6, "row-1", { to_type: "agent", to_agent_id: "agent-1", to_ref: "agent-1" }),
+        // An older recovery notice has no source session; its loaded original row decides.
+        reminder(7, "row-1", { to_type: "member", to_member_id: "member-me" })];
+      // The reader is a member whose member id differs from the user id the page knows.
+      const mounted = renderActivityRows(rows, "user-me", { members: [{ id: "member-me", user_id: "user-me", name: "Me", role: "member" }] });
+      await waitFor(() => expect(mounted.container.querySelectorAll("[data-question-tag]")).toHaveLength(3));
+      expect(document.getElementById("comment-row-1")?.querySelector("[data-question-summary]")).toHaveTextContent("Retire the v1 endpoint?");
+      expect(document.getElementById("comment-row-3")?.querySelector("[data-question-summary]")).toHaveTextContent("Which side branch?");
+      expect(document.getElementById("comment-row-6")?.querySelector("[data-question-summary]")).not.toBeNull();
+      for (const hidden of ["row-2", "row-4", "row-5", "row-7"]) expect(document.getElementById(`comment-${hidden}`)).toBeNull();
+      expect(mockApiObj.getQuestion).toHaveBeenCalledWith("row-1");
+      expect(mockApiObj.getQuestion).toHaveBeenCalledWith("q-side");
+      expect(mockApiObj.getQuestion).not.toHaveBeenCalledWith("row-2");
+    });
+
+    it("filters side-session and Chat Main activities and toggles third-layer audits while showing the cap hint", async () => {
+      const activities = [audit("second", 1, "issue_created"), audit("system", 2, "decision_requested"),
+        audit("comment", 3, "comment_created"), audit("mention", 4, "comment_mention_skipped"), audit("duplicate", 5, "workspace_move_cleared")];
+      const head = activityRow(0, "head");
+      const side = renderActivityRows([head], "side-activity", { activities, side: true });
+      expect(side.container.querySelector("[data-issue-activity]")).toBeNull();
+      side.unmount();
+      const chatMain = renderActivityRows([head], "chat-main-activity", { activities, chatOwned: true });
+      expect(chatMain.container.querySelector("[data-issue-activity]")).toBeNull();
+      chatMain.unmount();
+      const view = renderActivityRows([head], "main-activity", { activities, truncated: true });
+      expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(1);
+      expect(view.container).toHaveTextContent("Showing the latest 200 activities");
+      fireEvent.click(screen.getByRole("switch", { hidden: true }));
+      expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(3);
+      expect(view.container.querySelectorAll("[data-activity-group][data-system-detail]")).toHaveLength(2);
+      await act(async () => {});
+    });
+
+    it("opens an SSR missing-target tail's gate after preferences, without temporary details", async () => {
+      const user = "missing-ssr";
+      const rows = [activityRow(0, "head"), activityRow(1, "message", { author_type: "member", body_md: "retained" }),
+        activityRow(2, "system")];
+      const view = renderActivityRows(rows, user, { target: "missing", missing: "missing", ssr: true });
+      expect(view.serverHtml).toContain('data-ssr-display-ready="0"');
+      expect(view.serverHtml).not.toContain('data-ssr-anchor-id=');
+      expect(view.serverHtml).toContain("retained");
+      expect(view.serverHtml).not.toContain('data-system-detail');
+      await waitFor(() => expect(view.container.querySelector("[data-tab-scroll-root]"))
+        .toHaveAttribute("data-ssr-display-ready", "1"));
+      expect(activityPreferencesStore(user, "ws-1").getState().showSystemDetails).toBe(false);
+      expect(view.container.querySelector('[role="switch"]')).toHaveAttribute("aria-checked", "false");
+    });
+
+    it.each([
+      ["envelope", "system", { envelope: { kind: "report", to: { role: "delegator" }, outcome: "done" } }, "Agent-only instruction"],
+      ["result", "result_published", { title: "Linked result" }, "Result body"],
+      ["inbox", "turn", { assignee_agent_id: "agent-1" }, "读收件箱 ises_hidden cmt_env_hidden"],
+      ["unknown", "follow_frozen", {}, "Frozen details"],
+    ] as const)("renders a hidden %s deep-link target before SSR reveal without persisting the temporary display", async (name, kind, metadata, body) => {
+      const user = "deep-link-" + name;
+      const preference = activityPreferencesStore(user, "ws-1");
+      const write = vi.spyOn(preference.getState(), "setShowSystemDetails");
+      const target = activityRow(1, kind as string, { id: "linked-" + name, metadata, body_md: body as string });
+      const view = renderActivityRows([activityRow(0, "head"), target], user, { target: target.id, ssr: true });
+      const server = document.createElement("div");
+      server.innerHTML = view.serverHtml!;
+      const anchor = view.container.querySelector('[data-perf-anchor="target-comment"]');
+      expect(anchor).toHaveAttribute("id", "comment-" + target.id);
+      expect(anchor).toHaveClass("bg-warning/10");
+      expect(server.querySelector('[data-perf-anchor="target-comment"]')).toHaveAttribute("id", "comment-" + target.id);
+      expect(server.querySelector('[role="switch"]')).toHaveAttribute("aria-checked", "true");
+      expect(server.querySelector("[data-session-log-scroll]")).toHaveAttribute("data-ssr-display-ready", "0");
+      expect(view.container.querySelector("[data-session-log-scroll]")).toHaveAttribute("data-ssr-display-ready", "1");
+      expect(screen.getByRole("switch", { hidden: true })).toHaveAttribute("aria-checked", "true");
+      expect(preference.getState().showSystemDetails).toBe(false);
+      expect(write).not.toHaveBeenCalled();
+      view.changeTarget();
+      expect(view.container.querySelector("[data-system-detail]")).toBeNull();
+      expect(screen.getByRole("switch", { hidden: true })).toHaveAttribute("aria-checked", "false");
+      expect(write).not.toHaveBeenCalled();
+      write.mockRestore();
+      await act(async () => {});
+    });
+
+    it("keeps ordinary comment deep links filtered and does not write their preference", () => {
+      const user = "deep-link-comment";
+      const preference = activityPreferencesStore(user, "ws-1");
+      const write = vi.spyOn(preference.getState(), "setShowSystemDetails");
+      const target = activityRow(1, "message", { author_type: "member", body_md: "Linked comment", body_html: "<p>Linked comment</p>" });
+      const view = renderActivityRows([activityRow(0, "head"), target, activityRow(2, "system")], user, { target: target.id });
+      expect(view.container.querySelector('[data-perf-anchor="target-comment"]')).toHaveAttribute("id", "comment-" + target.id);
+      expect(view.container.querySelector("[data-system-detail]")).toBeNull();
+      expect(screen.getByRole("switch", { hidden: true })).toHaveAttribute("aria-checked", "false");
+      expect(write).not.toHaveBeenCalled();
+      write.mockRestore();
+    });
+
+    it("waits for an unresolved deep-link target before enabling the display gate", async () => {
+      const head = activityRow(0, "head");
+      const target = activityRow(1, "system", { id: "late-system-target" });
+      const view = renderActivityRows([head], "deep-link-late", { target: target.id });
+      expect(view.container.querySelector("[data-session-log-scroll]")).toHaveAttribute("data-ssr-display-ready", "0");
+      expect(document.getElementById("comment-" + target.id)).toBeNull();
+      view.replaceRows([head, target]);
+      expect(view.container.querySelector("[data-session-log-scroll]")).toHaveAttribute("data-ssr-display-ready", "1");
+      expect(view.container.querySelector('[data-perf-anchor="target-comment"]')).toHaveAttribute("id", "comment-" + target.id);
+      expect(screen.getByRole("switch", { hidden: true })).toHaveAttribute("aria-checked", "true");
+      expect(activityPreferencesStore("deep-link-late", "ws-1").getState().showSystemDetails).toBe(false);
+      await act(async () => {});
+    });
+
+    it("lets a manual switch override temporary deep-link display and persist the user's choice", async () => {
+      const user = "deep-link-manual";
+      const preference = activityPreferencesStore(user, "ws-1");
+      const write = vi.spyOn(preference.getState(), "setShowSystemDetails");
+      const rows = [activityRow(0, "head"), activityRow(1, "system")];
+      const view = renderActivityRows(rows, user, { target: rows[1]!.id });
+      const toggle = screen.getByRole("switch", { hidden: true });
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(view.container.querySelector("[data-system-detail]")).toBeNull();
+      expect(write).toHaveBeenLastCalledWith(false);
+      view.replaceRows([...rows]);
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      fireEvent.click(toggle);
+      expect(write).toHaveBeenLastCalledWith(true);
+      expect(preference.getState().showSystemDetails).toBe(true);
+      view.unmount();
+      const later = renderActivityRows(rows, user);
+      expect(later.container.querySelector("[data-system-detail]")).not.toBeNull();
+      write.mockRestore();
+      await act(async () => {});
+    });
+
+    it("filters all system detail types before rendering and only inserts them after the user's toggle", async () => {
+      const head = activityRow(0, "head", { body_md: "" });
+      const assignment = activityRow(1, "turn", { task_id: "task", body_md: "# Assignment\nFull task instructions", metadata: { assignee_agent_id: "agent-1", status: "completed" } });
+      const comment = activityRow(2, "message", { author_type: "member", author_id: "user-1", body_md: "Ordinary comment", body_html: "<p>Ordinary comment</p>" });
+      const hidden = [
+        activityRow(3, "turn", { body_md: "读收件箱 ises_x cmt_env_x", metadata: { assignee_agent_id: "agent-1" } }),
+        activityRow(4, "system", { body_md: "Read internal instructions dec_x", metadata: { envelope: { kind: "decision_needed" } } }),
+        activityRow(5, "result_published", { body_md: "# Duplicate body", metadata: { title: "Result title" } }),
+        activityRow(6, "follow_frozen", { body_md: "# Frozen tsk_x" }),
+      ];
+      const view = renderActivityRows([head, assignment, comment, ...hidden], "detail-filter");
+      expect(view.container.querySelectorAll("[data-system-detail]")).toHaveLength(0);
+      expect(document.getElementById("comment-row-1")).not.toBeNull();
+      expect(document.getElementById("comment-row-2")).toHaveTextContent("Ordinary comment");
+      for (const row of hidden) expect(document.getElementById("comment-" + row.id)).toBeNull();
+      const toggle = screen.getByRole("switch", { hidden: true });
+      expect(toggle).toHaveAttribute("aria-label", "Show system details");
+      fireEvent.click(toggle);
+      expect(view.container.querySelectorAll("[data-system-detail]")).toHaveLength(4);
+      expect(view.container).not.toHaveTextContent(/Full task instructions|Read internal instructions|Duplicate body|ises_x|cmt_env_x|tsk_x|dec_x/);
+      fireEvent.click(toggle);
+      expect(view.container.querySelectorAll("[data-system-detail]")).toHaveLength(0);
+      expect(document.getElementById("comment-row-2")).toHaveTextContent("Ordinary comment");
+      await act(async () => {});
+    });
+
+    it("applies a persisted preference on the first client render and keeps it across remounts", () => {
+      const preference = activityPreferencesStore("detail-persist", "ws-1");
+      preference.getState().setShowSystemDetails(true);
+      const rows = [activityRow(0, "head"), activityRow(1, "system", { body_md: "Visible from first render" })];
+      const first = renderActivityRows(rows, "detail-persist");
+      expect(first.container.querySelector("[data-system-detail]")).not.toBeNull();
+      first.unmount();
+      const second = renderActivityRows(rows, "detail-persist");
+      expect(second.container.querySelector("[data-system-detail]")).not.toBeNull();
+      second.unmount();
+      const differentUser = renderActivityRows(rows, "detail-other");
+      expect(differentUser.container.querySelector("[data-system-detail]")).toBeNull();
+    });
+
+    it("preserves a released reader's anchor when the user toggles details and keeps pinned scrolling at the end", async () => {
+      const view = renderActivityRows([activityRow(0, "head"), activityRow(1, "system"),
+        activityRow(2, "message", { author_type: "member", body_md: "Reader anchor", body_html: "<p>Reader anchor</p>" })], "detail-anchor");
+      const root = view.container.querySelector<HTMLDivElement>("[data-session-log-scroll]")!;
+      const comment = document.getElementById("comment-row-2")!;
+      root.dataset.stickState = "released";
+      root.scrollTop = 200;
+      root.getBoundingClientRect = () => ({ top: 50, bottom: 500 } as DOMRect);
+      comment.getBoundingClientRect = () => {
+        const top = view.container.querySelector("[data-system-detail]") ? 100 : 60;
+        return { top, bottom: top + 20 } as DOMRect;
+      };
+      const toggle = screen.getByRole("switch", { hidden: true });
+      fireEvent.click(toggle);
+      expect(root.scrollTop).toBe(240);
+      root.dataset.stickState = "pinned";
+      Object.defineProperty(root, "scrollHeight", { configurable: true, value: 800 });
+      fireEvent.click(toggle);
+      expect(root.scrollTop).toBe(800);
+      await act(async () => {});
+    });
+
+    it("retains a comment reading anchor when its trailer contains system activities", async () => {
+      const user = "activity-toggle-anchor";
+      activityPreferencesStore(user, "ws-1").getState().setShowSystemDetails(true);
+      const view = renderActivityRows([activityRow(0, "head", { created_at: audit("", 0, "").created_at }),
+        activityRow(1, "message", { author_type: "member", created_at: audit("", 1, "").created_at })], user,
+        { activities: [audit("decision", 2, "decision_requested")] });
+      await act(async () => {});
+      const root = view.container.querySelector<HTMLElement>("[data-tab-scroll-root]")!;
+      const comment = document.getElementById("comment-row-1")!;
+      expect(comment.querySelector("[data-system-detail]")).not.toBeNull();
+      root.dataset.stickState = "released";
+      root.scrollTop = 200;
+      root.getBoundingClientRect = () => ({ top: 50, bottom: 500 } as DOMRect);
+      comment.getBoundingClientRect = () => ({ top: comment.querySelector("[data-system-detail]") ? 100 : 60, bottom: 300 } as DOMRect);
+      fireEvent.click(screen.getByRole("switch", { hidden: true }));
+      expect(root.scrollTop).toBe(160);
+      await act(async () => {});
+    });
+
+    it("marks only the first assignee reply and does not retrofit references after earlier paging", () => {
+      const head = activityRow(0, "head");
+      const turn = activityRow(1, "turn", { task_id: "task", body_md: "# Task title", metadata: { assignee_agent_id: "agent-1" } });
+      const first = activityRow(2, "message", { task_id: "task", author_type: "agent", author_id: "agent-1", body_md: "First reply", body_html: "<p>First reply</p>" });
+      const second = activityRow(3, "message", { ...first, seq: 3, id: "second", body_md: "Second reply", body_html: "<p>Second reply</p>" });
+      const view = renderActivityRows([head, turn, first, second], "detail-response");
+      expect(view.container.querySelectorAll("[data-assignment-ref]")).toHaveLength(1);
+      expect(document.getElementById("comment-row-2")?.querySelector("[data-assignment-ref]")).toHaveTextContent("Responding to assignment: Task title");
+      expect(document.getElementById("comment-second")?.querySelector("[data-assignment-ref]")).toBeNull();
+      view.unmount();
+      const lateTurn = renderActivityRows([head, first, second], "detail-window");
+      expect(lateTurn.container.querySelector("[data-assignment-ref]")).toBeNull();
+      lateTurn.replaceRows([head, turn, first, second]);
+      expect(lateTurn.container.querySelector("[data-assignment-ref]")).toBeNull();
+    });
+    it.each(["no rows", "protocol head only"])("marks an answered empty log ready immediately with %s", (caseName) => {
+      const head: SessionLogRow = {
+        session_id: "session-main", id: "head-session-main", seq: 0, kind: "head", revision: 1,
+        visibility: "shown", author_type: "system", author_id: null, task_id: null, parent_id: null,
+        body_md: "", body_html: "", render_version: "test", metadata: { attachments: [] },
+        resolved_at: null, resolved_by_type: null, resolved_by_id: null, created_at: "", updated_at: "", deleted_at: null,
+      };
+      const entries = caseName === "protocol head only" ? [head] : [];
+      const replica = new MemorySessionReplica({ "session-main": { entries, ready: true, fresh: true } });
+      issueLogOverride.current = { replica, snapshot: replica.getSnapshot("session-main"), error: false };
+      const onContentReady = vi.fn();
+
+      render(
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null} members={[]} agents={[]}
+              canModerateComments={false} activeIssueSessionId="session-main" activeIssueSession={null}
+              sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()} onCreateSession={vi.fn()}
+              scrollContainerEl={null} onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()}
+              onContentReady={onContentReady} />
+          </QueryClientProvider>
+        </I18nProvider>,
+      );
+
+      expect(onContentReady).toHaveBeenCalledOnce();
+    });
+
+    it("publishes a log 500 immediately, replacing old session content with a retry view", () => {
+      const oldRow: SessionLogRow = {
+        session_id: "session-main", id: "old-row", seq: 1, kind: "message", revision: 1,
+        visibility: "shown", author_type: "member", author_id: "user-1", task_id: null, parent_id: null,
+        body_md: "Old session body", body_html: "<p>Old session body</p>", render_version: "test",
+        metadata: { attachments: [] }, resolved_at: null, resolved_by_type: null,
+        resolved_by_id: null, created_at: "", updated_at: "", deleted_at: null,
+      };
+      const oldReplica = new MemorySessionReplica({ "session-main": { entries: [oldRow], ready: true, fresh: true } });
+      issueLogOverride.current = { replica: oldReplica, snapshot: oldReplica.getSnapshot("session-main"), error: false };
+      const onContentReady = vi.fn();
+      const queryClient = createTestQueryClient();
+      const view = (sessionId: string) => <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={queryClient}>
+          <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null} members={[]} agents={[]}
+            canModerateComments={false} activeIssueSessionId={sessionId} activeIssueSession={null}
+            sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()} onCreateSession={vi.fn()}
+            scrollContainerEl={null} onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()}
+            onContentReady={onContentReady} />
+        </QueryClientProvider>
+      </I18nProvider>;
+      const rendered = render(view("session-main"));
+      expect(screen.getByText("Old session body")).toBeInTheDocument();
+      onContentReady.mockClear();
+
+      const failedReplica = new MemorySessionReplica({ "session-review": { entries: [], ready: false, fresh: false } });
+      const refreshVisible = vi.fn(async () => {});
+      issueLogOverride.current = { replica: Object.assign(failedReplica, { refreshVisible }),
+        snapshot: failedReplica.getSnapshot("session-review"), error: true };
+      rendered.rerender(view("session-review"));
+
+      expect(onContentReady).toHaveBeenCalled();
+      expect(screen.queryByText("Old session body")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+      expect(refreshVisible).toHaveBeenCalledOnce();
+    });
+
     // comment-1 and comment-2 are roots; reply-1 answers comment-1 but was
     // written last. The old grouping hoisted it inside comment-1's card, so it
     // appeared *before* comment-2 — a second layer of parallelism inside a
@@ -1827,13 +2506,56 @@ describe("IssueDetail (shared)", () => {
       },
     ] as TimelineEntry[];
 
+    it("deep-links to a reply while its resolved parent stays collapsed", async () => {
+      const row = (seq: number, id: string, body: string, parentId: string | null,
+        resolvedAt: string | null): SessionLogRow => ({
+        session_id: "session-main", seq, id, revision: 1, kind: "message", visibility: "shown",
+        author_type: "member", author_id: "user-1", task_id: null, parent_id: parentId,
+        body_md: body, body_html: `<p>${body}</p>`, render_version: "test",
+        metadata: { attachments: [], reactions: [] }, resolved_at: resolvedAt,
+        resolved_by_type: resolvedAt ? "member" : null, resolved_by_id: resolvedAt ? "user-1" : null,
+        created_at: "2026-01-18T00:00:00Z", updated_at: "2026-01-18T00:00:00Z", deleted_at: null,
+      });
+      const entries = [
+        row(1, "resolved-parent", "Resolved root", null, "2026-01-19T00:00:00Z"),
+        row(2, "reply-1", "Reply inside resolved thread", "resolved-parent", null),
+      ];
+      const replica = new MemorySessionReplica({ "session-main": { entries, ready: true, fresh: true } });
+      issueLogOverride.current = { replica, snapshot: replica.getSnapshot("session-main"), error: false };
+      const session = { id: "session-main", title: "Main", issue_id: mockIssue.id,
+        workspace_id: "ws-1", status: "active", is_default: true, summary: null,
+        created_by_type: "system", created_by_id: null, created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2025-01-01T00:00:00Z", participants: [] } as any;
+      render(
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={createTestQueryClient()}>
+            <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null} members={[]} agents={[]}
+              currentUserId="user-1" canModerateComments activeIssueSessionId="session-main"
+              activeIssueSession={session} sessionsPending={false} sessionsFetching={false}
+              onRetrySessions={vi.fn()} onCreateSession={vi.fn()} highlightCommentId="reply-1"
+              initialLog={{ sessionId: "session-main", window: {
+                entries: [], head_seq: 2, log_version: 1, has_more_before: false, has_more_after: false,
+              }, head: null }} onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()}
+              scrollContainerEl={null} />
+          </QueryClientProvider>
+        </I18nProvider>,
+      );
+
+      await waitForReveal();
+      expect(document.querySelector('[data-perf-anchor="target-comment"]')).toHaveAttribute("id", "comment-reply-1");
+      expect(document.getElementById("comment-reply-1")).toHaveClass("bg-warning/10");
+      expect(screen.getByText("Reply inside resolved thread")).toBeInTheDocument();
+      expect(screen.queryByText("Resolved root")).not.toBeInTheDocument();
+      expect(document.getElementById("comment-resolved-parent")).not.toBeNull();
+    });
+
     it("renders every comment as its own entry in created_at order", async () => {
       mockApiObj.listTimeline.mockResolvedValue(threadedTimeline);
       renderIssueDetail();
 
       await screen.findByText("Answering the first one");
 
-      const ids = Array.from(document.querySelectorAll("[id^='comment-']")).map(
+      const ids = Array.from(document.querySelectorAll("[id^='comment-']:not(#comment-head-session-main)")).map(
         (el) => el.id,
       );
       expect(ids).toEqual(["comment-comment-1", "comment-comment-2", "comment-reply-1"]);
@@ -1854,13 +2576,15 @@ describe("IssueDetail (shared)", () => {
       renderIssueDetail();
 
       await screen.findByText("Answering the first one");
+      // Role queries honour CSS visibility, and the reveal keeps the whole
+      // document `visibility: hidden` until its gates hold.
+      await waitForReveal();
 
-      // One editor for the description, one for the composer — and nothing
-      // per message. A per-message input is what made the stream a stack of
-      // little forms instead of a chat log.
+      // The description is read-only until edited; only the session composer
+      // mounts an editor, and no message gets its own form.
       expect(screen.getByPlaceholderText("Comment in Main…")).toBeInTheDocument();
       expect(screen.queryByPlaceholderText("Leave a reply...")).not.toBeInTheDocument();
-      expect(screen.getAllByTestId("rich-text-editor")).toHaveLength(2);
+      expect(screen.getAllByTestId("rich-text-editor")).toHaveLength(1);
 
       // Each row keeps its own toolbar: react / reply / ⋯.
       expect(screen.getAllByRole("button", { name: "Reply" })).toHaveLength(3);
@@ -1872,6 +2596,7 @@ describe("IssueDetail (shared)", () => {
       renderIssueDetail();
 
       await screen.findByText("Started working on this");
+      await waitForReveal();
 
       // jsdom can't evaluate :hover, so the class list is the contract: a
       // keyboard user has to be able to reach these controls, which means
@@ -1887,6 +2612,7 @@ describe("IssueDetail (shared)", () => {
     it("marks a reply with a reference chip that scrolls to its parent", async () => {
       mockApiObj.listTimeline.mockResolvedValue(threadedTimeline);
       renderIssueDetail();
+      await waitForReveal();
 
       // Only the reply carries a chip; the two roots answer nobody.
       const chip = await screen.findByRole("button", {
@@ -1921,6 +2647,7 @@ describe("IssueDetail (shared)", () => {
         },
       ] as TimelineEntry[]);
       renderIssueDetail();
+      await waitForReveal();
 
       expect(
         await screen.findByRole("button", {
@@ -1948,6 +2675,7 @@ describe("IssueDetail (shared)", () => {
       renderIssueDetail();
 
       await screen.findByText("Started working on this");
+      await waitForReveal();
       const editor = await screen.findByPlaceholderText("Comment in Main…");
       // reply-1 already quotes comment-1 in the stream, so the chip has to be
       // read inside the composer to tell the two apart.
@@ -1971,7 +2699,7 @@ describe("IssueDetail (shared)", () => {
         expect(mockApiObj.createComment).toHaveBeenCalledWith(
           "issue-1",
           "On it",
-          "comment",
+          undefined,
           "comment-1",
           undefined,
           "session-main",
@@ -1990,6 +2718,7 @@ describe("IssueDetail (shared)", () => {
       renderIssueDetail();
 
       await screen.findByText("Started working on this");
+      await waitForReveal();
       const editor = await screen.findByPlaceholderText("Comment in Main…");
       const composer = within(editor.parentElement!.parentElement!);
       fireEvent.click(screen.getAllByRole("button", { name: "Reply" })[0]!);
@@ -2013,371 +2742,90 @@ describe("IssueDetail (shared)", () => {
       mockApiObj.listIssueSessionResults.mockResolvedValue([]);
       renderIssueDetail();
 
-      expect(
-        await screen.findByText("Nothing in this session yet"),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          "Leave a comment, or delegate a task from the right panel to get started.",
-        ),
-      ).toBeInTheDocument();
+      expect(await screen.findByText("Add JWT auth to the backend")).toBeInTheDocument();
+      await waitForReveal();
+      expect(screen.getByPlaceholderText("Comment in Main…")).toBeInTheDocument();
     });
   });
 
-  it("collapses non-trailing activity blocks and expands the last one by default", async () => {
-    // Timeline shape:
-    //   [activities: status_changed, priority_changed] ← block A (older)
-    //   [comment-1]
-    //   [activities: due_date_changed]                  ← block B (latest)
-    // Block A should be collapsed; block B should be expanded.
-    mockApiObj.listTimeline.mockResolvedValue([
-      {
-        type: "activity",
-        id: "act-1",
-        actor_type: "member",
-        actor_id: "user-1",
-        action: "status_changed",
-        details: { from: "todo", to: "in_progress" },
-        created_at: "2026-01-16T00:00:00Z",
-      },
-      {
-        type: "activity",
-        id: "act-2",
-        actor_type: "member",
-        actor_id: "user-1",
-        action: "priority_changed",
-        details: { from: "low", to: "high" },
-        created_at: "2026-01-16T01:00:00Z",
-      },
-      {
-        type: "comment",
-        id: "comment-1",
-        actor_type: "member",
-        actor_id: "user-1",
-        content: "Talking it through",
-        parent_id: null,
-        created_at: "2026-01-17T00:00:00Z",
-        updated_at: "2026-01-17T00:00:00Z",
-        comment_type: "comment",
-      },
-      {
-        type: "activity",
-        id: "act-3",
-        actor_type: "member",
-        actor_id: "user-1",
-        action: "due_date_changed",
-        details: { to: "2026-02-01T00:00:00Z" },
-        created_at: "2026-01-18T00:00:00Z",
-      },
-    ] as TimelineEntry[]);
+  it.each(["en", "zh-Hans"] as const)("renders workspace move system log rows in %s with literal names", async (locale) => {
+    const name = '**x** [x](mention://agent/fake) <b>x</b>';
+    mockApiObj.listTimeline.mockResolvedValue(["assignee", "project", "label"].map((field, index) => ({
+      type: "activity", id: `move-${field}`, actor_type: "system", actor_id: "",
+      content: "Server fallback body", details: { type: "workspace_move_cleared", field, name },
+      created_at: `2026-01-01T00:00:0${index}Z`, updated_at: `2026-01-01T00:00:0${index}Z`,
+    })));
+    renderIssueDetail("issue-1", undefined, undefined, locale);
 
+    const messages = locale === "en"
+      ? [`cleared assignee “${name}” when moving workspaces`, `cleared project “${name}” when moving workspaces`, `removed label “${name}” when moving workspaces`]
+      : [`移动工作区时清空了经办人「${name}」`, `移动工作区时清空了项目「${name}」`, `移动工作区时移除了标签「${name}」`];
+    await screen.findByText(messages[0]!);
+    for (const message of messages) expect(screen.getByText(message)).toBeInTheDocument();
+    expect(screen.queryByText("Server fallback body")).not.toBeInTheDocument();
+    for (const row of document.querySelectorAll("[data-log-kind='system']")) {
+      expect(row.querySelector("a, strong, b")).toBeNull();
+    }
+  });
+
+  it("refreshes workspace move system log rows on the committed comment event", async () => {
+    mockApiObj.listTimeline.mockResolvedValue([]);
+    renderIssueDetail();
+    await screen.findByText("Add JWT auth to the backend");
+    await waitForReveal();
+    expect(screen.queryByText("cleared project “Original project” when moving workspaces")).not.toBeInTheDocument();
+    mockApiObj.listTimeline.mockResolvedValue([{
+      type: "activity", id: "move-project", actor_type: "system", actor_id: "",
+      content: "Server fallback body", details: { type: "workspace_move_cleared", field: "project", name: "Original project" },
+      created_at: "2026-01-01T00:00:01Z", updated_at: "2026-01-01T00:00:01Z",
+    }]);
+    const callbacks = vi.mocked(useWSEvent).mock.calls.filter(([event]) => event === "comment:created");
+    expect(callbacks.length).toBeGreaterThan(0);
+    await act(async () => {
+      for (const [, handler] of callbacks) handler({ comment: { id: "move-project", issue_id: "issue-1", issue_session_id: "session-main" } });
+    });
+    expect(await screen.findByText("cleared project “Original project” when moving workspaces")).toBeInTheDocument();
+  });
+
+  it("renders system log rows in seq order only when system details are enabled", async () => {
+    mockApiObj.listTimeline.mockResolvedValue(Array.from({ length: 10 }, (_, index) => ({
+      type: "activity", id: `system-${index + 1}`, actor_type: "system", actor_id: "",
+      content: `System event ${index + 1}`, parent_id: null,
+      created_at: `2026-01-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+      updated_at: `2026-01-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+    })));
     renderIssueDetail();
 
-    // Latest block (single activity) is expanded — its rendered text is visible.
-    await waitFor(() => {
-      expect(screen.getByText(/set due date to/i)).toBeInTheDocument();
-    });
-
-    // Older block is collapsed: shows the summary, hides the individual entries.
-    expect(screen.getByText("2 activities")).toBeInTheDocument();
-    expect(screen.queryByText(/changed status/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/changed priority/i)).not.toBeInTheDocument();
-
-    // Clicking the summary expands the older block.
-    fireEvent.click(screen.getByText("2 activities"));
-    await waitFor(() => {
-      expect(screen.getByText(/changed status/i)).toBeInTheDocument();
-    });
-    expect(screen.getByText(/changed priority/i)).toBeInTheDocument();
-  });
-
-  it("truncates the trailing activity block to the most recent 8 entries with a show-more toggle", async () => {
-    // 10 activities, all in the trailing block (no comment after them, so it's
-    // the trailing block by definition). Alternating action types so the
-    // 2-minute coalesce window never merges consecutive entries — we end up
-    // with 10 distinct rows.
-    const trailingBlock: TimelineEntry[] = [
-      { type: "activity", id: "act-1", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "todo", to: "in_progress" }, created_at: "2026-01-18T00:00:00Z" },
-      { type: "activity", id: "act-2", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "low", to: "medium" }, created_at: "2026-01-18T00:01:00Z" },
-      { type: "activity", id: "act-3", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "in_progress", to: "in_review" }, created_at: "2026-01-18T00:02:00Z" },
-      { type: "activity", id: "act-4", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "medium", to: "high" }, created_at: "2026-01-18T00:03:00Z" },
-      { type: "activity", id: "act-5", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "in_review", to: "done" }, created_at: "2026-01-18T00:04:00Z" },
-      { type: "activity", id: "act-6", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "high", to: "urgent" }, created_at: "2026-01-18T00:05:00Z" },
-      { type: "activity", id: "act-7", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "done", to: "blocked" }, created_at: "2026-01-18T00:06:00Z" },
-      { type: "activity", id: "act-8", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "urgent", to: "low" }, created_at: "2026-01-18T00:07:00Z" },
-      { type: "activity", id: "act-9", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "blocked", to: "todo" }, created_at: "2026-01-18T00:08:00Z" },
-      { type: "activity", id: "act-10", actor_type: "member", actor_id: "user-1", action: "due_date_changed", details: { to: "2026-02-01T00:00:00Z" }, created_at: "2026-01-18T00:09:00Z" },
-    ] as TimelineEntry[];
-    mockApiObj.listTimeline.mockResolvedValue(trailingBlock);
-
-    renderIssueDetail();
-
-    // In the truncated default state the "N activities" collapse header
-    // stays hidden — the "Show N more" link is the only control we want
-    // to expose for a glance at recent activity.
-    await waitFor(() => {
-      expect(screen.getByText("Show 2 more activities")).toBeInTheDocument();
-    });
-    expect(screen.queryByText("10 activities")).not.toBeInTheDocument();
-
-    // Only the 8 most recent entries (act-3..act-10) are rendered by default.
-    // act-1 and act-2 are folded behind the show-more line.
-    expect(screen.getByText(/from In Progress to In Review/i)).toBeInTheDocument(); // act-3
-    expect(screen.getByText(/set due date to/i)).toBeInTheDocument(); // act-10
-    expect(screen.queryByText(/from Todo to In Progress/i)).not.toBeInTheDocument(); // act-1
-    expect(screen.queryByText(/from Low to Medium/i)).not.toBeInTheDocument(); // act-2
-
-    // Clicking the toggle reveals the older entries in place and brings the
-    // full "N activities" header back (so the user can fold the block).
-    fireEvent.click(screen.getByText("Show 2 more activities"));
-    await waitFor(() => {
-      expect(screen.getByText(/from Todo to In Progress/i)).toBeInTheDocument();
-    });
-    expect(screen.getByText(/from Low to Medium/i)).toBeInTheDocument();
-    expect(screen.getByText(/set due date to/i)).toBeInTheDocument();
-    expect(screen.getByText("10 activities")).toBeInTheDocument();
-    expect(screen.queryByText(/Show \d+ more activit/i)).not.toBeInTheDocument();
-  });
-
-  it("does not show the show-more toggle when the trailing block has 8 or fewer entries", async () => {
-    const trailingBlock: TimelineEntry[] = [
-      { type: "activity", id: "act-1", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "todo", to: "in_progress" }, created_at: "2026-01-18T00:00:00Z" },
-      { type: "activity", id: "act-2", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "low", to: "high" }, created_at: "2026-01-18T00:01:00Z" },
-      { type: "activity", id: "act-3", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "in_progress", to: "in_review" }, created_at: "2026-01-18T00:02:00Z" },
-      { type: "activity", id: "act-4", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "high", to: "urgent" }, created_at: "2026-01-18T00:03:00Z" },
-      { type: "activity", id: "act-5", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "in_review", to: "done" }, created_at: "2026-01-18T00:04:00Z" },
-      { type: "activity", id: "act-6", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "urgent", to: "low" }, created_at: "2026-01-18T00:05:00Z" },
-      { type: "activity", id: "act-7", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "done", to: "blocked" }, created_at: "2026-01-18T00:06:00Z" },
-      { type: "activity", id: "act-8", actor_type: "member", actor_id: "user-1", action: "due_date_changed", details: { to: "2026-02-01T00:00:00Z" }, created_at: "2026-01-18T00:07:00Z" },
-    ] as TimelineEntry[];
-    mockApiObj.listTimeline.mockResolvedValue(trailingBlock);
-
-    renderIssueDetail();
-
-    await waitFor(() => {
-      expect(screen.getByText("8 activities")).toBeInTheDocument();
-    });
-    // Every one of the 8 entries should be visible — the trailing block fits
-    // exactly within the limit, so no "Show N more activities" line appears.
-    expect(screen.getByText(/from Todo to In Progress/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Low to High/i)).toBeInTheDocument();
-    expect(screen.getByText(/from In Progress to In Review/i)).toBeInTheDocument();
-    expect(screen.getByText(/from High to Urgent/i)).toBeInTheDocument();
-    expect(screen.getByText(/from In Review to Done/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Urgent to Low/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Done to Blocked/i)).toBeInTheDocument();
-    expect(screen.getByText(/set due date to/i)).toBeInTheDocument();
-    expect(screen.queryByText(/Show \d+ more activit/i)).not.toBeInTheDocument();
-  });
-
-  it("expanding a non-trailing block shows every entry — only the trailing block truncates older ones", async () => {
-    // Non-trailing block (10 activities) + comment + trailing block (1 activity).
-    // Manually expanding the older block must reveal all 10 entries — the
-    // truncate-to-8 rule applies only to the trailing block.
-    const timeline: TimelineEntry[] = [
-      { type: "activity", id: "old-1", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "backlog", to: "todo" }, created_at: "2026-01-16T00:00:00Z" },
-      { type: "activity", id: "old-2", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "none", to: "low" }, created_at: "2026-01-16T00:01:00Z" },
-      { type: "activity", id: "old-3", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "todo", to: "in_progress" }, created_at: "2026-01-16T00:02:00Z" },
-      { type: "activity", id: "old-4", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "low", to: "medium" }, created_at: "2026-01-16T00:03:00Z" },
-      { type: "activity", id: "old-5", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "in_progress", to: "in_review" }, created_at: "2026-01-16T00:04:00Z" },
-      { type: "activity", id: "old-6", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "medium", to: "high" }, created_at: "2026-01-16T00:05:00Z" },
-      { type: "activity", id: "old-7", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "in_review", to: "done" }, created_at: "2026-01-16T00:06:00Z" },
-      { type: "activity", id: "old-8", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "high", to: "urgent" }, created_at: "2026-01-16T00:07:00Z" },
-      { type: "activity", id: "old-9", actor_type: "member", actor_id: "user-1", action: "status_changed", details: { from: "done", to: "blocked" }, created_at: "2026-01-16T00:08:00Z" },
-      { type: "activity", id: "old-10", actor_type: "member", actor_id: "user-1", action: "priority_changed", details: { from: "urgent", to: "low" }, created_at: "2026-01-16T00:09:00Z" },
-      {
-        type: "comment", id: "comment-mid", actor_type: "member", actor_id: "user-1",
-        content: "Splitting the blocks", parent_id: null,
-        created_at: "2026-01-17T00:00:00Z", updated_at: "2026-01-17T00:00:00Z",
-        comment_type: "comment",
-      },
-      { type: "activity", id: "last-1", actor_type: "member", actor_id: "user-1", action: "due_date_changed", details: { to: "2026-02-01T00:00:00Z" }, created_at: "2026-01-18T00:00:00Z" },
-    ] as TimelineEntry[];
-    mockApiObj.listTimeline.mockResolvedValue(timeline);
-
-    renderIssueDetail();
-
-    // The older block defaults to collapsed; its summary reports 10.
-    await waitFor(() => {
-      expect(screen.getByText("10 activities")).toBeInTheDocument();
-    });
-    // None of the older entries are rendered before expansion.
-    expect(screen.queryByText(/from Backlog to Todo/i)).not.toBeInTheDocument();
-
-    // Expand the older block by clicking its summary line.
-    fireEvent.click(screen.getByText("10 activities"));
-
-    // Every one of the 10 entries should now be visible — even though the
-    // block has more than 8 entries, the truncate-to-8 rule does not apply
-    // to non-trailing blocks, so no "Show N more activities" line appears.
-    await waitFor(() => {
-      expect(screen.getByText(/from Backlog to Todo/i)).toBeInTheDocument();
-    });
-    expect(screen.getByText(/from No priority to Low/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Todo to In Progress/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Low to Medium/i)).toBeInTheDocument();
-    expect(screen.getByText(/from In Progress to In Review/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Medium to High/i)).toBeInTheDocument();
-    expect(screen.getByText(/from In Review to Done/i)).toBeInTheDocument();
-    expect(screen.getByText(/from High to Urgent/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Done to Blocked/i)).toBeInTheDocument();
-    expect(screen.getByText(/from Urgent to Low/i)).toBeInTheDocument();
-    expect(screen.queryByText(/Show \d+ more activit/i)).not.toBeInTheDocument();
-  });
-
-  describe("highlightCommentId scroll-to-comment", () => {
-    it("loads older pages until the highlighted comment is available", async () => {
-      timelinePageControl.hasMore = true;
-      timelinePageControl.olderEntries = [{
-        type: "comment",
-        id: "historical-comment",
-        actor_type: "member",
-        actor_id: "user-1",
-        content: "Historical target",
-        parent_id: null,
-        created_at: "2026-01-15T00:00:00Z",
-      }];
-
-      renderIssueDetailWithHighlight("historical-comment");
-
-      await waitFor(() => {
-        expect(mockApiObj.listTimelinePage).toHaveBeenCalledWith(
-          "issue-1",
-          expect.objectContaining({ before: "older-cursor", limit: 40 }),
-        );
-        expect(document.getElementById("comment-historical-comment")).not.toBeNull();
-      });
-      expect(scrollIntoViewSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ block: "center" }),
-      );
-    });
-
-    it("scrolls to the highlighted comment after both issue and timeline finish loading", async () => {
-      renderIssueDetailWithHighlight("comment-2");
-
-      // Wait for the comment row to mount. With initialItemCount in
-      // production, items[0..targetIdx] are force-mounted on first commit;
-      // the mock unconditionally inline-renders every item, so this just
-      // waits for the regular render pass.
-      await waitFor(() => {
-        expect(
-          document.getElementById("comment-comment-2"),
-        ).not.toBeNull();
-      });
-
-      // The deep-link useLayoutEffect calls native scrollIntoView on the
-      // target node ({block: 'center'}).
-      await waitFor(() => {
-        expect(scrollIntoViewSpy).toHaveBeenCalled();
-      });
-      expect(scrollIntoViewSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ block: "center" }),
-      );
-    });
-
-    it("still scrolls when the timeline is ready before the issue (regression for inbox click)", async () => {
-      // Reproduces the inbox-click race: timeline data is in the cache
-      // before the issue resolves. While loading is true, IssueDetail
-      // renders the loading skeleton (Virtuoso never mounts), so no
-      // scroll can fire. After the issue resolves, Virtuoso mounts and
-      // the useLayoutEffect dispatches the native scroll.
-      let resolveIssue: (value: Issue) => void = () => {};
-      const issuePromise = new Promise<Issue>((resolve) => {
-        resolveIssue = resolve;
-      });
-      mockApiObj.getIssue.mockReturnValue(issuePromise);
-
-      renderIssueDetailWithHighlight("comment-2", "issue-1", { seedTimeline: true });
-
-      expect(
-        document.getElementById("comment-comment-2"),
-      ).toBeNull();
-      expect(scrollIntoViewSpy).not.toHaveBeenCalled();
-
-      resolveIssue(mockIssue);
-
-      await waitFor(() => {
-        expect(
-          document.getElementById("comment-comment-2"),
-        ).not.toBeNull();
-      });
-      await waitFor(() => {
-        expect(scrollIntoViewSpy).toHaveBeenCalledWith(
-          expect.objectContaining({ block: "center" }),
-        );
-      });
-    });
-
-    it("lands directly on a reply whose parent is folded away as resolved", async () => {
-      // comment-3 is resolved, so it renders as a collapsed bar. Its reply,
-      // reply-1, is the deep-link target — and in the flat stream it is an
-      // entry of its own, so there is no thread to unfold first: the
-      // id="comment-reply-1" node is in the DOM on the first commit.
-      const timelineWithResolvedThread: TimelineEntry[] = [
-        ...mockTimeline,
-        {
-          type: "comment",
-          id: "comment-3",
-          actor_type: "member",
-          actor_id: "user-1",
-          content: "Resolved root",
-          parent_id: null,
-          created_at: "2026-01-18T00:00:00Z",
-          updated_at: "2026-01-18T00:00:00Z",
-          comment_type: "comment",
-          resolved_at: "2026-01-19T00:00:00Z",
-        } as TimelineEntry,
-        {
-          type: "comment",
-          id: "reply-1",
-          actor_type: "member",
-          actor_id: "user-1",
-          content: "Reply inside resolved thread",
-          parent_id: "comment-3",
-          created_at: "2026-01-18T01:00:00Z",
-          updated_at: "2026-01-18T01:00:00Z",
-          comment_type: "comment",
-        } as TimelineEntry,
-      ];
-      mockApiObj.listTimeline.mockResolvedValue(timelineWithResolvedThread);
-
-      const queryClient = createTestQueryClient();
-      render(
-        <I18nProvider locale="en" resources={TEST_RESOURCES}>
-          <QueryClientProvider client={queryClient}>
-            <IssueDetail issueId="issue-1" highlightCommentId="reply-1" />
-          </QueryClientProvider>
-        </I18nProvider>,
-      );
-
-      await waitFor(() => {
-        expect(
-          document.getElementById("comment-reply-1"),
-        ).not.toBeNull();
-      });
-      await waitFor(() => {
-        expect(scrollIntoViewSpy).toHaveBeenCalledWith(
-          expect.objectContaining({ block: "center" }),
-        );
-      });
-      // The parent stayed folded — the reply is readable without it.
-      expect(screen.getByText("Reply inside resolved thread")).toBeInTheDocument();
-      expect(screen.queryByText("Resolved root")).not.toBeInTheDocument();
-    });
+    await waitForReveal();
+    expect(screen.queryByText("System event 10")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Show system details" }));
+    await screen.findByText("System event 10");
+    const rows = Array.from(document.querySelectorAll("[data-log-kind='system']"));
+    expect(rows).toHaveLength(10);
+    expect(rows.map(row => row.querySelector(".flex-1")?.textContent)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `System event ${index + 1}`),
+    );
+    expect(screen.queryByText(/show \d+ more activities/i)).not.toBeInTheDocument();
+    expect(rows.every(row => row.querySelector("[role='status']")?.classList.contains("h-8"))).toBe(true);
+    fireEvent.click(screen.getByRole("switch", { name: "Show system details" }));
+    expect(document.querySelectorAll("[data-log-kind='system']")).toHaveLength(0);
   });
 
   it("sends empty description when editor is cleared", async () => {
     renderIssueDetail();
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue("Add JWT auth to the backend")).toBeInTheDocument();
+      expect(screen.getByText("Add JWT auth to the backend")).toBeInTheDocument();
     });
+    await waitForReveal();
 
-    const editor = screen.getByPlaceholderText("Add description...");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const editor = await screen.findByPlaceholderText("Add description...");
     fireEvent.change(editor, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(mockApiObj.updateIssue).toHaveBeenCalledWith(
+      expect(mockApiObj.patchIssue).toHaveBeenCalledWith(
         "issue-1",
         expect.objectContaining({ description: "" }),
       );
@@ -2400,10 +2848,74 @@ describe("IssueDetail (shared)", () => {
       renderIssueDetail();
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue("Add JWT auth to the backend")).toBeInTheDocument();
+        expect(screen.getByText("Add JWT auth to the backend")).toBeInTheDocument();
       });
 
       expect(mockApiObj.listIssues).not.toHaveBeenCalled();
+    });
+
+    it("does not let a list row suppress the authoritative detail request", async () => {
+      const queryClient = createTestQueryClient();
+      queryClient.setQueryData(["issues", "ws-1", "list", {}], {
+        byStatus: {
+          in_progress: { issues: [mockIssue], total: 1 },
+        },
+      });
+
+      render(
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail issueId="issue-1" />
+          </QueryClientProvider>
+        </I18nProvider>,
+      );
+
+      await waitFor(() => expect(mockApiObj.getIssue).toHaveBeenCalledWith("issue-1"));
+      expect(mockApiObj.listIssues).not.toHaveBeenCalled();
+    });
+
+    it("seeds the detail from a cached row that carries this issue's human-stage count", async () => {
+      mockApiObj.getIssue.mockReturnValue(new Promise(() => {}));
+      const queryClient = createTestQueryClient();
+      queryClient.setQueryData(["issues", "ws-1", "list", {}], {
+        byStatus: {
+          in_progress: { issues: [{ ...mockIssue, pending_decision_count: 1 }], total: 1 },
+        },
+      });
+
+      render(
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail issueId="issue-1" />
+          </QueryClientProvider>
+        </I18nProvider>,
+      );
+
+      // The detail request never answers here; the seed alone paints the title and the bar.
+      expect(await screen.findByRole("button", { name: "Implement authentication" })).toBeInTheDocument();
+      expect(document.querySelector("[data-issue-decision-banner]")).toHaveTextContent("1 question awaiting an answer");
+      expect(mockApiObj.getIssue).toHaveBeenCalledWith("issue-1");
+      expect(mockApiObj.listIssues).not.toHaveBeenCalled();
+    });
+
+    it("waits for the detail when the cached row lacks the detail-only count", async () => {
+      mockApiObj.getIssue.mockReturnValue(new Promise(() => {}));
+      const queryClient = createTestQueryClient();
+      queryClient.setQueryData(["issues", "ws-1", "list", {}], {
+        byStatus: { in_progress: { issues: [mockIssue], total: 1 } },
+      });
+
+      render(
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail issueId="issue-1" />
+          </QueryClientProvider>
+        </I18nProvider>,
+      );
+
+      await act(async () => {});
+      expect(screen.queryByRole("button", { name: "Implement authentication" })).toBeNull();
+      expect(screen.getAllByRole("generic").some((el) => el.getAttribute("data-slot") === "skeleton")).toBe(true);
     });
 
     it("still issues no list request when the issue has a parent to resolve", async () => {
@@ -2417,7 +2929,7 @@ describe("IssueDetail (shared)", () => {
       renderIssueDetail();
 
       await waitFor(() => {
-        expect(screen.getByDisplayValue("Add JWT auth to the backend")).toBeInTheDocument();
+        expect(screen.getByText("Add JWT auth to the backend")).toBeInTheDocument();
       });
 
       expect(mockApiObj.listIssues).not.toHaveBeenCalled();

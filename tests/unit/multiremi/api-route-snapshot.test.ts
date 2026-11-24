@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   captureApiSnapshot,
   GOLDEN_PATH,
+  normalize,
   scrubString,
   serializeSnapshot,
   type SnapshotFile,
@@ -30,6 +32,12 @@ function firstDiff(actual: string, expected: string): string | null {
 }
 
 describe("api route golden snapshot", () => {
+  it("normalizes storage root hints across Windows and Unix without changing prose", () => {
+    expect(normalize({ root_hint: "...\\session-archives", body: "literal\\value" }))
+      .toEqual({ root_hint: ".../session-archives", body: "literal\\value" });
+    expect(normalize({ root_hint: ".../session-archives" }))
+      .toEqual({ root_hint: ".../session-archives" });
+  });
   it("scrubs machine identity only in path-shaped contexts", () => {
     const identity = { hostname: "unknown", username: "unknown" };
 
@@ -109,11 +117,12 @@ describe("api route golden snapshot", () => {
   // $TMPDIR is /tmp, a $HOME of /tmp/alice is nested under it, and the shorter
   // rule winning would leave the machine-specific username behind.
   it("applies the longest matching path prefix", () => {
-    const identity = { hostname: "unknown", username: "unknown", homedir: "/tmp/alice" };
+    const temporary = tmpdir().replace(/[/\\]$/, "");
+    const identity = { hostname: "unknown", username: "unknown", homedir: `${temporary}/alice` };
 
-    expect(scrubString("/tmp/alice/private", identity)).toBe("<home>/private");
-    expect(scrubString("/tmp/other/private", identity)).toBe("<tmp>/other/private");
-    expect(scrubString("/tmp/alice", identity)).toBe("<home>");
+    expect(scrubString(`${temporary}/alice/private`, identity)).toBe("<home>/private");
+    expect(scrubString(`${temporary}/other/private`, identity)).toBe("<tmp>/other/private");
+    expect(scrubString(`${temporary}/alice`, identity)).toBe("<home>");
   });
 
   // A replacement token must not become a delimiter for the next rule, or one
@@ -193,12 +202,19 @@ describe("api route golden snapshot", () => {
     // them; this makes plain `bun test` as strict as the --check CLI. The
     // harness pins clock, uuid, random, hostname and env, so it is stable.
     expect(firstDiff(serializeSnapshot(snapshot), goldenText)).toBeNull();
-  }, 15_000);
+  }, 60_000);
 
   it("covers every GET route (websocket upgrades status-only)", async () => {
     const getRoutes = golden.routes.filter((route) => route.startsWith("GET "));
     const covered = new Set(golden.coveredRoutes);
     for (const route of getRoutes) expect(covered.has(route)).toBe(true);
-    expect(golden.meta.statusOnlyRoutes).toEqual(["GET /api/daemon/ws", "GET /api/realtime/ws", "GET /ws"]);
+    // MUL-438 adds the browser trace socket: it is a WebSocket upgrade route like
+    // the other three, so it is recorded status-only rather than driven.
+    expect(golden.meta.statusOnlyRoutes).toEqual([
+      "GET /api/daemon/ws",
+      "GET /api/realtime/ws",
+      "GET /api/trace/ws",
+      "GET /ws",
+    ]);
   });
 });

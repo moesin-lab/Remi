@@ -36,13 +36,6 @@ export const runtimeKeys = {
   listMine: (wsId: string) => [...runtimeKeys.all(wsId), "list", "mine"] as const,
   executionGroups: (wsId: string, agentId?: string) =>
     [...runtimeKeys.all(wsId), "execution-groups", agentId ?? ""] as const,
-  usage: (rid: string, days: number, tz: string) =>
-    ["runtimes", "usage", rid, days, tz] as const,
-  usageByAgent: (rid: string, days: number, tz: string) =>
-    ["runtimes", "usage", "by-agent", rid, days, tz] as const,
-  // by-hour now follows the viewer's tz, like the other reports.
-  usageByHour: (rid: string, days: number, tz: string) =>
-    ["runtimes", "usage", "by-hour", rid, days, tz] as const,
   latestVersion: () => ["runtimes", "latestVersion"] as const,
   daemonInventory: (wsId: string) =>
     ["runtimes", "daemons", "inventory", wsId] as const,
@@ -91,39 +84,6 @@ export function sshMeshOptions(wsId: string) {
   });
 }
 
-// `tz` is the viewer's IANA name — all reports follow the viewer's tz.
-export function runtimeUsageOptions(
-  runtimeId: string,
-  days: number,
-  tz: string,
-) {
-  return queryOptions({
-    queryKey: runtimeKeys.usage(runtimeId, days, tz),
-    queryFn: () => api.getRuntimeUsage(runtimeId, { days, tz }),
-    staleTime: 60 * 1000,
-  });
-}
-
-export function runtimeUsageByAgentOptions(
-  runtimeId: string,
-  days: number,
-  tz: string,
-) {
-  return queryOptions({
-    queryKey: runtimeKeys.usageByAgent(runtimeId, days, tz),
-    queryFn: () => api.getRuntimeUsageByAgent(runtimeId, { days, tz }),
-    staleTime: 60 * 1000,
-  });
-}
-
-export function runtimeUsageByHourOptions(runtimeId: string, days: number, tz: string) {
-  return queryOptions({
-    queryKey: runtimeKeys.usageByHour(runtimeId, days, tz),
-    queryFn: () => api.getRuntimeUsageByHour(runtimeId, { days, tz }),
-    staleTime: 60 * 1000,
-  });
-}
-
 export function runtimeListOptions(wsId: string, owner?: "me") {
   return queryOptions({
     queryKey: owner === "me" ? runtimeKeys.listMine(wsId) : runtimeKeys.list(wsId),
@@ -131,6 +91,9 @@ export function runtimeListOptions(wsId: string, owner?: "me") {
     staleTime: 10_000,
     refetchInterval: RUNTIME_LIST_REFRESH_MS,
     refetchIntervalInBackground: false,
+    // The interval pauses while the page is hidden; re-read on return instead
+    // of up to one interval later, so presence judges a current list.
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -145,12 +108,13 @@ export function executionGroupListOptions(wsId: string, agentId?: string) {
   });
 }
 
-export function latestCliVersionOptions() {
+export function latestCliVersionOptions(options: { enabled?: boolean } = {}) {
   return queryOptions({
     queryKey: runtimeKeys.latestVersion(),
     // Proxied through the backend: a direct api.github.com call from the
     // browser hits rate limits and logs a console error on every page.
     queryFn: () => api.getLatestCliVersion(),
+    enabled: options.enabled ?? true,
     staleTime: 10 * 60 * 1000, // 10 minutes
   });
 }

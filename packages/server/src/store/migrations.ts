@@ -1,17 +1,39 @@
+import { assertSchemaBeforeExpand, readSchemaLevels, SCHEMA_COMPATIBILITY } from "./schema-levels.js";
+import { runSchemaExpands } from "./schema-migration-runner.js";
+import { SCHEMA_MIGRATIONS } from "./schema-migrations.js";
+import { PACKAGE_VERSION as SCHEMA_RELEASE } from "@shared/package-version.js";
+import { ensureDaemonDrainIdentity, ensurePlannedRestarts } from "./planned-restart-schema.js";
+import { migrateExecutionEndpoints } from "./execution-endpoint-migration.js";
+import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
+import { ensureTurnListIndexes } from './turn-list-indexes.js';
+import { ensureQuestionQueryIndexes } from './inbox/question-indexes.js';
+import { openSqliteDatabase, withModernSqliteAlterTable } from './db/sqlite.js';
+import { widenAttemptCounters,separateLaneProviderProgress } from './inbox/attempt-counters.js';
+import { migrateAttemptInput } from './inbox/attempt-input.js';
+import { createMemberInboxReadProjection } from './inbox/member-records.js';
+import { createAutopilotRunReadProjection } from './autopilot-run-records.js';
+import { assertUnifiedMigrationReports, runUnifiedModelMigration, unifiedModelPreflight, UnifiedModelPreflightError, collectUnifiedBeforeReport, writeUnifiedModelReport } from "./unified-model-migration.js";
+import { foldLegacyWorkspacePrompts } from "../prompts/workspace-settings.js";
+import { joinProjectInstructions } from "@multiremi/contracts/remi-rules.js";
+import { BACKGROUND_TASKS_ATTEMPT_COLUMNS, BACKGROUND_TASKS_MIGRATION, BACKGROUND_TASKS_SCHEMA, CHAT_FOLLOW_UP_QUEUE_LANE_COLUMNS, CHAT_FOLLOW_UP_QUEUE_MIGRATION, CHAT_FOLLOW_UP_QUEUE_SCHEMA, UNIFIED_LANE_SWEEP_INDEX, UNIFIED_MODEL_MIGRATION } from "./unified-model-schema.js";
+import { prepareMigrationReportDirectory, resolveMigrationReportDirectory } from "./migration-report-directory.js";
+import { foldDecisionRecords } from './inbox/decision-migration.js';
+import { createDecisionReadProjections } from "./inbox/decision-records.js";
+import { foldAgentReadState } from "./inbox/lane-migration.js";
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatTaskRetryParentSql } from "@multiremi/store/helpers.js";
-import { syncRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { backfillRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { ensureUsageAccountingSchema } from "@multiremi/store/usage-accounting.js";
 import { createHash } from "node:crypto";
+import { readAuditedIssueSessionHistory } from "./issue-session-owner-scope.js";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
-import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
-import {
-  isSessionArchiveRetryExhausted,
-  nextSessionArchiveRetryAt,
-  resolveSessionArchiveRetryPolicy,
-  resolveSessionArchiveUploadStallMs,
-} from "@multiremi/session-archive/retry-policy.js";
+import { type SqlDatabase, type SqlDatabaseDialect } from "@multiremi/store/db/postgres.js";
 import { createLogger } from "@shared/logger.js";
 import { canonicalizeDaemonRoutingWithinTransaction } from "@multiremi/store/daemon-routing.js";
-import { isPostgresConfigured } from "@multiremi/store/db/postgres.js";
+import { advisoryLock, isPostgresConfigured } from "@multiremi/store/db/postgres.js";
+import { LANE_SLASH_COMMANDS_COLUMN, LANE_SLASH_COMMANDS_MIGRATION } from "@multiremi/store/slash-commands.js";
+import { MIGRATION_ADVISORY_LOCK_KEY } from "@multiremi/store/advisory-locks.js";
+import { backfillConversationLogWithinTransaction, CONVERSATION_LOG_BACKFILL_MIGRATION } from "@multiremi/store/conversation-log-backfill.js";
+import { executionScopeSql, TASK_EXECUTION_SCOPE_MIGRATION, PENDING_TURN_MIGRATION, preparePendingTurnConstraintsWithinTransaction } from "@multiremi/store/pending-turns.js";
 
 const log = createLogger("multiremi-store");
 const SCM_CONNECTION_ORIGIN_MIGRATION = "20260822_scm_connection_origins";
@@ -19,7 +41,6 @@ const SCM_DEFAULT_SCOPE_MIGRATION = "20260822_scm_default_repository_scope";
 const FEISHU_INGEST_V2_MIGRATION = "20260825_feishu_ingest_v2";
 const FEISHU_INGEST_ALERT_DELIVERY_V3_MIGRATION = "20260825_feishu_ingest_alert_delivery_v3";
 const CODEBASE_CHANGE_REQUEST_CURSOR_RESET_MIGRATION = "20260825_codebase_change_request_cursor_reset";
-const SESSION_ARCHIVE_RETRY_BUDGET_MIGRATION = "20260826_session_archive_retry_budget";
 const FEISHU_ISSUE_PROPOSALS_V4_MIGRATION = "20260826_feishu_issue_proposals_v4";
 const MESSAGING_CORE_V1_MIGRATION = "20260831_messaging_core_v1";
 const MESSAGING_MIGRATION_BATCH_SIZE = 500;
@@ -37,17 +58,106 @@ const FEISHU_BOT_AGENT_ROUTES_MIGRATION = "20260908_feishu_bot_agent_routes";
 const FEISHU_BOT_AGENT_ROUTE_DEFAULT_UNIQUENESS_MIGRATION =
   "20260909_feishu_bot_agent_route_default_uniqueness";
 const CHAT_ISSUE_DECOUPLING_MIGRATION = "20260916_chat_issue_decoupling";
+const CHAT_OWNED_SESSIONS_MIGRATION = "20260913_chat_owned_sessions";
+const DUAL_OWNED_SESSIONS_MIGRATION = "20261008_dual_owned_sessions";
 const AGENT_PAGE_QUERY_INDEXES_MIGRATION = "20260910_agent_page_query_indexes";
 const TASK_FALLBACK_MODEL_MIGRATION = "20260919_task_fallback_model";
 const GATEWAY_MODEL_REASONING_MIGRATION = "20260919_gateway_model_reasoning";
+const GATEWAY_MODEL_CONTEXT_MIGRATION = "20260928_gateway_model_context";
 const TASK_LIST_PAGINATION_INDEXES_MIGRATION = "20260921_task_list_pagination_indexes";
+const TASK_TRACE_POINTERS_MIGRATION = "20260927_task_trace_pointers";
+const ISSUE_NUMBER_UNIQUE_INDEX = "idx_multiremi_issues_workspace_number";
+const PROJECT_DOC_CONTENT_URI_INDEX_MIGRATION = "20260926_project_doc_content_uri_index";
+const CONVERSATION_LOG_MIGRATION = "20260927_conversation_log";
+const LOCAL_RECORDS_MIGRATION = "20261013_local_records_recyclable_workspaces";
 
 // Stable Feishu open_id of the deployment owner (hehuajie / 贺华杰). The seed
 // `local` user is tagged with this on migration so SSO login re-binds to it
 // instead of creating a duplicate. Overridable via MULTIREMI_OWNER_OPEN_ID.
 const DEFAULT_OWNER_OPEN_ID = "ou_e6b7ffc662b392317275b817295c0b44";
 
-export function runMigrations(db: SqlDatabase): void {
+export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseDialect; historicalMaintenance?: boolean; requireEnrolled?: boolean } = {}): void {
+  const reportDir = resolveMigrationReportDirectory();
+  // Refuse an unwritable report directory before creating the SQLite lock file.
+  prepareMigrationReportDirectory(reportDir);
+  // MUL-405: the lock spans the entire run, so a second process either waits for
+  // a finished migration or proceeds exactly as before (SQLite, where the lock
+  // is a no-op). It releases on throw as well as on return, so a failed
+  // migration cannot strand it.
+  const migrate = () => withModernSqliteAlterTable(db, resolveSqlDialect(db, options.dialect), () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
+    assertSchemaBeforeExpand(db);
+    // Enrollment certifies the frozen historical chain completed. Reopening
+    // an enrolled database must never replay rebuilds or historical backfills.
+    if (!options.historicalMaintenance && readSchemaLevels(db).expandLevel >= 1) {
+      assertUnifiedMigrationReports(reportDir);
+      runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);
+      return;
+    }
+    // The directory may have become unwritable while waiting for the lock.
+    prepareMigrationReportDirectory(reportDir);
+    const tables=existingTableNames(db);
+    if (options.requireEnrolled && readSchemaLevels(db).expandLevel === 0 && [...tables].some(table => table.startsWith('multiremi_'))) {
+      throw new Error('Historical schema preparation required: stop all API slots and workers, run remi db prepare, then restart. Historical rebuilds and backfills never run during a slot startup.');
+    }
+    if (tables.has("multiremi_turn_attempts")) addColumnIfMissing(db, "multiremi_turn_attempts", "execution_connection TEXT");
+    if(tables.has("multiremi_users"))backfillOwnerExternalId(db);
+    if (tables.has("multiremi_feishu_bot_configs")) {
+      addColumnIfMissing(db, "multiremi_feishu_bot_configs", "sender_access_policy TEXT NOT NULL DEFAULT 'allowlist'");
+      addColumnIfMissing(db, "multiremi_feishu_bot_configs", "responsible_member_id TEXT");
+    }
+    // Additive upgrade must also run for an already unified snapshot.
+    // Deprecated: both responsible_member_id columns are kept for old rows and clients; nothing reads them.
+    if(tables.has('multiremi_issues'))addColumnIfMissing(db,'multiremi_issues','responsible_member_id TEXT');
+    if(tables.has('multiremi_autopilots'))addColumnIfMissing(db,'multiremi_autopilots','responsible_member_id TEXT');
+    if(tables.has('multiremi_issue_activity'))addColumnIfMissing(db,'multiremi_issue_activity','workspace_id TEXT');
+    if (tables.has("multiremi_execution_binding_states")) {
+      addColumnIfMissing(db, "multiremi_execution_binding_states", "model_catalog TEXT");
+    }
+    if (tables.has("multiremi_execution_groups")) {
+      addColumnIfMissing(db, "multiremi_execution_groups", "connection_mode TEXT NOT NULL DEFAULT 'legacy'");
+      addColumnIfMissing(db, "multiremi_execution_groups", "model_policy TEXT NOT NULL DEFAULT '{}'");
+    }
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);ensurePlannedRestarts(db);runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);return;}
+    // Inspect the existing snapshot before bootstrap migrations can touch it.
+    const checks=unifiedModelPreflight(db);
+    if(checks.some(c=>!c.ok)){
+      writeUnifiedModelReport(reportDir,'before',collectUnifiedBeforeReport(db));
+      throw new UnifiedModelPreflightError(checks);
+    }
+    runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
+    runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
+    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);ensurePlannedRestarts(db);
+    runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);
+  }));
+  // SQLite schema rebuilds toggle foreign_keys outside their transactions.
+  // Hold a separate SQLite writer lock across that entire sequence so another
+  // startup cannot inspect a half-migrated schema. SQLite releases it on exit.
+  const filename = (db as SqlDatabase & { filename?: string }).filename;
+  if (resolveSqlDialect(db, options.dialect) !== 'sqlite' || !filename || filename === ':memory:') return migrate();
+  const lock = openSqliteDatabase(`${filename}.migration-lock`, { create: true });
+  try {
+    lock.exec('PRAGMA busy_timeout=30000; BEGIN IMMEDIATE');
+    migrate();
+  } finally {
+    if (lock.inTransaction) lock.exec('ROLLBACK');
+    lock.close();
+  }
+}
+
+/** Production entry: populated pre-protocol databases require offline preparation. */
+export function runStartupMigrations(db: SqlDatabase): void {
+  runMigrations(db, { requireEnrolled: true });
+}
+
+/** Historical schema bootstrap used by offline migration fixtures, never a runtime read path. */
+export function bootstrapPreUnifiedSchema(db:SqlDatabase):void { const dialect=resolveSqlDialect(db,db.dialect); withModernSqliteAlterTable(db,dialect,()=>runMigrationsForDialect(db,dialect)); }
+
+/**
+ * The migration body. The dialect is resolved once, up front, from declared
+ * facts, and passed down to the few steps that differ per backend — rather than
+ * rediscovered per step by probing (MUL-407).
+ */
+function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
   renameLegacyMulticaObjects(db);
   const legacyGithubTables = existingTableNames(db);
   db.exec(`
@@ -830,11 +940,13 @@ export function runMigrations(db: SqlDatabase): void {
       FOREIGN KEY(parent_issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
     );
 
-    -- Product-level collaboration sessions. These are intentionally distinct
-    -- from ACP/provider session ids stored on tasks and agent lanes.
+    -- A Session is owned by chat_id when present, otherwise by issue_id.
+    -- Chat-owned Sessions retain issue_id as an optional work projection.
+    -- The physical table name is retained for upgrade compatibility.
     CREATE TABLE IF NOT EXISTS multiremi_issue_sessions (
       id TEXT PRIMARY KEY,
-      issue_id TEXT NOT NULL,
+      chat_id TEXT,
+      issue_id TEXT,
       workspace_id TEXT NOT NULL DEFAULT 'local',
       title TEXT NOT NULL DEFAULT 'Main',
       status TEXT NOT NULL DEFAULT 'active',
@@ -852,16 +964,13 @@ export function runMigrations(db: SqlDatabase): void {
       created_by_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_issue
       ON multiremi_issue_sessions(issue_id, status, updated_at);
     CREATE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_workspace
       ON multiremi_issue_sessions(workspace_id, updated_at);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_default
-      ON multiremi_issue_sessions(issue_id) WHERE is_default = 1;
-
     CREATE TABLE IF NOT EXISTS multiremi_session_participants (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -934,7 +1043,8 @@ export function runMigrations(db: SqlDatabase): void {
     -- published results/summaries, not the source session's private event log.
     CREATE TABLE IF NOT EXISTS multiremi_session_results (
       id TEXT PRIMARY KEY,
-      issue_id TEXT NOT NULL,
+      chat_id TEXT,
+      issue_id TEXT,
       source_session_id TEXT NOT NULL,
       title TEXT NOT NULL DEFAULT '',
       body TEXT NOT NULL,
@@ -942,7 +1052,7 @@ export function runMigrations(db: SqlDatabase): void {
       published_by_type TEXT NOT NULL DEFAULT 'agent',
       published_by_id TEXT,
       created_at TEXT NOT NULL,
-      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL,
       FOREIGN KEY(source_session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE CASCADE
     );
 
@@ -976,6 +1086,7 @@ export function runMigrations(db: SqlDatabase): void {
     CREATE TABLE IF NOT EXISTS multiremi_issue_activity (
       id TEXT PRIMARY KEY,
       issue_id TEXT NOT NULL,
+      workspace_id TEXT,
       actor_type TEXT NOT NULL DEFAULT 'system',
       actor_id TEXT,
       type TEXT NOT NULL,
@@ -2196,6 +2307,9 @@ export function runMigrations(db: SqlDatabase): void {
       delegation_id TEXT,
       delegated_by_agent_id TEXT,
       delegation_return_task_id TEXT,
+      delegated_from_issue_session_id TEXT,
+      delegation_skip_reason TEXT,
+      wake_source TEXT,
       assignment_event_id TEXT,
       assignment_source_event_id TEXT,
       projection_from_seq INTEGER,
@@ -2226,7 +2340,6 @@ export function runMigrations(db: SqlDatabase): void {
       FOREIGN KEY(agent_id) REFERENCES multiremi_agents(id),
       FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id),
       FOREIGN KEY(issue_session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE SET NULL,
-      FOREIGN KEY(chat_session_id) REFERENCES multiremi_chat_sessions(id) ON DELETE SET NULL,
       FOREIGN KEY(trigger_comment_id) REFERENCES multiremi_issue_comments(id) ON DELETE SET NULL
     );
 
@@ -2450,6 +2563,42 @@ export function runMigrations(db: SqlDatabase): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_multiremi_human_requests_task ON multiremi_task_human_requests(task_id, status);
+    CREATE INDEX IF NOT EXISTS idx_multiremi_human_requests_pending ON multiremi_task_human_requests(status, task_id);
+
+    -- MUL-400 E4: the light "waiting for your decision" row. A child run raises
+    -- one of these instead of blocking; the parent owner answers it or hands it
+    -- to a human. No scope, expiry or revocation: that is not a grant object.
+    CREATE TABLE IF NOT EXISTS multiremi_issue_decisions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL,
+      source_issue_id TEXT NOT NULL,
+      source_task_id TEXT,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      options TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      answer TEXT,
+      answered_by_member_id TEXT,
+      answered_at TEXT,
+      history TEXT NOT NULL DEFAULT '[]',
+      owner_agent_id TEXT,
+      created_by_agent_id TEXT,
+      -- MUL-412: the single text nudge a decision card gets. Decisions never
+      -- expire, so this is a one-shot slot rather than a deadline offset.
+      reminder_sent_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(source_issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE
+    );
+
+    -- The read model asks "this Issue's open/pending rows" on every parent page.
+    CREATE INDEX IF NOT EXISTS idx_multiremi_issue_decisions_issue
+      ON multiremi_issue_decisions(issue_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_multiremi_issue_decisions_source
+      ON multiremi_issue_decisions(source_issue_id, created_at);
 
     CREATE TABLE IF NOT EXISTS multiremi_task_steer_messages (
       id TEXT PRIMARY KEY,
@@ -2485,6 +2634,7 @@ export function runMigrations(db: SqlDatabase): void {
 
     CREATE TABLE IF NOT EXISTS multiremi_platform_operations (
       id TEXT PRIMARY KEY,
+      idempotency_key TEXT,
       kind TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'queued',
       driver TEXT NOT NULL,
@@ -2508,7 +2658,6 @@ export function runMigrations(db: SqlDatabase): void {
       ON multiremi_platform_operations(active_slot);
     CREATE INDEX IF NOT EXISTS idx_multiremi_platform_operations_created
       ON multiremi_platform_operations(created_at);
-
     CREATE TABLE IF NOT EXISTS multiremi_platform_maintenance (
       id TEXT PRIMARY KEY,
       mode TEXT NOT NULL DEFAULT 'normal',
@@ -2533,9 +2682,6 @@ export function runMigrations(db: SqlDatabase): void {
       repos TEXT NOT NULL DEFAULT '[]',
       last_task_id TEXT,
       cleaned_at TEXT,
-      cleaned_archive_id TEXT,
-      cleaned_archive_source_revision TEXT,
-      cleaned_archive_sha256 TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
@@ -2543,38 +2689,6 @@ export function runMigrations(db: SqlDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS idx_multiremi_issue_workspaces_runtime
       ON multiremi_issue_workspaces(runtime_id, status, updated_at);
-  `);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS multiremi_session_archives (
-      id TEXT PRIMARY KEY,
-      workspace_id TEXT NOT NULL DEFAULT 'local',
-      issue_id TEXT NOT NULL,
-      runtime_id TEXT NOT NULL,
-      daemon_id TEXT NOT NULL,
-      source_revision TEXT NOT NULL,
-      sha256 TEXT NOT NULL,
-      size_bytes BIGINT NOT NULL,
-      uploaded_size_bytes BIGINT NOT NULL DEFAULT 0,
-      file_count INTEGER,
-      status TEXT NOT NULL DEFAULT 'pending',
-      relative_path TEXT NOT NULL,
-      metadata TEXT NOT NULL DEFAULT '{}',
-      attempt_count INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      next_retry_at TEXT,
-      retry_exhausted_at TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      completed_at TEXT,
-      UNIQUE(issue_id, source_revision, sha256),
-      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_multiremi_session_archives_issue
-      ON multiremi_session_archives(issue_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_multiremi_session_archives_workspace_status
-      ON multiremi_session_archives(workspace_id, status, updated_at);
-    CREATE INDEX IF NOT EXISTS idx_multiremi_session_archives_runtime
-      ON multiremi_session_archives(runtime_id, status, updated_at);
   `);
   db.exec(`
     DELETE FROM multiremi_task_messages
@@ -2687,6 +2801,7 @@ export function runMigrations(db: SqlDatabase): void {
     "pending_heartbeat_count INTEGER NOT NULL DEFAULT 0",
   );
   addColumnIfMissing(db, "multiremi_runtimes", "daemon_id TEXT");
+  addColumnIfMissing(db, "multiremi_runtimes", "daemon_protocol_version INTEGER");
   addColumnIfMissing(db, "multiremi_runtimes", "legacy_daemon_id TEXT");
   addColumnIfMissing(db, "multiremi_runtimes", "runtime_mode TEXT NOT NULL DEFAULT 'local'");
   addColumnIfMissing(db, "multiremi_runtimes", "device_info TEXT NOT NULL DEFAULT ''");
@@ -2708,6 +2823,10 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_runtimes", "drain_ack_at TEXT");
   addColumnIfMissing(db, "multiremi_runtimes", "drain_reported_active_tasks INTEGER");
   addColumnIfMissing(db, "multiremi_platform_operations", "cancel_requested INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_platform_operations", "idempotency_key TEXT");
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_platform_operations_idempotency
+    ON multiremi_platform_operations(requested_by, idempotency_key)
+    WHERE idempotency_key IS NOT NULL`);
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_time TEXT NOT NULL DEFAULT '05:00'");
   addColumnIfMissing(
     db,
@@ -2717,6 +2836,10 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_next_check_at TEXT");
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_last_checked_at TEXT");
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_last_result TEXT");
+  addColumnIfMissing(db, "multiremi_platform_state", "release_feed_url TEXT");
+  addColumnIfMissing(db, "multiremi_platform_state", "default_release_feed_url TEXT");
+  addColumnIfMissing(db, "multiremi_platform_state", "updater_preflight TEXT");
+  addColumnIfMissing(db, "multiremi_platform_state", "update_mode TEXT");
   addColumnIfMissing(
     db,
     "multiremi_daemon_retirements",
@@ -2764,20 +2887,19 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_issues", "due_date TEXT");
   addColumnIfMissing(db, "multiremi_issues", "acceptance_criteria TEXT NOT NULL DEFAULT '[]'");
   addColumnIfMissing(db, "multiremi_issues", "context_refs TEXT NOT NULL DEFAULT '[]'");
-  // Hard deletion spans a database commit and durable archive cleanup. Keep a
-  // persisted fence on the Issue so daemon archive writers cannot race a
-  // purge snapshot or resurrect archive bytes after the control-plane row is
-  // removed.
   addColumnIfMissing(db, "multiremi_issues", "lifecycle_state TEXT NOT NULL DEFAULT 'active'");
+  // MUL-400 S1c (A4): the retired parent-done grant. Three nullable columns,
+  // add-only, kept for old rows; the done rule replaced the grant and nothing
+  // reads them.
+  addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_at TEXT");
+  // Deprecated: kept for old rows and clients; nothing reads it.
+  addColumnIfMissing(db, "multiremi_issues", "responsible_member_id TEXT");
+  addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_by TEXT");
+  addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_agent_id TEXT");
   const issueCompletedAtAdded = addColumnIfMissing(db, "multiremi_issues", "completed_at TEXT");
   addColumnIfMissing(db, "multiremi_issues", "archived_at TEXT");
-  addColumnIfMissing(db, "multiremi_issue_workspaces", "cleaned_archive_id TEXT");
-  addColumnIfMissing(db, "multiremi_issue_workspaces", "cleaned_archive_source_revision TEXT");
-  addColumnIfMissing(db, "multiremi_issue_workspaces", "cleaned_archive_sha256 TEXT");
-  addColumnIfMissing(db, "multiremi_session_archives", "next_retry_at TEXT");
-  addColumnIfMissing(db, "multiremi_session_archives", "retry_exhausted_at TEXT");
-  runMigrationOnce(db, SESSION_ARCHIVE_RETRY_BUDGET_MIGRATION, () => {
-    backfillSessionArchiveRetryBudget(db);
+  runMigrationOnce(db, TASK_TRACE_POINTERS_MIGRATION, () => {
+    createTaskTracePointers(db);
   });
   addColumnIfMissing(db, "multiremi_issue_comments", "parent_id TEXT");
   addColumnIfMissing(db, "multiremi_issue_comments", "type TEXT NOT NULL DEFAULT 'comment'");
@@ -2842,11 +2964,26 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "delegation_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegated_by_agent_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegation_return_task_id TEXT");
+  // MUL-400 E2b: where a cross-issue delegation returns (the delegator's Issue
+  // Session at dispatch time) and why a task-token dispatch was not recorded as
+  // a delegation. Both are add-only: existing rows read NULL, which keeps the
+  // legacy "return to the task's own Session" behaviour for old tasks.
+  addColumnIfMissing(db, "multiremi_tasks", "delegated_from_issue_session_id TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "delegation_skip_reason TEXT");
+  // MUL-400 E2b ruling: server-owned marker for notification rounds the server
+  // generated itself (E2 child-status rounds). NULL means "not a server wake
+  // round", so D4's manual-wakeup lookup can exclude it without trusting any
+  // request-body field. Add-only: existing rows read NULL.
+  addColumnIfMissing(db, "multiremi_tasks", "wake_source TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "trigger_comment_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "trigger_summary TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "issue_session_id TEXT");
   db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_delegation_return_pending
     ON multiremi_tasks(issue_session_id, delegated_by_agent_id, delegation_return_task_id, status)`);
+  // MUL-400 E2b: the drain now selects by the return Session, which is not the
+  // task's own Session for a cross-issue delegation.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_delegation_return_target
+    ON multiremi_tasks(delegated_from_issue_session_id, delegated_by_agent_id, delegation_return_task_id, status)`);
   addColumnIfMissing(db, "multiremi_tasks", "issue_session_generation INTEGER");
   addColumnIfMissing(db, "multiremi_tasks", "holds_workspace INTEGER NOT NULL DEFAULT 1");
   addColumnIfMissing(db, "multiremi_tasks", "assignment_event_id TEXT");
@@ -2859,7 +2996,8 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings", "thread_id TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings", "reply_to_message_id TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_deliveries", "sender_id TEXT");
-  addColumnIfMissing(db, "multiremi_feishu_bot_configs", "sender_access_policy TEXT NOT NULL DEFAULT 'agent'");
+  addColumnIfMissing(db, "multiremi_feishu_bot_configs", "sender_access_policy TEXT NOT NULL DEFAULT 'allowlist'");
+  addColumnIfMissing(db, "multiremi_feishu_bot_configs", "responsible_member_id TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_senders", "name_en TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_senders", "profile_checked_at TEXT");
   db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_delivery_sender
@@ -2869,6 +3007,11 @@ export function runMigrations(db: SqlDatabase): void {
   // in the dynamic allowlist. A tracked delivery without an identity is denied.
   addColumnIfMissing(db, "multiremi_feishu_bot_deliveries", "sender_recorded INTEGER NOT NULL DEFAULT 0");
   backfillFeishuBotReplyDestinations(db);
+  // Session ownership must be migrated while the legacy Chat issue_id column
+  // is still available as a safe, one-time backfill hint. The following
+  // migration intentionally removes that generic Chat-to-Issue binding.
+  migrateChatOwnedSessions(db, dialect);
+  migrateDualOwnedSessions(db, dialect);
   // SQLite cannot change foreign_keys inside a transaction. Disable it only
   // around this atomic table rebuild, then restore the caller's setting.
   const chatSchema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_chat_sessions'")
@@ -2937,6 +3080,8 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "codex_profile TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "claude_profile TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "execution_fingerprint TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "offered_at TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "accepted_at TEXT");
   addColumnIfMissing(db, "multiremi_session_agent_lanes", "execution_fingerprint TEXT");
   migrateExecutionScopedLanes(db);
   addColumnIfMissing(db, "multiremi_session_agent_lanes", "parent_cursor_seq INTEGER NOT NULL DEFAULT 0");
@@ -2964,6 +3109,8 @@ export function runMigrations(db: SqlDatabase): void {
   runMigrationOnce(db, MARKDOWN_ATTACHMENT_OWNERSHIP_MIGRATION, () => backfillMarkdownAttachmentOwnership(db));
   addColumnIfMissing(db, "multiremi_autopilots", "created_by_type TEXT NOT NULL DEFAULT 'member'");
   addColumnIfMissing(db, "multiremi_autopilots", "created_by_id TEXT NOT NULL DEFAULT 'local'");
+  // Deprecated: kept for old rows and clients; nothing reads it.
+  addColumnIfMissing(db, "multiremi_autopilots", "responsible_member_id TEXT");
   addColumnIfMissing(db, "multiremi_autopilots", "session_policy TEXT NOT NULL DEFAULT 'new'");
   addColumnIfMissing(db, "multiremi_autopilots", "workspace_policy TEXT NOT NULL DEFAULT 'reuse_issue'");
   addColumnIfMissing(db, "multiremi_autopilot_triggers", "event_filters TEXT");
@@ -3155,11 +3302,48 @@ export function runMigrations(db: SqlDatabase): void {
   );
   CREATE INDEX IF NOT EXISTS idx_execution_group_members_group ON multiremi_execution_group_members(workspace_id, group_id);`);
   runMigrationOnce(db, "execution_groups_v1", () => {
-    for (const row of db.query("SELECT id FROM multiremi_runtimes").all() as { id: string }[]) syncRuntimeExecutionGroups(db, row.id);
+    for (const row of db.query("SELECT id FROM multiremi_runtimes").all() as { id: string }[]) backfillRuntimeExecutionGroups(db, row.id);
     db.run(`UPDATE multiremi_agents SET execution_group_id = (
       SELECT group_id FROM multiremi_execution_group_members m WHERE m.runtime_id = multiremi_agents.runtime_id AND m.provider = multiremi_agents.provider
     ) WHERE execution_group_id IS NULL AND runtime_id IS NOT NULL`);
   });
+  addColumnIfMissing(db, "multiremi_execution_groups", "name TEXT");
+  addColumnIfMissing(db, "multiremi_execution_groups", "description TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "multiremi_execution_groups", "profile_id TEXT");
+  addColumnIfMissing(db, "multiremi_execution_groups", "managed INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_execution_groups", "connection_mode TEXT NOT NULL DEFAULT 'legacy'");
+  addColumnIfMissing(db, "multiremi_execution_groups", "model_policy TEXT NOT NULL DEFAULT '{}'");
+  db.exec(`CREATE TABLE IF NOT EXISTS multiremi_execution_profiles (
+    id TEXT NOT NULL,workspace_id TEXT NOT NULL,name TEXT NOT NULL,provider TEXT NOT NULL,
+    revision INTEGER NOT NULL,deleted_at TEXT,PRIMARY KEY(workspace_id,id));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_profile_versions (
+    id TEXT NOT NULL,workspace_id TEXT NOT NULL,name TEXT NOT NULL,provider TEXT NOT NULL,
+    revision INTEGER NOT NULL,profile TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,id,revision));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_profile_legacy_sources (
+    profile_id TEXT NOT NULL,workspace_id TEXT NOT NULL,revision INTEGER NOT NULL,runtime_id TEXT NOT NULL,
+    provider TEXT NOT NULL,legacy_profile TEXT NOT NULL,PRIMARY KEY(workspace_id,profile_id));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_profile_credentials (
+    id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,workspace_id TEXT NOT NULL,ciphertext TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS multiremi_execution_binding_generations (
+    workspace_id TEXT NOT NULL,group_id TEXT NOT NULL,runtime_id TEXT NOT NULL,generation TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,group_id,runtime_id));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_binding_states (
+    workspace_id TEXT NOT NULL,group_id TEXT NOT NULL,runtime_id TEXT NOT NULL,profile_id TEXT,
+    profile_revision INTEGER,status TEXT NOT NULL,error TEXT,updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,group_id,runtime_id));`);
+  addColumnIfMissing(db, "multiremi_execution_binding_states", "generation TEXT");
+  addColumnIfMissing(db, "multiremi_execution_binding_states", "model_catalog TEXT");
+  runMigrationOnce(db, "central_execution_profiles_v1", () => {
+    db.exec(`ALTER TABLE multiremi_execution_group_members RENAME TO multiremi_execution_group_members_legacy;
+      CREATE TABLE multiremi_execution_group_members (
+      runtime_id TEXT NOT NULL,provider TEXT NOT NULL,workspace_id TEXT NOT NULL,group_id TEXT NOT NULL,
+      PRIMARY KEY(workspace_id,group_id,runtime_id));
+      INSERT INTO multiremi_execution_group_members SELECT * FROM multiremi_execution_group_members_legacy;
+      DROP TABLE multiremi_execution_group_members_legacy;
+      CREATE INDEX idx_execution_group_members_group ON multiremi_execution_group_members(workspace_id,group_id);`);
+  });
+  runMigrationOnce(db, "central_execution_profiles_legacy_v1", () => migrateLegacyExecutionProfiles(db));
   // MUL-336: a task (and its recovery chain) can run on a model other than its
   // Agent's primary one after a gateway resource failure. The override lives on
   // the task so the Agent's own model stays untouched and concurrent tasks of
@@ -3187,6 +3371,81 @@ export function runMigrations(db: SqlDatabase): void {
         ON multiremi_tasks(status, created_at DESC, id DESC);
     `);
   });
+  // MUL-407 (E5): an Issue human request now becomes a server-built decision
+  // card delivery instead of waking a relay Agent. The push row keeps its
+  // idempotency duty but no longer requires a wake Task, and the request gains
+  // the deadline the reminder lane and the timeout card both read.
+  //
+  // Every step below is idempotent (the rebuild returns early once the column is
+  // nullable), so it runs beside the other Feishu column additions instead of
+  // through `runMigrationOnce`: that helper stamps `new Date()`, and consuming
+  // an extra clock read shifts the deterministic cursor pinned by
+  // `tests/unit/multiremi/issue-detail-first-screen-query-count.test.ts`.
+  allowNullableHumanRequestPushWakeTaskId(db, dialect);
+  addColumnIfMissing(db, "multiremi_feishu_bot_human_request_pushes", "delivery_id TEXT");
+  addColumnIfMissing(db, "multiremi_task_human_requests", "expires_at TEXT");
+  addColumnIfMissing(db, "multiremi_task_human_requests", "reminder_sent_at TEXT");
+  // The delivery lane itself: NULL kind keeps every existing row on its old
+  // meaning (topic seed, Task stream, or plain text).
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "kind TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "human_request_id TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "human_request_task_id TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "expires_at TEXT");
+  // A patch lane edits an already-sent message instead of creating one, so it
+  // must name its target rather than reuse `external_message_id` (which means
+  // "the message this delivery produced").
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "target_message_id TEXT");
+  // Why a decision lane carried plain text instead of a card. NULL means the
+  // delivery is a normal card (or not a decision lane at all).
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "degraded TEXT");
+  // MUL-412 (E4 x E5): an E4 decision rides the same pipeline. It gets its own
+  // nullable pointer rather than borrowing `human_request_id`, so a delivery
+  // row names exactly one owner and MUL-440 can split lanes by kind without
+  // guessing. `reminder_sent_at` is the one-shot slot for the decision's single
+  // reminder: decisions never expire, so there is no deadline to key it on.
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "decision_id TEXT");
+  // The Issue the decision hangs on. Redundant with the decision row's own
+  // `issue_id`, but the delivery is read on its own when the host reports an
+  // outcome or re-registers a card, and a join for one column on those paths
+  // buys nothing.
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "decision_issue_id TEXT");
+  addColumnIfMissing(db, "multiremi_issue_decisions", "reminder_sent_at TEXT");
+  ensureFeishuOutboundKindsSchema(db, dialect);
+  addColumnIfMissing(db, "multiremi_feishu_bot_deliveries", "outbound_requested INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_feishu_bot_deliveries", "outbound_context TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_deliveries", "outbound_task_id TEXT");
+  db.exec(`CREATE TABLE IF NOT EXISTS multiremi_feishu_bot_outbound_operations (
+    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, kind TEXT NOT NULL, unit_key TEXT NOT NULL,
+    operation TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', claim_token TEXT, leased_until TEXT,
+    available_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(workspace_id, kind, unit_key));
+    CREATE INDEX IF NOT EXISTS idx_feishu_outbound_operations_pending
+      ON multiremi_feishu_bot_outbound_operations(workspace_id, status, available_at, leased_until);`);
+  runMigrationOnce(db, "20260929_human_request_tokens", () => {
+    for (const table of ["multiremi_task_human_requests", "multiremi_issue_decisions"]) {
+      addColumnIfMissing(db, table, "token_hash TEXT");
+      addColumnIfMissing(db, table, "token_recipient TEXT");
+      addColumnIfMissing(db, table, "token_consumed_at TEXT");
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_token_hash
+        ON ${table}(token_hash) WHERE token_hash IS NOT NULL`);
+    }
+  });
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_human_requests_expiry
+    ON multiremi_task_human_requests(status, expires_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_outbound_kind
+    ON multiremi_feishu_bot_outbound_deliveries(kind, status, available_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_outbound_decision
+    ON multiremi_feishu_bot_outbound_deliveries(decision_id, status, available_at)`);
+  // MUL-386 C.2: `recall` resolves one OpenViking URI per search hit. It used to
+  // call `listProjectDocs`, reading every doc in the project (body included) and
+  // comparing URIs in JavaScript — 15.5 MB of bridge payload per request. This
+  // index backs the replacement lookup by `(project_id, content_uri)`.
+  runMigrationOnce(db, PROJECT_DOC_CONTENT_URI_INDEX_MIGRATION, () => {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_multiremi_project_docs_content_uri
+        ON multiremi_project_docs(project_id, content_uri);
+    `);
+  });
   runMigrationOnce(db, "20260919_agent_fallback_model", () => {
     addColumnIfMissing(db, "multiremi_agents", "fallback_model TEXT");
     addColumnIfMissing(db, "multiremi_agents", "fallback_thinking_level TEXT");
@@ -3210,9 +3469,199 @@ export function runMigrations(db: SqlDatabase): void {
       );
     `);
   });
-  backfillDefaultIssueSessions(db);
+  // MUL-426 / B1 (ADR 0006): the single per-session conversation log. One row is
+  // one display unit (`head` at seq 0, `message`, `system`, `turn`,
+  // `result_published`); every other lifecycle fact is a hidden marker row so
+  // lane cursors, projection windows and the browser replica keep reading one
+  // ordering. `multiremi_conversation_heads` allocates seq with an atomic
+  // `head_seq = head_seq + 1` update; the `(session_id, seq)` primary key is the
+  // backstop. Written once in SQLite dialect and translated for Postgres.
+  runMigrationOnce(db, CONVERSATION_LOG_MIGRATION, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_conversation_log (
+        session_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        author_type TEXT NOT NULL DEFAULT 'system',
+        author_id TEXT,
+        task_id TEXT,
+        body_md TEXT NOT NULL DEFAULT '',
+        body_html TEXT,
+        render_version TEXT,
+        parent_id TEXT,
+        resolved_at TEXT,
+        resolved_by_type TEXT,
+        resolved_by_id TEXT,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        revision INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        PRIMARY KEY(session_id, seq)
+      );
+      CREATE INDEX IF NOT EXISTS idx_multiremi_conversation_log_window
+        ON multiremi_conversation_log(session_id, visibility, seq);
+      CREATE INDEX IF NOT EXISTS idx_multiremi_conversation_log_task
+        ON multiremi_conversation_log(task_id);
+
+      CREATE TABLE IF NOT EXISTS multiremi_conversation_heads (
+        session_id TEXT PRIMARY KEY,
+        head_seq INTEGER NOT NULL DEFAULT 0,
+        log_version INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  });
+  runMigrationOnce(db, GATEWAY_MODEL_CONTEXT_MIGRATION, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_gateway_model_context (
+        workspace_id TEXT NOT NULL,
+        engine TEXT NOT NULL CHECK(engine = 'claude'),
+        model_id TEXT NOT NULL,
+        context_window TEXT NOT NULL CHECK(context_window = '1m'),
+        updated_by TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(workspace_id, engine, model_id)
+      );
+    `);
+  });
   backfillIssueKeys(db);
   migrateLegacyGithubProjection(db, legacyGithubTables);
+  runMigrationOnce(db, CONVERSATION_LOG_BACKFILL_MIGRATION, () => {
+    backfillLegacyIssueLogSources(db);
+    backfillConversationLogWithinTransaction(db);
+  });
+  // MUL-432 (ADR 0006 decision 9): per-task digests of the task_messages trace
+  // backfill, still joined by usage accounting. Plain idempotent DDL rather than
+  // `runMigrationOnce`, for the same clock-read reason as the MUL-407 (E5) block
+  // above. Ordered after the MUL-427 conversation backfill.
+  createTraceBackfillTasks(db);
+  migrateTaskExecutionScope(db);
+  runMigrationOnce(db, "20260929_relay_issue_log_to_seq", () => {
+    addColumnIfMissing(db, "multiremi_tasks", "bound_issue_log_to_seq INTEGER");
+  });
+  runMigrationOnce(db, "20260929_relay_issue_log_delivered_seq", () => {
+    addColumnIfMissing(db, "multiremi_tasks", "bound_issue_log_delivered_seq INTEGER");
+  });
+  runMigrationOnce(db, PENDING_TURN_MIGRATION, () => {
+    preparePendingTurnConstraintsWithinTransaction(db);
+  });
+  runMigrationOnce(db, "20261001_lane_rering_sweep", () => {
+    addColumnIfMissing(db, "multiremi_session_agent_lanes", "swept_to_seq INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(db, "multiremi_session_agent_lanes", "swept_at TEXT");
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_lane_active
+      ON multiremi_tasks(issue_session_id, agent_id, execution_scope)
+      WHERE status IN ('queued','dispatched','running','waiting_local_directory','awaiting_human')
+        AND issue_session_id IS NOT NULL`);
+  });
+  runMigrationOnce(db, "20261001_lane_rering_wake_hint", () => {
+    addColumnIfMissing(db, "multiremi_session_agent_lanes", "wake_hint_seq INTEGER NOT NULL DEFAULT 0");
+    // One conservative upgrade scan of runnable Issue lanes; unavailable
+    // history must not delay fresh hints. Recipient semantics stay in the
+    // shared log predicate. Later writes hint only the resolved recipient.
+    db.exec(`UPDATE multiremi_session_agent_lanes SET wake_hint_seq = (
+      SELECT h.head_seq FROM multiremi_conversation_heads h
+      WHERE h.session_id = multiremi_session_agent_lanes.session_id)
+      WHERE status = 'active' AND substr(execution_scope, 1, 6) <> 'relay:'
+        AND EXISTS (SELECT 1 FROM multiremi_issue_sessions s
+          JOIN multiremi_agents a ON a.id = multiremi_session_agent_lanes.agent_id
+            AND a.archived_at IS NULL AND a.workspace_id = s.workspace_id
+          WHERE s.id = multiremi_session_agent_lanes.session_id AND s.status = 'active')
+        AND EXISTS (SELECT 1 FROM multiremi_conversation_heads h
+        WHERE h.session_id = multiremi_session_agent_lanes.session_id
+          AND h.head_seq > CASE WHEN cursor_seq > swept_to_seq THEN cursor_seq ELSE swept_to_seq END
+          AND h.head_seq > wake_hint_seq)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_lanes_sweep_pending
+      ON multiremi_session_agent_lanes(COALESCE(swept_at, ''), session_id, agent_id, execution_scope)
+      WHERE status = 'active' AND wake_hint_seq > swept_to_seq`);
+    db.exec("DROP INDEX IF EXISTS idx_multiremi_lanes_sweep_order");
+  });
+  runMigrationOnce(db, "20261004_session_agent_read_progress", () => {
+    // Provider checkpoints cannot acknowledge context that was only referenced.
+    // Shared session heads cover both Issue and Chat agents without changing lane identity.
+    addColumnIfMissing(db, "multiremi_conversation_heads", "agent_read_state TEXT");
+  });
+  ensureIssueNumberUniqueness(db, legacyGithubTables);
+}
+
+/**
+ * Second line of defense for issue numbering (MUL-405): the transaction lock in
+ * `IssuesRepo.createIssue` is what allocates numbers, and this index is what
+ * makes a duplicate number impossible even if a future caller forgets it.
+ *
+ * It MUST NOT be able to fail a startup. The daily release updates the platform
+ * container unattended at 07:00 Beijing time, and the updater rolls back when the
+ * new container does not come up — a failed `CREATE UNIQUE INDEX` on existing
+ * duplicate data would take the whole release down over a defense that no read
+ * path depends on. So the run degrades instead: duplicates or any other failure
+ * log one grep-able `api_startup_warning` line and leave the index absent, and
+ * the next startup retries, which is why this does not go through
+ * `runMigrationOnce`.
+ */
+function ensureIssueNumberUniqueness(db: SqlDatabase, objects: Set<string>): void {
+  if (objects.has(ISSUE_NUMBER_UNIQUE_INDEX)) return;
+  // `issue_number = 0` is the "not allocated yet" placeholder, not a number: the
+  // column defaults to 0 and `backfillIssueKeys` hands those rows real numbers on
+  // every startup. Rows written by an out-of-band writer (a fixture, a script, a
+  // pre-upgrade client) all sit at 0, so enforcing uniqueness over the whole
+  // column would make the index reject them and it would be the index, not the
+  // allocator, that broke them. The predicate therefore covers exactly the rows
+  // an allocator produced, which is where a duplicate number can come from.
+  const allocatedOnly = "issue_number > 0";
+  let duplicates: Array<{ workspace_id?: unknown; issue_number?: unknown; count?: unknown }> = [];
+  try {
+    duplicates = db.query(
+      `SELECT workspace_id, issue_number, COUNT(*) AS count
+         FROM multiremi_issues
+        WHERE ${allocatedOnly}
+        GROUP BY workspace_id, issue_number
+       HAVING COUNT(*) > 1
+        LIMIT 1`,
+    ).all() as Array<{ workspace_id?: unknown; issue_number?: unknown; count?: unknown }>;
+  } catch (err) {
+    logStartupWarning("duplicate check failed", err, {});
+    return;
+  }
+  if (duplicates.length) {
+    const row = duplicates[0]!;
+    logStartupWarning("duplicate issue numbers found, unique index skipped", null, {
+      workspace_id: row.workspace_id ?? null,
+      issue_number: row.issue_number ?? null,
+      duplicate_rows: row.count ?? null,
+    });
+    return;
+  }
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${ISSUE_NUMBER_UNIQUE_INDEX}
+         ON multiremi_issues(workspace_id, issue_number)
+       WHERE ${allocatedOnly}`,
+    );
+  } catch (err) {
+    logStartupWarning("unique index creation failed", err, {});
+  }
+}
+
+/**
+ * One JSON line per degraded startup step, on stdout next to the other
+ * machine-read startup lines (`api_minute_summary`, `api_slow_request`).
+ * `createLogger` cannot be used here: WARN goes to stderr and stops being a
+ * parseable record of what the process decided at boot.
+ */
+function logStartupWarning(message: string, error: unknown, fields: Record<string, unknown>): void {
+  try {
+    console.log(JSON.stringify({
+      event: "api_startup_warning",
+      ts: new Date().toISOString(),
+      message,
+      ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+      ...fields,
+    }));
+  } catch {
+    // A hostile console is not worth failing a migration over.
+  }
 }
 
 function ensureFeishuBotAgentRoutesSchema(db: SqlDatabase): void {
@@ -3375,39 +3824,380 @@ function normalizeSquadLeaderRoles(db: SqlDatabase): void {
   );
 }
 
-function backfillDefaultIssueSessions(db: SqlDatabase): void {
+function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect, legacyBackfill = true): void {
+  const applied = db.query("SELECT 1 AS applied FROM multiremi_schema_migrations WHERE id = ?").get(
+    CHAT_OWNED_SESSIONS_MIGRATION,
+  );
+  if (applied) return;
+
+  // MUL-301 normally adds this projection during Chat decoupling, but the
+  // Session ownership migration must run first so it can consume validated
+  // binding evidence on databases where Chat.issue_id is already absent.
+  addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings",
+    "issue_id TEXT REFERENCES multiremi_issues(id) ON DELETE SET NULL");
+
+  if (dialect === "postgres") {
+    runMigrationOnce(db, CHAT_OWNED_SESSIONS_MIGRATION, () => {
+      addColumnIfMissing(db, "multiremi_issue_sessions", "chat_id TEXT");
+      addColumnIfMissing(db, "multiremi_session_results", "chat_id TEXT");
+      db.exec(`
+        ALTER TABLE multiremi_issue_sessions ALTER COLUMN issue_id DROP NOT NULL;
+        ALTER TABLE multiremi_session_results ALTER COLUMN issue_id DROP NOT NULL;
+        ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_issue_id_fkey;
+        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_issue_id_fkey
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL;
+        ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_chat_id_fkey;
+        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_chat_id_fkey
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE;
+        ALTER TABLE multiremi_session_results DROP CONSTRAINT IF EXISTS multiremi_session_results_issue_id_fkey;
+        ALTER TABLE multiremi_session_results ADD CONSTRAINT multiremi_session_results_issue_id_fkey
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL;
+        ALTER TABLE multiremi_session_results DROP CONSTRAINT IF EXISTS multiremi_session_results_chat_id_fkey;
+        ALTER TABLE multiremi_session_results ADD CONSTRAINT multiremi_session_results_chat_id_fkey
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_default;
+        CREATE UNIQUE INDEX idx_multiremi_issue_sessions_default
+          ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_chat
+          ON multiremi_issue_sessions(chat_id, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_multiremi_session_results_chat
+          ON multiremi_session_results(chat_id, created_at);
+      `);
+      backfillChatOwnedSessions(db, legacyBackfill);
+    });
+    return;
+  }
+
+  const foreignKeysEnabled = Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys?: number } | null)?.foreign_keys ?? 0) === 1;
+  const sessionHasChatId = (db.query("PRAGMA table_info(multiremi_issue_sessions)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "chat_id");
+  const resultHasChatId = (db.query("PRAGMA table_info(multiremi_session_results)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "chat_id");
+  db.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;");
+  try {
+    db.transaction(() => {
+      const claimed = db.run(
+        "INSERT OR IGNORE INTO multiremi_schema_migrations (id, applied_at) VALUES (?, ?)",
+        [CHAT_OWNED_SESSIONS_MIGRATION, new Date().toISOString()],
+      ).changes;
+      if (claimed !== 1) return;
+      db.exec(`
+        ALTER TABLE multiremi_issue_sessions RENAME TO multiremi_issue_sessions_issue_owned;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_issue;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_workspace;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_default;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_chat;
+        CREATE TABLE multiremi_issue_sessions (
+          id TEXT PRIMARY KEY,
+          chat_id TEXT,
+          issue_id TEXT,
+          workspace_id TEXT NOT NULL DEFAULT 'local',
+          title TEXT NOT NULL DEFAULT 'Main',
+          status TEXT NOT NULL DEFAULT 'active',
+          is_default INTEGER NOT NULL DEFAULT 0,
+          holds_workspace INTEGER NOT NULL DEFAULT 1,
+          parent_session_id TEXT,
+          inherit_mode TEXT NOT NULL DEFAULT 'none',
+          inherit_cutoff_seq INTEGER,
+          inherited_tokens_total INTEGER NOT NULL DEFAULT 0,
+          follow_frozen_seq INTEGER,
+          with_code INTEGER NOT NULL DEFAULT 0,
+          code_runtime_id TEXT,
+          summary TEXT,
+          created_by_type TEXT NOT NULL DEFAULT 'member',
+          created_by_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
+        );
+        INSERT INTO multiremi_issue_sessions (
+          id, chat_id, issue_id, workspace_id, title, status, is_default,
+          holds_workspace, parent_session_id, inherit_mode, inherit_cutoff_seq,
+          inherited_tokens_total, follow_frozen_seq, with_code, code_runtime_id,
+          summary, created_by_type, created_by_id, created_at, updated_at
+        )
+        SELECT id, ${sessionHasChatId ? "chat_id" : "NULL"}, issue_id, workspace_id, title, status, is_default,
+          holds_workspace, parent_session_id, inherit_mode, inherit_cutoff_seq,
+          inherited_tokens_total, follow_frozen_seq, with_code, code_runtime_id,
+          summary, created_by_type, created_by_id, created_at, updated_at
+        FROM multiremi_issue_sessions_issue_owned;
+        DROP TABLE multiremi_issue_sessions_issue_owned;
+        CREATE INDEX idx_multiremi_issue_sessions_issue
+          ON multiremi_issue_sessions(issue_id, status, updated_at);
+        CREATE INDEX idx_multiremi_issue_sessions_workspace
+          ON multiremi_issue_sessions(workspace_id, updated_at);
+        CREATE INDEX idx_multiremi_issue_sessions_chat
+          ON multiremi_issue_sessions(chat_id, status, updated_at);
+        CREATE UNIQUE INDEX idx_multiremi_issue_sessions_default
+          ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;
+
+        ALTER TABLE multiremi_session_results RENAME TO multiremi_session_results_issue_owned;
+        DROP INDEX IF EXISTS idx_multiremi_session_results_issue;
+        DROP INDEX IF EXISTS idx_multiremi_session_results_source;
+        DROP INDEX IF EXISTS idx_multiremi_session_results_chat;
+        CREATE TABLE multiremi_session_results (
+          id TEXT PRIMARY KEY,
+          chat_id TEXT,
+          issue_id TEXT,
+          source_session_id TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          published_by_type TEXT NOT NULL DEFAULT 'agent',
+          published_by_id TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL,
+          FOREIGN KEY(source_session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE CASCADE
+        );
+        INSERT INTO multiremi_session_results (
+          id, chat_id, issue_id, source_session_id, title, body, metadata,
+          published_by_type, published_by_id, created_at
+        )
+        SELECT id, ${resultHasChatId ? "chat_id" : "NULL"}, issue_id, source_session_id, title, body, metadata,
+          published_by_type, published_by_id, created_at
+        FROM multiremi_session_results_issue_owned;
+        DROP TABLE multiremi_session_results_issue_owned;
+        CREATE INDEX idx_multiremi_session_results_issue
+          ON multiremi_session_results(issue_id, created_at);
+        CREATE INDEX idx_multiremi_session_results_chat
+          ON multiremi_session_results(chat_id, created_at);
+        CREATE INDEX idx_multiremi_session_results_source
+          ON multiremi_session_results(source_session_id, created_at);
+      `);
+      backfillChatOwnedSessions(db, legacyBackfill);
+      assertSessionForeignKeys(db);
+    })();
+  } finally {
+    db.exec(`PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ${foreignKeysEnabled ? "ON" : "OFF"};`);
+  }
+}
+
+function assertSessionForeignKeys(db: SqlDatabase): void {
+  // Existing installations can contain an unrelated legacy violation which a
+  // later migration repairs. Fail only for tables whose references can be
+  // affected by rebuilding the Session/result parents here.
+  const sessionTables = new Set([
+    "multiremi_issue_sessions",
+    "multiremi_session_results",
+    "multiremi_session_events",
+    "multiremi_session_participants",
+    "multiremi_session_agent_lanes",
+    "multiremi_tasks",
+    "multiremi_issue_comments",
+  ]);
+  const violations = (db.query("PRAGMA foreign_key_check").all() as Array<{ table?: string }>)
+    .filter((row) => sessionTables.has(String(row.table ?? "")));
+  if (violations.length > 0) throw new Error(`Chat-owned Session migration left ${violations.length} foreign-key violation(s)`);
+}
+
+function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
+  if (db.query("SELECT 1 FROM multiremi_schema_migrations WHERE id = ?").get(DUAL_OWNED_SESSIONS_MIGRATION)) return;
+  const migrate = () => {
+    const invalid = db.query(
+      `SELECT s.id FROM multiremi_issue_sessions s
+       LEFT JOIN multiremi_chat_sessions chat ON chat.id = s.chat_id
+       LEFT JOIN multiremi_issues issue ON issue.id = s.issue_id
+       WHERE (s.chat_id IS NULL AND s.issue_id IS NULL)
+          OR (s.chat_id IS NOT NULL AND (chat.id IS NULL OR chat.workspace_id <> s.workspace_id))
+          OR (s.chat_id IS NULL AND issue.id IS NULL)
+       ORDER BY s.id LIMIT 1`,
+    ).get() as { id: string } | null;
+    if (invalid) throw new Error(`Dual-owned Session migration: invalid or missing owner for Session ${invalid.id}`);
+    // Repair the pre-rotation move shape only. An actual Main-rotation receipt
+    // freezes source history, including old independent sides whose identity
+    // is insufficient to grant reads. Never move those bodies into the target.
+    const movedSessions = db.query(`SELECT s.id, s.issue_id, s.workspace_id, issue.workspace_id AS owner_workspace_id
+      FROM multiremi_issue_sessions s JOIN multiremi_issues issue ON issue.id = s.issue_id
+      WHERE s.chat_id IS NULL AND s.workspace_id <> issue.workspace_id ORDER BY s.id`)
+      .all() as Array<{ id: string; issue_id: string; workspace_id: string; owner_workspace_id: string }>;
+    const sourceWorkspaces = new Map<string, Set<string>>();
+    const repairedSessions: Array<{ id: string; workspaceId: string }> = [];
+    for (const session of movedSessions) {
+      if (!sourceWorkspaces.has(session.issue_id)) {
+        // Pre-unified snapshots do not yet have head.workspace_id. Only the
+        // owner identities and immutable receipt decide preservation here;
+        // runtime reads additionally require the real head's source workspace.
+        sourceWorkspaces.set(session.issue_id, readAuditedIssueSessionHistory(db, session.issue_id, false).sourceWorkspaceIds);
+      }
+      if (!sourceWorkspaces.get(session.issue_id)!.has(session.workspace_id)) {
+        db.run("UPDATE multiremi_issue_sessions SET workspace_id = ? WHERE id = ?", [session.owner_workspace_id, session.id]);
+        repairedSessions.push({ id: session.id, workspaceId: session.owner_workspace_id });
+      }
+    }
+    const foreignProjections = `SELECT s.id FROM multiremi_issue_sessions s
+      LEFT JOIN multiremi_issues issue ON issue.id = s.issue_id
+      WHERE s.chat_id IS NOT NULL AND s.issue_id IS NOT NULL
+        AND (issue.id IS NULL OR issue.workspace_id <> s.workspace_id)`;
+    db.run(`UPDATE multiremi_session_results SET issue_id = NULL WHERE source_session_id IN (${foreignProjections})`);
+    db.run(`UPDATE multiremi_issue_sessions SET issue_id = NULL WHERE id IN (${foreignProjections})`);
+    const invalidParent = db.query(
+      `SELECT s.id FROM multiremi_issue_sessions s
+       LEFT JOIN multiremi_issue_sessions parent ON parent.id = s.parent_session_id
+       WHERE s.parent_session_id IS NOT NULL AND (parent.id IS NULL
+         OR s.workspace_id <> parent.workspace_id
+         OR COALESCE(s.chat_id, '') <> COALESCE(parent.chat_id, '')
+         OR (s.chat_id IS NULL AND s.issue_id <> parent.issue_id))
+       ORDER BY s.id LIMIT 1`,
+    ).get() as { id: string } | null;
+    if (invalidParent) throw new Error(`Dual-owned Session migration: parent has a different owner for Session ${invalidParent.id}`);
+    const duplicate = db.query(
+      `SELECT MIN(id) AS id FROM multiremi_issue_sessions WHERE is_default = 1
+       GROUP BY chat_id, CASE WHEN chat_id IS NULL THEN issue_id ELSE NULL END
+       HAVING COUNT(*) > 1 LIMIT 1`,
+    ).get() as { id: string } | null;
+    if (duplicate) throw new Error(`Dual-owned Session migration: duplicate Main for Session ${duplicate.id}`);
+
+    if (dialect === "postgres") {
+      if (existingTableNames(db).has("multiremi_tasks")) db.exec("ALTER TABLE multiremi_tasks DROP CONSTRAINT IF EXISTS multiremi_tasks_chat_session_id_fkey");
+      db.exec(`ALTER TABLE multiremi_issue_sessions
+        DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_owner_check;
+        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_owner_check
+          CHECK(chat_id IS NOT NULL OR issue_id IS NOT NULL);`);
+    } else {
+      // chat_session_id on retained audits is a privacy tombstone. Clearing it
+      // on owner deletion would expose private transcripts as Issue-only work.
+      const taskSchema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_tasks'")
+        .get() as { sql: string } | null;
+      const taskReplacement = taskSchema?.sql.replace(/,\s*FOREIGN KEY\s*\(chat_session_id\)\s*REFERENCES\s*["`]?multiremi_chat_sessions["`]?\(id\)\s*ON DELETE SET NULL/iu, "");
+      if (taskSchema && taskReplacement && taskReplacement !== taskSchema.sql) {
+        const taskIndexes = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multiremi_tasks' AND sql IS NOT NULL")
+          .all() as Array<{ sql: string }>;
+        db.exec(taskReplacement.replace(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?multiremi_tasks["`]?/i,
+          "CREATE TABLE multiremi_tasks_dual_owned"));
+        db.exec(`INSERT INTO multiremi_tasks_dual_owned SELECT * FROM multiremi_tasks;
+          DROP TABLE multiremi_tasks;
+          ALTER TABLE multiremi_tasks_dual_owned RENAME TO multiremi_tasks;`);
+        for (const index of taskIndexes) db.exec(index.sql);
+      }
+      const schema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_issue_sessions'")
+        .get() as { sql: string };
+      const indexes = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multiremi_issue_sessions' AND sql IS NOT NULL")
+        .all() as Array<{ sql: string }>;
+      let replacement = schema.sql.replace(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?multiremi_issue_sessions["`]?/i,
+        "CREATE TABLE multiremi_issue_sessions_dual_owned");
+      if (!replacement.includes("multiremi_issue_sessions_owner_check")) {
+        replacement = replacement.replace(/\)\s*$/u,
+          ", CONSTRAINT multiremi_issue_sessions_owner_check CHECK(chat_id IS NOT NULL OR issue_id IS NOT NULL))");
+      }
+      db.exec(replacement);
+      db.exec(`INSERT INTO multiremi_issue_sessions_dual_owned SELECT * FROM multiremi_issue_sessions;
+        DROP TABLE multiremi_issue_sessions;
+        ALTER TABLE multiremi_issue_sessions_dual_owned RENAME TO multiremi_issue_sessions;`);
+      for (const index of indexes) db.exec(index.sql);
+    }
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_default
+      ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_issue_default
+      ON multiremi_issue_sessions(issue_id) WHERE is_default = 1 AND chat_id IS NULL;`);
+    db.run(`INSERT INTO multiremi_issue_sessions (
+        id, chat_id, issue_id, workspace_id, title, status, is_default,
+        created_by_type, created_by_id, created_at, updated_at
+      )
+      SELECT 'ises_issue_' || issue.id, NULL, issue.id, issue.workspace_id, 'Main', 'active', 1,
+        'system', NULL, issue.created_at, issue.updated_at FROM multiremi_issues issue
+      WHERE NOT EXISTS (SELECT 1 FROM multiremi_issue_sessions s
+        WHERE s.chat_id IS NULL AND s.issue_id = issue.id AND s.is_default = 1)
+      ON CONFLICT DO NOTHING`);
+    const missingMain = db.query(`SELECT issue.id FROM multiremi_issues issue
+      WHERE NOT EXISTS (SELECT 1 FROM multiremi_issue_sessions s
+        WHERE s.chat_id IS NULL AND s.issue_id = issue.id AND s.is_default = 1) LIMIT 1`).get() as { id: string } | null;
+    if (missingMain) throw new Error(`Dual-owned Session migration: Main id collision for Issue ${missingMain.id}`);
+
+    // Existing instances have already run the conversation backfill. Supply
+    // heads only for missing Issue Main logs without replaying old events.
+    if (existingTableNames(db).has("multiremi_conversation_log")) {
+      const unifiedLog = (db.query('PRAGMA table_info(multiremi_conversation_log)').all() as Array<{name:string}>).some(column => column.name === 'sender_type');
+      db.run(`INSERT INTO multiremi_conversation_log (
+          session_id, seq, id, kind, visibility, ${unifiedLog ? 'sender_type' : 'author_type'}, body_md, metadata, created_at, updated_at
+        ) SELECT s.id, 0, 'head_' || s.id, 'head', 'shown', '${unifiedLog ? 'platform' : 'system'}',
+          CASE WHEN LENGTH(TRIM(COALESCE(issue.description, ''))) > 0
+            THEN issue.title || '\n\n' || TRIM(issue.description) ELSE issue.title END,
+          '{}', s.created_at, s.updated_at FROM multiremi_issue_sessions s
+        JOIN multiremi_issues issue ON issue.id = s.issue_id
+        WHERE s.chat_id IS NULL AND s.is_default = 1 AND NOT EXISTS (
+          SELECT 1 FROM multiremi_conversation_log entry WHERE entry.session_id = s.id AND entry.seq = 0)
+        ON CONFLICT DO NOTHING`);
+      db.run(`INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at)
+        SELECT s.id, 0, 1, s.updated_at FROM multiremi_issue_sessions s
+        WHERE s.chat_id IS NULL AND s.is_default = 1 AND NOT EXISTS (
+          SELECT 1 FROM multiremi_conversation_heads head WHERE head.session_id = s.id)
+        ON CONFLICT DO NOTHING`);
+      const headHasWorkspace = (db.query("PRAGMA table_info(multiremi_conversation_heads)").all() as Array<{ name: string }>)
+        .some(column => column.name === "workspace_id");
+      for (const session of repairedSessions) {
+        if (headHasWorkspace) {
+          db.run("UPDATE multiremi_conversation_heads SET workspace_id = ? WHERE session_id = ?",
+            [session.workspaceId, session.id]);
+        }
+        db.run(`UPDATE multiremi_comment_reactions SET workspace_id = ?
+          WHERE comment_id IN (SELECT message.id FROM multiremi_conversation_log message
+            WHERE message.session_id = ?)`, [session.workspaceId, session.id]);
+      }
+    }
+    if (dialect === "sqlite") assertSessionForeignKeys(db);
+  };
+  if (dialect === "postgres") {
+    runMigrationOnce(db, DUAL_OWNED_SESSIONS_MIGRATION, migrate);
+    return;
+  }
+  const foreignKeysEnabled = Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys?: number } | null)?.foreign_keys ?? 0) === 1;
+  db.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;");
+  try {
+    runMigrationOnce(db, DUAL_OWNED_SESSIONS_MIGRATION, migrate);
+  } finally {
+    db.exec(`PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ${foreignKeysEnabled ? "ON" : "OFF"};`);
+  }
+}
+
+function backfillChatOwnedSessions(db: SqlDatabase, legacyBackfill = true): void {
   const now = new Date().toISOString();
+  // Preserve the stored owner. An Issue Session never becomes Chat-owned merely
+  // because a Chat or a transport binding happens to reference that Issue.
+  const chatHasLegacyIssueId = (db.query("PRAGMA table_info(multiremi_chat_sessions)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "issue_id");
+  // Every Chat owns a default Main Session. Creating it does not route Chat
+  // messages through Session Tasks; that interaction remains a separate layer.
+  const projectedIssueId = chatHasLegacyIssueId
+    ? "c.issue_id"
+    : `(SELECT MIN(binding.issue_id)
+        FROM multiremi_feishu_bot_chat_bindings binding
+        WHERE binding.chat_session_id = c.id AND binding.issue_id IS NOT NULL)`;
   db.run(
     `INSERT INTO multiremi_issue_sessions (
-       id, issue_id, workspace_id, title, status, is_default,
+       id, chat_id, issue_id, workspace_id, title, status, is_default,
        created_by_type, created_by_id, created_at, updated_at
      )
-     SELECT 'ises_' || i.id, i.id, i.workspace_id, 'Main', 'active', 1,
-            'system', NULL, i.created_at, i.updated_at
-     FROM multiremi_issues i
+     SELECT 'ises_chat_' || c.id, c.id, ${projectedIssueId}, c.workspace_id, 'Main', 'active', 1,
+            'member', c.creator_id, c.created_at, c.updated_at
+     FROM multiremi_chat_sessions c
      WHERE NOT EXISTS (
        SELECT 1 FROM multiremi_issue_sessions s
-       WHERE s.issue_id = i.id AND s.is_default = 1
+       WHERE s.chat_id = c.id AND s.is_default = 1
      )
      ON CONFLICT DO NOTHING`,
   );
-  db.run(
-    `UPDATE multiremi_issue_comments
-     SET issue_session_id = (
-       SELECT s.id FROM multiremi_issue_sessions s
-       WHERE s.issue_id = multiremi_issue_comments.issue_id AND s.is_default = 1
-       LIMIT 1
-     )
-     WHERE issue_session_id IS NULL`,
-  );
+  if (!legacyBackfill) return;
   db.run(
     `UPDATE multiremi_tasks
-     SET issue_session_id = (
-       SELECT s.id FROM multiremi_issue_sessions s
-       WHERE s.issue_id = multiremi_tasks.issue_id AND s.is_default = 1
-       LIMIT 1
+     SET chat_session_id = (
+       SELECT s.chat_id FROM multiremi_issue_sessions s
+       WHERE s.id = multiremi_tasks.issue_session_id
      )
-     WHERE issue_id IS NOT NULL AND issue_session_id IS NULL AND chat_session_id IS NULL`,
+     WHERE issue_session_id IS NOT NULL AND chat_session_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM multiremi_issue_sessions s
+         WHERE s.id = multiremi_tasks.issue_session_id AND s.chat_id IS NOT NULL
+       )`,
+  );
+  db.run(
+    `UPDATE multiremi_session_results
+     SET chat_id = (
+       SELECT s.chat_id FROM multiremi_issue_sessions s
+       WHERE s.id = multiremi_session_results.source_session_id
+     )
+     WHERE chat_id IS NULL`,
   );
   db.run(
     `INSERT INTO multiremi_session_events (
@@ -3927,6 +4717,14 @@ function stringOrNull(value: unknown): string | null {
   return value === null || value === undefined || value === "" ? null : String(value);
 }
 
+export function migrateTaskExecutionScope(db: SqlDatabase): void {
+  runMigrationOnce(db, TASK_EXECUTION_SCOPE_MIGRATION, () => {
+    addColumnIfMissing(db, "multiremi_tasks", "execution_scope TEXT NOT NULL DEFAULT ''");
+    addColumnIfMissing(db, "multiremi_tasks", "wake_seq INTEGER NOT NULL DEFAULT 0");
+    db.run(`UPDATE multiremi_tasks SET execution_scope = ${executionScopeSql("multiremi_tasks")}`);
+  });
+}
+
 function runMigrationOnce(db: SqlDatabase, id: string, migrate: () => void): void {
   db.transaction(() => {
     const claimed = db.run(
@@ -4007,7 +4805,7 @@ function migrateExecutionScopedLanes(db: SqlDatabase): void {
     UPDATE multiremi_tasks SET session_id = NULL, work_dir = NULL, issue_session_generation = NULL,
       projection_from_seq = NULL, projection_to_seq = NULL, projection_mode = NULL,
       projection_truncated = 0, projection_omitted_events = 0, projection_estimated_tokens = 0
-    WHERE issue_session_id IS NOT NULL AND chat_session_id IS NULL AND status = 'queued';`);
+    WHERE issue_session_id IS NOT NULL AND status = 'queued';`);
   })();
 }
 
@@ -4058,9 +4856,408 @@ function allowNullableFeishuOutboundReplyToMessageId(db: SqlDatabase): void {
       attempt_count, external_message_id, last_error, sent_at, created_at, updated_at
     FROM multiremi_feishu_bot_outbound_deliveries_legacy;
     DROP TABLE multiremi_feishu_bot_outbound_deliveries_legacy;
-    CREATE INDEX idx_multiremi_feishu_bot_outbound_pending
+    CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_outbound_pending
       ON multiremi_feishu_bot_outbound_deliveries(status, available_at, leased_until, created_at);
   `);
+}
+
+/**
+ * MUL-407: a decision-card push has no wake Task, so `wake_task_id` must accept
+ * NULL. SQLite cannot drop NOT NULL in place and the column is UNIQUE, so the
+ * table is rebuilt. Same shape as the outbound-delivery rebuild above, including
+ * the Postgres branch that only has to relax the column.
+ */
+const HUMAN_REQUEST_PUSH_TABLE = "multiremi_feishu_bot_human_request_pushes";
+const HUMAN_REQUEST_PUSH_LEGACY_TABLE = `${HUMAN_REQUEST_PUSH_TABLE}_legacy`;
+
+/** C5 relaxes the Task key without deleting delivery data. SQLite retains an
+ * atomic pre-migration copy; PG can relax the constraint in place. */
+export function ensureFeishuOutboundKindsSchema(db: SqlDatabase, dialect?: SqlDatabaseDialect): void {
+  const table = "multiremi_feishu_bot_outbound_deliveries";
+  addColumnIfMissing(db, table, "unit_key TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, table, "cascade_failure INTEGER NOT NULL DEFAULT 1");
+  addColumnIfMissing(db, table, "delivery_mode TEXT");
+  if (isPostgresDialect(db, dialect)) {
+    db.transaction(() => {
+      const constraints = db.query(`SELECT c.conname FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = ? AND n.nspname = current_schema() AND c.contype = 'u'
+          AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute
+            WHERE attrelid = t.oid AND attname = 'task_id')]::smallint[]`).all(table) as Array<{ conname: string }>;
+      for (const constraint of constraints) {
+        const name = constraint.conname.replaceAll('"', '""');
+        db.exec(`ALTER TABLE ${table} DROP CONSTRAINT "${name}"`);
+      }
+      ensureFeishuOutboundKindIndexes(db);
+    })();
+    return;
+  }
+  const uniqueIndexes = db.query(`PRAGMA index_list(${table})`).all() as Array<{ name: string; unique: number; partial: number }>;
+  const oldUnique = uniqueIndexes.some(index => {
+    if (Number(index.unique) !== 1 || Number(index.partial) === 1) return false;
+    const columns = db.query(`PRAGMA index_info("${index.name.replaceAll('"', '""')}")`).all() as Array<{ name: string }>;
+    return columns.length === 1 && columns[0]!.name === "task_id";
+  });
+  if (!oldUnique) { ensureFeishuOutboundKindIndexes(db); return; }
+  let backup = `${table}_c5_backup`;
+  for (let version = 2; tableExists(db, backup); version++) backup = `${table}_c5_backup_${version}`;
+  const schema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as { sql: string };
+  const relaxed = schema.sql.replace(/\btask_id\s+TEXT\s+UNIQUE\b/i, "task_id TEXT");
+  if (relaxed === schema.sql) throw new Error("C5 outbound migration: unexpected task_id unique constraint");
+  const columns = (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+    .map(column => `"${column.name.replaceAll('"', '""')}"`).join(", ");
+  const indexes = db.query("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL")
+    .all(table) as Array<{ name: string; sql: string }>;
+  const foreignKeys = Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys);
+  if (foreignKeys) db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      db.exec(`ALTER TABLE ${table} RENAME TO ${backup}`);
+      db.exec(relaxed);
+      db.exec(`INSERT INTO ${table} (${columns}) SELECT ${columns} FROM ${backup}`);
+      for (const index of indexes) {
+        // Index names are global in SQLite; the original indexes stay on the retained backup.
+        const definition = index.sql.slice(index.sql.toUpperCase().indexOf(" ON "));
+        let name = `${index.name}_c5`;
+        for (let version = 2; db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(name); version++) name = `${index.name}_c5_${version}`;
+        db.exec(`CREATE ${/^CREATE UNIQUE/i.test(index.sql) ? "UNIQUE " : ""}INDEX "${name.replaceAll('"', '""')}"${definition}`);
+      }
+      ensureFeishuOutboundKindIndexes(db);
+    })();
+  } finally {
+    if (foreignKeys) db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+function ensureFeishuOutboundKindIndexes(db: SqlDatabase): void {
+  const table = "multiremi_feishu_bot_outbound_deliveries";
+  const indexes = [
+    ["idx_feishu_outbound_task_kind_unit", "UNIQUE ", "(task_id, COALESCE(kind, ''), COALESCE(unit_key, ''))"],
+    ["idx_feishu_outbound_task_carrier", "UNIQUE ", "(task_id) WHERE task_id IS NOT NULL AND (kind IS NULL OR kind = 'cot') AND unit_key = ''"],
+    ["idx_feishu_outbound_pending_c5", "", "(status, available_at, leased_until, created_at)"],
+    ["idx_feishu_outbound_kind_c5", "", "(kind, status, available_at)"],
+  ];
+  if (isPostgresDialect(db)) {
+    const keys = [
+      ["task_id", "COALESCE(kind, ''::text)", "COALESCE(unit_key, ''::text)"],
+      ["task_id"],
+      ["status", "available_at", "leased_until", "created_at"],
+      ["kind", "status", "available_at"],
+    ];
+    const carrierPredicate = "((task_id IS NOT NULL) AND ((kind IS NULL) OR (kind = 'cot'::text)) AND (unit_key = ''::text))";
+    type IndexDefinition = { unique: boolean; keys: string[]; predicate: string | null };
+    const liveIndexes = () => db.query(`SELECT i.indisunique AS "unique",
+        to_json(ARRAY(SELECT pg_get_indexdef(i.indexrelid, key, false)
+          FROM generate_series(1, i.indnkeyatts) AS key)) AS keys,
+        pg_get_expr(i.indpred, i.indrelid) AS predicate
+      FROM pg_index i
+      JOIN pg_class t ON t.oid = i.indrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      JOIN pg_class index_relation ON index_relation.oid = i.indexrelid
+      JOIN pg_am method ON method.oid = index_relation.relam
+      WHERE t.relname = ? AND n.nspname = current_schema()
+        AND i.indisvalid AND i.indisready AND method.amname = 'btree'`).all(table) as IndexDefinition[];
+    const matches = (index: IndexDefinition, position: number) =>
+      index.unique === Boolean(indexes[position]![1])
+      && index.keys.length === keys[position]!.length
+      && index.keys.every((key, column) => key === keys[position]![column])
+      && index.predicate === (position === 1 ? carrierPredicate : null);
+    const existing = liveIndexes();
+    for (const [position, [baseName, unique, definition]] of indexes.entries()) {
+      if (existing.some(index => matches(index, position))) continue;
+      let name = baseName!;
+      for (let version = 2; db.query(`SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = ? AND n.nspname = current_schema()`).get(name); version++) name = `${baseName}_${version}`;
+      // An archive may own the original name. A concurrent collision must fail, not skip creation.
+      db.exec(`CREATE ${unique}INDEX ${name} ON ${table}${definition}`);
+    }
+    const complete = liveIndexes();
+    if (indexes.some((_, position) => !complete.some(index => matches(index, position)))) {
+      throw new Error("C5 outbound migration: live index definitions are incomplete; see docs/feishu-outbound-kind-migration.md");
+    }
+    return;
+  }
+  for (const [baseName, unique, definition] of indexes) {
+    let name = baseName!;
+    if (!isPostgresDialect(db)) {
+      for (let version = 2; ; version++) {
+        const existing = db.query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?").get(name) as { tbl_name: string } | null;
+        if (!existing || existing.tbl_name === table) break;
+        name = `${baseName}_${version}`;
+      }
+    }
+    db.exec(`CREATE ${unique}INDEX IF NOT EXISTS ${name} ON ${table}${definition}`);
+  }
+}
+
+/**
+ * MUL-407: a decision-card push has no wake Task, so `wake_task_id` must accept
+ * NULL. SQLite cannot drop NOT NULL in place and the column is UNIQUE, so the
+ * table is rebuilt.
+ *
+ * The rebuild is atomic and self-healing, because a crash used to be permanent:
+ * the previous version ran RENAME → CREATE → copy → DROP as four separate
+ * statements, so a crash after the RENAME left every push row stranded in
+ * `_legacy` with an empty live table and no way back. Two habits fix that:
+ * run the whole rebuild inside one transaction (SQLite rolls a DDL transaction
+ * back cleanly), and treat a surviving `_legacy` table as unfinished work —
+ * copy from it and drop it — rather than as an error.
+ *
+ * `foreign_keys` cannot be toggled inside a transaction. Nothing references
+ * this table (it is a leaf: no `REFERENCES multiremi_feishu_bot_human_request_pushes`
+ * anywhere in the schema), so the surrounding code only has to turn them off
+ * for the rebuild's duration to keep the RENAME from rewriting its own FKs.
+ */
+function allowNullableHumanRequestPushWakeTaskId(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
+  if (isPostgresDialect(db, dialect)) {
+    // Postgres can relax the column in place, and the PRAGMA below is SQLite
+    // only — asking for `is_nullable` through `PRAGMA table_info` would be
+    // translated into a query Postgres cannot answer. `DROP NOT NULL` is itself
+    // idempotent, so a repeated run is harmless.
+    const column = (db.query(`PRAGMA table_info(${HUMAN_REQUEST_PUSH_TABLE})`).all() as Array<{
+      name: string;
+      notnull: number;
+    }>).find((entry) => entry.name === "wake_task_id");
+    if (!column || Number(column.notnull) === 0) return;
+    db.exec(`ALTER TABLE ${HUMAN_REQUEST_PUSH_TABLE} ALTER COLUMN wake_task_id DROP NOT NULL`);
+    return;
+  }
+
+  const columns = db.query(`PRAGMA table_info(${HUMAN_REQUEST_PUSH_TABLE})`).all() as Array<{
+    name: string;
+    notnull: number;
+  }>;
+  const wakeTask = columns.find((entry) => entry.name === "wake_task_id");
+  const hasDeliveryId = columns.some((entry) => entry.name === "delivery_id");
+  const alreadyRebuilt = hasDeliveryId && wakeTask !== undefined && Number(wakeTask.notnull) === 0;
+
+  // The steady state: the live table is already the new shape and no crashed
+  // copy is waiting beside it. Nothing to merge and nothing to rebuild, so this
+  // must not run the full-table copy — it costs a `SELECT` plus an `INSERT` per
+  // row on every startup (measured ~122ms at 10k rows).
+  //
+  // Both halves matter. A `_legacy` table means the previous run died mid-heal,
+  // and the copy it holds may be the only copy. A missing `delivery_id` means
+  // the live table predates the rebuild and the nullable column has to be
+  // produced by one.
+  if (alreadyRebuilt && !tableExists(db, HUMAN_REQUEST_PUSH_LEGACY_TABLE)) {
+    // The rebuild is done, but a crash between the DROP and the index creation
+    // in the version that shipped this would have left the table without its
+    // index, so assert it either way — the statement is idempotent.
+    ensureHumanRequestPushWakeIndex(db);
+    return;
+  }
+
+  // Every other state needs the merge: a stranded copy to fold back in, an old
+  // shape to rebuild into the new one, or both. `mergeHumanRequestPushRows`
+  // reads both tables, so it covers the plain old-shape rebuild too.
+  rebuildHumanRequestPushTableForNullableWakeTaskId(db);
+}
+
+function ensureHumanRequestPushWakeIndex(db: SqlDatabase): void {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_${HUMAN_REQUEST_PUSH_TABLE}_wake
+    ON ${HUMAN_REQUEST_PUSH_TABLE}(wake_task_id)`);
+}
+
+/**
+ * Which SQL this handle speaks.
+ *
+ * Resolved from declared facts only — never by running a statement that one
+ * backend cannot answer. The previous probe (`SELECT … FROM sqlite_master`)
+ * logged an ERROR on Postgres at every startup, aborted the surrounding
+ * transaction if one was ever open, and read SQLite as Postgres whenever that
+ * query failed for an unrelated reason such as a lock.
+ *
+ * Order: an explicit argument (how a caller that already knows says so) beats
+ * the handle's own `dialect` marker, which beats `MULTIREMI_DATABASE_URL`. A
+ * thin test double with no marker falls through to the configured backend,
+ * which is what its SQL is written against anyway.
+ */
+export function resolveSqlDialect(db: SqlDatabase, explicit?: SqlDatabaseDialect): SqlDatabaseDialect {
+  if (explicit) return explicit;
+  const marker = (db as { dialect?: unknown }).dialect;
+  if (marker === "postgres" || marker === "sqlite") return marker;
+  return isPostgresConfigured() ? "postgres" : "sqlite";
+}
+
+function isPostgresDialect(db: SqlDatabase, explicit?: SqlDatabaseDialect): boolean {
+  return resolveSqlDialect(db, explicit) === "postgres";
+}
+
+// A stranded copy is only ever left by an early version of this migration.
+// `origin/main` does create the live table (migrations.ts:2382), but it has never
+// created the `_legacy` one, so the two sides here are the same table at two
+// points in our own rebuild: the live copy and the copy a crashed run stranded.
+// A key collision therefore means the two versions genuinely disagree rather
+// than that something expected happened. The caller routes both the ordinary
+// rebuild and the recovery through `mergeHumanRequestPushTables`, so there is one
+// code path to reason about.
+
+function tableExists(db: SqlDatabase, table: string): boolean {
+  return Boolean(db.query(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(table));
+}
+
+/** One push row, with the pre-MUL-407 shape normalized (`delivery_id` -> NULL). */
+interface HumanRequestPushRow {
+  id: string;
+  workspace_id: string;
+  binding_id: string;
+  issue_id: string;
+  source_task_id: string;
+  request_id: string;
+  wake_task_id: string | null;
+  delivery_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const humanRequestPushFingerprint = (row: HumanRequestPushRow): string => JSON.stringify([
+  row.id, row.workspace_id, row.binding_id, row.issue_id, row.source_task_id,
+  row.request_id, row.wake_task_id, row.delivery_id, row.created_at, row.updated_at,
+]);
+
+function readHumanRequestPushRows(db: SqlDatabase, table: string): HumanRequestPushRow[] {
+  if (!tableExists(db, table)) return [];
+  const columns = (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+    .map((column) => column.name);
+  // The old shape has no `delivery_id`; read it as NULL so both sides compare
+  // over the same field list.
+  const delivery = columns.includes("delivery_id") ? "delivery_id" : "NULL AS delivery_id";
+  return (db.query(`SELECT id, workspace_id, binding_id, issue_id, source_task_id,
+      request_id, wake_task_id, ${delivery}, created_at, updated_at FROM ${table}`)
+    .all() as Array<Record<string, unknown>>).map((row) => ({
+    id: String(row.id),
+    workspace_id: String(row.workspace_id),
+    binding_id: String(row.binding_id),
+    issue_id: String(row.issue_id),
+    source_task_id: String(row.source_task_id),
+    request_id: String(row.request_id),
+    wake_task_id: row.wake_task_id == null ? null : String(row.wake_task_id),
+    delivery_id: row.delivery_id == null ? null : String(row.delivery_id),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  }));
+}
+
+/**
+ * Union the live table's rows with a stranded copy's.
+ *
+ * Identical rows (every column equal) collapse: a partly finished copy has the
+ * rows that already landed present on both sides, and those are the same row.
+ * A collision on any key where the contents differ is a real ambiguity — the two
+ * versions disagree about what happened, and choosing one silently would either
+ * drop a real push or resurrect a superseded one. That throws, which rolls the
+ * surrounding transaction back and leaves both tables exactly as they were.
+ */
+function mergeHumanRequestPushRows(
+  live: HumanRequestPushRow[],
+  legacy: HumanRequestPushRow[],
+): HumanRequestPushRow[] {
+  const merged: HumanRequestPushRow[] = [];
+  const seen = new Set<string>();
+  const byId = new Map<string, HumanRequestPushRow>();
+  const byRequest = new Map<string, HumanRequestPushRow>();
+  const byWakeTask = new Map<string, HumanRequestPushRow>();
+  const add = (row: HumanRequestPushRow): void => {
+    const fingerprint = humanRequestPushFingerprint(row);
+    if (seen.has(fingerprint)) return;
+    const clashes: string[] = [];
+    if (byId.has(row.id)) clashes.push(`id=${row.id}`);
+    const requestKey = `${row.binding_id}\u0000${row.request_id}`;
+    if (byRequest.has(requestKey)) {
+      clashes.push(`(binding_id=${row.binding_id}, request_id=${row.request_id})`);
+    }
+    if (row.wake_task_id && byWakeTask.has(row.wake_task_id)) {
+      clashes.push(`wake_task_id=${row.wake_task_id}`);
+    }
+    if (clashes.length) {
+      throw new Error(
+        `multiremi_feishu_bot_human_request_pushes rebuild conflict: the live table and its `
+        + `stranded copy hold different rows for ${clashes.join(", ")}. The correct row cannot be `
+        + `chosen automatically; reconcile the two tables and retry.`,
+      );
+    }
+    seen.add(fingerprint);
+    byId.set(row.id, row);
+    byRequest.set(requestKey, row);
+    if (row.wake_task_id) byWakeTask.set(row.wake_task_id, row);
+    merged.push(row);
+  };
+  for (const row of live) add(row);
+  for (const row of legacy) add(row);
+  return merged;
+}
+
+/**
+ * Rebuild the push table in one transaction, keeping every distinct row from the
+ * live table and any stranded copy. With no stranded copy this is the ordinary
+ * first-time rebuild, so both the normal path and the recovery path share it.
+ */
+function mergeHumanRequestPushTables(db: SqlDatabase): void {
+  // `foreign_keys` cannot be toggled inside a transaction, so it is switched
+  // around the whole transaction and restored on every path — including the
+  // throw a merge conflict raises.
+  const foreignKeysEnabled =
+    Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys?: number } | null)?.foreign_keys) === 1;
+  if (foreignKeysEnabled) db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      // Read both sides inside the transaction: the snapshot the merge decides
+      // on and the tables it replaces must be the same one, or a concurrent
+      // write could land between the read and the drop.
+      const merged = mergeHumanRequestPushRows(
+        readHumanRequestPushRows(db, HUMAN_REQUEST_PUSH_TABLE),
+        readHumanRequestPushRows(db, HUMAN_REQUEST_PUSH_LEGACY_TABLE),
+      );
+      db.exec(`DROP TABLE IF EXISTS ${HUMAN_REQUEST_PUSH_TABLE}`);
+      db.exec(`DROP TABLE IF EXISTS ${HUMAN_REQUEST_PUSH_LEGACY_TABLE}`);
+      createHumanRequestPushTable(db);
+      for (const row of merged) {
+        db.run(
+          `INSERT INTO ${HUMAN_REQUEST_PUSH_TABLE} (
+             id, workspace_id, binding_id, issue_id, source_task_id,
+             request_id, wake_task_id, delivery_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [row.id, row.workspace_id, row.binding_id, row.issue_id, row.source_task_id,
+            row.request_id, row.wake_task_id, row.delivery_id, row.created_at, row.updated_at],
+        );
+      }
+      ensureHumanRequestPushWakeIndex(db);
+    })();
+  } finally {
+    if (foreignKeysEnabled) db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+function createHumanRequestPushTable(db: SqlDatabase): void {
+  db.exec(`
+    CREATE TABLE ${HUMAN_REQUEST_PUSH_TABLE} (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      binding_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL,
+      source_task_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      wake_task_id TEXT UNIQUE,
+      delivery_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(binding_id, request_id),
+      FOREIGN KEY(binding_id) REFERENCES multiremi_feishu_bot_chat_bindings(id) ON DELETE CASCADE,
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(source_task_id) REFERENCES multiremi_tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY(wake_task_id) REFERENCES multiremi_tasks(id) ON DELETE CASCADE
+    )`);
+}
+
+function rebuildHumanRequestPushTableForNullableWakeTaskId(db: SqlDatabase): void {
+  // Same merge as the recovery path; with no stranded copy this is just the
+  // ordinary single-table rebuild, and it inherits the conflict detection too.
+  mergeHumanRequestPushTables(db);
 }
 
 function backfillCanonicalDaemonRouting(db: SqlDatabase): void {
@@ -4680,7 +5877,7 @@ function migrateChatIssueOwnership(db: SqlDatabase, chatSchema?: string | null):
       SELECT push.workspace_id, push.binding_id, push.issue_id, retry.id, push.delivery_mode, push.source
       FROM push_lineage push
       JOIN multiremi_tasks parent ON parent.id = push.wake_task_id
-      JOIN multiremi_tasks retry ON ${chatTaskRetryParentSql("retry", "parent")}
+      JOIN multiremi_tasks retry ON ${chatTaskRetryParentSql("retry", "parent", "legacy")}
     )
     SELECT push.*, task.chat_session_id FROM push_lineage push
     LEFT JOIN multiremi_tasks task ON task.id = push.wake_task_id
@@ -4790,9 +5987,16 @@ function migrateChatIssueOwnership(db: SqlDatabase, chatSchema?: string | null):
         session_execution_fingerprint = NULL,
         session_runtime_id = CASE WHEN work_dir IS NOT NULL AND work_dir <> '' THEN session_runtime_id ELSE NULL END
         WHERE id = ?`, [chatId]);
-      db.run(`UPDATE multiremi_tasks SET session_id = NULL,
-        issue_session_id = NULL, issue_session_generation = NULL
+      db.run(`UPDATE multiremi_tasks SET session_id = NULL
         WHERE status IN ('queued', 'dispatched') AND chat_session_id = ?`, [chatId]);
+      db.run(`UPDATE multiremi_tasks
+        SET issue_session_id = NULL, issue_session_generation = NULL
+        WHERE status IN ('queued', 'dispatched') AND chat_session_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM multiremi_issue_sessions session
+            WHERE session.id = multiremi_tasks.issue_session_id
+              AND session.chat_id = multiremi_tasks.chat_session_id
+          )`, [chatId]);
       // An already-running provider can still report its old session later.
       // Fence every dirty generation, including a retained B topic whose
       // current task inherited a provider that had previously served Issue A.
@@ -4801,7 +6005,12 @@ function migrateChatIssueOwnership(db: SqlDatabase, chatSchema?: string | null):
       [CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatId]);
       if (ordinaryChatIds.has(chatId)) {
         db.run(`UPDATE multiremi_tasks SET issue_id = NULL
-          WHERE status IN ('queued', 'dispatched') AND chat_session_id = ?`, [chatId]);
+          WHERE status IN ('queued', 'dispatched') AND chat_session_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM multiremi_issue_sessions session
+              WHERE session.id = multiremi_tasks.issue_session_id
+                AND session.chat_id = multiremi_tasks.chat_session_id
+            )`, [chatId]);
       }
     }
     if (chatSchema && /FOREIGN KEY\s*\(issue_id\)/i.test(chatSchema)) {
@@ -4832,13 +6041,18 @@ function migrateChatIssueOwnership(db: SqlDatabase, chatSchema?: string | null):
       dropColumnIfExists(db, "multiremi_chat_sessions", "issue_id");
     }
   }
-  // Historical startup backfills accidentally gave conversational tasks an
-  // Issue Session as well. Pending private and topic tasks must keep one owner;
-  // completed/running audit rows remain unchanged and hydrate through Chat.
+  // Historical startup backfills accidentally gave ordinary conversational
+  // tasks a Session as well. Preserve an explicit Session Task only when that
+  // Session is owned by the same Chat; clear every other pending pointer.
   db.run(`UPDATE multiremi_tasks
     SET issue_session_id = NULL, issue_session_generation = NULL
     WHERE chat_session_id IS NOT NULL AND status IN ('queued', 'dispatched')
-      AND (issue_session_id IS NOT NULL OR issue_session_generation IS NOT NULL)`);
+      AND (issue_session_id IS NOT NULL OR issue_session_generation IS NOT NULL)
+      AND NOT EXISTS (
+        SELECT 1 FROM multiremi_issue_sessions session
+        WHERE session.id = multiremi_tasks.issue_session_id
+          AND session.chat_id = multiremi_tasks.chat_session_id
+      )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_chat_bindings_issue
     ON multiremi_feishu_bot_chat_bindings(workspace_id, issue_id)`);
   // Private Chats retain their conversation history, but cannot receive or
@@ -5039,40 +6253,308 @@ function backfillFeishuBotReplyDestinations(db: SqlDatabase): void {
   }
 }
 
-function backfillSessionArchiveRetryBudget(db: SqlDatabase): void {
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const stallBefore = new Date(now.getTime() - resolveSessionArchiveUploadStallMs()).toISOString();
-  const policy = resolveSessionArchiveRetryPolicy();
-  const rows = db.query(
-    `SELECT id, status, attempt_count, updated_at
-     FROM multiremi_session_archives
-     WHERE status = 'failed'
-        OR (status = 'uploading' AND updated_at <= ?)`,
-  ).all(stallBefore) as Array<{
-    id: string;
-    status: string;
-    attempt_count: number;
-    updated_at: string;
-  }>;
-  for (const row of rows) {
-    const attemptCount = Number(row.attempt_count ?? 0);
-    const exhausted = isSessionArchiveRetryExhausted(attemptCount, policy);
-    const nextRetryAt = nextSessionArchiveRetryAt(row.id, attemptCount, policy, now);
-    db.run(
-      `UPDATE multiremi_session_archives
-       SET status = 'failed',
-           last_error = CASE
-             WHEN status = 'uploading' THEN 'upload stalled'
-             ELSE last_error
-           END,
-           next_retry_at = COALESCE(next_retry_at, ?),
-           retry_exhausted_at = COALESCE(retry_exhausted_at, ?),
-           updated_at = CASE WHEN status = 'uploading' THEN ? ELSE updated_at END,
-           completed_at = NULL
-       WHERE id = ?`,
-      [nextRetryAt, exhausted ? nowIso : null, nowIso, row.id],
+/** `multiremi_task_traces`: one row per task, pointing at the daemon that holds its trace. */
+function createTaskTracePointers(db: SqlDatabase): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS multiremi_task_traces (
+      task_id TEXT PRIMARY KEY,
+      location TEXT NOT NULL,
+      runtime_id TEXT,
+      event_count INTEGER,
+      head_seq INTEGER,
+      closed INTEGER,
+      updated_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_multiremi_task_traces_location
+      ON multiremi_task_traces(location, updated_at);
+  `);
+}
+
+/**
+ * `multiremi_trace_backfill_tasks` holds the per-task digests of the last
+ * completed trace backfill; `cross_switch` marks the tasks that run
+ * acknowledged as cross-switch (MUL-432 P1). Usage accounting still joins it.
+ */
+function createTraceBackfillTasks(db: SqlDatabase): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS multiremi_trace_backfill_tasks (
+      task_id TEXT PRIMARY KEY,
+      subject_kind TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      archive_id TEXT NOT NULL,
+      row_count BIGINT NOT NULL,
+      head_seq BIGINT NOT NULL,
+      digest TEXT NOT NULL,
+      cross_switch INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_multiremi_trace_backfill_tasks_subject
+      ON multiremi_trace_backfill_tasks(subject_kind, subject_id);
+  `);
+}
+
+/**
+ * ADR 0018: traces and workspaces live on the daemon, so everything the server
+ * kept for session archives goes, and every native session id it held is void.
+ *
+ * Runs once. It follows the unified model migration (lanes and the run view must
+ * exist), on a fresh database as well as an upgraded one, so both end in the same
+ * schema. The legacy archive tables are renamed rather than dropped: nothing
+ * reads them, but the ZIP files they index can be recovered from them later.
+ */
+/** ADR 0020: queued Chat follow-ups and the agent lane pause. Additive on both chains. */
+function migrateChatFollowUpQueue(db: SqlDatabase): void {
+  runMigrationOnce(db, CHAT_FOLLOW_UP_QUEUE_MIGRATION, () => {
+    for (const column of CHAT_FOLLOW_UP_QUEUE_LANE_COLUMNS) addColumnIfMissing(db, "multiremi_session_lanes", column);
+    db.exec(CHAT_FOLLOW_UP_QUEUE_SCHEMA);
+  });
+}
+
+function migrateLocalRecords(db: SqlDatabase): void {
+  runMigrationOnce(db, LOCAL_RECORDS_MIGRATION, () => {
+    const now = new Date().toISOString();
+    const objects = db.query("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'index')")
+      .all() as Array<{ name: string; type: string }>;
+    const tables = new Set(objects.filter((object) => object.type === "table").map((object) => object.name));
+    const columns = (table: string) => new Set(
+      (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name),
+    );
+
+    if (tables.has("multiremi_session_archives") && !tables.has("multiremi_legacy_session_archives")) {
+      db.exec("ALTER TABLE multiremi_session_archives RENAME TO multiremi_legacy_session_archives");
+      // Index names are schema-global; the renamed table must not keep the old table's.
+      for (const { name, type } of objects) {
+        if (type === "index" && name.startsWith("idx_multiremi_session_archives_")) db.exec(`DROP INDEX IF EXISTS ${name}`);
+      }
+    }
+
+    // Trace pointers keep only where the daemon's file is. Every pointer that
+    // named a daemon or an archive is void: daemon-side state is not migrated.
+    const traceColumns = columns("multiremi_task_traces");
+    if (traceColumns.has("archive_id")) {
+      if (!tables.has("multiremi_legacy_trace_pointers")) {
+        db.exec(`CREATE TABLE multiremi_legacy_trace_pointers AS
+          SELECT task_id, archive_id, member_path, data_offset, compressed_size, uncompressed_size, sha256, head_seq, event_count
+          FROM multiremi_task_traces WHERE location = 'archive'`);
+      }
+      db.exec("DROP INDEX IF EXISTS idx_multiremi_task_traces_archive");
+    }
+    for (const column of ["archive_id", "member_path", "data_offset", "compressed_size", "uncompressed_size", "sha256", "source"]) {
+      dropColumnIfExists(db, "multiremi_task_traces", column);
+    }
+    db.run("UPDATE multiremi_task_traces SET location = 'lost', updated_at = ? WHERE location <> 'none'", [now]);
+
+    db.exec("DROP TABLE IF EXISTS multiremi_session_archive_requests");
+    db.exec("DROP TABLE IF EXISTS multiremi_trace_backfill_progress");
+
+    db.run(
+      `UPDATE multiremi_session_lanes
+       SET provider_session_id = NULL, runtime_id = NULL, provider = NULL, execution_fingerprint = NULL,
+           work_dir = NULL, provider_cursor_seq = 0, parent_cursor_seq = 0,
+           generation = generation + 1, last_attempt_id = NULL
+       WHERE reader_type = 'agent' AND provider_session_id IS NOT NULL`,
+    );
+    db.run(
+      `UPDATE multiremi_chat_sessions
+       SET session_id = NULL, work_dir = NULL, session_runtime_id = NULL,
+           session_provider = NULL, session_execution_fingerprint = NULL
+       WHERE session_id IS NOT NULL OR work_dir IS NOT NULL OR session_runtime_id IS NOT NULL
+          OR session_provider IS NOT NULL OR session_execution_fingerprint IS NOT NULL`,
+    );
+    // An attempt queued before the upgrade would otherwise claim with the voided session and the old layout's directory.
+    db.run(
+      `UPDATE multiremi_turn_attempts
+       SET session_id = NULL, work_dir = NULL, updated_at = ?
+       WHERE status = 'offered' AND (session_id IS NOT NULL OR work_dir IS NOT NULL)`,
+      [now],
+    );
+    // The only writer of a non-active Issue lifecycle was the archive-era hard delete.
+    db.run("UPDATE multiremi_issues SET lifecycle_state = 'active' WHERE lifecycle_state <> 'active'");
+
+    addColumnIfMissing(db, "multiremi_issue_workspaces", "snapshot_json TEXT");
+    addColumnIfMissing(db, "multiremi_issue_workspaces", "snapshot_at TEXT");
+    addColumnIfMissing(db, "multiremi_issue_workspaces", "unsaved_work INTEGER NOT NULL DEFAULT 0");
+    db.run(
+      `UPDATE multiremi_issue_workspaces
+       SET status = 'cleaned', repos = '[]', cleaned_at = COALESCE(cleaned_at, ?), updated_at = ?
+       WHERE status <> 'cleaned'`,
+      [now, now],
+    );
+    for (const column of ["cleaned_archive_id", "cleaned_archive_source_revision", "cleaned_archive_sha256"]) {
+      dropColumnIfExists(db, "multiremi_issue_workspaces", column);
+    }
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_daemon_storage_reports (
+        workspace_id TEXT NOT NULL,
+        daemon_id TEXT NOT NULL,
+        runtime_id TEXT NOT NULL,
+        report TEXT NOT NULL,
+        reported_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, daemon_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS multiremi_runtime_gc_run_requests (
+        id TEXT PRIMARY KEY,
+        runtime_id TEXT NOT NULL,
+        daemon_id TEXT,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        requested_by TEXT,
+        report TEXT,
+        error TEXT,
+        run_started_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(runtime_id) REFERENCES multiremi_runtimes(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_multiremi_runtime_gc_run_runtime
+        ON multiremi_runtime_gc_run_requests(runtime_id, status, created_at);
+    `);
+
+    addColumnIfMissing(db, "multiremi_chat_sessions", "origin_autopilot_id TEXT");
+    addColumnIfMissing(db, "multiremi_chat_sessions", "origin_run_id TEXT");
+    addColumnIfMissing(db, "multiremi_autopilot_runs", "chat_session_id TEXT");
+    addColumnIfMissing(db, "multiremi_autopilot_runs", "quiet INTEGER NOT NULL DEFAULT 0");
+    // Deleting a Chat clears this column on its runs.
+    db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_autopilot_runs_chat ON multiremi_autopilot_runs(chat_session_id)");
+    // The run view lists the table's columns as they were when it was created.
+    db.exec("DROP VIEW IF EXISTS multiremi_autopilot_run_records");
+    createAutopilotRunReadProjection(db);
+
+    const workspaces = db.query("SELECT id, settings FROM multiremi_workspaces").all() as Array<{ id: string; settings: unknown }>;
+    for (const workspace of workspaces) {
+      const settings = parseSettingsObject(workspace.settings);
+      if (!settings || !("session_archive" in settings)) continue;
+      delete settings.session_archive;
+      db.run("UPDATE multiremi_workspaces SET settings = ? WHERE id = ?", [JSON.stringify(settings), workspace.id]);
+    }
+  });
+}
+
+/**
+ * PR 2 (ADR 0019): the turn + items trace summary on the attempt. The daemon's
+ * completion report carries it; the turn card projects it, so the Chat page
+ * renders the finished-turn fold and the idle context ring without reading the
+ * trace (MUL-472). Attempts that predate it keep NULL: no fold, no ring.
+ *
+ * - `context_usage`: JSON `{used, size}`, the last context-window occupancy.
+ * - `worked_ms`: `final_started_at - started_at` of the trace turn.
+ * - `process_item_count`: top-level items the Chat fold renders.
+ *
+ * Runs on both chains: a fresh unified schema already has the columns, an
+ * upgraded one gains them here.
+ */
+const TURN_ATTEMPT_TRACE_SUMMARY_MIGRATION = "20261015_turn_attempt_trace_summary";
+function addTurnAttemptTraceSummary(db: SqlDatabase): void {
+  runMigrationOnce(db, TURN_ATTEMPT_TRACE_SUMMARY_MIGRATION, () => {
+    addColumnIfMissing(db, "multiremi_turn_attempts", "context_usage TEXT");
+    addColumnIfMissing(db, "multiremi_turn_attempts", "worked_ms BIGINT");
+    addColumnIfMissing(db, "multiremi_turn_attempts", "process_item_count BIGINT");
+  });
+}
+
+/**
+ * PR 5: subagent facts on the attempt.
+ *
+ * - `running_subagents`: the count the daemon's best-effort `task.activity`
+ *   frame last reported while the attempt was active. `/api/turns` rows carry
+ *   it for the Chat sidebar badge.
+ * - `late_subagents`: JSON `TraceLateSubagent[]` from the completion report,
+ *   the top-level subagents that ended after the final reply started; the turn
+ *   card projects it for the finished turn's "finished in the background" rows.
+ *
+ * Both stay NULL on attempts that predate them and when nothing was reported.
+ * Runs on both chains: a fresh unified schema already has the columns, an
+ * upgraded one gains them here.
+ */
+const TURN_ATTEMPT_SUBAGENTS_MIGRATION = "20261017_turn_attempt_subagents";
+function addTurnAttemptSubagents(db: SqlDatabase): void {
+  runMigrationOnce(db, TURN_ATTEMPT_SUBAGENTS_MIGRATION, () => {
+    addColumnIfMissing(db, "multiremi_turn_attempts", "running_subagents INTEGER");
+    addColumnIfMissing(db, "multiremi_turn_attempts", "late_subagents TEXT");
+  });
+}
+
+/**
+ * PR 6: the background-task registry (`multiremi_background_tasks`) and the
+ * attempt's `running_background_tasks` count from `task.activity`. Runs on
+ * both chains: a fresh unified schema already has the column (the table is
+ * created here either way), an upgraded one gains both once.
+ */
+function addBackgroundTasks(db: SqlDatabase): void {
+  runMigrationOnce(db, BACKGROUND_TASKS_MIGRATION, () => {
+    for (const column of BACKGROUND_TASKS_ATTEMPT_COLUMNS) addColumnIfMissing(db, "multiremi_turn_attempts", column);
+    db.exec(BACKGROUND_TASKS_SCHEMA);
+  });
+}
+
+/** ADR 0023: the Remi Chat block an attempt's provider instruction file held. Additive and nullable on both chains. */
+export const TASK_PROMPT_INSTRUCTIONS_MIGRATION = "20261019_task_prompt_instructions";
+
+function addTaskPromptInstructions(db: SqlDatabase): void {
+  runMigrationOnce(db, TASK_PROMPT_INSTRUCTIONS_MIGRATION, () => {
+    addColumnIfMissing(db, "multiremi_task_prompts", "instructions TEXT");
+  });
+}
+
+/** ADR 0025: the agent lane's latest command catalogue. Additive and nullable on both chains. */
+function addLaneSlashCommands(db: SqlDatabase): void {
+  runMigrationOnce(db, LANE_SLASH_COMMANDS_MIGRATION, () => {
+    addColumnIfMissing(db, "multiremi_session_lanes", LANE_SLASH_COMMANDS_COLUMN);
+  });
+}
+
+export const CHAT_SESSION_IDS_MIGRATION = "20261023_chat_session_ids";
+
+/** Reserve deleted Chat ids without keeping their private messages or heads. */
+function addChatSessionIds(db: SqlDatabase): void {
+  runMigrationOnce(db, CHAT_SESSION_IDS_MIGRATION, () => {
+    db.exec(`CREATE TABLE multiremi_chat_session_ids (id TEXT PRIMARY KEY);
+      INSERT INTO multiremi_chat_session_ids (id)
+      SELECT id FROM multiremi_chat_sessions
+      UNION SELECT chat_session_id FROM multiremi_turn_execution_records WHERE chat_session_id IS NOT NULL
+      UNION SELECT session_id FROM multiremi_conversation_log WHERE session_id LIKE 'chat_%'
+      ON CONFLICT (id) DO NOTHING;`);
+  });
+}
+
+/**
+ * ADR 0023: no bootstrap/delta prompts any more. A workspace's two prompt keys
+ * become one `prompt_appendix` (bootstrap, a blank line, then delta; a bootstrap
+ * prompt that begins with Remi's former default keeps only what follows it), and
+ * a Project's `delta_instructions` is appended to `instructions` and cleared.
+ * Readers fold unmigrated values the same way, so the order of a rolling upgrade
+ * does not matter. The `delta_instructions` column stays for older images.
+ */
+export const MERGE_PROMPT_HALVES_MIGRATION = "20261019_merge_prompt_halves";
+
+function mergePromptHalves(db: SqlDatabase): void {
+  runMigrationOnce(db, MERGE_PROMPT_HALVES_MIGRATION, () => {
+    const workspaces = db.query("SELECT id, settings FROM multiremi_workspaces").all() as Array<{ id: string; settings: string | null }>;
+    for (const workspace of workspaces) {
+      const settings = parseSettingsObject(workspace.settings);
+      const folded = settings ? foldLegacyWorkspacePrompts(settings) : null;
+      if (folded) db.run("UPDATE multiremi_workspaces SET settings = ? WHERE id = ?", [JSON.stringify(folded), workspace.id]);
+    }
+    const projects = db.query("SELECT id, instructions, delta_instructions FROM multiremi_projects WHERE delta_instructions IS NOT NULL AND delta_instructions <> ''")
+      .all() as Array<{ id: string; instructions: string | null; delta_instructions: string }>;
+    for (const project of projects) {
+      db.run("UPDATE multiremi_projects SET instructions = ?, delta_instructions = '' WHERE id = ?",
+        [joinProjectInstructions(project.instructions ?? "", project.delta_instructions), project.id]);
+    }
+  });
+}
+
+function parseSettingsObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
   }
 }
 
@@ -5085,4 +6567,248 @@ function nextIssueNumber(db: SqlDatabase, workspaceId: string): number {
 
 function formatIssueKey(number: number): string {
   return `MUL-${number}`;
+}
+
+function backfillLegacyIssueLogSources(db: SqlDatabase): void {
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT INTO multiremi_issue_sessions (
+       id, issue_id, workspace_id, title, status, is_default,
+       created_by_type, created_by_id, created_at, updated_at
+     )
+     SELECT 'ises_' || i.id, i.id, i.workspace_id, 'Main', 'active', 1,
+            'system', NULL, i.created_at, i.updated_at
+     FROM multiremi_issues i
+     WHERE NOT EXISTS (
+       SELECT 1 FROM multiremi_issue_sessions s
+       WHERE s.chat_id IS NULL AND s.issue_id = i.id AND s.is_default = 1
+     )
+     ON CONFLICT DO NOTHING`,
+  );
+  db.run(
+    `UPDATE multiremi_issue_comments
+     SET issue_session_id = (
+       SELECT s.id FROM multiremi_issue_sessions s
+       WHERE s.chat_id IS NULL AND s.issue_id = multiremi_issue_comments.issue_id AND s.is_default = 1
+       LIMIT 1
+     )
+     WHERE issue_session_id IS NULL`,
+  );
+  db.run(
+    `UPDATE multiremi_tasks
+     SET issue_session_id = (
+       SELECT s.id FROM multiremi_issue_sessions s
+       WHERE s.chat_id IS NULL AND s.issue_id = multiremi_tasks.issue_id AND s.is_default = 1
+       LIMIT 1
+     )
+     WHERE issue_id IS NOT NULL AND issue_session_id IS NULL AND chat_session_id IS NULL`,
+  );
+  db.run(
+    `INSERT INTO multiremi_session_events (
+       id, session_id, seq, author_type, author_id, kind, body,
+       source_comment_id, metadata, created_at
+     )
+     SELECT
+       'sevt_' || c.id,
+       c.issue_session_id,
+       COALESCE((
+         SELECT MAX(existing.seq)
+         FROM multiremi_session_events existing
+         WHERE existing.session_id = c.issue_session_id
+       ), 0) + (
+         SELECT COUNT(*)
+         FROM multiremi_issue_comments prior
+         WHERE prior.issue_session_id = c.issue_session_id
+           AND (prior.created_at < c.created_at OR (prior.created_at = c.created_at AND prior.id <= c.id))
+       ),
+       c.author_type,
+       c.author_id,
+       CASE WHEN c.type = 'system' THEN 'system' ELSE 'message' END,
+       c.body,
+       c.id,
+       '{}',
+       c.created_at
+     FROM multiremi_issue_comments c
+     WHERE c.issue_session_id IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM multiremi_session_events e WHERE e.source_comment_id = c.id
+       )
+     ON CONFLICT DO NOTHING`,
+  );
+  db.run(
+    `INSERT INTO multiremi_session_participants (
+       id, session_id, participant_type, participant_id, role, status, joined_at, updated_at
+     )
+     SELECT
+       'spart_' || e.session_id || '_' || e.author_type || '_' || e.author_id,
+       e.session_id,
+       e.author_type,
+       e.author_id,
+       'participant',
+       'active',
+       MIN(e.created_at),
+       ?
+     FROM multiremi_session_events e
+     WHERE e.author_id IS NOT NULL AND e.author_type IN ('agent', 'member')
+     GROUP BY e.session_id, e.author_type, e.author_id
+     ON CONFLICT DO NOTHING`,
+    [now],
+  );
+}
+
+const FEISHU_MULTIPLE_BOTS_MIGRATION = "20261009_feishu_multiple_bots";
+
+/** Keep this DDL in the updater fingerprinted migration source.
+ * Give the original bot a stable `default` identity, including a deleted bot's
+ * outstanding Runtime state. SQLite suspends foreign keys while rebuilding
+ * identity constraints, preserving referenced IDs, indexes and ciphertext. */
+export function migrateFeishuMultipleBots(db: SqlDatabase): void {
+  if (db.query("SELECT id FROM multiremi_schema_migrations WHERE id = ?").get(FEISHU_MULTIPLE_BOTS_MIGRATION)) return;
+  const foreignKeys = db.dialect !== "postgres" && Number(db.query("PRAGMA foreign_keys").get()?.foreign_keys) === 1;
+  if (foreignKeys) db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      const tables = ["configs", "runtime_states", "agent_routes", "deliveries", "audit", "chat_bindings", "senders", "inbound_attachments"];
+      for (const suffix of tables) {
+        db.exec(`ALTER TABLE multiremi_feishu_bot_${suffix} ADD COLUMN bot_id TEXT NOT NULL DEFAULT 'default'`);
+      }
+      db.exec("ALTER TABLE multiremi_feishu_bot_configs ADD COLUMN name TEXT NOT NULL DEFAULT ''");
+      db.exec("ALTER TABLE multiremi_feishu_bot_runtime_states ADD COLUMN release_pending INTEGER NOT NULL DEFAULT 0");
+      db.exec("ALTER TABLE multiremi_feishu_bot_runtime_states ADD COLUMN stopping_app_id TEXT");
+      const identities = [
+        ["configs", "workspace_id, bot_id"],
+        ["runtime_states", "workspace_id, bot_id, runtime_id"],
+        ["deliveries", "workspace_id, bot_id, external_message_id"],
+      ];
+      if (db.dialect === "postgres") {
+        for (const [suffix, columns] of identities) {
+          const table = `multiremi_feishu_bot_${suffix}`;
+          db.exec(`ALTER TABLE ${table} DROP CONSTRAINT ${table}_pkey`);
+          db.exec(`ALTER TABLE ${table} ADD PRIMARY KEY (${columns})`);
+        }
+        for (const [suffix, columns] of [["agent_routes", "scope, chat_id"], ["chat_bindings", "app_id, agent_id, external_session_key"], ["senders", "app_id, open_id"]]) {
+          const table = `multiremi_feishu_bot_${suffix}`;
+          const unique = db.query(`SELECT conname FROM pg_constraint WHERE conrelid = ?::regclass AND contype = 'u' AND pg_get_constraintdef(oid) LIKE '%workspace_id%'`).all(table);
+          for (const row of unique) {
+            const name = String(row.conname).replaceAll('"', '""');
+            db.exec(`ALTER TABLE ${table} DROP CONSTRAINT "${name}"`);
+          }
+          db.exec(`ALTER TABLE ${table} ADD UNIQUE (workspace_id, bot_id, ${columns})`);
+        }
+      } else {
+        for (const [suffix, columns] of [...identities, ["agent_routes", ""], ["chat_bindings", ""], ["senders", ""]]) {
+          const table = `multiremi_feishu_bot_${suffix}`;
+          const schema = String(db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)!.sql);
+          const indexes = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL").all(table);
+          const names = db.query(`PRAGMA table_info(${table})`).all().map(row => `"${row.name}"`).join(", ");
+          let next = schema.replace(new RegExp(`(CREATE TABLE\\s+["\x60]?)${table}(["\x60]?)`, "i"), `$1${table}_multi$2`);
+          if (suffix === "configs") {
+            next = next.replace(/workspace_id TEXT PRIMARY KEY/i, "workspace_id TEXT NOT NULL");
+            next = next.replace(/\)\s*$/, `, PRIMARY KEY (${columns}))`);
+          } else if (columns) {
+            next = next.replace(/PRIMARY KEY\s*\([^)]*\)/i, `PRIMARY KEY (${columns})`);
+          } else {
+            next = next.replace(/UNIQUE\s*\(workspace_id, /i, "UNIQUE(workspace_id, bot_id, ");
+          }
+          db.exec(next);
+          db.exec(`INSERT INTO ${table}_multi (${names}) SELECT ${names} FROM ${table}`);
+          db.exec(`DROP TABLE ${table}`);
+          db.exec(`ALTER TABLE ${table}_multi RENAME TO ${table}`);
+          for (const index of indexes) db.exec(String(index.sql).replace("(workspace_id, scope)", "(workspace_id, bot_id, scope)"));
+        }
+      }
+      db.exec(`DROP INDEX IF EXISTS idx_multiremi_feishu_bot_agent_routes_default_scope;
+        CREATE UNIQUE INDEX idx_multiremi_feishu_bot_agent_routes_default_scope
+          ON multiremi_feishu_bot_agent_routes(workspace_id, bot_id, scope) WHERE chat_id IS NULL;
+        CREATE UNIQUE INDEX idx_multiremi_feishu_bot_configs_app ON multiremi_feishu_bot_configs(workspace_id, app_id);
+        CREATE UNIQUE INDEX idx_multiremi_feishu_bot_configs_runtime ON multiremi_feishu_bot_configs(workspace_id, runtime_id);
+        CREATE INDEX idx_multiremi_feishu_bot_audit_bot ON multiremi_feishu_bot_audit(workspace_id, bot_id, seq);`);
+      db.run("INSERT INTO multiremi_schema_migrations(id, applied_at) VALUES (?, ?)", [FEISHU_MULTIPLE_BOTS_MIGRATION, new Date().toISOString()]);
+      if (db.dialect !== "postgres" && db.query("PRAGMA foreign_key_check").all().length) throw new Error("Feishu bot migration introduced invalid foreign keys");
+    })();
+  } finally { if (foreignKeys) db.exec("PRAGMA foreign_keys = ON"); }
+}
+
+function ensureBotMenuScope(db: SqlDatabase): void {
+  addColumnIfMissing(db, "multiremi_bot_menu_publish_requests", "bot_id TEXT NOT NULL DEFAULT 'default'");
+}
+
+/** Bots used to default to letting anyone in. Switch every existing bot to the
+ * allowlist once; nobody is pre-approved, so admins approve senders explicitly. */
+function enforceFeishuSenderAllowlist(db: SqlDatabase): void {
+  if (!existingTableNames(db).has("multiremi_feishu_bot_configs")) return;
+  runMigrationOnce(db, "feishu_sender_allowlist_enforced_v1", () => {
+    db.run("UPDATE multiremi_feishu_bot_configs SET sender_access_policy = 'allowlist' WHERE sender_access_policy <> 'allowlist'");
+  });
+}
+
+function migrateEndpointConfiguration(db: SqlDatabase): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS multiremi_execution_endpoint_catalogs (
+    workspace_id TEXT NOT NULL, endpoint_id TEXT NOT NULL, protocol TEXT NOT NULL, snapshot TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,endpoint_id,protocol))`);
+  addColumnIfMissing(db, "multiremi_execution_groups", "connection_mode TEXT NOT NULL DEFAULT 'legacy'");
+  addColumnIfMissing(db, "multiremi_execution_groups", "model_policy TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, "multiremi_relay_config", "endpoint_id TEXT");
+  runMigrationOnce(db, "execution_endpoints_v1", () => migrateExecutionEndpoints(db));
+}
+
+/** Additive and nullable: existing automations retain isolated execution without delivery. */
+function addAutopilotDeliveryTarget(db: SqlDatabase): void {
+  runMigrationOnce(db, "20261116_autopilot_delivery_target", () => {
+    addColumnIfMissing(db, "multiremi_autopilots", "delivery_chat_session_id TEXT");
+    addColumnIfMissing(db, "multiremi_autopilots", "delivery_authorized_by TEXT");
+  });
+}
+
+/** Additive for both historical and already-unified databases; preserves active fences. */
+function ensureDaemonDrains(db: SqlDatabase): void {
+  addColumnIfMissing(db, "multiremi_runtimes", "drain_ack_scope TEXT");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS multiremi_daemon_drains (
+      workspace_id TEXT NOT NULL,
+      daemon_id TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      deadline TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      forced_at TEXT,
+      update_request_id TEXT,
+      PRIMARY KEY (workspace_id, daemon_id)
+    );
+  `);
+  const now = new Date().toISOString();
+  const deadline = new Date(Date.now() + 300_000).toISOString();
+  db.run(`INSERT INTO multiremi_daemon_drains
+    (workspace_id, daemon_id, started_at, deadline, reason, update_request_id)
+    SELECT COALESCE(r.workspace_id, 'local'), COALESCE(r.daemon_id, r.id), ?, ?, 'cli_update', MIN(u.id)
+    FROM multiremi_runtime_update_requests u JOIN multiremi_runtimes r ON r.id = u.runtime_id
+    WHERE u.scope = 'cli' AND u.status IN ('pending', 'running', 'restarting', 'verifying')
+    GROUP BY COALESCE(r.workspace_id, 'local'), COALESCE(r.daemon_id, r.id)
+    ON CONFLICT (workspace_id, daemon_id) DO NOTHING`, [now, deadline]);
+  ensureDaemonDrainIdentity(db);
+}
+
+/** Expand only; old requests retain nullable identity and do not become automatic. */
+function ensureRuntimeUpdateBuildIdentity(db: SqlDatabase): void {
+  addColumnIfMissing(db, "multiremi_runtime_update_requests", "target_commit TEXT");
+  addColumnIfMissing(db, "multiremi_runtime_update_requests", "automatic_daemon_key TEXT");
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_automatic_commit
+    ON multiremi_runtime_update_requests(automatic_daemon_key, target_commit);
+    CREATE TABLE IF NOT EXISTS multiremi_runtime_update_failures (
+      daemon_key TEXT NOT NULL, target_commit TEXT NOT NULL, issue_id TEXT,
+      outcome TEXT NOT NULL, created_at TEXT NOT NULL,
+      PRIMARY KEY (daemon_key, target_commit)
+    );`);
+}
+
+/** Expand-only indexes for base-table claim selection and retry deadlines. */
+function ensureClaimIndexes(db: SqlDatabase): void {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_turn_attempts_claim_queue
+    ON multiremi_turn_attempts(status, created_at, next_retry_at, turn_id);
+    CREATE INDEX IF NOT EXISTS idx_turn_attempts_claim_retry
+    ON multiremi_turn_attempts(status, next_retry_at);
+    CREATE INDEX IF NOT EXISTS idx_turns_claim_status
+    ON multiremi_turns(status, current_attempt_id);
+    CREATE INDEX IF NOT EXISTS idx_turns_claim_chat_queue
+    ON multiremi_turns(chat_session_id, issue_session_id, priority, chat_queue_order);
+  `);
 }

@@ -28,6 +28,8 @@ vi.mock("../paths", () => ({
  */
 const EXPECTED_EVENTS: readonly string[] = [
   "issue:updated",
+  "decision:created",
+  "decision:updated",
   "issue:created",
   "issue:deleted",
   "issue_labels:changed",
@@ -53,14 +55,14 @@ const EXPECTED_EVENTS: readonly string[] = [
   "invitation:accepted",
   "invitation:declined",
   "invitation:revoked",
-  "task:message",
-  "chat:message",
   "chat:queue_updated",
   "chat:done",
   "task:queued",
   "task:dispatch",
   "task:running",
   "task:progress",
+  "task:subagents",
+  "chat:background_tasks",
   "task:waiting_local_directory",
   "task:awaiting_human",
   "task:cancelled",
@@ -109,6 +111,7 @@ function createRecordingWs(): RecordingWs {
       };
     },
     onReconnect: () => () => {},
+    onResync: () => () => {},
   } as unknown as WSClient;
 
   return {
@@ -162,12 +165,6 @@ describe("useRealtimeSync — registration / teardown parity", () => {
     renderHook(() => useRealtimeSync(mock.ws, stores), { wrapper: createWrapper(qc) });
 
     expect(mock.registered).toEqual(["*", ...EXPECTED_EVENTS]);
-  });
-
-  it("registers each event exactly once", () => {
-    const mock = createRecordingWs();
-    renderHook(() => useRealtimeSync(mock.ws, stores), { wrapper: createWrapper(qc) });
-
     expect(new Set(mock.registered).size).toBe(mock.registered.length);
   });
 
@@ -256,6 +253,57 @@ describe("useRealtimeSync — registration / teardown parity", () => {
     expect(invalidateSpy).not.toHaveBeenCalled();
   });
 
+  it.each(["decision:created", "decision:updated"] as const)(
+    "invalidates the issue detail and decision list for %s",
+    (event) => {
+      const issueId = "issue-1";
+      const detailKey = issueKeys.detail("ws-1", issueId);
+      const decisionsKey = issueKeys.decisions("ws-1", issueId);
+      // An ancestor's drawer lists the subtree's questions too.
+      const ancestorQuestionsKey = issueKeys.questions("ws-1", "parent-1");
+      qc.setQueryData(detailKey, { id: issueId });
+      qc.setQueryData(decisionsKey, { count: 1 });
+      qc.setQueryData(ancestorQuestionsKey, []);
+      const mock = createRecordingWs();
+      renderHook(() => useRealtimeSync(mock.ws, stores), {
+        wrapper: createWrapper(qc),
+      });
+
+      mock.emit(event, { issue_id: issueId, decision: { id: "decision-1" } });
+
+      expect(qc.getQueryState(detailKey)?.isInvalidated).toBe(true);
+      expect(qc.getQueryState(decisionsKey)?.isInvalidated).toBe(true);
+      expect(qc.getQueryState(ancestorQuestionsKey)?.isInvalidated).toBe(true);
+    },
+  );
+
+  it.each(["parent_done_grant_created", "parent_done_grant_revoked"] as const)(
+    "only marks the timeline for historical %s activity",
+    (action) => {
+      const issueId = "issue-1";
+      const detailKey = issueKeys.detail("ws-1", issueId);
+      qc.setQueryData(detailKey, { id: issueId });
+      const mock = createRecordingWs();
+      renderHook(() => useRealtimeSync(mock.ws, stores), {
+        wrapper: createWrapper(qc),
+      });
+
+      mock.emit("activity:created", {
+        issue_id: issueId,
+        entry: {
+          type: "activity",
+          id: `activity-${action}`,
+          actor_type: "member",
+          actor_id: "member-1",
+          action,
+          created_at: "2026-09-28T00:00:00.000Z",
+        },
+      });
+
+      expect(qc.getQueryState(detailKey)?.isInvalidated).toBe(false);
+    },
+  );
+
   it("invalidates plugin queries for agent_plugin events", () => {
     vi.useFakeTimers();
     const mock = createRecordingWs();
@@ -269,6 +317,29 @@ describe("useRealtimeSync — registration / teardown parity", () => {
       queryKey: ["workspaces", "ws-1", "agent-plugins"],
     });
   });
+
+  it.each(["agent:archived", "agent:restored"] as const)(
+    "refetches every human-stage count and the re-routed questions after %s",
+    (event) => {
+      vi.useFakeTimers();
+      // An owner's availability re-routes its questions into or out of the human stage.
+      const detailKey = issueKeys.detail("ws-1", "issue-1");
+      const questionsKey = issueKeys.questions("ws-1", "issue-1");
+      const questionKey = ["question", "ws-1", "question-1"];
+      qc.setQueryData(detailKey, { id: "issue-1", pending_decision_count: 1 });
+      qc.setQueryData(questionsKey, []);
+      qc.setQueryData(questionKey, { id: "question-1" });
+      const mock = createRecordingWs();
+      renderHook(() => useRealtimeSync(mock.ws, stores), { wrapper: createWrapper(qc) });
+
+      mock.emit(event, { agent: { id: "agent-1" } });
+
+      expect(qc.getQueryState(detailKey)?.isInvalidated).toBe(true);
+      vi.advanceTimersByTime(100);
+      expect(qc.getQueryState(questionsKey)?.isInvalidated).toBe(true);
+      expect(qc.getQueryState(questionKey)?.isInvalidated).toBe(true);
+    },
+  );
 
   it("invalidates SCM queries for connection and repository binding events", () => {
     vi.useFakeTimers();
@@ -484,25 +555,4 @@ describe("useRealtimeSync — registration / teardown parity", () => {
     expect(result.current.data?.pages[0]?.entries.at(-1)?.id).toBe("agent-reply");
   });
 
-  it("flushes buffered task:message frames on unmount", () => {
-    vi.useFakeTimers();
-    const mock = createRecordingWs();
-    qc.setQueryData(["task-messages", "task-1"], []);
-    const { unmount } = renderHook(() => useRealtimeSync(mock.ws, stores), {
-      wrapper: createWrapper(qc),
-    });
-
-    mock.emit("task:message", {
-      task_id: "task-1",
-      seq: 1,
-      type: "text",
-      content: "hello",
-    });
-    // Still buffered — the 80ms coalescing window has not elapsed.
-    expect(qc.getQueryData(["task-messages", "task-1"])).toEqual([]);
-
-    unmount();
-
-    expect(qc.getQueryData(["task-messages", "task-1"])).toHaveLength(1);
-  });
 });

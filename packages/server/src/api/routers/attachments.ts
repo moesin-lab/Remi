@@ -2,74 +2,29 @@ import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import type { Hono } from "hono";
 import {
   MAX_UPLOAD_SIZE,
-  createUploadAttachmentId,
   currentWorkspaceRole,
   denyAttachmentAccess,
   denyAttachmentCreationAccess,
   denyCurrentUserCommentAccess,
+  denyTaskChatContentAccess,
   detectContentTypeFromFilename,
   loadChatSessionForCurrentUser,
   issueMutationActor,
   localAttachmentFileResponse,
+  persistUploadedAttachments,
   readJson,
   safeFilename,
   stringFormValue,
-  uploadAbsolutePath,
-  uploadRelativePath,
   uploadedAttachmentPath,
 } from "../helpers.js";
 import { attachmentCompatibilityResponse, cleanString, currentTaskAccessToken } from "../wire/index.js";
 import type { CreateAttachmentInput } from "@multiremi/contracts/types.js";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { unlink } from "node:fs/promises";
 import { CHAT_ATTACHMENT_MAX_BYTES, chatAttachmentValidationError, sanitizeChatAttachmentFilename } from "@multiremi/contracts/attachments.js";
 import type { RouterDeps } from "./deps.js";
 
 export function registerAttachmentRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
-
-  app.post("/api/chat/attachments/send", async (c) => {
-    const token = currentTaskAccessToken(c);
-    if (!token?.taskId) return c.json({ error: "a current Chat task credential is required" }, 403);
-    const task = store.getTask(token.taskId);
-    if (!task?.chatSessionId || task.workspaceId !== token.workspaceId) {
-      return c.json({ error: "current task is not a Chat task" }, 403);
-    }
-    const form = await c.req.formData();
-    const files = form.getAll("file");
-    if (!files.length || files.length > 10 || files.some(file => !(file instanceof File))) {
-      return c.json({ error: "between 1 and 10 file fields are required" }, 400);
-    }
-    const content = stringFormValue(form.get("content")) ?? "";
-    if (content.length > 200_000) return c.json({ error: "content is too long" }, 400);
-    // Validate every file before writing any bytes or enqueueing a delivery.
-    const uploads = (files as File[]).map((file, index) => ({ file,
-      // Bun 1.3.14 can lose an empty multipart File's name. Still identify the
-      // offending field and reject it cleanly instead of failing sanitization.
-      filename: sanitizeChatAttachmentFilename(file.name || `file #${index + 1}`),
-    }));
-    for (const { file, filename } of uploads) {
-      const error = chatAttachmentValidationError(filename, file.size);
-      if (error) return c.json({ error }, file.size > CHAT_ATTACHMENT_MAX_BYTES ? 413 : 400);
-    }
-    const paths: string[] = [];
-    try {
-      const inputs: CreateAttachmentInput[] = [];
-      for (const { file, filename } of uploads) {
-        const id = createUploadAttachmentId();
-        const path = uploadAbsolutePath(uploadRelativePath(task.workspaceId, id, filename));
-        await mkdir(dirname(path), { recursive: true });
-        paths.push(path);
-        await writeFile(path, new Uint8Array(await file.arrayBuffer()), { flag: "wx" });
-        inputs.push({ id, filename, url: `/api/attachments/${id}/content`,
-          contentType: detectContentTypeFromFilename(filename), sizeBytes: file.size });
-      }
-      return c.json(store.sendChatAttachments(task.id, inputs, content), 202);
-    } catch (error) {
-      await Promise.all(paths.map(path => unlink(path).catch(() => undefined)));
-      return c.json({ error: error instanceof Error ? error.message : "attachment delivery failed" }, 400);
-    }
-  });
 
   app.get("/api/multiremi/attachments/:id", (c) => {
     const attachment = store.getAttachment(c.req.param("id"));
@@ -139,26 +94,18 @@ export function registerAttachmentRoutes(app: Hono, deps: RouterDeps): void {
       actorType: stringFormValue(form.get("uploaderType") ?? form.get("uploader_type")) ?? undefined,
       actorId: stringFormValue(form.get("uploaderId") ?? form.get("uploader_id")),
     });
-    const attachmentId = createUploadAttachmentId();
     const safeName = safeFilename(file.name || "upload.bin");
-    const relativePath = uploadRelativePath(workspaceId, attachmentId, safeName);
-    const absolutePath = uploadAbsolutePath(relativePath);
-    await mkdir(dirname(absolutePath), { recursive: true });
-    await writeFile(absolutePath, new Uint8Array(await file.arrayBuffer()));
-    const attachment = store.createAttachment({
-      id: attachmentId,
-      workspaceId,
-      issueId: issue?.id ?? comment?.issueId ?? null,
-      commentId,
-      chatSessionId: chatSession?.session.id ?? null,
-      uploaderType,
-      uploaderId,
-      filename: safeName,
-      url: `/api/attachments/${attachmentId}/content`,
-      contentType: file.type || detectContentTypeFromFilename(safeName),
-      sizeBytes: file.size,
-    });
-    return c.json({ attachment, ...attachmentCompatibilityResponse(attachment) });
+    try {
+      const attachment = await persistUploadedAttachments(workspaceId, [{ filename: safeName,
+        bytes: new Uint8Array(await file.arrayBuffer()),
+        contentType: file.type || detectContentTypeFromFilename(safeName) }],
+        ([input]) => store.createAttachment({ ...input!,
+          issueId: issue?.id ?? comment?.issueId ?? null, commentId,
+          chatSessionId: chatSession?.session.id ?? null, uploaderType, uploaderId }));
+      return c.json({ attachment, ...attachmentCompatibilityResponse(attachment) });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "attachment upload failed" }, 400);
+    }
   });
 
   app.get("/api/attachments/:id", (c) => {
@@ -188,7 +135,7 @@ export function registerAttachmentRoutes(app: Hono, deps: RouterDeps): void {
     if (!attachment.url.startsWith("/api/attachments/")) {
       return c.redirect(attachment.url);
     }
-    return localAttachmentFileResponse(attachment);
+    return localAttachmentFileResponse(attachment, c.req.raw.headers);
   });
 
   app.delete("/api/attachments/:id", async (c) => {
@@ -196,11 +143,13 @@ export function registerAttachmentRoutes(app: Hono, deps: RouterDeps): void {
     if (!existing) return c.json({ ok: true });
     const denied = denyAttachmentAccess(c, store, existing);
     if (denied) return denied;
-    // Go file.go DeleteAttachment: only the uploader or a workspace admin/owner may
-    // delete a non-chat attachment. Chat attachments are already creator-gated by
-    // denyAttachmentAccess above (the creator is the uploader).
+    // Humans share workspace authority. A task still needs to be the uploader
+    // or carry its original actor's admin/owner role for non-Chat attachments.
     if (!existing.chatSessionId) {
-      const role = currentWorkspaceRole(c, store, existing.workspaceId);
+      const taskToken = currentTaskAccessToken(c);
+      const role = taskToken
+        ? store.getUserRoleInWorkspace(taskToken.userId ?? "local", existing.workspaceId)
+        : currentWorkspaceRole(c, store, existing.workspaceId);
       const caller = issueMutationActor(c);
       const isUploader = existing.uploaderType === caller.actorType && existing.uploaderId === caller.actorId;
       const isAdmin = role === "owner" || role === "admin";

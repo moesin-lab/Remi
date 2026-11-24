@@ -1,10 +1,24 @@
-import { getExecutionGroup, listExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { querySchemaCompatibility } from './schema-levels.js';
+import { PlannedRestarts } from "./planned-restarts.js";
+import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+import { createId } from "@multiremi/ids.js";
+import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
+import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
+import { ExecutionEndpointsRepo } from "@multiremi/store/repos/execution-endpoints-repo.js";
+import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
+import { isRelatedTurnController } from './turn-controls.js';
+import { DaemonTurnBridge } from './inbox/daemon-turn-bridge.js';
+import { questionNotificationIdentity, questionNotificationFactsSql, canReadQuestionNotificationFacts, questionNotificationVisibilitySql } from './inbox/question-notification-visibility.js';
+import type { InboxAccess } from './inbox/inbox-visibility.js';
+import type { QuestionCardCredential } from "@multiremi/store/question-card-token.js";
 import type { RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
-import { type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
+import { afterCommit, type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
+import { runStartupMigrations as runMigrations } from "@multiremi/store/migrations.js";
+import { invalidatingDatabase } from "@multiremi/store/request-read-cache.js";
+import { daemonRuntimeId, isTerminalStatus, parseJson } from "@multiremi/store/helpers.js";
 import { activityRepositories, hasProjectActivity, readRepositoryActivity, type ActivityScope, type ActivitySubject } from "./repository-activity.js";
 import { canonicalGitRemoteKey, normalizeWorkspaceRepositories } from "../api/helpers/repositories.js";
-import { runMigrations } from "@multiremi/store/migrations.js";
-import { daemonRuntimeId, isTerminalStatus } from "@multiremi/store/helpers.js";
 import { agentRoleAtLeast } from "@multiremi/store/agent-role.js";
 import { FeedbackRepo } from "@multiremi/store/repos/feedback-repo.js";
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
@@ -28,7 +42,7 @@ import {
   type NotificationSenderRegistry,
 } from "@multiremi/notifications/outbound-dispatcher.js";
 import { CloudRuntimeNodesRepo } from "@multiremi/store/repos/cloud-runtime-nodes-repo.js";
-import { PlatformOperationsRepo } from "@multiremi/store/repos/platform-operations-repo.js";
+import { PlatformOperationsRepo, type PlatformOperationReceipt } from "@multiremi/store/repos/platform-operations-repo.js";
 import { PlatformMaintenanceRepo } from "@multiremi/store/repos/platform-maintenance-repo.js";
 import { AgentsSkillsRepo } from "@multiremi/store/repos/agents-skills-repo.js";
 import { AgentPluginsRepo } from "@multiremi/store/repos/agent-plugins-repo.js";
@@ -63,6 +77,10 @@ import type {
   ScmSnapshotEventWriteResult,
 } from "@multiremi/scm/types.js";
 import { UsageRepo } from "@multiremi/store/repos/usage-repo.js";
+import { UsageAccountingRepo, type UsageReportInput } from "@multiremi/store/repos/usage-accounting-repo.js";
+import { writeUsageSnapshot } from "@multiremi/store/usage-accounting.js";
+import { ensureUsageAccountingStartup, startUsageAccountingBackfill } from "@multiremi/store/usage-migration.js";
+import type { TaskUsageSnapshot, SetUsagePriceInput, UsagePrice, UsageReport } from "@multiremi/contracts/usage-accounting.js";
 import { SquadsRepo } from "@multiremi/store/repos/squads-repo.js";
 import { ProjectsRepo, type ProjectInstructionsWriteContext } from "@multiremi/store/repos/projects-repo.js";
 import {
@@ -82,25 +100,62 @@ import {
 } from "@multiremi/store/repos/knowledge-repo.js";
 import { resolveRepositoryWikiAutomation } from "@multiremi/repository-wiki/automation.js";
 import { IssueSessionsRepo } from "@multiremi/store/repos/issue-sessions-repo.js";
-import { ChatRepo } from "@multiremi/store/repos/chat-repo.js";
+import { ChatRepo, type PendingChatTaskCandidate } from "@multiremi/store/repos/chat-repo.js";
+import { InboxRepo } from "@multiremi/store/repos/inbox-repo.js";
+import {
+  ConversationLogRepo,
+  type AppendConversationLogInput,
+  type ConversationLogQuery,
+  type ConversationLogWindowInput,
+  type UpdateConversationLogInput,
+} from "@multiremi/store/repos/conversation-log-repo.js";
+import type {
+  ConversationLogEntry,
+  ConversationLogListener,
+  ConversationLogLocation,
+  ConversationLogWindow,
+} from "@multiremi/contracts/conversation-log";
 import {
   IssuesRepo,
+  type AnswerIssueDecisionOptions,
+  IssueDependencyError,
+  ParentStatusGuardError,
   type IssueTimelineCursor,
   type IssueTimelinePageResult,
-  type BeginIssueDeletionResult,
   type IssueMutationActivityContext,
 } from "@multiremi/store/repos/issues-repo.js";
 import { IssueWorkspacesRepo } from "@multiremi/store/repos/issue-workspaces-repo.js";
-import { RuntimeWorkspacesRepo } from "@multiremi/store/repos/runtime-workspaces-repo.js";
 import {
-  SessionArchivesRepo,
-  type SessionArchiveStatusSnapshot,
-  type SessionArchiveWorkspaceUsage,
-} from "@multiremi/store/repos/session-archives-repo.js";
+  StorageRepo,
+  type DaemonStorageReportRecord,
+  type SubjectReclaimedInput,
+} from "@multiremi/store/repos/storage-repo.js";
+import type { GcRunMode, GcRunRequest, StorageReport } from "@multiremi/contracts/storage.js";
+import { RuntimeWorkspacesRepo } from "@multiremi/store/repos/runtime-workspaces-repo.js";
+import { TaskTracesRepo } from "@multiremi/store/repos/task-traces-repo.js";
+import {
+  BackgroundTasksRepo,
+  type BackgroundTaskDownlinks,
+  type BackgroundTaskStopResult,
+  type BackgroundTaskStopTarget,
+  type SessionBackgroundTasks,
+} from "@multiremi/store/repos/background-tasks-repo.js";
+import type {
+  DaemonLaneBackgroundTasksPayload,
+  DaemonLaneBackgroundWakePayload,
+  DaemonLaneBackgroundWakeReply,
+  DaemonParkedLane,
+} from "@multiremi/contracts/daemon-protocol.js";
+import type { MultiremiTaskTrace } from "@multiremi/contracts/trace-file.js";
+import type { TraceLateSubagent } from "@multiremi/contracts/trace.js";
+import type { DaemonTaskCompletionFields } from "@multiremi/contracts/daemon-protocol.js";
+import type { ChatSlashCommandsResponse } from "@multiremi/contracts/slash-commands.js";
+import { readChatSlashCommands } from "./slash-commands.js";
 import {
   RuntimesRepo,
   type ArchiveAgentsAndDeleteRuntimeResult,
   type StrictRuntimeDeleteResult,
+  type RuntimeDeleteOptions,
 } from "@multiremi/store/repos/runtimes-repo.js";
 import {
   DaemonProfilesRepo,
@@ -123,8 +178,11 @@ import type { SshMeshKeyMaterial } from "@multiremi/ssh-mesh/keys.js";
 import {
   TasksRepo,
   type ClaimTaskOptions,
+  type MultiremiTaskIdentity,
   type TaskListCandidate,
+  type TaskRef,
   type TaskListCursor,
+  type TaskStatusSnapshot,
 } from "@multiremi/store/repos/tasks-repo.js";
 import { OrganizerActionError, readOrganizerMode } from "../organizer/settings.js";
 import {
@@ -148,6 +206,7 @@ import {
 } from "@multiremi/store/repos/analytics-repo.js";
 import {
   WorkspacesRepo,
+  type GatewayModelContextDecl,
   type GatewayModelReasoningDecl,
   type GatewayModelsSnapshot,
   type RelayConfigForBrowser,
@@ -156,6 +215,7 @@ import {
 } from "@multiremi/store/repos/workspaces-repo.js";
 // The relay/gateway config types used to be declared here; keep the public surface unchanged.
 export type {
+  GatewayModelContextDecl,
   GatewayModelReasoningDecl,
   GatewayModelsSnapshot,
   RelayConfigForBrowser,
@@ -166,8 +226,11 @@ export type {
 } from "@multiremi/store/repos/workspaces-repo.js";
 import {
   StoreContext,
+  createCommitEventQueue,
+  type CommitEventQueue,
   type TaskEnqueuedListener,
   type TaskEventListener,
+  type HumanRequestListener,
   type TaskMessagesListener,
   type WorkspaceEventListener,
 } from "@multiremi/store/context.js";
@@ -176,6 +239,7 @@ import type {
   AddSessionParticipantInput,
   AddSquadMemberInput,
   AssignIssueInput,
+  AssignIssueOptions,
   AssignIssueResult,
   CreateAccessTokenInput,
   CreateBotMenuPublishRequestInput,
@@ -192,8 +256,6 @@ import type {
   CreateIssueCommentInput,
   CreateIssueInput,
   CreateIssueSessionInput,
-  InitSessionArchiveInput,
-  ReportSessionArchiveFailureInput,
   BatchDeleteIssuesInput,
   BatchUpdateIssuesInput,
   CreateLabelInput,
@@ -259,19 +321,27 @@ import type {
   ListIssueCommentsInput,
   ListIssueCommentsResult,
   MultiremiIssueDependency,
+  MultiremiIssueDependencyView,
   MultiremiIssue,
+  MultiremiIssueDecision,
+  MultiremiIssueDecisionList,
+  CreateIssueDecisionInput,
+  AnswerIssueDecisionInput,
+  IssueDecisionActor,
   CreateKnowledgeCompilationRunInput,
   CreateKnowledgeSubmissionInput,
   MultiremiKnowledgeCompilationOutput,
   MultiremiKnowledgeCompilationRun,
   MultiremiKnowledgeCompilationRunSource,
+  MultiremiKnowledgeCompilationRunSourceListItem,
   MultiremiKnowledgeCompilationStatus,
   MultiremiKnowledgeCursorPage,
+  MultiremiKnowledgeDocSummary,
   MultiremiKnowledgeSubmission,
+  MultiremiKnowledgeSubmissionListItem,
   MultiremiKnowledgeSubmissionStatus,
   MultiremiIssueShare,
   MultiremiIssueSession,
-  MultiremiSessionArchive,
   MultiremiIssueAssigneeGroup,
   MultiremiIssueSearchResult,
   MultiremiFeedback,
@@ -294,6 +364,7 @@ import type {
   MultiremiProject,
   MultiremiProjectDevice,
   MultiremiProjectDoc,
+  MultiremiProjectDocKind,
   MultiremiProjectDocRevision,
   MultiremiRepositoryWikiDoc,
   MultiremiRepositoryWikiDocRevision,
@@ -357,7 +428,6 @@ import type {
   MultiremiWorkspace,
   MultiremiWorkspaceInvitation,
   MultiremiWorkspaceMember,
-  MarkIssueWorkspaceCleanedInput,
   RegisterRuntimeInput,
   RecordTaskPromptInput,
   ReportAgentPluginRuntimeStateInput,
@@ -377,6 +447,7 @@ import type {
   UpdateAutopilotTriggerInput,
   UpdateChatSessionInput,
   UpdateIssueInput,
+  UpdateIssueOptions,
   UpdateIssueCommentInput,
   UpdateIssueSessionInput,
   UpdateLabelInput,
@@ -447,7 +518,21 @@ import type {
 export { daemonRuntimeId, isTerminalStatus };
 
 export class MultiremiStore {
+  activateBackgroundTerm(holder: string, onLost: () => void): LiveTermFence {
+    return LiveTermFence.activate(this.fenceDatabase, holder, onLost);
+  }
+
+  isDatabaseUnavailable(): boolean { return this.db.connectionUnavailable === true; }
+  private databaseReadyUntil = 0;
+  checkDatabaseReady(force = false): void {
+    if (!force && !this.db.connectionUnavailable && Date.now() < this.databaseReadyUntil) return;
+    this.databaseReadyUntil = 0;
+    this.db.query("SELECT 1 AS ready").get();
+    this.databaseReadyUntil = Date.now() + 1_000;
+  }
+
   private db: SqlDatabase;
+  private fenceDatabase: SqlDatabase;
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
   private accessTokens: AccessTokensRepo;
@@ -491,19 +576,27 @@ export class MultiremiStore {
   private knowledge: KnowledgeRepo;
   private sessions: IssueSessionsRepo;
   private chat: ChatRepo;
+  private inbox: InboxRepo;
+  private conversationLog: ConversationLogRepo;
   private issues: IssuesRepo;
   private issueWorkspaces: IssueWorkspacesRepo;
-  private sessionArchives: SessionArchivesRepo;
+  private storage: StorageRepo;
+  private taskTraces: TaskTracesRepo;
   readonly runtimeWorkspaces: RuntimeWorkspacesRepo;
   private runtimes: RuntimesRepo;
+  private executionBindingStates: ExecutionBindingStatesRepo;
+  private executionProfiles: ExecutionProfilesRepo;
   private daemonProfiles: DaemonProfilesRepo;
   private runtimeProvisions: RuntimeProvisionsRepo;
   private daemonRetirement: DaemonRetirementRepo;
   private sshMesh: SshMeshRepo;
   private autopilots: AutopilotsRepo;
   private tasks: TasksRepo;
+  private backgroundTasks: BackgroundTasksRepo;
 
   constructor(db?: SqlDatabase, options: {
+    /** Pointer reads can be routed to a read-only pool in the split topology. */
+    taskTraceQuery?: import("./repos/task-traces-repo.js").TaskTraceQuery;
     notificationSenders?: NotificationSenderRegistry;
     notificationMaxAttempts?: number;
     notificationRetryBaseDelayMs?: number;
@@ -513,7 +606,10 @@ export class MultiremiStore {
     agentIssueUpdateDebounceMs?: number;
     publicUrl?: string | null;
   } = {}) {
-    this.db = db ?? openMultiremiDatabase();
+    // The wrapper clears the per-request read cache on every write, so a cached row can never
+    // outlive a write that changed it. See request-read-cache.ts for the contract.
+    this.fenceDatabase = invalidatingDatabase(db ?? openMultiremiDatabase());
+    this.db = liveTermDatabase(this.fenceDatabase);
     this.ctx = new StoreContext(this.db, () => this);
     this.feedback = new FeedbackRepo(this.db);
     this.accessTokens = new AccessTokensRepo(this.db);
@@ -547,27 +643,49 @@ export class MultiremiStore {
     // The analytics recorders are not part of the public facade, so domains reach them through the
     // context rather than through `resolveHost`.
     this.ctx.registerAnalytics(this.analytics);
+    this.onTaskEnqueued(task => this.notifyTaskRepositoryActivity(task));
+    this.onTaskEvent(({ task }) => this.notifyTaskRepositoryActivity(task));
     this.projects = new ProjectsRepo(this.ctx);
     this.repositoryWiki = new RepositoryWikiRepo(this.ctx);
     this.knowledge = new KnowledgeRepo(this.ctx);
     this.sessions = new IssueSessionsRepo(this.ctx);
     this.chat = new ChatRepo(this.ctx);
+    this.conversationLog = new ConversationLogRepo(this.ctx);
+    this.inbox = new InboxRepo(this.ctx);
     this.agentIssueUpdates = new AgentIssueUpdatesRepo(this.ctx, {
       debounceMs: options.agentIssueUpdateDebounceMs,
     });
     this.issues = new IssuesRepo(this.ctx);
     this.issueWorkspaces = new IssueWorkspacesRepo(this.ctx);
-    this.sessionArchives = new SessionArchivesRepo(this.ctx);
+    this.storage = new StorageRepo(this.ctx, this.issueWorkspaces);
+    this.taskTraces = new TaskTracesRepo(this.ctx, options.taskTraceQuery);
     this.runtimes = new RuntimesRepo(this.ctx);
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
+    this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
+    this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
     this.daemonProfiles = new DaemonProfilesRepo(this.ctx);
     this.runtimeProvisions = new RuntimeProvisionsRepo(this.ctx);
     this.daemonRetirement = new DaemonRetirementRepo(this.ctx);
     this.sshMesh = new SshMeshRepo(this.ctx);
     this.autopilots = new AutopilotsRepo(this.ctx);
     this.tasks = new TasksRepo(this.ctx);
-    this.taskCapabilityMonitor = new TaskCapabilityMonitor(now => this.tasks.refreshQueuedCapabilityWaitReasons(now));
+    this.backgroundTasks = new BackgroundTasksRepo(this.ctx);
+    this.taskCapabilityMonitor = new TaskCapabilityMonitor([
+      now => this.tasks.refreshQueuedCapabilityWaitReasons(now),
+      now => this.tasks.sweepIdleIssueLanes(now),
+      now => this.archiveIdleChats(now),
+      now => this.backgroundTasks.sweep(now),
+      () => this.reconcileRuntimeUpdateFailures(),
+    ]);
     this.migrate();
+    for (const workspace of this.workspaces.listWorkspaces()) {
+      const events = createCommitEventQueue();
+      this.db.transaction(() => {
+        this.workspaces.ensureWorkspaceOperator(workspace.id);
+        new Questions(this.ctx).refreshWorkspaceOperatorWithinTransaction(workspace.id, events);
+      })();
+      this.ctx.emitCommitEvents(events);
+    }
   }
 
   onTaskEnqueued(listener: TaskEnqueuedListener): () => void {
@@ -581,6 +699,20 @@ export class MultiremiStore {
     this.ctx.taskEventListeners.add(listener);
     return () => {
       this.ctx.taskEventListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Subscribe to human-request transitions (MUL-403 §2 item 4).
+   *
+   * `humanRequestListeners` lives on the context beside the other realtime
+   * listener sets, so the hub's feed attaches and detaches exactly like the
+   * task/workspace listeners do.
+   */
+  onHumanRequest(listener: HumanRequestListener): () => void {
+    this.ctx.humanRequestListeners.add(listener);
+    return () => {
+      this.ctx.humanRequestListeners.delete(listener);
     };
   }
 
@@ -617,6 +749,25 @@ export class MultiremiStore {
 runMigrations(this.db);
   }
 
+  /** Required cutover gate; call after schema migration and before API/jobs. */
+  private usageBackfill: ReturnType<typeof startUsageAccountingBackfill> | null = null;
+  usageAccountingBackfillReady() { return this.usageBackfill === null; }
+
+  querySchemaCompatibility() { return querySchemaCompatibility(this.db); }
+
+  startUsageAccountingBackfill() {
+    const worker = startUsageAccountingBackfill(this.db);
+    this.usageBackfill = worker;
+    void worker.done.then(() => {
+      if (this.usageBackfill === worker && worker.failure === undefined) this.usageBackfill = null;
+    });
+    return worker;
+  }
+
+  ensureUsageAccountingStartup(): void {
+    ensureUsageAccountingStartup(this.db);
+  }
+
   getPlatformState() {
     return this.platformOperations.getState();
   }
@@ -625,7 +776,7 @@ runMigrations(this.db);
     return this.platformOperations.setAutoUpdateStable(enabled);
   }
 
-  setPlatformAutoUpdateSettings(input: { enabled: boolean; time: string; timezone: string }, at?: Date) {
+  setPlatformAutoUpdateSettings(input: { enabled: boolean; time: string; timezone: string; releaseFeedUrl?: string | null }, at?: Date) {
     return this.platformOperations.setAutoUpdateSettings(input, at);
   }
 
@@ -638,7 +789,11 @@ runMigrations(this.db);
   }
 
   heartbeatPlatformUpdater(input: {
-    driver: "systemd_release" | "docker_compose";
+    updateMode?: import("@multiremi/contracts/types.js").MultiremiPlatformUpdateMode | null;
+    defaultReleaseFeedUrl?: string | null;
+    releaseFeedUrl?: string | null;
+    preflight?: import("@multiremi/contracts/types.js").MultiremiPlatformPreflight | null;
+    driver: "systemd_release" | "docker_compose" | "local_profile";
     currentRelease?: MultiremiPlatformRelease | null;
     latestRelease?: MultiremiPlatformRelease | null;
     recentReleases?: MultiremiPlatformRelease[];
@@ -652,6 +807,10 @@ runMigrations(this.db);
     requestedBy: string,
   ): MultiremiPlatformOperation {
     return this.platformOperations.create(input, requestedBy);
+  }
+
+  findPlatformOperationByRequestId(requestedBy: string, requestId: string) {
+    return this.platformOperations.findByRequestId(requestedBy, requestId);
   }
 
   getPlatformOperation(id: string): MultiremiPlatformOperation | null {
@@ -677,6 +836,10 @@ runMigrations(this.db);
     return this.platformOperations.report(id, input);
   }
 
+  reconcilePlatformOperations(receipts: PlatformOperationReceipt[]): MultiremiPlatformOperation[] {
+    return this.platformOperations.reconcile(receipts);
+  }
+
   cancelPlatformOperation(id: string): MultiremiPlatformOperation {
     return this.platformOperations.requestCancel(id);
   }
@@ -685,136 +848,290 @@ runMigrations(this.db);
     return this.platformMaintenance.get();
   }
 
+  getPlatformWriteBlockingOperationId(): string | null {
+    return this.platformMaintenance.writeBlockingOperationId();
+  }
+
   beginPlatformDrain(input: { operationId: string; reason?: string | null; ttlMs?: number }): MultiremiPlatformMaintenance {
-    return this.platformMaintenance.beginDrain(input);
+    const maintenance = this.platformMaintenance.beginDrain(input);
+    this.publishPlatformMaintenanceChanged(maintenance);
+    return maintenance;
   }
 
   renewPlatformDrain(operationId: string, ttlMs?: number): MultiremiPlatformMaintenance | null {
-    return this.platformMaintenance.renewDrain(operationId, ttlMs);
+    const maintenance = this.platformMaintenance.renewDrain(operationId, ttlMs);
+    if (maintenance) this.publishPlatformMaintenanceChanged(maintenance);
+    return maintenance;
   }
 
   releasePlatformDrain(operationId: string): MultiremiPlatformMaintenance {
-    return this.platformMaintenance.releaseDrain(operationId);
+    const maintenance = this.platformMaintenance.releaseDrain(operationId);
+    this.publishPlatformMaintenanceChanged(maintenance);
+    return maintenance;
   }
 
-  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null): void {
-    this.platformMaintenance.recordRuntimeDrainAck(runtimeId, generation, activeTasks);
+  private publishPlatformMaintenanceChanged(maintenance: MultiremiPlatformMaintenance): void {
+    for (const workspace of this.listWorkspaces()) this.ctx.emitWorkspaceEvent({
+      type: "daemon:maintenance_changed", workspaceId: workspace.id,
+      actorType: "system", actorId: null, payload: { mode: maintenance.mode, generation: maintenance.generation },
+    });
+  }
+
+  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null, scope: "daemon" | "runtime" = "daemon"): void {
+    this.platformMaintenance.recordRuntimeDrainAck(runtimeId, generation, activeTasks, scope);
   }
 
   getPlatformDrainStatus(): MultiremiPlatformDrainStatus {
     return this.platformMaintenance.drainStatus();
   }
 
-  getSessionArchive(id: string): MultiremiSessionArchive | null {
-    return this.sessionArchives.get(id);
-  }
-
-  listSessionArchives(issueId: string): MultiremiSessionArchive[] {
-    return this.sessionArchives.list(issueId);
-  }
-
-  getSessionArchiveWorkspaceUsage(workspaceId: string): SessionArchiveWorkspaceUsage {
-    return this.sessionArchives.workspaceUsage(workspaceId);
-  }
-
-  getSessionArchiveStatus(
-    issueId: string,
-    sourceRevision?: string | null,
-    sha256?: string | null,
-  ): SessionArchiveStatusSnapshot {
-    return this.sessionArchives.status(issueId, sourceRevision, sha256);
-  }
-
-  initSessionArchive(input: InitSessionArchiveInput, id: string, relativePath: string): {
-    archive: MultiremiSessionArchive;
-    created: boolean;
-  } {
-    const initialized = this.sessionArchives.init(input, id, relativePath);
-    if (!initialized) {
-      throw Object.assign(
-        new Error("Issue is deleting or its workspace has already been cleaned"),
-        { code: "issue_archive_lifecycle_closed" },
+  getExecutionGroupMembers(id: string, workspaceId: string) {
+    const group = this.getExecutionGroup(id, workspaceId);
+    if (!group) return [];
+    return group.runtimeIds.map((runtimeId) => {
+      if (group.provider === "antigravity" && group.connectionMode === "native"
+        && this.getRuntimeLite(runtimeId)?.metadata.antigravity_native !== 1)
+        return { runtime_id: runtimeId, status: "error", error: "Upgrade this Runtime to support Antigravity local sign-in" };
+      if (group.endpointId && this.getExecutionEndpoint(group.endpointId, workspaceId)?.connection.options
+        && this.getRuntimeLite(runtimeId)?.metadata.execution_endpoint_options !== 1)
+        return { runtime_id: runtimeId, status: "error", error: "Upgrade this Runtime to support endpoint model inventory and custom headers" };
+      if (group.connectionMode !== "legacy" && this.getRuntimeLite(runtimeId)?.metadata.execution_endpoints !== 1)
+        return { runtime_id: runtimeId, status: "error", error: "Upgrade this Runtime to support explicit endpoint and local-sign-in selection" };
+      const row = this.db
+        .query(
+          "SELECT profile_id,profile_revision,status,error,generation FROM multiremi_execution_binding_states WHERE workspace_id=? AND group_id=? AND runtime_id=?",
+        )
+        .get(workspaceId, id, runtimeId) as {
+        profile_id: string | null;
+        profile_revision: number | null;
+        status: string;
+        error: string | null;
+        generation: string | null;
+      } | null;
+      const desired = this.getRuntimeExecutionBindings(runtimeId).find(
+        (binding) => binding.groupId === id,
       );
-    }
-    return initialized;
+      const current =
+        row &&
+        row.profile_id === group.profileId &&
+        row.profile_revision === group.profileRevision &&
+        row.generation === desired?.generation;
+      return {
+        runtime_id: runtimeId,
+        status: !group.managed ? "ready" : current ? row.status : "pending",
+        error: current ? row.error : null,
+      };
+    });
   }
-
-  reportSessionArchiveFailure(
-    input: ReportSessionArchiveFailureInput,
-    id: string,
-    relativePath: string,
-  ): { archive: MultiremiSessionArchive; created: boolean } {
-    const reported = this.sessionArchives.reportFailure(input, id, relativePath);
-    if (!reported) {
-      throw Object.assign(
-        new Error("Issue is deleting or its workspace has already been cleaned"),
-        { code: "issue_archive_lifecycle_closed" },
-      );
-    }
-    return reported;
+  executionBindingStatesRepo() {
+    return this.executionBindingStates;
   }
-
-  touchWritableSessionArchive(id: string, runtimeId: string): MultiremiSessionArchive | null {
-    return this.sessionArchives.touchWritableArchive(id, runtimeId);
+  getRuntimeExecutionBindings(runtimeId: string) {
+    return this.executionBindingStates.getRuntimeExecutionBindings(runtimeId);
   }
-
-  claimSessionArchiveUploadAttempt(id: string, runtimeId: string): MultiremiSessionArchive | null {
-    return this.sessionArchives.claimUploadAttempt(id, runtimeId);
+  getRuntimeBindingModelCatalog(groupId: string, runtimeId: string) {
+    return this.executionBindingStates.getRuntimeBindingModelCatalog(groupId, runtimeId);
   }
-
-  beginSessionArchiveUploadAttempt(
-    id: string,
+  recordRuntimeExecutionBindingAcks(runtimeId: string, input: unknown) {
+    return this.executionBindingStates.recordRuntimeExecutionBindingAcks(
+      runtimeId,
+      input,
+    );
+  }
+  isRuntimeExecutionBindingReady(
+    groupId: string,
     runtimeId: string,
-    attemptCount: number,
-  ): MultiremiSessionArchive | null {
-    return this.sessionArchives.beginUploadAttempt(id, runtimeId, attemptCount);
+    profileId: string | null,
+    revision: number | null,
+  ) {
+    return this.executionBindingStates.isRuntimeExecutionBindingReady(
+      groupId,
+      runtimeId,
+      profileId,
+      revision,
+    );
   }
-
-  markSessionArchiveUploadedAttempt(
-    id: string,
+  runtimeProfileModelEvidenceMatches(
     runtimeId: string,
-    attemptCount: number,
-    uploadedSizeBytes: number,
-  ): MultiremiSessionArchive | null {
-    return this.sessionArchives.markUploadedAttempt(id, runtimeId, attemptCount, uploadedSizeBytes);
+    provider: string,
+    profile: import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile,
+  ) {
+    return this.runtimes.runtimeProfileModelEvidenceMatches(
+      runtimeId,
+      provider,
+      profile,
+    );
   }
-
-  markSessionArchiveReadyAttempt(
+  getAgentExecutionProfile(runtimeId: string | null, agent: MultiremiAgent) {
+    return this.runtimes.getAgentExecutionProfile(runtimeId, agent);
+  }
+  executionProfilesRepo() {
+    return this.executionProfiles;
+  }
+  listExecutionProfiles(workspaceId: string) {
+    return this.executionProfiles.list(workspaceId);
+  }
+  listExecutionEndpoints(workspaceId: string) {
+    return new ExecutionEndpointsRepo(this.ctx).list(workspaceId);
+  }
+  getExecutionEndpoint(id: string, workspaceId: string) {
+    return new ExecutionEndpointsRepo(this.ctx).get(id, workspaceId);
+  }
+  saveExecutionEndpoint(workspaceId: string, input: import("@multiremi/contracts/execution-endpoint.js").ExecutionEndpointInput, id?: string) {
+    const result = new ExecutionEndpointsRepo(this.ctx).save(workspaceId, input, id);
+    this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
+    return result;
+  }
+  deleteExecutionEndpoint(id: string, workspaceId: string) {
+    return this.executionProfiles.delete(id, workspaceId);
+  }
+  getExecutionEndpointCatalog(id: string, workspaceId: string) {
+    return (this.db.query("SELECT snapshot FROM multiremi_execution_endpoint_catalogs WHERE workspace_id=? AND endpoint_id=? ORDER BY protocol")
+      .all(workspaceId, id) as { snapshot: string }[]).map(row => JSON.parse(row.snapshot));
+  }
+  recordExecutionEndpointInspection(id: string, workspaceId: string, revision: number, inspection: import("@multiremi/relay/endpoint-inspection.js").EndpointInspection) {
+    this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      if (this.getExecutionEndpoint(id, workspaceId)?.revision !== revision) return;
+      for (const result of inspection.results) {
+        if (result.operation !== "models") continue;
+        const old = this.db.query("SELECT snapshot FROM multiremi_execution_endpoint_catalogs WHERE workspace_id=? AND endpoint_id=? AND protocol=?")
+          .get(workspaceId, id, result.protocol) as { snapshot: string } | null;
+        const previous = old ? JSON.parse(old.snapshot) : null;
+        const ok = result.state === "ok" || result.state === "manual";
+        const snapshot = { protocol: result.protocol, revision, last_checked_at: inspection.checked_at,
+          last_success_at: ok ? inspection.checked_at : previous?.last_success_at ?? null,
+          models_revision: ok ? revision : previous?.models_revision ?? null,
+          models: ok ? result.models : previous?.models ?? [],
+          error_code: ok ? null : result.error_code ?? "discovery_failed", message: ok ? null : result.message ?? null,
+          state: result.state, http_status: result.http_status, duration_ms: result.duration_ms };
+        this.db.run(`INSERT INTO multiremi_execution_endpoint_catalogs(workspace_id,endpoint_id,protocol,snapshot) VALUES(?,?,?,?)
+          ON CONFLICT(workspace_id,endpoint_id,protocol) DO UPDATE SET snapshot=excluded.snapshot`,
+          [workspaceId, id, result.protocol, JSON.stringify(snapshot)]);
+      }
+    })();
+  }
+  getSystemModelEndpoints(workspaceId: string): Record<string, string | null> {
+    return Object.fromEntries((["claude", "codex", "antigravity"] as const).map(engine => [
+      engine === "claude" ? "anthropic-messages" : engine === "codex" ? "openai-chat-completions" : "google-generative",
+      (this.db.query("SELECT endpoint_id FROM multiremi_relay_config WHERE workspace_id=? AND engine=?")
+        .get(workspaceId, engine) as { endpoint_id: string | null } | null)?.endpoint_id ?? null,
+    ]));
+  }
+  setSystemModelEndpoints(workspaceId: string, input: unknown) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("defaults must be an object");
+    const protocols = { "anthropic-messages": "claude", "openai-chat-completions": "codex", "google-generative": "antigravity" } as const;
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      for (const [protocol, id] of Object.entries(input)) {
+        if (!(protocol in protocols)) throw new Error("Unknown API protocol");
+        const endpoint = typeof id === "string" ? this.getExecutionEndpoint(id, workspaceId) : null;
+        if (id !== null && (!endpoint || !endpoint.connection.protocols.some(value => value === protocol))) throw new Error("Endpoint is missing or incompatible");
+        if (endpoint && endpoint.connection.auth_mode !== "api_key") throw new Error("Server AI features require a stored API credential");
+        this.db.run(`INSERT INTO multiremi_relay_config(workspace_id,engine,fragment,auth_token,revision,updated_at,endpoint_id)
+          VALUES(?,?,'','',1,?,?) ON CONFLICT(workspace_id,engine) DO UPDATE SET endpoint_id=excluded.endpoint_id,
+          fragment='',auth_token='',revision=multiremi_relay_config.revision+1,updated_at=excluded.updated_at`,
+          [workspaceId, protocols[protocol as keyof typeof protocols], new Date().toISOString(), id]);
+      }
+      this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
+      return this.getSystemModelEndpoints(workspaceId);
+    })();
+  }
+  getExecutionProfile(id: string, workspaceId: string, revision?: number) {
+    return this.executionProfiles.get(id, workspaceId, revision);
+  }
+  getGroupExecutionProfile(id: string, workspaceId: string) {
+    return this.executionProfiles.getGroupExecutionProfile(id, workspaceId);
+  }
+  saveExecutionProfile(
+    workspaceId: string,
+    input: import("@multiremi/contracts/execution-profile.js").ExecutionProfileInput,
+    id?: string,
+  ) {
+    const result = this.executionProfiles.save(workspaceId, input, id);
+    this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
+    return result;
+  }
+  deleteExecutionProfile(id: string, workspaceId: string) {
+    return this.executionProfiles.delete(id, workspaceId);
+  }
+  getExecutionProfileKey(
     id: string,
-    runtimeId: string,
-    attemptCount: number,
-    uploadedSizeBytes: number,
-  ): MultiremiSessionArchive | null {
-    return this.sessionArchives.markReadyAttempt(id, runtimeId, attemptCount, uploadedSizeBytes);
+    workspaceId: string,
+    revision: number,
+    credentialId: string,
+  ) {
+    return this.executionProfiles.getKey(
+      id,
+      workspaceId,
+      revision,
+      credentialId,
+    );
+  }
+  saveExecutionGroup(
+    workspaceId: string,
+    input: import("@multiremi/contracts/execution-profile.js").ExecutionGroupInput,
+    id = createId("eg"),
+  ) {
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      let profileId = input.profile_id;
+      if (input.connection !== undefined) {
+        if (input.endpoint_id !== undefined) throw new Error("Save endpoint settings through the endpoint API");
+        if (!input.connection || typeof input.connection !== "object" || Array.isArray(input.connection))
+          throw new Error("connection must be a provider connection object");
+        if (input.provider !== "claude" && input.provider !== "codex")
+          throw new Error("Custom connections require Claude or Codex");
+        if (profileId !== null && (typeof profileId !== "string" || !this.getExecutionProfile(profileId, workspaceId)))
+          throw new Error("Profile not found in this workspace");
+        const { name, profile, api_key } = input.connection;
+        profileId = this.executionProfiles.save(workspaceId, {
+          name, provider: input.provider, profile, api_key,
+        }, profileId ?? undefined).id;
+      }
+      const result = saveExecutionGroup(this.db, workspaceId, id, { ...input, profile_id: profileId });
+      this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
+      return result;
+    })();
+  }
+  deleteExecutionGroup(id: string, workspaceId: string) {
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const result = deleteExecutionGroup(this.db, id, workspaceId);
+      this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
+      return result;
+    })();
+  }
+  listExecutionGroups(workspaceId: string) {
+    return listExecutionGroups(this.db, workspaceId);
+  }
+  getExecutionGroup(id: string, workspaceId = "local") {
+    return getExecutionGroup(this.db, id, workspaceId);
+  }
+  getTaskTrace(taskId: string): MultiremiTaskTrace | null {
+    return this.taskTraces.get(taskId);
   }
 
-  markSessionArchiveFailedAttempt(
-    id: string,
-    runtimeId: string,
-    attemptCount: number,
-    error: string,
-  ): MultiremiSessionArchive | null {
-    return this.sessionArchives.markFailedAttempt(id, runtimeId, attemptCount, error);
+  markTaskTraceDaemon(taskId: string, runtimeId: string): void {
+    this.taskTraces.markDaemon(taskId, runtimeId);
   }
 
-  markSessionArchiveFailed(id: string, error: string): MultiremiSessionArchive | null {
-    return this.sessionArchives.markFailed(id, error);
+  markTaskTraceNone(taskId: string): void {
+    this.taskTraces.markNone(taskId);
   }
 
-  markSessionArchiveVerificationFailedAttempt(
-    id: string,
-    attemptCount: number,
-    error: string,
-  ): MultiremiSessionArchive | null {
-    return this.sessionArchives.markVerificationFailedAttempt(id, attemptCount, error);
+  markTaskTraceLost(taskId: string): void {
+    this.taskTraces.markLost(taskId);
   }
 
-  retrySessionArchive(id: string): MultiremiSessionArchive | null {
-    return this.sessionArchives.retry(id);
+  markTaskTracesLostForRuntimes(runtimeIds: readonly string[]): number {
+    return this.taskTraces.markLostForRuntimes(runtimeIds);
   }
 
-  listExecutionGroups(workspaceId: string) { return listExecutionGroups(this.db, workspaceId); }
-  getExecutionGroup(id: string, workspaceId = "local") { return getExecutionGroup(this.db, id, workspaceId); }
+  moveTaskTracesToRuntime(fromRuntimeId: string, toRuntimeId: string): void {
+    this.taskTraces.moveToRuntime(fromRuntimeId, toRuntimeId);
+  }
+
 
   createAgent(input: CreateAgentInput): MultiremiAgent {
     return this.agents.createAgent(input);
@@ -824,13 +1141,14 @@ runMigrations(this.db);
     const updated = this.db.transaction(() => {
       const current = this.agents.getAgent(id);
       if (!current) throw new Error(`Agent not found: ${id}`);
-      const agent = this.agents.updateAgent(id, input);
+      const agent = this.agents.updateAgentWithinTransaction(id, input);
       if (current.role !== agent.role) {
         for (const task of this.tasks.listAgentTasks(id)) this.accessTokens.revokeTaskAccessTokens(task.id);
       }
       return agent;
     })();
     if (input.name !== undefined || input.visibility !== undefined) this.notifyRepositoryActivity(updated.workspaceId, this.affectedActivity(updated.workspaceId, "agent", id));
+    this.publishDaemonDispatchConditionsChanged(updated.workspaceId);
     return updated;
   }
 
@@ -863,7 +1181,9 @@ runMigrations(this.db);
   }
 
   restoreAgent(id: string): MultiremiAgent {
-    return this.agents.restoreAgent(id);
+    const agent = this.agents.restoreAgent(id);
+    this.publishDaemonDispatchConditionsChanged(agent.workspaceId);
+    return agent;
   }
 
   cancelAgentTasks(agentId: string): number {
@@ -895,7 +1215,7 @@ runMigrations(this.db);
     return this.agents.listSkills(workspaceId, options);
   }
 
-  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill | null {
+  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = {}): MultiremiSkill | null {
     return this.agents.getSkill(id, options);
   }
 
@@ -911,12 +1231,16 @@ runMigrations(this.db);
     return this.agents.deleteSkillFile(skillId, fileId);
   }
 
-  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill[] {
+  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = {}): MultiremiSkill[] {
     return this.agents.listAgentSkills(agentId, options);
   }
 
   setAgentSkills(agentId: string, input: SetAgentSkillsInput | string[]): MultiremiSkill[] {
     return this.agents.setAgentSkills(agentId, input);
+  }
+
+  addAgentSkills(agentId: string, skillIds: readonly string[]): MultiremiSkill[] {
+    return this.agents.addAgentSkills(agentId, skillIds);
   }
 
   /** Internal cross-domain primitive; callers must already own a DB transaction. */
@@ -1034,7 +1358,9 @@ runMigrations(this.db);
     versionId: string,
     input: ReportAgentPluginRuntimeStateInput,
   ): MultiremiAgentPluginRuntimeState {
-    return this.agentPlugins.reportAgentPluginRuntimeState(runtimeId, versionId, input);
+    const state = this.agentPlugins.reportAgentPluginRuntimeState(runtimeId, versionId, input);
+    this.publishDaemonDispatchConditionsChanged(state.workspaceId, runtimeId);
+    return state;
   }
 
   reportAgentPluginRuntimeStateResult(
@@ -1042,14 +1368,17 @@ runMigrations(this.db);
     versionId: string,
     input: ReportAgentPluginRuntimeStateInput,
   ): { state: MultiremiAgentPluginRuntimeState; changed: boolean } {
-    return this.agentPlugins.reportAgentPluginRuntimeStateResult(runtimeId, versionId, input);
+    const result = this.agentPlugins.reportAgentPluginRuntimeStateResult(runtimeId, versionId, input);
+    if (result.changed) this.publishDaemonDispatchConditionsChanged(result.state.workspaceId, runtimeId);
+    return result;
   }
 
   /** Internal cross-domain primitive; caller owns workspace lifecycle + Plugin locks. */
   recordAgentPluginRuntimeHeartbeatWithinLock(
     runtimeId: string,
+    knownRuntime?: { daemonId: string | null; metadata: Record<string, unknown>; workspaceId: string | null },
   ): { changes: MultiremiAgentPluginRuntimeState[]; revision: string } {
-    return this.agentPlugins.recordAgentPluginRuntimeHeartbeatWithinLock(runtimeId);
+    return this.agentPlugins.recordAgentPluginRuntimeHeartbeatWithinLock(runtimeId, knownRuntime);
   }
 
   retryAgentPluginRuntime(
@@ -1083,8 +1412,17 @@ runMigrations(this.db);
     return this.agents.getDefaultAgent(workspaceId, provider, ownerId);
   }
 
-  getAgent(id: string): MultiremiAgent | null {
-    return this.agents.getAgent(id);
+  getAgent(id: string, options: { includeFiles?: boolean } = {}): MultiremiAgent | null {
+    return this.agents.getAgent(id, options);
+  }
+
+  /** The Agent row without its Skills or Skill files — for eligibility decisions only. */
+  getAgentLite(id: string): MultiremiAgent | null {
+    return this.agents.getAgentLite(id);
+  }
+
+  listAgentsLite(options: { includeArchived?: boolean } = {}): MultiremiAgent[] {
+    return this.agents.listAgentsLite(options);
   }
 
   getAgentByWorkspaceAndName(workspaceId: string, name: string): MultiremiAgent | null {
@@ -1095,8 +1433,26 @@ runMigrations(this.db);
     return this.agents.getAgentByRef(ref, workspaceId);
   }
 
+  /** Reference resolution from Agent rows only — no Skills, no Skill files. */
+  getAgentLiteByRef(ref: string, workspaceId?: string | null): MultiremiAgent | null {
+    return this.agents.getAgentLiteByRef(ref, workspaceId);
+  }
+
+  /** Live Agent rows by id, without Skills or Skill files. */
+  listAgentsLiteByIds(ids: readonly string[]): MultiremiAgent[] {
+    return this.agents.listAgentsLiteByIds(ids);
+  }
+
   listAgents(options?: { includeArchived?: boolean }): MultiremiAgent[] {
     return this.agents.listAgents(options);
+  }
+
+  listAgentCompatibilityCandidates(workspaceId: string, options?: { includeArchived?: boolean }): MultiremiAgent[] {
+    return this.agents.listAgentCompatibilityCandidates(workspaceId, options);
+  }
+
+  listAgentSkillSummaries(agents: readonly MultiremiAgent[]): Map<string, MultiremiSkill[]> {
+    return this.agents.listAgentSkillSummaries(agents);
   }
 
   createWorkspaceMember(input: CreateWorkspaceMemberInput): MultiremiWorkspaceMember {
@@ -1111,8 +1467,12 @@ runMigrations(this.db);
     return this.workspaces.getWorkspaceMemberByRef(ref, workspaceId);
   }
 
-  listWorkspaceMembers(workspaceId?: string | null): MultiremiWorkspaceMember[] {
-    return this.workspaces.listWorkspaceMembers(workspaceId);
+  updateBotMenu(workspaceId: string, botId: string, menu: import("@multiremi/contracts/types.js").BotMenuConfig): MultiremiWorkspace | null {
+    return this.workspaces.updateBotMenu(workspaceId, botId, menu);
+  }
+
+  listWorkspaceMembers(workspaceId?: string | null, options: { includeArchived?: boolean } = {}): MultiremiWorkspaceMember[] {
+    return this.workspaces.listWorkspaceMembers(workspaceId, options);
   }
 
   updateWorkspaceMember(id: string, input: UpdateWorkspaceMemberInput): MultiremiWorkspaceMember {
@@ -1168,6 +1528,39 @@ runMigrations(this.db);
     return this.workspaces.findWorkspaceMemberForUser(userId, workspaceId);
   }
 
+  getWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember | null {
+    return this.workspaces.getWorkspaceOperator(workspaceId);
+  }
+
+  ensureWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember {
+    return this.workspaces.ensureWorkspaceOperator(workspaceId);
+  }
+
+  canReadQuestionNotification(id: string, access: InboxAccess): boolean {
+    const entry = this.getMessage(id);
+    if (!entry) return false;
+    const original = typeof entry.metadata.root_question_id === 'string' ? this.getMessage(entry.metadata.root_question_id) : null;
+    const identity = questionNotificationIdentity(entry, original);
+    if (!identity) return false;
+    const query = questionNotificationFactsSql(identity, entry, access);
+    return canReadQuestionNotificationFacts(identity, entry, access, this.db.query(query.sql).get(...query.params));
+  }
+
+  /** Batch the same notification grant used by Inbox before pagination. */
+  readableQuestionNotifications(entries: readonly Parameters<typeof questionNotificationIdentity>[0][], access: InboxAccess,
+    originals: ReadonlyMap<string, Parameters<typeof questionNotificationIdentity>[0] | null>): Set<string> {
+    // Keep strict metadata validation (including numeric route revisions) from
+    // the scalar reader before applying the shared SQL fact checks.
+    const ids = [...new Set(entries.filter(entry => questionNotificationIdentity(entry,
+      originals.get(String(entry.metadata.root_question_id)))).map(entry => entry.id!))];
+    if (!ids.length) return new Set();
+    const guard = questionNotificationVisibilitySql(this.db, access, 'm', 'h.workspace_id');
+    const rows = this.db.query(`SELECT m.id FROM multiremi_conversation_log m
+      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id
+      WHERE m.id IN (${ids.map(() => '?').join(',')}) AND ${guard.where}`).all(...ids, ...guard.params) as Array<{ id: string }>;
+    return new Set(rows.map(row => row.id));
+  }
+
   listWorkspacesForUser(userId: string | null | undefined): MultiremiWorkspace[] {
     return this.workspaces.listWorkspacesForUser(userId);
   }
@@ -1186,6 +1579,10 @@ runMigrations(this.db);
 
   listWorkspaces(): MultiremiWorkspace[] {
     return this.workspaces.listWorkspaces();
+  }
+
+  hasWorkspace(id: string): boolean {
+    return this.workspaces.hasWorkspace(id);
   }
 
   getWorkspace(id: string): MultiremiWorkspace | null {
@@ -1296,7 +1693,11 @@ runMigrations(this.db);
         );
       }
       return ack;
-    });
+    }, false);
+  }
+
+  sshMeshDirectiveForRuntime(runtimeId: string): MultiremiSshMeshHeartbeatAck | null {
+    return this.sshMesh.directiveForRuntime(runtimeId);
   }
 
   recordControlPlaneSshMeshHeartbeat(
@@ -1323,7 +1724,7 @@ runMigrations(this.db);
         );
       }
       return ack;
-    });
+    }, false);
   }
 
   getSshMeshConfigForDaemon(runtimeId: string): MultiremiDaemonSshMeshConfig | null {
@@ -1382,6 +1783,24 @@ runMigrations(this.db);
     input: { models?: GatewayModelsSnapshot["models"]; sourceRevision: number; nativeCatalogStatus?: GatewayModelsSnapshot["nativeCatalogStatus"]; error?: string | null },
   ): void {
     return this.workspaces.saveGatewayModels(workspaceId, engine, input);
+  }
+
+  listGatewayModelContext(workspaceId: string, engine: RelayEngine): GatewayModelContextDecl[] {
+    return this.workspaces.listGatewayModelContext(workspaceId, engine);
+  }
+
+  getGatewayModelContext(workspaceId: string, engine: RelayEngine, modelId: string): GatewayModelContextDecl | null {
+    return this.workspaces.getGatewayModelContext(workspaceId, engine, modelId);
+  }
+
+  saveGatewayModelContext(
+    workspaceId: string, engine: RelayEngine, input: { modelId: string; updatedBy?: string | null },
+  ): GatewayModelContextDecl {
+    return this.workspaces.saveGatewayModelContext(workspaceId, engine, input);
+  }
+
+  deleteGatewayModelContext(workspaceId: string, engine: RelayEngine, modelId: string): boolean {
+    return this.workspaces.deleteGatewayModelContext(workspaceId, engine, modelId);
   }
 
   listGatewayModelReasoning(workspaceId: string, engine: RelayEngine): GatewayModelReasoningDecl[] {
@@ -1490,9 +1909,10 @@ runMigrations(this.db);
 
   flushAgentIssueUpdatesForIssueWithinTransaction(
     issueId: string,
+    deferredEvents: CommitEventQueue,
     now?: string | Date,
   ): AgentIssueUpdateFlushResult {
-    return this.agentIssueUpdates.flushIssueNowWithinTransaction(issueId, now);
+    return this.agentIssueUpdates.flushIssueNowWithinTransaction(issueId, deferredEvents, now);
   }
 
   listNotificationChannels(workspaceId: string): MultiremiNotificationChannel[] {
@@ -1600,14 +2020,83 @@ runMigrations(this.db);
     return this.notificationDispatcher.retry(id);
   }
 
+  /**
+   * The table the `body_html` backfill reads and writes (MUL-439).
+   *
+   * The backfill task is built in the API process, where the store's own
+   * `SqlDatabase` is not reachable from outside this class. Rather than widen
+   * the store's surface with a general-purpose handle, these two methods give
+   * the task the one shape it needs: does the table exist with the columns B1
+   * owns, and what rows still need a render.
+   *
+   * The probe is the store's own `PRAGMA table_info`, which
+   * `translateSqliteToPg` maps to `information_schema.columns`, so it answers
+   * on both backends. `null` means the table is not there yet, which is the
+   * documented case where the backfill must not start.
+   */
+  conversationLogRenderColumns(): { body_html: boolean; render_version: boolean } | null {
+    let columns: Array<{ name?: unknown }>;
+    try {
+      columns = this.db
+        .query("PRAGMA table_info(multiremi_conversation_log)")
+        .all() as Array<{ name?: unknown }>;
+    } catch {
+      return null;
+    }
+    if (columns.length === 0) return null;
+    const names = new Set(columns.map((column) => String(column.name ?? "")));
+    return {
+      body_html: names.has("body_html"),
+      render_version: names.has("render_version"),
+    };
+  }
+
+  /**
+   * Conversation-log rows whose `body_html` is missing or was produced by a
+   * different `render_version`, oldest first.
+   *
+   * Returns an empty list when the table or either column is missing, so a
+   * caller can run this before B1 lands without special-casing.
+   */
+  listConversationLogRowsNeedingBodyHtml(
+    renderVersion: string,
+    limit: number,
+  ): Array<{ session_id: string; seq: number; body_md: string | null }> {
+    const columns = this.conversationLogRenderColumns();
+    if (!columns?.body_html || !columns.render_version) return [];
+    return this.db
+      .query(
+        `SELECT session_id, seq, body_md FROM multiremi_conversation_log
+         WHERE body_html IS NULL OR render_version IS NULL OR render_version <> ?
+         ORDER BY session_id, seq
+         LIMIT ?`,
+      )
+      .all(renderVersion, limit) as Array<{ session_id: string; seq: number; body_md: string | null }>;
+  }
+
+  /** Store one rendered body. Guarded by the table's primary key. */
+  setConversationLogBodyHtml(
+    sessionId: string,
+    seq: number,
+    html: string,
+    renderVersion: string,
+  ): number {
+    return this.db
+      .query(
+        `UPDATE multiremi_conversation_log
+         SET body_html = ?, render_version = ?
+         WHERE session_id = ? AND seq = ?`,
+      )
+      .run(html, renderVersion, sessionId, seq).changes;
+  }
+
   startNotificationDeliverySweeper(): void {
     this.notificationDispatcher.start();
     this.taskCapabilityMonitor.start();
   }
 
-  stopNotificationDeliverySweeper(): void {
-    this.notificationDispatcher.stop();
-    this.taskCapabilityMonitor.stop();
+  async stopNotificationDeliverySweeper(): Promise<void> {
+    await Promise.all([this.notificationDispatcher.stop(), this.taskCapabilityMonitor.stop()]);
   }
 
   createFeedback(input: CreateFeedbackInput): MultiremiFeedback {
@@ -1789,8 +2278,20 @@ runMigrations(this.db);
   // `revealFeishuBotSecrets` decrypt, and both are reachable solely from the
   // daemon route and the admin-only test route.
 
+  /** Explicit bot scope for management; transport scopes are resolved from the
+   * authenticated Runtime or persisted Chat binding, never a browser selection. */
+  feishuBotFor(botId = "default"): FeishuBotRepo { return this.feishuBot.forBot(botId); }
+
   getFeishuBotConfig(workspaceId: string): MultiremiFeishuBotConfig | null {
     return this.feishuBot.getConfig(workspaceId);
+  }
+
+  enqueueAutopilotReportWithinTransaction(...args: Parameters<FeishuBotRepo["enqueueAutopilotReportWithinTransaction"]>): void {
+    this.feishuBot.enqueueAutopilotReportWithinTransaction(...args);
+  }
+
+  getFeishuBotConfigForSession(workspaceId: string, sessionId: string): MultiremiFeishuBotConfig | null {
+    return this.feishuBot.getConfigForSession(workspaceId, sessionId);
   }
 
   listFeishuBotAgentRoutes(workspaceId: string): ReturnType<FeishuBotRepo["listRoutes"]> {
@@ -1821,8 +2322,8 @@ runMigrations(this.db);
     return this.feishuBot.upsertConfig(workspaceId, input);
   }
 
-  deleteFeishuBotConfig(workspaceId: string): boolean {
-    return this.feishuBot.deleteConfig(workspaceId);
+  deleteFeishuBotConfig(workspaceId: string, actorId?:string): boolean {
+    return this.feishuBot.deleteConfig(workspaceId,actorId);
   }
 
   setFeishuBotEnabled(workspaceId: string, enabled: boolean, actor?: string | null): MultiremiFeishuBotConfig | null {
@@ -1845,7 +2346,7 @@ runMigrations(this.db);
   }
 
   getFeishuBotDaemonConfig(workspaceId: string, runtimeId: string): MultiremiFeishuBotDaemonConfig | null {
-    return this.feishuBot.getDaemonConfig(workspaceId, runtimeId);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).getDaemonConfig(workspaceId, runtimeId);
   }
 
   submitFeishuBotMessage(
@@ -1853,11 +2354,15 @@ runMigrations(this.db);
     runtimeId: string,
     input: Parameters<FeishuBotRepo["submitMessage"]>[2],
   ): ReturnType<FeishuBotRepo["submitMessage"]> {
-    return this.feishuBot.submitMessage(workspaceId, runtimeId, input);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).submitMessage(workspaceId, runtimeId, input);
   }
 
   getFeishuIssueIdForChatSession(chatSessionId: string): string | null {
     return this.feishuBot.getIssueIdForChatSession(chatSessionId);
+  }
+
+  getVerifiedFeishuIssueIdForChatSession(chatSessionId: string): string | null {
+    return this.feishuBot.getVerifiedIssueIdForChatSession(chatSessionId);
   }
 
   isFeishuTransportChatSession(chatSessionId: string): boolean {
@@ -1868,16 +2373,51 @@ runMigrations(this.db);
     return this.feishuBot.canDaemonAccessTask(workspaceId, daemonId, taskId);
   }
 
+  canFeishuBotDaemonAccessIssueTaskHumanRequest(workspaceId: string, daemonId: string, taskId: string): boolean {
+    return this.feishuBot.canDaemonAccessIssueTaskHumanRequest(workspaceId, daemonId, taskId);
+  }
+
+  canFeishuBotDaemonAccessIssueDecision(workspaceId: string, daemonId: string, issueId: string): boolean {
+    return this.feishuBot.canDaemonAccessIssueDecision(workspaceId, daemonId, issueId);
+  }
+
+  supportsFeishuIssueDecisionCard(workspaceId: string, runtimeId: string | null | undefined): boolean {
+    return this.feishuBot.supportsIssueDecisionCard(workspaceId, runtimeId);
+  }
+
+  resolveFeishuDecisionOperatorMember(workspaceId: string, appId: string, openId: string | null | undefined) {
+    return this.feishuBot.resolveIssueDecisionOperatorMember(workspaceId, appId, openId);
+  }
+
+  listFeishuIssueDecisionCards(workspaceId: string, runtimeId: string) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).listLiveIssueDecisionCards(workspaceId, runtimeId);
+  }
+
+  getFeishuIssueDecisionCardContext(workspaceId: string, decisionId: string) {
+    return this.feishuBot.getIssueDecisionCardContext(workspaceId, decisionId);
+  }
+
+  listFeishuBotLiveDecisionCards(
+    workspaceId: string,
+    runtimeId: string,
+  ): ReturnType<FeishuBotRepo["listLiveDecisionCards"]> {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).listLiveDecisionCards(workspaceId, runtimeId);
+  }
+
+  listFeishuBotSettledHumanRequestCandidates(workspaceId: string, runtimeId: string, daemonId?: string) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).listSettledHumanRequestCandidates(workspaceId, runtimeId, daemonId);
+  }
+
   assertFeishuBotInboundAttachmentScope(...args: Parameters<FeishuBotRepo["assertInboundAttachmentScope"]>) {
-    return this.feishuBot.assertInboundAttachmentScope(...args);
+    return this.feishuBot.forRuntime(args[0], args[1]).assertInboundAttachmentScope(...args);
   }
 
   createFeishuBotInboundAttachment(...args: Parameters<FeishuBotRepo["createInboundAttachment"]>) {
-    return this.feishuBot.createInboundAttachment(...args);
+    return this.feishuBot.forRuntime(args[0], args[1]).createInboundAttachment(...args);
   }
 
   sendChatAttachments(...args: Parameters<FeishuBotRepo["sendChatAttachments"]>) {
-    return this.feishuBot.sendChatAttachments(...args);
+    return this.feishuBot.forTask(args[0]).sendChatAttachments(...args);
   }
 
   getFeishuBotChatConversationKind(chatSessionId: string): "p2p" | "group" | null {
@@ -1913,15 +2453,40 @@ runMigrations(this.db);
     return this.feishuBot.prepareIssueTopicWithinTransaction(issue);
   }
 
+  prepareIssueDecisionCardWithinTransaction(
+    issue: MultiremiIssue,
+    decision: MultiremiIssueDecision,
+    deferredEvents: CommitEventQueue,
+  ): void {
+    this.feishuBot.prepareIssueDecisionCardWithinTransaction(issue, decision, deferredEvents);
+  }
+
+  enqueueIssueDecisionCardPatchWithinTransaction(
+    decision: MultiremiIssueDecision,
+    deferredEvents: CommitEventQueue,
+  ): void {
+    this.feishuBot.enqueueIssueDecisionCardPatchWithinTransaction(decision, deferredEvents);
+  }
+
   prepareFeishuBotHumanRequestPush(request: MultiremiTaskHumanRequest): MultiremiTask | null {
     return this.feishuBot.prepareHumanRequestPush(request);
+  }
+
+  prepareFeishuIssueRoundPushes(input: {
+    issue: MultiremiIssue;
+    leaderTask: MultiremiTask;
+  }): MultiremiTask[] {
+    return this.feishuBot.listConfigs(input.issue.workspaceId).flatMap(bot => this.feishuBot.forBot(bot.botId).prepareIssueRoundPushes(input));
   }
 
   prepareFeishuIssueRoundPushesWithinTransaction(input: {
     issue: MultiremiIssue;
     leaderTask: MultiremiTask;
+    envelopeDeliveries?: import("./repos/inbox-repo.js").EnvelopeDelivery[];
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector;
+    deferredEvents: import("./context.js").CommitEventQueue;
   }): MultiremiTask[] {
-    return this.feishuBot.prepareIssueRoundPushesWithinTransaction(input);
+    return this.feishuBot.listConfigs(input.issue.workspaceId).flatMap(bot => this.feishuBot.forBot(bot.botId).prepareIssueRoundPushesWithinTransaction(input));
   }
 
   retargetFeishuRoundPushTaskWithinTransaction(fromTaskId: string, toTaskId: string): void {
@@ -1932,6 +2497,26 @@ runMigrations(this.db);
     this.feishuBot.upsertRoundPushDeliveryWithinTransaction(task, body);
   }
 
+  prepareFeishuBackgroundDoorbellDeliveryWithinTransaction(originAttemptId: string, originTurnId: string | null, taskId: string): void {
+    this.feishuBot.forTask(taskId).prepareBackgroundDoorbellDeliveryWithinTransaction(originAttemptId, originTurnId, taskId);
+  }
+
+  materializeFeishuTaskDeliveries(taskId: string): void {
+    this.feishuBot.materializeTaskDeliveries(taskId);
+  }
+
+  claimFeishuBotOutbounds(workspaceId: string, runtimeId: string, now?: string | Date): MultiremiFeishuBotOutboundDelivery[] {
+    const deliveries: MultiremiFeishuBotOutboundDelivery[] = [];
+    for (let count = 0; count < 16; count++) {
+      const delivery = this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, now, true, true, true, true);
+      if (!delivery) break;
+      deliveries.push(delivery);
+      // E5 and pre-C5 deliveries retain their existing one-row heartbeat cadence.
+      if (!delivery.kind || delivery.kind.startsWith("decision_")) break;
+    }
+    return deliveries;
+  }
+
   claimFeishuBotOutbound(
     workspaceId: string,
     runtimeId: string,
@@ -1939,8 +2524,26 @@ runMigrations(this.db);
     supportsTaskStream = false,
     supportsNativeCot = false,
     supportsAttachments = false,
+    supportsKinds = false,
   ): MultiremiFeishuBotOutboundDelivery | null {
-    return this.feishuBot.claimOutbound(workspaceId, runtimeId, now, supportsTaskStream, supportsNativeCot, supportsAttachments);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, now, supportsTaskStream, supportsNativeCot, supportsAttachments, supportsKinds);
+  }
+
+  pendingFeishuBotOutbound(workspaceId: string, runtimeId: string): MultiremiFeishuBotOutboundDelivery | null {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, undefined, true, true, true, true, "peek");
+  }
+
+  nextFeishuBotOutboundWakeAt(runtimeId: string): number | null {
+    const workspaceId = this.runtimes.getRuntimeLite(runtimeId)?.workspaceId;
+    return workspaceId ? this.feishuBot.forRuntime(workspaceId, runtimeId).nextOutboundWakeAt(workspaceId, runtimeId) : null;
+  }
+
+  claimAcknowledgedFeishuBotOutbound(workspaceId: string, runtimeId: string, id: string, claimToken: string): void {
+    this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, undefined, true, true, true, true, { id, claimToken });
+  }
+
+  discardPendingFeishuBotOutbound(workspaceId: string, runtimeId: string, id: string): void {
+    this.feishuBot.forRuntime(workspaceId, runtimeId).discardPendingOutbound(workspaceId, runtimeId, id);
   }
 
   getFeishuBotOutboundAttachment(
@@ -1950,7 +2553,7 @@ runMigrations(this.db);
     claimToken: string,
     attachmentId: string,
   ): MultiremiAttachment | null {
-    return this.feishuBot.getOutboundAttachment(
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).getOutboundAttachment(
       workspaceId,
       runtimeId,
       deliveryId,
@@ -1963,7 +2566,11 @@ runMigrations(this.db);
     workspaceId: string, runtimeId: string, deliveryId: string, claimToken: string,
     openId: string | null, now?: string | Date,
   ): { openId: string | null } | null {
-    return this.feishuBot.prepareOutboundMention(workspaceId, runtimeId, deliveryId, claimToken, openId, now);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).prepareOutboundMention(workspaceId, runtimeId, deliveryId, claimToken, openId, now);
+  }
+
+  getFeishuBotOutboundReportState(workspaceId: string, runtimeId: string, deliveryId: string, claimToken: string) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).getOutboundReportState(workspaceId, runtimeId, deliveryId, claimToken);
   }
 
   reportFeishuBotOutbound(
@@ -1973,7 +2580,7 @@ runMigrations(this.db);
     input: Parameters<FeishuBotRepo["reportOutbound"]>[3],
     now?: string | Date,
   ): boolean {
-    return this.feishuBot.reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
   }
 
   resetFeishuBotSession(
@@ -1982,7 +2589,7 @@ runMigrations(this.db);
     revision: number,
     externalSessionKey: string,
   ): boolean {
-    return this.feishuBot.resetSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey);
   }
 
   cancelFeishuBotSessionTask(
@@ -1992,7 +2599,7 @@ runMigrations(this.db);
     externalSessionKey: string,
     options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
   ): import("@multiremi/contracts/types.js").FeishuBotCancelResult {
-    return this.feishuBot.cancelSessionTask(workspaceId, runtimeId, revision, externalSessionKey, options);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).cancelSessionTask(workspaceId, runtimeId, revision, externalSessionKey, options);
   }
 
   inspectFeishuBotSession(
@@ -2001,11 +2608,11 @@ runMigrations(this.db);
     revision: number,
     externalSessionKey: string,
   ): ReturnType<FeishuBotRepo["inspectSession"]> {
-    return this.feishuBot.inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
   }
 
   feishuBotDirectiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {
-    return this.feishuBot.directiveForRuntime(workspaceId, runtimeId);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).directiveForRuntime(workspaceId, runtimeId);
   }
 
   reportFeishuBotRuntimeStatus(
@@ -2013,7 +2620,7 @@ runMigrations(this.db);
     runtimeId: string,
     input: ReportFeishuBotRuntimeStatusInput,
   ): MultiremiFeishuBotRuntimeStatus {
-    return this.feishuBot.reportRuntimeStatus(workspaceId, runtimeId, input);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).reportRuntimeStatus(workspaceId, runtimeId, input);
   }
 
   listFeishuBotRuntimeStatuses(workspaceId: string): MultiremiFeishuBotRuntimeStatus[] {
@@ -2238,12 +2845,21 @@ runMigrations(this.db);
     task: Pick<MultiremiTask, "id" | "agentId" | "workspaceId">,
     userId: string,
   ): Promise<MultiremiCreatedAccessToken> {
-    const agent = this.getAgent(task.agentId);
+    // Scope decisions read role/workspace/provider; the token payload never carries Skills.
+    const agent = this.getAgentLite(task.agentId);
     const scopes: string[] = [];
     if (agent && agentRoleAtLeast(agent.role, "supervisor")) scopes.push("organizer:supervisor");
     const storedTask = this.getTask(task.id);
     const run = storedTask?.autopilotRunId ? this.getAutopilotRun(storedTask.autopilotRunId) : null;
-    const repositoryWikiAutomation = resolveRepositoryWikiAutomation(this, task.workspaceId);
+    // Capability resolution reads roles and plugin bindings; hydrating every Agent's
+    // Skills to answer it is what made a claim cross megabytes it never used.
+    const repositoryWikiAutomation = resolveRepositoryWikiAutomation({
+      listAgents: () => this.listAgentsLite(),
+      listAutopilots: (workspaceId) => this.listAutopilots(workspaceId),
+      listAgentPlugins: (workspaceId, options) => this.listAgentPlugins(workspaceId, options),
+      listAgentPluginBindings: (agentId) => this.listAgentPluginBindings(agentId),
+      listAutopilotTriggers: (autopilotId) => this.listAutopilotTriggers(autopilotId),
+    }, task.workspaceId);
     if (
       agent
       && agentRoleAtLeast(agent.role, "maintainer")
@@ -2270,6 +2886,10 @@ runMigrations(this.db);
 
   getAccessToken(id: string): MultiremiAccessToken | null {
     return this.accessTokens.getAccessToken(id);
+  }
+
+  isAccessTokenStillValid(token: MultiremiAccessToken): boolean {
+    return this.accessTokens.isAccessTokenStillValid(token);
   }
 
   bindDaemonAccessToken(id: string, daemonId: string): MultiremiAccessToken | null {
@@ -2498,7 +3118,7 @@ runMigrations(this.db);
     dedicated: boolean,
     updatedBy: string | null,
   ): DaemonProfile {
-    return this.db.transaction(() => {
+    const profile = this.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const runtime = this.listRuntimes().find((candidate) => (
         (candidate.workspaceId ?? "local") === workspaceId && candidate.daemonId === daemonId
@@ -2513,6 +3133,8 @@ runMigrations(this.db);
         updatedBy,
       );
     })();
+    this.publishDaemonDispatchConditionsChanged(workspaceId);
+    return profile;
   }
 
   getDaemonRetirementPlan(workspaceId: string, daemonId: string): DaemonRetirementPlan {
@@ -2610,11 +3232,14 @@ runMigrations(this.db);
     });
   }
 
-  private withSshMeshLifecycleLock<T>(workspaceId: string, operation: () => T): T {
-    return this.db.transaction(() => {
+  private withSshMeshLifecycleLock<T>(workspaceId: string, operation: () => T, publishChange = true): T {
+    const result = this.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       return operation();
     })();
+    if (publishChange) this.ctx.emitWorkspaceEvent({ type: "daemon:ssh_mesh_changed", workspaceId,
+      actorType: "system", actorId: null, payload: {} });
+    return result;
   }
 
   private assertNoDaemonRetirementRekeyInProgress(workspaceId: string): void {
@@ -2662,6 +3287,23 @@ runMigrations(this.db);
     return this.runtimes.getRuntime(id);
   }
 
+  getRuntimeForDispatch(id: string): MultiremiRuntime | null {
+    return this.runtimes.getRuntimeForDispatch(id);
+  }
+
+  /** The Runtime row without the derived usage/model/group reads. */
+  daemonInputRuntimeIds(workspaceId: string) { return this.runtimes.daemonInputRuntimeIds(workspaceId); }
+
+  getRuntimesLite(ids: readonly string[]) { return this.runtimes.getRuntimesLite(ids); }
+
+  getRuntimeLite(id: string): MultiremiRuntime | null {
+    return this.runtimes.getRuntimeLite(id);
+  }
+
+  recordDaemonProtocol(runtimeId: string, daemonId: string, version: number, cliVersion?: string): void {
+    this.runtimes.recordDaemonProtocol(runtimeId, daemonId, version, cliVersion);
+  }
+
   getRuntimeCodexProfile(id: string) {
     return this.runtimes.getRuntimeCodexProfile(id);
   }
@@ -2675,7 +3317,9 @@ runMigrations(this.db);
   }
 
   setRuntimeCodexProfile(id: string, input: unknown, apiKey?: unknown) {
-    return this.runtimes.setRuntimeCodexProfile(id, input, apiKey);
+    const profile = this.runtimes.setRuntimeCodexProfile(id, input, apiKey);
+    this.publishDaemonDispatchConditionsChanged(this.getRuntimeLite(id)?.workspaceId ?? "local", id);
+    return profile;
   }
 
   getRuntimeCodexProfileKey(runtimeId: string, credentialId: string) {
@@ -2691,7 +3335,9 @@ runMigrations(this.db);
   }
 
   setRuntimeClaudeProfile(id: string, input: unknown, apiKey?: unknown) {
-    return this.runtimes.setRuntimeClaudeProfile(id, input, apiKey);
+    const profile = this.runtimes.setRuntimeClaudeProfile(id, input, apiKey);
+    this.publishDaemonDispatchConditionsChanged(this.getRuntimeLite(id)?.workspaceId ?? "local", id);
+    return profile;
   }
 
   getRuntimeClaudeProfileKey(runtimeId: string, credentialId: string) {
@@ -2702,12 +3348,22 @@ runMigrations(this.db);
     return this.runtimes.listRuntimes();
   }
 
+  listRuntimesLiteForWorkspace(workspaceId: string): MultiremiRuntime[] {
+    return this.runtimes.listRuntimesLiteForWorkspace(workspaceId);
+  }
+
+  listRuntimesForWorkspace(workspaceId: string): MultiremiRuntime[] {
+    return this.runtimes.listRuntimesForWorkspace(workspaceId);
+  }
+
   listActiveAgentsByRuntime(runtimeId: string): MultiremiAgent[] {
     return this.agents.listActiveAgentsByRuntime(runtimeId);
   }
 
   updateRuntime(id: string, input: UpdateRuntimeInput): MultiremiRuntime {
-    return this.runtimes.updateRuntime(id, input);
+    const runtime = this.runtimes.updateRuntime(id, input);
+    this.publishDaemonDispatchConditionsChanged(runtime.workspaceId ?? "local");
+    return runtime;
   }
 
   setRuntimeOffline(id: string): MultiremiRuntime | null {
@@ -2726,15 +3382,16 @@ runMigrations(this.db);
     return this.runtimes.deleteRuntime(id);
   }
 
-  deleteRuntimeWithArchivedAgentCleanup(id: string): StrictRuntimeDeleteResult {
-    return this.runtimes.deleteRuntimeWithArchivedAgentCleanup(id);
+  deleteRuntimeWithArchivedAgentCleanup(id: string, options: RuntimeDeleteOptions = {}): StrictRuntimeDeleteResult {
+    return this.runtimes.deleteRuntimeWithArchivedAgentCleanup(id, options);
   }
 
   archiveAgentsAndDeleteRuntime(
     id: string,
     expectedActiveAgentIds: string[],
+    options: RuntimeDeleteOptions = {},
   ): ArchiveAgentsAndDeleteRuntimeResult {
-    return this.runtimes.archiveAgentsAndDeleteRuntime(id, expectedActiveAgentIds);
+    return this.runtimes.archiveAgentsAndDeleteRuntime(id, expectedActiveAgentIds, options);
   }
 
   mergeRuntimeInto(
@@ -2827,6 +3484,22 @@ runMigrations(this.db);
     return this.runtimes.claimRuntimeDirectoryScanRequest(runtimeId);
   }
 
+  createRuntimeGcRunRequest(runtimeId: string, input: { mode: GcRunMode; requestedBy: string | null }): GcRunRequest {
+    return this.runtimes.createRuntimeGcRunRequest(runtimeId, input);
+  }
+
+  getRuntimeGcRunRequest(runtimeId: string, requestId: string): GcRunRequest | null {
+    return this.runtimes.getRuntimeGcRunRequest(runtimeId, requestId);
+  }
+
+  reportRuntimeGcRunResult(
+    runtimeId: string,
+    requestId: string,
+    input: { status: "completed" | "failed"; report: StorageReport | null; error: string | null },
+  ): GcRunRequest {
+    return this.runtimes.reportRuntimeGcRunResult(runtimeId, requestId, input);
+  }
+
   reportRuntimeDirectoryScanResult(runtimeId: string, requestId: string, input: ReportRuntimeDirectoryScanInput): MultiremiRuntimeDirectoryScanRequest {
     return this.runtimes.reportRuntimeDirectoryScanResult(runtimeId, requestId, input);
   }
@@ -2835,12 +3508,39 @@ runMigrations(this.db);
     return this.runtimes.createRuntimeUpdateRequest(runtimeId, input);
   }
 
-  reconcileRuntimeCliRelease(targetVersion: string): MultiremiRuntimeUpdateRequest[] {
-    return this.runtimes.reconcileRuntimeCliRelease(targetVersion);
+  reconcileRuntimeCliRelease(targetVersion: string, targetCommit?: string): MultiremiRuntimeUpdateRequest[] {
+    return this.runtimes.reconcileRuntimeCliRelease(targetVersion, targetCommit);
+  }
+
+  reconcileRuntimeUpdateFailures(): void { this.runtimes.reconcileRuntimeUpdateFailures(); }
+
+  runtimeCliReleaseReconciliationKey(targetVersion: string, targetCommit?: string): string {
+    return this.runtimes.runtimeCliReleaseReconciliationKey(targetVersion, targetCommit);
   }
 
   getRuntimeUpdateRequest(runtimeId: string, requestId: string): MultiremiRuntimeUpdateRequest | null {
     return this.runtimes.getRuntimeUpdateRequest(runtimeId, requestId);
+  }
+
+  plannedRestarts(): PlannedRestarts { return new PlannedRestarts(this.ctx); }
+
+  beginDaemonDrain(...args: Parameters<RuntimesRepo["beginDaemonDrain"]>) { return this.runtimes.beginDaemonDrain(...args); }
+  undrainDaemon(...args: Parameters<RuntimesRepo["undrainDaemon"]>) { return this.runtimes.undrainDaemon(...args); }
+  getDaemonDrainStatus(...args: Parameters<RuntimesRepo["getDaemonDrainStatus"]>) { return this.runtimes.getDaemonDrainStatus(...args); }
+  reconcileDaemonDrain(runtimeId: string) { return this.runtimes.reconcileDaemonDrain(runtimeId); }
+  daemonDrainDirective(runtimeId: string) {
+    const maintenance = this.getPlatformMaintenance();
+    return { mode: maintenance.mode === "draining" || this.hasCliUpdateDrainForRuntime(runtimeId) ? "draining" as const : "normal" as const,
+      generation: maintenance.generation };
+  }
+  nextDaemonDrainWakeAt(runtimeId: string): number | null {
+    // Scheduling only needs the deadline, not the status/task/ack aggregate.
+    const row = this.ctx.db.query(`SELECT drain.deadline FROM multiremi_runtimes runtime
+      JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local')
+        AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id)
+      WHERE runtime.id = ?`).get(runtimeId) as { deadline: string } | null;
+    const at = row ? Date.parse(row.deadline) : NaN;
+    return Number.isFinite(at) && at > Date.now() ? at : null;
   }
 
   hasCliUpdateDrainForRuntime(runtimeId: string): boolean {
@@ -2852,7 +3552,10 @@ runMigrations(this.db);
   }
 
   reportRuntimeUpdateResult(runtimeId: string, requestId: string, input: ReportRuntimeUpdateInput): MultiremiRuntimeUpdateRequest {
-    return this.runtimes.reportRuntimeUpdateResult(runtimeId, requestId, input);
+    const request = this.runtimes.reportRuntimeUpdateResult(runtimeId, requestId, input);
+    this.reconcileRuntimeUpdateFailures();
+    this.publishDaemonDispatchConditionsChanged(this.getRuntimeLite(runtimeId)?.workspaceId ?? "local");
+    return request;
   }
 
   createRuntimeCommandRequest(runtimeId: string, input: CreateRuntimeCommandInput): MultiremiRuntimeCommandRequest {
@@ -2963,6 +3666,47 @@ runMigrations(this.db);
     return this.usage.listRuntimeUsage(runtimeId);
   }
 
+  getUsageReport(input: UsageReportInput): UsageReport {
+    return new UsageAccountingRepo(this.ctx).report(input);
+  }
+
+  listUsagePrices(workspaceId: string): UsagePrice[] {
+    return new UsageAccountingRepo(this.ctx).listPrices(workspaceId);
+  }
+
+  setUsagePrice(workspaceId: string, input: SetUsagePriceInput): UsagePrice {
+    return new UsageAccountingRepo(this.ctx).setPrice(workspaceId, input);
+  }
+
+  closeUsagePrice(workspaceId: string, id: string, effectiveTo: string): UsagePrice {
+    return new UsageAccountingRepo(this.ctx).closePrice(workspaceId, id, effectiveTo);
+  }
+
+  reportTaskUsageSnapshot(taskId: string, snapshot: TaskUsageSnapshot, authority?: Parameters<TasksRepo["writeTaskUsageSnapshotFromDaemon"]>[2]): MultiremiTask {
+    const changed = authority ? this.tasks.writeTaskUsageSnapshotFromDaemon(taskId, snapshot, authority) : writeUsageSnapshot(this.ctx.db, taskId, snapshot);
+    const task = this.getTask(taskId)!;
+    if (changed) afterCommit(this.ctx.db, () => this.ctx.notifyTaskEvent("task:usage", task));
+    return task;
+  }
+
+  getTaskUsageRunRuntime(taskId: string, runId: string): string | null {
+    const row = this.ctx.db.query("SELECT runtime_id FROM multiremi_usage_run_scopes WHERE task_id=? AND run_id=?").get(taskId, runId) as { runtime_id: string | null } | null;
+    return row?.runtime_id ?? null;
+  }
+
+  isTaskUsageExecutionAuthorized(taskId: string, runId: string, runtimeId: string): boolean {
+    return !!this.ctx.db.query(`SELECT t.id FROM multiremi_turn_execution_records t JOIN multiremi_usage_task_scopes s ON s.task_id=t.id
+      JOIN multiremi_usage_runs r ON r.task_id=t.id AND r.run_id=s.active_run_id
+      WHERE t.id=? AND t.runtime_id=? AND t.status IN ('running','awaiting_human') AND s.active_run_id=? AND r.complete=0`).get(taskId, runtimeId, runId);
+  }
+
+  /** Deprecated transport replay check; never a reporting/statistics source. */
+  getLegacyTaskUsageForIngestion(taskId: string): unknown {
+    const row = this.ctx.db.query("SELECT usage FROM multiremi_turn_execution_records WHERE id=?").get(taskId) as { usage: unknown } | null;
+    return row?.usage ?? null;
+  }
+
+
   listUsageDaily(input: {
     workspaceId?: string | null;
     projectId?: string | null;
@@ -3023,45 +3767,153 @@ runMigrations(this.db);
     return this.usage.listAgentRuntime(input);
   }
   heartbeatRuntime(runtimeId: string, options: {
+    health?: import("@multiremi/contracts/daemon-protocol.js").DaemonHealth;
     claimPending?: boolean;
     supportsBatchImport?: boolean;
     supportsDirectoryScan?: boolean;
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
+    /** Set only by the socket session after named-capability negotiation. */
+    plannedRestartNegotiated?: boolean;
+    plannedRestartProtocol?: number;
     supportsBotMenu?: boolean;
+    botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;
+    supportsDecisionCard?: boolean;
+    supportsIssueDecisionCard?: boolean;
   } = {}): MultiremiDaemonHeartbeatAck {
     return this.runtimes.heartbeatRuntime(runtimeId, options);
   }
 
-  createIssue(input: CreateIssueInput): MultiremiIssue {
-    return this.issues.createIssue(input);
+  pendingRuntimeRequests(runtimeId: string) { return this.runtimes.pendingRuntimeRequests(runtimeId); }
+  claimAcknowledgedRuntimeRequest(runtimeId: string, kind: string, id: string): void {
+    this.runtimes.claimAcknowledgedRuntimeRequest(runtimeId, kind, id);
+  }
+  discardRuntimePendingRequest(runtimeId: string, kind: string, id: string): void {
+    this.runtimes.discardRuntimePendingRequest(runtimeId, kind, id);
+  }
+
+  createIssue(input: CreateIssueInput, transaction?: {
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector;
+    deferredEvents: import("./context.js").CommitEventQueue;
+  }): MultiremiIssue {
+    return this.issues.createIssue(input, transaction);
+  }
+
+  /**
+   * MUL-400 E3: issue creation for a caller that already holds a transaction.
+   * Both a child-status collector and a commit-event queue are required — the
+   * caller replays the collector and drains the queue after its COMMIT (see
+   * IssuesRepo.createIssueWithinTransaction).
+   */
+  createIssueWithinTransaction(
+    input: CreateIssueInput,
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ): MultiremiIssue {
+    return this.issues.createIssueWithinTransaction(input, childStatusChanges, deferredEvents);
   }
 
   getIssue(id: string): MultiremiIssue | null {
     return this.issues.getIssue(id);
   }
 
+  resolveIssueResponsibility(issueId: string): import('@multiremi/contracts').IssueResponsibility {
+    return this.ctx.resolveIssueResponsibility(issueId);
+  }
+
+  getIssueDecision(issueId: string, decisionId: string): MultiremiIssueDecision | null {
+    return this.issues.getIssueDecision(issueId, decisionId);
+  }
+
+  getIssueDecisionAnywhere(decisionId: string): MultiremiIssueDecision | null {
+    return this.issues.getIssueDecisionAnywhere(decisionId);
+  }
+
+  isIssueDecisionRecordedInWorkspace(workspaceId: string, issueId: string, decisionId: string): boolean {
+    return this.issues.isIssueDecisionRecordedInWorkspace(workspaceId, issueId, decisionId);
+  }
+
+  listIssueDecisions(issueId: string): MultiremiIssueDecisionList {
+    return this.issues.listIssueDecisions(issueId);
+  }
+
+  countPendingIssueDecisions(issueId: string): number {
+    return this.issues.countPendingIssueDecisions(issueId);
+  }
+
+  createIssueDecision(sourceIssueId: string, input: CreateIssueDecisionInput, actor: IssueDecisionActor): MultiremiIssueDecision {
+    return this.issues.createIssueDecision(sourceIssueId, input, actor);
+  }
+
+  answerIssueDecision(
+    issueId: string,
+    decisionId: string,
+    input: AnswerIssueDecisionInput,
+    actor: IssueDecisionActor,
+    options: AnswerIssueDecisionOptions = {},
+  ): MultiremiIssueDecision {
+    return this.issues.answerIssueDecision(issueId, decisionId, input, actor, options);
+  }
+
+  escalateIssueDecision(issueId: string, decisionId: string, actor: IssueDecisionActor): MultiremiIssueDecision {
+    return this.issues.escalateIssueDecision(issueId, decisionId, actor);
+  }
+
+  withdrawIssueDecision(issueId: string, decisionId: string, actor: IssueDecisionActor): MultiremiIssueDecision {
+    return this.issues.withdrawIssueDecision(issueId, decisionId, actor);
+  }
+
   getIssueWorkspace(issueId: string): MultiremiIssueWorkspace | null {
     return this.issueWorkspaces.get(issueId);
   }
 
-  reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
-    const previous = this.issueWorkspaces.get(input.issueId);
-    const result = this.issueWorkspaces.report(input);
-    this.notifyWorktreeActivity(previous, result);
+  issueRanOnDaemon(issueId: string, daemonId: string): boolean {
+    return this.issueWorkspaces.ranOnDaemon(issueId, daemonId);
+  }
+
+  abandonIssueWorkspace(issueId: string, workspaceId: string) {
+    const previous = this.issueWorkspaces.get(issueId);
+    const result = this.issueWorkspaces.abandon(issueId, workspaceId);
+    if (result.status === "abandoned") this.notifyWorktreeActivity(previous, result.workspace);
     return result;
   }
 
-  markIssueWorkspaceCleaned(input: MarkIssueWorkspaceCleanedInput): MultiremiIssueWorkspace {
+  reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
     const previous = this.issueWorkspaces.get(input.issueId);
-    const result = this.issueWorkspaces.markCleaned(input);
-    this.notifyWorktreeActivity(previous, result);
-    return result;
+    const workspace = this.issueWorkspaces.report(input);
+    this.notifyWorktreeActivity(previous, workspace);
+    // A live Issue workspace is pinned to its daemon. Its readiness changes
+    // eligibility for sibling providers on that host, not unrelated machines.
+    const runtime = this.runtimes.getRuntimeLite(input.runtimeId)!;
+    for (const runtimeId of this.runtimes.runtimeIdsForDaemon(runtime)) {
+      this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId: workspace.workspaceId,
+        actorType: "system", actorId: null, payload: { dispatch_only: true, runtime_id: runtimeId } });
+    }
+    return workspace;
+  }
+
+  /** `gc.subject_reclaimed`: the daemon deleted a subject's workspace. */
+  reportSubjectReclaimed(runtimeId: string, input: SubjectReclaimedInput): void {
+    const previous = input.subject.kind === "issue" ? this.issueWorkspaces.get(input.subject.id) : null;
+    this.storage.reportSubjectReclaimed(runtimeId, input);
+    if (input.subject.kind === "issue") {
+      const current = this.issueWorkspaces.get(input.subject.id);
+      if (current) this.notifyWorktreeActivity(previous, current);
+      this.publishDaemonDispatchConditionsChanged(this.runtimes.getRuntimeLite(runtimeId)?.workspaceId ?? "local");
+    }
+  }
+
+  saveDaemonStorageReport(daemonId: string, runtimeId: string, report: StorageReport): void {
+    this.storage.saveDaemonStorageReport(daemonId, runtimeId, report);
+  }
+
+  listDaemonStorageReports(workspaceId: string, daemonIds: readonly string[]): DaemonStorageReportRecord[] {
+    return this.storage.listDaemonStorageReports(workspaceId, daemonIds);
   }
 
   private notifyWorktreeActivity(previous: MultiremiIssueWorkspace | null, current: MultiremiIssueWorkspace) {
-    const entries = (workspace: MultiremiIssueWorkspace | null) => new Map((workspace?.repos ?? []).map(repo =>
+    const entries = (workspace: MultiremiIssueWorkspace | null) => new Map((workspace?.status === "cleaned" ? [] : workspace?.repos ?? []).map(repo =>
       [canonicalGitRemoteKey(repo.repoUrl), JSON.stringify([repo.branchName, repo.status])]));
     const before = entries(previous);
     const after = entries(current);
@@ -3074,6 +3926,10 @@ runMigrations(this.db);
 
   getIssueByRef(ref: string, workspaceId?: string | null): MultiremiIssue | null {
     return this.issues.getIssueByRef(ref, workspaceId);
+  }
+
+  hasIssue(id: string): boolean {
+    return this.issues.hasIssue(id);
   }
 
   getIssueWithTasks(id: string): MultiremiIssueWithTasks | null {
@@ -3112,6 +3968,10 @@ runMigrations(this.db);
     return this.issues.countIssues(input);
   }
 
+  listIssueStatusPages(input: ListIssuesInput = {}, includeArchivedTotal = false) {
+    return this.issues.listIssueStatusPages(input, includeArchivedTotal);
+  }
+
   listGroupedIssues(input: ListIssuesInput = {}): { groups: MultiremiIssueAssigneeGroup[] } {
     return this.issues.listGroupedIssues(input);
   }
@@ -3128,7 +3988,11 @@ runMigrations(this.db);
     return this.issues.listAssigneeFrequency(input);
   }
 
-  batchUpdateIssues(input: BatchUpdateIssuesInput): { updated: number; issues: MultiremiIssue[] } {
+  batchUpdateIssues(input: BatchUpdateIssuesInput): {
+    updated: number;
+    issues: MultiremiIssue[];
+    skipped: Array<{ issueId: string; error: string; code: string | null }>;
+  } {
     return this.issues.batchUpdateIssues(input);
   }
 
@@ -3138,18 +4002,6 @@ runMigrations(this.db);
 
   deleteIssuesAtomically(ids: string[]): { deleted: number } {
     return this.issues.deleteIssuesAtomically(ids);
-  }
-
-  beginIssueDeletion(id: string): BeginIssueDeletionResult {
-    return this.issues.beginIssueDeletion(id);
-  }
-
-  abortIssueDeletion(id: string): void {
-    this.issues.abortIssueDeletion(id);
-  }
-
-  getIssueDeletionLifecycleState(id: string): string | null {
-    return this.issues.deletionLifecycleState(id);
   }
 
   batchDeleteIssues(input: BatchDeleteIssuesInput): { deleted: number } {
@@ -3179,7 +4031,7 @@ runMigrations(this.db);
     return this.issues.getChildIssueProgress(parentIssueId);
   }
 
-  listIssueDependencies(issueId: string): MultiremiIssueDependency[] {
+  listIssueDependencies(issueId: string): MultiremiIssueDependencyView[] {
     return this.issues.listIssueDependencies(issueId);
   }
 
@@ -3187,7 +4039,7 @@ runMigrations(this.db);
     issueId: string,
     input: CreateIssueDependencyInput,
     activity?: IssueMutationActivityContext,
-  ): MultiremiIssueDependency {
+  ): MultiremiIssueDependencyView {
     return this.issues.createIssueDependency(issueId, input, activity);
   }
 
@@ -3203,22 +4055,147 @@ runMigrations(this.db);
     return this.issues.deleteIssueDependency(issueId, dependencyId, activity);
   }
 
-  updateIssue(id: string, input: UpdateIssueInput): MultiremiIssue {
-    return this.updateIssueWithOutcome(id, input).issue;
+  updateIssue(id: string, input: UpdateIssueInput, options: UpdateIssueOptions = {}): MultiremiIssue {
+    return this.updateIssueWithOutcome(id, input, options).issue;
   }
 
-  updateIssueWithOutcome(id: string, input: UpdateIssueInput): { issue: MultiremiIssue; cancelledTasks: number } {
+  updateIssueAndDispatch(id: string, input: UpdateIssueInput): ReturnType<IssuesRepo['updateIssueAndDispatch']> {
+    return this.withIssueActivityUpdate(id, input, () => this.issues.updateIssueAndDispatch(id, input));
+  }
+
+  updateIssueWithOutcome(
+    id: string,
+    input: UpdateIssueInput,
+    options: UpdateIssueOptions = {},
+  ): {
+    issue: MultiremiIssue;
+    cancelledTasks: number;
+    handledForcedStart: boolean;
+    /** The Issue the write itself saw, after its row lock (see the repo). */
+    previous: MultiremiIssue;
+  } {
+    return this.withIssueActivityUpdate(id, input, () => this.issues.updateIssueWithOutcome(id, input, options));
+  }
+
+  private withIssueActivityUpdate<T extends { issue: MultiremiIssue }>(id: string, input: UpdateIssueInput, write: () => T): T {
     const changesScope = [input.title, input.projectId, input.project_id, input.workspaceId, input.workspace_id].some(value => value !== undefined);
-    if (!changesScope) return this.issues.updateIssueWithOutcome(id, input);
+    if (!changesScope) return write();
     const previous = this.getIssue(id);
     const before = previous ? this.affectedActivity(previous.workspaceId, "issue", id) : [];
-    const result = this.issues.updateIssueWithOutcome(id, input);
+    const result = write();
     const workspaceId = result.issue.workspaceId;
     const after = this.affectedActivity(workspaceId, "issue", id);
     if (previous && previous.workspaceId !== workspaceId) this.notifyRepositoryActivity(previous.workspaceId, before);
     else after.push(...before);
     this.notifyRepositoryActivity(workspaceId, after);
     return result;
+  }
+
+  /** MUL-400 E3: prerequisites that are not `done` yet. */
+  listUnmetPrerequisites(issueId: string): import("@multiremi/store/repos/issue-dependencies.js").IssueDependencyUnmetRef[] {
+    return this.issues.listUnmetPrerequisites(issueId);
+  }
+
+  replayDependencyAutoStart(event: MultiremiSystemEvent): void {
+    this.issues.replayDependencyAutoStart(event);
+  }
+
+  /** MUL-458: caller owns the force-start task/status/activity transaction. */
+  recordDependencyForceStarted(
+    issueId: string,
+    input: import("@multiremi/store/repos/issues-repo.js").DependencyForceStartedInput,
+    deferredEvents: import("@multiremi/store/context.js").CommitEventQueue,
+  ): void {
+    this.issues.recordDependencyForceStarted(issueId, input, deferredEvents);
+  }
+
+  /** MUL-400 E3: `waiting_on` page data (unmet + all direct prerequisites). */
+  getIssueWaitingOn(issueId: string): import("@multiremi/contracts/types.js").MultiremiIssueWaitingOn {
+    return this.issues.getIssueWaitingOn(issueId);
+  }
+
+  /** MUL-400 E3: caller owns the transaction, e.g. issue creation. */
+  createIssueDependencyWithinTransaction(
+    issueId: string,
+    input: import("@multiremi/contracts/types.js").CreateIssueDependencyInput,
+    activity: import("@multiremi/store/repos/issues-repo.js").IssueMutationActivityContext,
+    deferredEvents: import("@multiremi/store/context.js").CommitEventQueue,
+  ): import("@multiremi/contracts/types.js").MultiremiIssueDependencyView {
+    return this.issues.createIssueDependencyWithinTransaction(issueId, input, activity, deferredEvents);
+  }
+
+  /**
+   * MUL-400 S1c (QA round 1): the caller owns the transaction. The status write
+   * and its audit activities commit together, and the caller replays the
+   * collected child-status transitions and flushes `deferredEvents` after
+   * COMMIT (see `runIssueUpdatePostCommit`).
+   */
+  updateIssueWithinTransaction(
+    id: string,
+    input: UpdateIssueInput,
+    options: UpdateIssueOptions,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: import("./context.js").CommitEventQueue,
+  ): {
+    issue: MultiremiIssue;
+    previous: MultiremiIssue;
+    cancelledTasks: number;
+    handledForcedStart: boolean;
+    dependencyCheckEventId: string | null;
+  } {
+    return this.issues.updateIssueWithinTransaction(id, input, options, collector, deferredEvents);
+  }
+
+  runIssueUpdatePostCommit(
+    result: {
+      issue: MultiremiIssue;
+      previous: MultiremiIssue;
+      cancelledTasks: number;
+      handledForcedStart: boolean;
+      dependencyCheckEventId: string | null;
+    },
+    input: UpdateIssueInput,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: import("./context.js").CommitEventQueue,
+  ): void {
+    this.issues.runIssueUpdatePostCommit(result, input, collector, deferredEvents);
+  }
+
+  countOpenChildIssues(parentIssueId: string): number {
+    return this.issues.countOpenChildIssues(parentIssueId);
+  }
+
+  hasChildIssues(issueId: string): boolean {
+    return this.issues.hasChildIssues(issueId);
+  }
+
+  holdParentStatusForOpenChildren(
+    issueId: string,
+    requested: string,
+    options: { exempt?: boolean; deferredEvents: import("./context.js").CommitEventQueue },
+  ): string {
+    return this.issues.holdParentStatusForOpenChildren(issueId, requested, options);
+  }
+
+  notifyChildStatusChange(
+    previous: MultiremiIssue,
+    issue: MultiremiIssue,
+    parentTaskId: string | null,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    options: { taskTerminalStatus?: "completed" | "failed" | "cancelled"; dependencyCheckEventId?: string | null; seen?: Set<string> } = {},
+  ): void {
+    this.issues.notifyChildStatusChange(previous, issue, parentTaskId, collector, options);
+  }
+
+  notifyChildStatusChangeWithinTransaction(
+    previous: MultiremiIssue,
+    issue: MultiremiIssue,
+    parentTaskId: string | null,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+    options: { taskTerminalStatus?: "completed" | "failed" | "cancelled"; statusChangeEventId?: string | null } = {},
+  ): void {
+    this.issues.notifyChildStatusChangeWithinTransaction(previous, issue, parentTaskId, collector, deferredEvents, options);
   }
 
   restoreIssue(id: string): MultiremiIssue {
@@ -3233,8 +4210,8 @@ runMigrations(this.db);
     return this.issues.issueArchiveSweepIntervalMs();
   }
 
-  assignIssue(id: string, input: AssignIssueInput): AssignIssueResult {
-    return this.issues.assignIssue(id, input);
+  assignIssue(id: string, input: AssignIssueInput, options: AssignIssueOptions = {}): AssignIssueResult {
+    return this.issues.assignIssue(id, input, options);
   }
 
   quickCreateIssue(input: QuickCreateIssueInput): QuickCreateIssueResult {
@@ -3249,8 +4226,24 @@ runMigrations(this.db);
     return this.issues.findGeneratedIssueByTitle(sourceIssueId, title);
   }
 
-  createIssueComment(issueId: string, input: CreateIssueCommentInput): MultiremiIssueComment {
-    return this.issues.createIssueComment(issueId, input);
+  createIssueComment(issueId: string, input: CreateIssueCommentInput, options: import("./context.js").CreateIssueCommentOptions = {}): MultiremiIssueComment {
+    return this.issues.createIssueComment(issueId, input, options);
+  }
+
+  createIssueCommentWithinTransaction(
+    issueId: string,
+    input: CreateIssueCommentInput,
+    options: { withinTransaction: true; deferredEvents: import("./context.js").CommitEventQueue; deferDispatch?: boolean; commentId?: string },
+  ): import("./context.js").CreatedIssueComment {
+    return this.issues.createIssueCommentWithinTransaction(issueId, input, options);
+  }
+
+  runIssueCommentPostCommit(created: import("./context.js").CreatedIssueComment, input: CreateIssueCommentInput): void {
+    this.issues.runIssueCommentPostCommit(created, input);
+  }
+
+  replayCommentDispatchEvent(event: import("@multiremi/contracts/types.js").MultiremiSystemEvent, now = Date.now()): MultiremiTask[] {
+    return this.issues.replayCommentDispatchEvent(event, now);
   }
 
   createTaskFailureSystemComment(
@@ -3278,6 +4271,10 @@ runMigrations(this.db);
     return this.issues.unresolveIssueComment(id);
   }
 
+  getIssueCommentSourceWorkspaceId(commentId: string): string | null {
+    return this.issues.getIssueCommentSourceWorkspaceId(commentId);
+  }
+
   getIssueComment(id: string): MultiremiIssueComment | null {
     return this.issues.getIssueComment(id);
   }
@@ -3292,6 +4289,10 @@ runMigrations(this.db);
 
   listIssueActivity(issueId: string): MultiremiIssueActivity[] {
     return this.issues.listIssueActivity(issueId);
+  }
+
+  listIssueActivityBetween(...args: Parameters<IssuesRepo["listIssueActivityBetween"]>) {
+    return this.issues.listIssueActivityBetween(...args);
   }
 
   recordIssueDispatchSkipped(issueId: string, input: {
@@ -3320,6 +4321,7 @@ runMigrations(this.db);
     issueSessionId?: string | null;
     before?: IssueTimelineCursor | null;
     limit: number;
+    skipExistenceChecks?: boolean;
   }): IssueTimelinePageResult {
     return this.issues.listIssueTimelinePage(issueId, options);
   }
@@ -3371,6 +4373,11 @@ runMigrations(this.db);
 
   listLabelsForIssue(issueId: string): MultiremiLabel[] {
     return this.issues.listLabelsForIssue(issueId);
+  }
+
+  /** `listLabelsForIssue` for a caller that already proved the issue exists. */
+  listLabelsForExistingIssue(issueId: string): MultiremiLabel[] {
+    return this.issues.listLabelsForExistingIssue(issueId);
   }
 
   attachLabelToIssue(
@@ -3433,6 +4440,11 @@ runMigrations(this.db);
     return this.issues.listIssueReactions(issueId);
   }
 
+  /** `listIssueReactions` for a caller that already proved the issue exists. */
+  listIssueReactionsForExistingIssue(issueId: string): MultiremiIssueReaction[] {
+    return this.issues.listIssueReactionsForExistingIssue(issueId);
+  }
+
   addIssueReaction(issueId: string, input: { actorType?: string; actorId?: string | null; emoji: string }): MultiremiIssueReaction {
     return this.issues.addIssueReaction(issueId, input);
   }
@@ -3473,12 +4485,21 @@ runMigrations(this.db);
     return this.issues.listAttachmentsForIssue(issueId);
   }
 
+  /** `listAttachmentsForIssue` for a caller that already proved the issue exists. */
+  listAttachmentsForExistingIssue(issueId: string): MultiremiAttachment[] {
+    return this.issues.listAttachmentsForExistingIssue(issueId);
+  }
+
   listAttachmentsForComment(commentId: string): MultiremiAttachment[] {
     return this.issues.listAttachmentsForComment(commentId);
   }
 
   listAttachmentsForComments(commentIds: string[]): Map<string, MultiremiAttachment[]> {
     return this.issues.listAttachmentsForComments(commentIds);
+  }
+
+  listAttachmentsForMessages(messageIds: string[]): Map<string, MultiremiAttachment[]> {
+    return this.issues.listAttachmentsForMessages(messageIds);
   }
 
   listAttachmentsForChatMessage(chatMessageId: string): MultiremiAttachment[] {
@@ -3493,6 +4514,7 @@ runMigrations(this.db);
     return this.issues.linkAttachmentsToIssue(issueId, attachmentIds);
   }
 
+  linkAttachmentsToComment(commentId:string,issueId:string,ids:string[]) {return this.issues.linkAttachmentsToComment(commentId,issueId,ids);}
   linkAttachmentsToChatMessage(chatSessionId: string, chatMessageId: string, attachmentIds: string[]): void {
     return this.issues.linkAttachmentsToChatMessage(chatSessionId, chatMessageId, attachmentIds);
   }
@@ -3545,6 +4567,31 @@ runMigrations(this.db);
     return this.sessions.getOrCreateDefaultIssueSession(issueId, createdById);
   }
 
+  getOrCreateDefaultChatSession(chatId: string, createdById: string | null = null): MultiremiIssueSession {
+    return this.sessions.getOrCreateDefaultChatSession(chatId, createdById);
+  }
+
+  createSession(chatId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
+    return this.sessions.createSession(chatId, input);
+  }
+
+  listChatOwnedSessions(chatId: string, includeArchived = false): MultiremiIssueSession[] {
+    return this.sessions.listChatSessions(chatId, includeArchived);
+  }
+
+  adoptLegacySession(chatId: string, sessionId: string): MultiremiIssueSession {
+    return this.sessions.adoptLegacySession(chatId, sessionId);
+  }
+
+  deleteOwnedSessionsWithinTransaction(ownerType: "chat" | "issue", ownerId: string): void {
+    this.sessions.deleteOwnedSessionsWithinTransaction(ownerType, ownerId);
+  }
+
+  /** For callers that already own the transaction (Senior ruling cmt_96e1yqxgifms §2). */
+  getOrCreateDefaultIssueSessionWithinTransaction(issueId: string, createdById: string | null = null): MultiremiIssueSession {
+    return this.sessions.getOrCreateDefaultIssueSessionWithinTransaction(issueId, createdById);
+  }
+
   createIssueSession(issueId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
     return this.sessions.createIssueSession(issueId, input);
   }
@@ -3561,12 +4608,24 @@ runMigrations(this.db);
     return this.sessions.getIssueSession(id);
   }
 
+  getIssueSessionOwnerFacts(ids: readonly string[]) {
+    return this.sessions.getIssueSessionOwnerFacts(ids);
+  }
+
+  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null {
+    return this.sessions.getIssueSessionWithOwnerScope(id);
+  }
+
   getSessionInheritedContext(sessionId: string): MultiremiSessionInheritedContext | null {
     return this.sessions.getSessionInheritedContext(sessionId);
   }
 
-  listIssueSessions(issueId: string, includeArchived = false): MultiremiIssueSession[] {
-    return this.sessions.listIssueSessions(issueId, includeArchived);
+  listIssueSessions(
+    issueId: string,
+    includeArchived = false,
+    options: { skipExistenceCheck?: boolean; chatAccess?: { userId: string; roleWithoutMembership: "owner" | "member" } } = {},
+  ): MultiremiIssueSession[] {
+    return this.sessions.listIssueSessions(issueId, includeArchived, options);
   }
 
   updateIssueSession(id: string, input: UpdateIssueSessionInput): MultiremiIssueSession {
@@ -3585,6 +4644,13 @@ runMigrations(this.db);
 
   listSessionParticipants(sessionId: string, includeLeft = false): MultiremiSessionParticipant[] {
     return this.sessions.listSessionParticipants(sessionId, includeLeft);
+  }
+
+  listSessionParticipantsForSessions(
+    sessionIds: string[],
+    includeLeft = false,
+  ): Map<string, MultiremiSessionParticipant[]> {
+    return this.sessions.listSessionParticipantsForSessions(sessionIds, includeLeft);
   }
 
   appendSessionEvent(sessionId: string, input: {
@@ -3618,6 +4684,254 @@ runMigrations(this.db);
     return this.sessions.listSessionEvents(sessionId, input);
   }
 
+  // ── conversation log (MUL-402 B1) ────────────────────────────────────────
+  // The read side of the v2 conversation storage. `window` and `locate` accept a
+  // `query(sql, params)` seam so MUL-403's read pool can be wired in without
+  // touching the SQL; both default to the primary handle.
+
+  /** Allocate the next seq for a session; the caller owns the transaction. */
+  nextSeqWithinTransaction(sessionId: string): number {
+    return this.conversationLog.nextSeqWithinTransaction(sessionId);
+  }
+
+  /** Insert one row at an allocated or explicit seq; the caller owns the transaction. */
+  appendWithinTransaction(input: AppendConversationLogInput): ConversationLogEntry {
+    return this.conversationLog.appendWithinTransaction(input);
+  }
+  publishMessageWithinTransaction(sessionId: string, seq: number, existing: boolean): void {
+    this.conversationLog.publishMessageWithinTransaction(sessionId, seq, existing);
+  }
+
+  /** Insert one row; the caller owns the transaction. */
+  appendConversationLogWithinTransaction(input: AppendConversationLogInput): ConversationLogEntry {
+    return this.conversationLog.appendWithinTransaction(input);
+  }
+
+  /** In-place update with `revision++`; the caller owns the transaction. */
+  updateWithinTransaction(sessionId: string, seq: number, input: UpdateConversationLogInput): ConversationLogEntry | null {
+    return this.conversationLog.updateWithinTransaction(sessionId, seq, input);
+  }
+
+  /** Bump `log_version` without touching a row, for head-only freshness. */
+  touchSessionWithinTransaction(sessionId: string, at?: string): void {
+    this.conversationLog.touchSessionWithinTransaction(sessionId, at);
+  }
+
+  /** Create the head row and counter for a session; idempotent. */
+  ensureSessionHeadWithinTransaction(
+    sessionId: string,
+    input: { bodyMd: string; title?: string | null },
+  ): ConversationLogEntry {
+    return this.conversationLog.ensureSessionHeadWithinTransaction(sessionId, input);
+  }
+
+  /** Sync the `head` row of an Issue session, one row per session. */
+  syncIssueHeadWithinTransaction(
+    sessionId: string,
+    issue: { title: string; description?: string | null },
+    createdAt?: string,
+  ): ConversationLogEntry {
+    return this.conversationLog.syncIssueHeadWithinTransaction(sessionId, issue, createdAt);
+  }
+
+  /** Sync a chat `head` row from the session title. */
+  syncChatHeadWithinTransaction(sessionId: string, title: string | null, createdAt?: string): ConversationLogEntry {
+    return this.conversationLog.syncChatHeadWithinTransaction(sessionId, title, createdAt);
+  }
+
+  /** The `turn` card of a task, if one exists. */
+  findTurnEntry(taskId: string): ConversationLogEntry | null {
+    return this.conversationLog.findTurnEntry(taskId);
+  }
+
+  /** Store attempt outcomes; the card is projected from normalized storage. */
+  recordAttemptOutcomeWithinTransaction(
+    taskId: string,
+    fields: Parameters<ConversationLogRepo["recordAttemptOutcomeWithinTransaction"]>[1],
+    materialize = true,
+  ): ConversationLogEntry | null {
+    return this.conversationLog.recordAttemptOutcomeWithinTransaction(taskId, fields, materialize);
+  }
+
+  /**
+   * MUL-432 segment 2 item 5: write the round-card fields of a daemon's
+   * `turn.complete` / `task.fail` frame onto the attempt's outcome. Written:
+   * `trace.event_count`, `tool_call_count`, `type_histogram`, `model`, since
+   * the turn + items traces (PR 2) `context_usage`, `worked_ms` and
+   * `process_item_count`, and since PR 5 `late_subagents`. The frame's
+   * `final_reply_md` is not (ruling (z)): the chat card keeps the assistant
+   * message and the Issue card its `final_entry_id` from the terminal write
+   * path. `null` — a daemon that sent no fields, or malformed ones — writes
+   * nothing.
+   *
+   * The terminal task transaction owns this write. An attempt that already
+   * carries the values keeps its revision; a missing attempt is skipped.
+   * Returns whether the outcome changed.
+   */
+  recordTurnCardCompletionFieldsWithinTransaction(taskId: string, fields: DaemonTaskCompletionFields | null): boolean {
+    if (!fields) return false;
+    const attempt = this.db.query(
+      `SELECT event_count, tool_call_count, type_histogram, model, context_usage, worked_ms, process_item_count,
+       late_subagents FROM multiremi_turn_attempts WHERE id = ?`,
+    ).get(taskId) as Record<string, unknown> | null;
+    if (!attempt) return false;
+    const typeHistogram = fields.trace.type_histogram.map(({ type, tool, count }) => ({ type, tool, count }));
+    const model = fields.model ? { provider: fields.model.provider, model: fields.model.model } : null;
+    const contextUsage = fields.context_usage ? { used: fields.context_usage.used, size: fields.context_usage.size } : null;
+    const workedMs = fields.worked_ms ?? null;
+    const processItemCount = fields.process_item_count ?? null;
+    const lateSubagents = fields.late_subagents?.length
+      ? fields.late_subagents.map(({ item_id, name, status, duration_ms }) => ({ item_id, name, status, duration_ms }))
+      : null;
+    const count = (value: unknown): number | null => value == null ? null : Number(value);
+    const stored = {
+      eventCount: count(attempt.event_count),
+      toolCallCount: count(attempt.tool_call_count),
+      typeHistogram: parseJson<Array<{ type: string; tool?: string | null; count: number }> | null>(attempt.type_histogram, null),
+      model: parseJson<{ provider: string; model: string } | null>(attempt.model, null),
+      contextUsage: parseJson<{ used: number; size: number } | null>(attempt.context_usage, null),
+      workedMs: count(attempt.worked_ms),
+      processItemCount: count(attempt.process_item_count),
+      lateSubagents: parseJson<TraceLateSubagent[] | null>(attempt.late_subagents, null),
+    };
+    const unchanged = stored.eventCount === fields.trace.event_count
+      && stored.toolCallCount === fields.trace.tool_call_count
+      && stored.typeHistogram?.length === typeHistogram.length
+      && stored.typeHistogram.every((bucket, index) => bucket.type === typeHistogram[index]!.type
+        && (bucket.tool ?? null) === typeHistogram[index]!.tool && bucket.count === typeHistogram[index]!.count)
+      && stored.model?.provider === model?.provider && stored.model?.model === model?.model
+      && stored.contextUsage?.used === contextUsage?.used && stored.contextUsage?.size === contextUsage?.size
+      && stored.workedMs === workedMs && stored.processItemCount === processItemCount
+      // Both sides hold the same four keys in the same order, as this method writes them.
+      && JSON.stringify(stored.lateSubagents) === JSON.stringify(lateSubagents);
+    if (unchanged) return false;
+    this.conversationLog.recordAttemptOutcomeWithinTransaction(taskId, {
+      eventCount: fields.trace.event_count,
+      toolCallCount: fields.trace.tool_call_count,
+      typeHistogram,
+      model,
+      contextUsage,
+      workedMs,
+      processItemCount,
+      lateSubagents,
+    }, false);
+    return true;
+  }
+
+  recordTaskInboxDelivery(taskId: string, fromSeq: number, toSeq: number): void {
+    this.ctx.db.transaction(() => {
+      this.conversationLog.recordTurnInboxDeliveryWithinTransaction(taskId, fromSeq, toSeq);
+    })();
+  }
+
+  recordTurnInboxDeliveryWithinTransaction(taskId: string, fromSeq: number, toSeq: number): ConversationLogEntry | null {
+    return this.conversationLog.recordTurnInboxDeliveryWithinTransaction(taskId, fromSeq, toSeq);
+  }
+
+  appendConversationLog(input: AppendConversationLogInput): ConversationLogEntry {
+    return this.conversationLog.append(input);
+  }
+
+  /** In-place update with `revision++`; the caller owns the transaction. */
+  updateConversationLogWithinTransaction(
+    sessionId: string,
+    seq: number,
+    input: UpdateConversationLogInput,
+  ): ConversationLogEntry | null {
+    return this.conversationLog.updateWithinTransaction(sessionId, seq, input);
+  }
+
+  getConversationLogAccessScope(sessionId: string) {
+    return this.conversationLog.getAccessScope(sessionId);
+  }
+
+  getConversationLogEntry(sessionId: string, seq: number, query?: ConversationLogQuery | null): ConversationLogEntry | null {
+    return this.conversationLog.getEntry(sessionId, seq, query);
+  }
+
+  getConversationLogEntriesByRefs(refs: readonly { sessionId: string; seq: number }[]) {
+    return this.conversationLog.getEntriesByRefs(refs);
+  }
+
+  getConversationLogEntryById(id: string): ConversationLogEntry | null {
+    return this.conversationLog.getEntryById(id);
+  }
+
+  getConversationLogHead(sessionId: string, query?: ConversationLogQuery | null) {
+    return this.conversationLog.getHead(sessionId, query);
+  }
+
+  getSessionAgentReadProgress(sessionId: string, agentId: string, attemptId?: string) {
+    return this.conversationLog.getSessionAgentReadProgress(sessionId, agentId, attemptId);
+  }
+
+  recordSessionAgentRangeRead(...args: Parameters<ConversationLogRepo["recordSessionAgentRangeRead"]>) {
+    return this.conversationLog.recordSessionAgentRangeRead(...args);
+  }
+
+  recordSessionAgentInlineRead(...args: Parameters<ConversationLogRepo["recordSessionAgentInlineRead"]>) {
+    return this.conversationLog.recordSessionAgentInlineRead(...args);
+  }
+
+  /** A window of shown entries; hidden markers never appear. */
+  conversationLogWindow(sessionId: string, input: ConversationLogWindowInput = {}): ConversationLogWindow {
+    return this.conversationLog.window(sessionId, input);
+  }
+
+  /** Locate one entry's seq by id, for deep links. */
+  locateConversationLogEntry(sessionId: string, id: string, query?: ConversationLogQuery | null): ConversationLogLocation | null {
+    return this.conversationLog.locate(sessionId, id, query);
+  }
+
+  hasInboxReceiptCovering(sessionId: string, agentId: string, seq: number): boolean {
+    return this.conversationLog.hasInboxReceiptCovering(sessionId, agentId, seq);
+  }
+
+  /** Shown entries in the inclusive seq range, oldest first. */
+  listConversationLogShown(sessionId: string, input: { sinceSeq?: number | null; toSeq?: number | null; limit?: number } = {}): ConversationLogEntry[] {
+    return this.conversationLog.listShown(sessionId, input);
+  }
+
+  /** Sync the `head` row to the Issue title and description (one row per session). */
+  syncConversationLogIssueHead(sessionId: string, issue: { title: string; description?: string | null }, createdAt?: string): ConversationLogEntry {
+    return this.conversationLog.syncIssueHeadWithinTransaction(sessionId, issue, createdAt);
+  }
+
+  /** Sync a chat `head` row from the session title. */
+  syncConversationLogChatHead(sessionId: string, title: string | null, createdAt?: string): ConversationLogEntry {
+    return this.conversationLog.syncChatHeadWithinTransaction(sessionId, title, createdAt);
+  }
+
+  /** Every row including hidden markers, for projections and wake-up. */
+  listConversationLogEntries(sessionId: string, input: { sinceSeq?: number | null; toSeq?: number | null } = {}): ConversationLogEntry[] {
+    return this.conversationLog.listAll(sessionId, input);
+  }
+
+  listConversationLogRangePage(sessionId: string, afterSeq: number, toSeq: number, limit: number): ConversationLogEntry[] {
+    return this.conversationLog.listRangePage(sessionId, afterSeq, toSeq, limit);
+  }
+
+  listConversationLogEntriesByTask(taskId: string): ConversationLogEntry[] {
+    return this.conversationLog.listByTask(taskId);
+  }
+
+  getTaskWakeSequences(taskId: string): number[] {
+    return this.tasks.getTaskWakeSequences(taskId);
+  }
+
+  /** The write hook C's Live Hub implements; B1 leaves it empty. */
+  setConversationLogListener(listener: ConversationLogListener | null): void {
+    this.conversationLog.setConversationLogListener(listener);
+  }
+
+  subscribeConversationLog(listener: ConversationLogListener): () => void {
+    return this.conversationLog.subscribeConversationLog(listener);
+  }
+
+  ensureConversationLogHead(sessionId: string, input: { bodyMd: string; title?: string | null }): ConversationLogEntry {
+    return this.ctx.db.transaction(() => this.conversationLog.ensureSessionHeadWithinTransaction(sessionId, input))();
+  }
+
   getOrCreateSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane {
     return this.sessions.getOrCreateSessionAgentLane(sessionId, agentId, executionScope);
   }
@@ -3626,13 +4940,20 @@ runMigrations(this.db);
     return this.sessions.getSessionAgentLane(sessionId, agentId, executionScope);
   }
 
-  buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
+  getSessionAgentMaxCursorSeq(sessionId: string, agentId: string): number {
+    return this.sessions.getSessionAgentMaxCursorSeq(sessionId, agentId);
+  }
+
+  buildTaskSessionProjection(taskId: string, options: { boundsOnly?: boolean } = {}): MultiremiSessionProjection | null {
     const task = this.tasks.getTask(taskId);
-    if (task?.chatSessionId && !this.feishuBot.getIssueIdForChatSession(task.chatSessionId)) {
-      return this.chat.buildTaskSessionProjection(taskId);
+    if (task?.chatSessionId) {
+      const executionKind = this.tasks.getTaskChatExecutionKind(task);
+      if (task.issueSessionId && executionKind !== "ordinary") {
+        return this.sessions.buildTaskSessionProjection(taskId, options);
+      }
+      return this.chat.buildTaskSessionProjection(taskId, options);
     }
-    if (task?.issueSessionId) return this.sessions.buildTaskSessionProjection(taskId);
-    if (task?.chatSessionId) return this.chat.buildTaskSessionProjection(taskId);
+    if (task?.issueSessionId) return this.sessions.buildTaskSessionProjection(taskId, options);
     return null;
   }
 
@@ -3652,18 +4973,32 @@ runMigrations(this.db);
     return this.sessions.listIssueSessionResults(issueId);
   }
 
+  listChatSessionResults(chatId: string): MultiremiSessionResult[] {
+    return this.sessions.listChatSessionResults(chatId);
+  }
+
+  listSessionResults(sessionId: string): MultiremiSessionResult[] {
+    return this.sessions.listSessionResults(sessionId);
+  }
+
+  listActiveTasksForIssue(...args: Parameters<TasksRepo["listActiveTasksForIssue"]>): MultiremiTask[] {
+    return this.tasks.listActiveTasksForIssue(...args);
+  }
+
   listTasksForIssue(issueId: string): MultiremiTask[] {
     return this.tasks.listTasksForIssue(issueId);
   }
 
-  isSquadLeaderDelegation(input: {
-    issue: MultiremiIssue;
-    sourceTask: MultiremiTask | null;
-    authorAgentId: string | null;
-    targetAgentId: string;
-    issueSessionId: string | null;
-  }): boolean {
-    return this.issues.isSquadLeaderDelegation(input);
+  resolveAgentDelegation(input: Parameters<IssuesRepo["resolveAgentDelegation"]>[0]): import("./repos/issues-repo.js").AgentDelegationDecision {
+    return this.issues.resolveAgentDelegation(input);
+  }
+
+  countDelegationPairHops(...args: Parameters<TasksRepo["countDelegationPairHops"]>): number {
+    return this.tasks.countDelegationPairHops(...args);
+  }
+
+  recordDelegationRoundTripLimitedWithinTransaction(...args: Parameters<TasksRepo["recordDelegationRoundTripLimitedWithinTransaction"]>): void {
+    this.tasks.recordDelegationRoundTripLimitedWithinTransaction(...args);
   }
 
   getTaskQueueBlocker(taskId: string): MultiremiTaskQueueBlocker | null {
@@ -3682,12 +5017,18 @@ runMigrations(this.db);
     return this.projects.listProjects(workspaceId);
   }
 
+  listProjectSummaries(workspaceId: string): import("./repos/projects-repo.js").ProjectSummary[] {
+    return this.projects.listProjectSummaries(workspaceId);
+  }
+
   searchProjects(input: { q: string; workspaceId?: string | null; includeClosed?: boolean; limit?: number; offset?: number }): { projects: MultiremiProjectSearchResult[]; total: number } {
     return this.projects.searchProjects(input);
   }
 
   updateProject(id: string, input: UpdateProjectInput, writeContext: ProjectInstructionsWriteContext = {}): MultiremiProject {
-    return this.projects.updateProject(id, input, writeContext);
+    const project = this.projects.updateProject(id, input, writeContext);
+    this.publishDaemonDispatchConditionsChanged(project.workspaceId);
+    return project;
   }
 
   archiveProject(id: string): MultiremiProject {
@@ -3695,7 +5036,9 @@ runMigrations(this.db);
   }
 
   restoreProject(id: string): MultiremiProject {
-    return this.projects.restoreProject(id);
+    const project = this.projects.restoreProject(id);
+    this.publishDaemonDispatchConditionsChanged(project.workspaceId);
+    return project;
   }
 
   listPinnedItems(workspaceId?: string | null, userId?: string | null): MultiremiPinnedItem[] {
@@ -3727,15 +5070,21 @@ runMigrations(this.db);
   }
 
   createProjectDevice(projectId: string, input: CreateProjectDeviceInput): MultiremiProjectDevice {
-    return this.projects.createProjectDevice(projectId, input);
+    const device = this.projects.createProjectDevice(projectId, input);
+    this.publishDaemonDispatchConditionsChanged(this.projects.getProject(projectId)!.workspaceId);
+    return device;
   }
 
   deleteProjectDevice(projectId: string, daemonId: string): void {
-    return this.projects.deleteProjectDevice(projectId, daemonId);
+    this.projects.deleteProjectDevice(projectId, daemonId);
+    const project = this.projects.getProject(projectId);
+    if (project) this.publishDaemonDispatchConditionsChanged(project.workspaceId);
   }
 
   replaceProjectDevices(projectId: string, input: ReplaceProjectDevicesInput): MultiremiProjectDevice[] {
-    return this.projects.replaceProjectDevices(projectId, input);
+    const devices = this.projects.replaceProjectDevices(projectId, input);
+    this.publishDaemonDispatchConditionsChanged(this.projects.getProject(projectId)!.workspaceId);
+    return devices;
   }
 
   listProjectsForDaemon(workspaceId: string, daemonId: string): MultiremiProject[] {
@@ -3774,8 +5123,22 @@ runMigrations(this.db);
     this.notifyRepositoryActivity(workspaceId, imported.filter(repo => urls.includes(canonicalGitRemoteKey(repo.url))).map(repo => repo.id));
   }
 
-  listProjectDocs(projectId: string, input: { kind?: string | null } = {}): MultiremiProjectDoc[] {
+  listProjectDocs(projectId: string, input: { kind?: string | null; includeBody?: boolean } = {}): MultiremiProjectDoc[] {
     return this.projects.listProjectDocs(projectId, input);
+  }
+
+  /** Id/title/path for a bounded doc-id set; run-list artifact summaries (MUL-386 C.2). */
+  listProjectDocSummariesByIds(ids: readonly string[]): MultiremiKnowledgeDocSummary[] {
+    return this.projects.listProjectDocSummariesByIds(ids);
+  }
+
+  /** Single-statement URI lookup backing recall; replaces a full project scan. */
+  findProjectDocByUri(
+    projectId: string,
+    uri: string,
+    candidates?: ReadonlyArray<{ kind: MultiremiProjectDocKind; slug: string }>,
+  ): MultiremiProjectDoc | null {
+    return this.projects.findProjectDocByUri(projectId, uri, candidates);
   }
 
   getProjectDoc(id: string): MultiremiProjectDoc | null {
@@ -3848,12 +5211,17 @@ runMigrations(this.db);
     return this.projects.getProjectDocsIndex(projectId);
   }
 
-  listRepositoryWikiDocs(workspaceId: string, repositoryId: string): MultiremiRepositoryWikiDoc[] {
-    return this.repositoryWiki.list(workspaceId, repositoryId);
+  listRepositoryWikiDocs(workspaceId: string, repositoryId: string, input: { includeBody?: boolean } = {}): MultiremiRepositoryWikiDoc[] {
+    return this.repositoryWiki.list(workspaceId, repositoryId, input);
   }
 
   listWorkspaceRepositoryWikiDocs(workspaceId: string): MultiremiRepositoryWikiDoc[] {
     return this.repositoryWiki.listWorkspace(workspaceId);
+  }
+
+  /** Id/title/path for a bounded doc-id set; run-list artifact summaries (MUL-386 C.2). */
+  listRepositoryWikiDocSummariesByIds(workspaceId: string, ids: readonly string[]): MultiremiKnowledgeDocSummary[] {
+    return this.repositoryWiki.listSummariesByIds(workspaceId, ids);
   }
 
   getRepositoryWikiDocByRef(workspaceId: string, repositoryId: string, ref: string): MultiremiRepositoryWikiDoc | null {
@@ -3958,7 +5326,8 @@ runMigrations(this.db);
     return this.knowledge.listSubmissions(input);
   }
 
-  listKnowledgeSubmissionsPage(input: KnowledgeListInput): MultiremiKnowledgeCursorPage<MultiremiKnowledgeSubmission> {
+  /** List projection: no `body`/`patch`, only `bodyExcerpt` (MUL-386 C.2). */
+  listKnowledgeSubmissionsPage(input: KnowledgeListInput): MultiremiKnowledgeCursorPage<MultiremiKnowledgeSubmissionListItem> {
     return this.knowledge.listSubmissionsPage(input);
   }
 
@@ -4013,6 +5382,11 @@ runMigrations(this.db);
 
   listKnowledgeRunSources(runId: string): MultiremiKnowledgeCompilationRunSource[] {
     return this.knowledge.listRunSources(runId);
+  }
+
+  /** Run sources without `metadata`; the runs list route uses this (MUL-386 C.2). */
+  listKnowledgeRunSourceSummaries(runId: string): MultiremiKnowledgeCompilationRunSourceListItem[] {
+    return this.knowledge.listRunSourceSummaries(runId);
   }
 
   recordKnowledgeCompilationOutput(input: RecordKnowledgeOutputInput): MultiremiKnowledgeCompilationOutput {
@@ -4174,7 +5548,7 @@ runMigrations(this.db);
     actorId?: string | null;
     automationSourceEventId?: string | null;
     automationSourceTaskId?: string | null;
-  }): MultiremiSystemEvent | null {
+  }): { event: MultiremiSystemEvent | null; dependencyCheckEventId: string | null } {
     return this.autopilots.enqueueIssueStatusChangedEvent(input);
   }
 
@@ -4226,8 +5600,20 @@ runMigrations(this.db);
     this.autopilots.advanceScheduledTargetRuns();
   }
 
+  deliverRunReportWithinTransaction(...args: Parameters<AutopilotsRepo["deliverRunReportWithinTransaction"]>): void {
+    this.autopilots.deliverRunReportWithinTransaction(...args);
+  }
+
   getAutopilotRun(id: string): MultiremiAutopilotRunRecord | null {
     return this.autopilots.getAutopilotRun(id);
+  }
+
+  markAutopilotRunQuiet(turnId: string): MultiremiAutopilotRunRecord | null {
+    return this.autopilots.markAutopilotRunQuiet(turnId);
+  }
+
+  settleQuietRunWithinTransaction(runId: string): void {
+    this.autopilots.settleQuietRunWithinTransaction(runId);
   }
 
   listWebhookDeliveries(autopilotId: string, options: { includeRawBody?: boolean; limit?: number } = {}): MultiremiWebhookDelivery[] {
@@ -4279,8 +5665,20 @@ runMigrations(this.db);
     return this.chat.createChatSession(input);
   }
 
-  listChatSessions(workspaceId?: string | null, options: { creatorId?: string | null; includeArchived?: boolean } = {}): MultiremiChatSession[] {
+  isChatSessionIdUsed(id: string): boolean {
+    return this.chat.isChatSessionIdUsed(id);
+  }
+
+  listChatSessions(workspaceId?: string | null, options: Parameters<ChatRepo["listChatSessions"]>[1] = {}): MultiremiChatSession[] {
     return this.chat.listChatSessions(workspaceId, options);
+  }
+
+  archiveIdleChats(now?: number): string[] {
+    return this.chat.archiveIdleChats(now);
+  }
+
+  listChatSessionsByIds(ids: readonly string[]): MultiremiChatSession[] {
+    return this.chat.listChatSessionsByIds(ids);
   }
 
   getChatSession(id: string): MultiremiChatSession | null {
@@ -4288,7 +5686,9 @@ runMigrations(this.db);
   }
 
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession {
-    return this.chat.updateChatSession(id, input);
+    const session = this.chat.updateChatSession(id, input);
+    this.publishDaemonDispatchConditionsChanged(session.workspaceId);
+    return session;
   }
 
   deleteChatSession(id: string): boolean {
@@ -4307,24 +5707,32 @@ runMigrations(this.db);
     return this.chat.listQueuedChatTasks(chatSessionId);
   }
 
-  updateQueuedChatTask(chatSessionId: string, taskId: string, content: string) {
-    return this.chat.updateQueuedChatTask(chatSessionId, taskId, content);
-  }
-
-  removeQueuedChatTasks(chatSessionId: string, taskId?: string): void {
-    this.chat.removeQueuedChatTasks(chatSessionId, taskId);
-  }
-
-  prioritizeQueuedChatTask(chatSessionId: string, taskId: string) {
-    return this.chat.prioritizeQueuedChatTask(chatSessionId, taskId);
-  }
-
   listPendingChatTasks(workspaceId?: string | null, options: { creatorId?: string | null } = {}): MultiremiTask[] {
     return this.chat.listPendingChatTasks(workspaceId, options);
   }
 
+  /** MUL-473: the batched form of {@link getPendingChatTask} for a whole list. */
+  listPendingChatTaskCandidates(
+    workspaceId?: string | null,
+    options: { creatorId?: string | null; excludeTransportSessions?: boolean } = {},
+  ): PendingChatTaskCandidate[] {
+    return this.chat.listPendingChatTaskCandidates(workspaceId, options);
+  }
+
   listChatMessages(chatSessionId: string): MultiremiChatMessage[] {
     return this.chat.listChatMessages(chatSessionId);
+  }
+
+  listChatMessagesPage(chatSessionId: string, options: Parameters<ChatRepo["listChatMessagesPage"]>[1]) {
+    return this.chat.listChatMessagesPage(chatSessionId, options);
+  }
+
+  listChatMessagesFromLog(chatSessionId: string): MultiremiChatMessage[] {
+    return this.chat.listChatMessagesFromLog(chatSessionId);
+  }
+
+  listChatMessagesPageFromLog(chatSessionId: string, limit: number, beforeId?: string | null, beforeCreatedAt?: string | null) {
+    return this.chat.listChatMessagesPageFromLog(chatSessionId, limit, beforeId, beforeCreatedAt);
   }
 
   sendChatMessage(chatSessionId: string, input: SendChatMessageInput): SendChatMessageResult {
@@ -4335,11 +5743,14 @@ runMigrations(this.db);
     return this.chat.appendChatMessageWithinTransaction(input);
   }
 
-  createPendingAgentIssueUpdateWithinTransaction(chatSessionId: string, body: string): {
+  createPendingAgentIssueUpdateWithinTransaction(
+    chatSessionId: string, body: string,
+    options?: Parameters<ChatRepo["createPendingAgentIssueUpdateWithinTransaction"]>[2],
+  ): {
     session: MultiremiChatSession;
     message: MultiremiChatMessage;
   } {
-    return this.chat.createPendingAgentIssueUpdateWithinTransaction(chatSessionId, body);
+    return this.chat.createPendingAgentIssueUpdateWithinTransaction(chatSessionId, body, options);
   }
 
   preparePendingAgentIssueUpdatesForTask(chatSessionId: string, taskId: string): {
@@ -4368,12 +5779,132 @@ runMigrations(this.db);
     return this.chat.getChatMessage(id);
   }
 
-  createTask(input: CreateTaskInput): MultiremiTask {
-    return this.tasks.createTask(input);
+  createTask(input: CreateTaskInput, options?: { requireIdleIssue?: boolean }): MultiremiTask {
+    return this.tasks.createTask(input, options);
   }
 
-  createTaskWithinTransaction(input: CreateTaskInput): MultiremiTask {
-    return this.tasks.createTaskWithinTransaction(input);
+  /** Caller owns the transaction and replays the collector after it commits. */
+  createTaskWithinTransaction(
+    input: CreateTaskInput,
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: import("./context.js").CommitEventQueue,
+  ): MultiremiTask {
+    return this.tasks.createTaskWithinTransaction(input, childStatusChanges, deferredEvents);
+  }
+
+  createTaskWithinWorkspaceLock(
+    ...args: Parameters<TasksRepo["createTaskWithinWorkspaceLock"]>
+  ): MultiremiTask {
+    return this.tasks.createTaskWithinWorkspaceLock(...args);
+  }
+
+  ensurePendingTurnWithinTransaction(input: import("./repos/tasks-repo.js").EnsurePendingTurnInput): import("./repos/tasks-repo.js").EnsurePendingTurnResult {
+    return this.tasks.ensurePendingTurnWithinTransaction(input);
+  }
+
+  getBoundIssueLogToSeq(taskId: string): number | null {
+    return this.tasks.getBoundIssueLogToSeq(taskId);
+  }
+
+  markBoundIssueLogDelivered(taskId: string, toSeq: number): boolean {
+    return this.tasks.markBoundIssueLogDelivered(taskId, toSeq);
+  }
+
+  reactMessage(...args:Parameters<import("./inbox/operations.js").InboxOperations["reactMessage"]>) {return this.inbox.operations.reactMessage(...args);}
+  canReadDelegationResult(...args: Parameters<InboxRepo["operations"]["canReadDelegationResult"]>) { return this.inbox.operations.canReadDelegationResult(...args); }
+  listMessages(...args: Parameters<InboxRepo["operations"]["listMessages"]>) { return this.inbox.operations.listMessages(...args); }
+  editMessage(...args: Parameters<InboxRepo["operations"]["editMessage"]>) { return this.inbox.operations.editMessage(...args); }
+  deleteMessage(...args: Parameters<InboxRepo["operations"]["deleteMessage"]>) { return this.inbox.operations.deleteMessage(...args); }
+  resolveMessage(...args: Parameters<InboxRepo["operations"]["resolveMessage"]>) { return this.inbox.operations.resolveMessage(...args); }
+  listMessageInbox(...args: Parameters<InboxRepo["operations"]["listMessageInbox"]>) { return this.inbox.operations.listMessageInbox(...args); }
+  readMessageInbox(...args: Parameters<InboxRepo["operations"]["readMessageInbox"]>) { return this.inbox.operations.readMessageInbox(...args); }
+  readAllMessageInbox(...args: Parameters<InboxRepo["operations"]["readAllMessageInbox"]>) { return this.inbox.operations.readAllMessageInbox(...args); }
+  listReaderMessageInbox(...args: Parameters<InboxRepo["operations"]["listReaderMessageInbox"]>) { return this.inbox.operations.listReaderMessageInbox(...args); }
+  readAgentMessageInbox(...args: Parameters<InboxRepo["operations"]["readAgentMessageInbox"]>) { return this.inbox.operations.readAgentMessageInbox(...args); }
+  getTurn(...args: Parameters<InboxRepo["operations"]["getTurn"]>) { return this.inbox.operations.getTurn(...args); }
+  getTurnForAttempt(attemptId: string) {
+    const row = readAttemptTurn(this.db, attemptId);
+    return row ? this.getTurn(String(row.turn_id)) : null;
+  }
+  listTurns(...args: Parameters<InboxRepo["operations"]["listTurns"]>) { return this.inbox.operations.listTurns(...args); }
+  listTurnAttempts(...args: Parameters<InboxRepo["operations"]["listTurnAttempts"]>) { return this.inbox.operations.listTurnAttempts(...args); }
+  getTurnTrace(...args: Parameters<InboxRepo["operations"]["getTurnTrace"]>) { return this.inbox.operations.getTurnTrace(...args); }
+  getTurnInput(...args: Parameters<InboxRepo["operations"]["getTurnInput"]>) { return this.inbox.operations.getTurnInput(...args); }
+  cancelTurn(...args: Parameters<InboxRepo["operations"]["cancelTurn"]>) { return this.inbox.operations.cancelTurn(...args); }
+  listQueuedMessages(...args: Parameters<InboxRepo["queue"]["list"]>) { return this.inbox.queue.list(...args); }
+  enqueueQueuedMessage(...args: Parameters<InboxRepo["queue"]["enqueue"]>) { return this.inbox.queue.enqueue(...args); }
+  updateQueuedMessage(...args: Parameters<InboxRepo["queue"]["update"]>) { return this.inbox.queue.update(...args); }
+  deleteQueuedMessage(...args: Parameters<InboxRepo["queue"]["delete"]>) { return this.inbox.queue.delete(...args); }
+  steerQueuedMessage(...args: Parameters<InboxRepo["queue"]["steer"]>) { return this.inbox.queue.steer(...args); }
+  resumeQueuedMessages(...args: Parameters<InboxRepo["queue"]["resume"]>) { return this.inbox.queue.resume(...args); }
+  wrapUpTurn(...args: Parameters<InboxRepo["operations"]["wrapUpTurn"]>) { return this.inbox.operations.wrapUpTurn(...args); }
+  retryTurn(...args: Parameters<InboxRepo["operations"]["retryTurn"]>) { return this.inbox.operations.retryTurn(...args); }
+  retryTurnAsMember(...args: Parameters<InboxRepo["operations"]["retryTurnAsMember"]>) { return this.inbox.operations.retryTurnAsMember(...args); }
+  issueMessageCardToken(...args: Parameters<InboxRepo["operations"]["issueMessageCardToken"]>) { return this.inbox.operations.issueMessageCardToken(...args); }
+  answerMessageDecision(...args: Parameters<InboxRepo["operations"]["answerMessageDecision"]>) { return this.inbox.operations.answerMessageDecision(...args); }
+  getQuestion(...args: Parameters<Questions['get']>) { return new Questions(this.ctx).get(...args); }
+  canAccessQuestionFromTurn(...args: Parameters<Questions['canAccessFromTurn']>) { return new Questions(this.ctx).canAccessFromTurn(...args); }
+  listIssueQuestions(...args: Parameters<Questions['list']>) { return new Questions(this.ctx).list(...args); }
+  answerQuestion(...args: Parameters<Questions['answer']>) { return new Questions(this.ctx).answer(...args); }
+  escalateQuestion(...args: Parameters<Questions['escalate']>) { return new Questions(this.ctx).escalate(...args); }
+  presentQuestion(...args: Parameters<Questions['present']>) { return new Questions(this.ctx).present(...args); }
+  enqueueQuestionPresentationWithinTransaction(id: string) { return this.feishuBot.enqueueQuestionPresentationWithinTransaction(id); }
+  continueQuestion(...args: Parameters<Questions['continue']>) { return new Questions(this.ctx).continue(...args); }
+  closeQuestion(...args: Parameters<Questions['close']>) { return new Questions(this.ctx).close(...args); }
+  reconcileQuestionWaits(...args: Parameters<Questions['reconcileRuntimeWaits']>) { return new Questions(this.ctx).reconcileRuntimeWaits(...args); }
+  getMessage(...args: Parameters<InboxRepo["getMessage"]>) { return this.inbox.getMessage(...args); }
+  /** `getMessage` for many ids in bounded batches; ids without a message are absent. */
+  getMessages(...args: Parameters<InboxRepo["getMessages"]>) { return this.inbox.getMessages(...args); }
+  getDaemonTurnBridge() {return new DaemonTurnBridge(this.ctx);}
+  sendMessage(input:import("@multiremi/contracts/unified-model.js").SendMessageInput, uploads: CreateAttachmentInput[] = [],
+    authorizeRecipient?:(agent:MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:MultiremiAgent|null)=>void) {
+    const events=createCommitEventQueue();
+    const result=this.db.transaction(()=>{
+      if (uploads.length) this.ctx.lockWorkspaceRuntimeLifecycle(uploads[0]!.workspaceId!);
+      if (input.dedupe_key && this.db.query("SELECT id FROM multiremi_conversation_log WHERE session_id=? AND dedupe_key=?").get(input.session_id, input.dedupe_key)) {
+        return this.inbox.sendMessageWithinTransaction(input, events, authorizeRecipient, authorizeConversation);
+      }
+      const attachmentIds = uploads.map(upload => this.createAttachment(upload).id);
+      const sent = this.inbox.sendMessageWithinTransaction({ ...input, attachment_ids: [...(input.attachment_ids ?? []), ...attachmentIds] },events,authorizeRecipient,authorizeConversation);
+      for (const id of attachmentIds) {
+        const attachment = this.getAttachment(id);
+        if (attachment && attachment.commentId !== sent.message.id && attachment.chatMessageId !== sent.message.id) this.deleteAttachment(id);
+      }
+      if (sent.message.sender_type === 'agent' && sent.message.task_id) {
+        const turn = this.getTurn(sent.message.task_id);
+        const task = turn?.current_attempt_id ? this.getTask(turn.current_attempt_id) : null;
+        const attachments = this.listAttachmentsForChatMessages([sent.message.id]).get(sent.message.id) ?? [];
+        if (task?.chatSessionId && attachments.length) this.feishuBot.forTask(task.id).registerChatAttachmentDeliveriesWithinTransaction(task.id, sent.message.id, attachments, sent.message.body_md);
+      }
+      return sent;
+    })();
+    afterCommit(this.db,()=>this.ctx.emitCommitEvents(events));
+    return result;
+  }
+  createTurnForMessageWithinWorkspaceLock(...args: Parameters<TasksRepo["createTurnForMessageWithinWorkspaceLock"]>) {
+    return this.tasks.createTurnForMessageWithinWorkspaceLock(...args);
+  }
+
+  sendEnvelopeWithinTransaction(
+    env: import("@multiremi/contracts/inbox.js").Envelope,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ): import("./repos/inbox-repo.js").EnvelopeDelivery[] {
+    return this.inbox.sendEnvelopeWithinTransaction(env, collector, deferredEvents);
+  }
+
+  createSystemIssueCommentWithinTransaction(
+    ...args: Parameters<IssuesRepo["createSystemIssueCommentWithinTransaction"]>
+  ): MultiremiIssueComment {
+    return this.issues.createSystemIssueCommentWithinTransaction(...args);
+  }
+
+  ensureDelegationWakeupWithinTransaction(
+    input: import("./repos/tasks-repo.js").DelegationWakeupInput,
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ) {
+    return this.tasks.ensureDelegationWakeupWithinTransaction(input, childStatusChanges, deferredEvents);
   }
 
   ensureDelegationWakeup(input: {
@@ -4387,7 +5918,11 @@ runMigrations(this.db);
   }
 
   resetSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane | null {
-    return this.tasks.resetSessionAgentLane(sessionId, agentId, executionScope);
+    const deferredEvents = createCommitEventQueue();
+    const lane = this.db.transaction(() =>
+      this.tasks.resetSessionAgentLane(sessionId, agentId, executionScope, undefined, deferredEvents))();
+    this.ctx.emitCommitEvents(deferredEvents);
+    return lane;
   }
 
   /**
@@ -4404,12 +5939,31 @@ runMigrations(this.db);
     return this.runtimes.runtimeCanRouteAgent(runtime, agent);
   }
 
+  agentModelPolicyReason(agent: MultiremiAgent): string | null {
+    return this.runtimes.agentModelPolicyReason(agent);
+  }
   runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     return this.runtimes.runtimeSupportsAgentModel(runtime, agent);
   }
 
   refreshQueuedCapabilityWaitReasons(now = Date.now()): { updated: number; alerted: number } {
     return this.tasks.refreshQueuedCapabilityWaitReasons(now);
+  }
+
+  sweepIdleIssueLanes(now = Date.now(), limits?: { lanes?: number; entries?: number }): import("./re-ring-sweep.js").ReRingSweepResult {
+    return this.tasks.sweepIdleIssueLanes(now, limits);
+  }
+
+  /**
+   * Read-only: the claim's own structural placement verdict for every
+   * registered Runtime, so operators and tests can see WHY a queued task
+   * cannot be taken without inferring it from claim side effects (MUL-449).
+   */
+  describeTaskPlacement(taskId: string): Array<{
+    runtimeId: string; provider: string; daemonId: string | null;
+    placementOk: boolean; routingOk: boolean;
+  }> {
+    return this.tasks.describeTaskPlacement(taskId);
   }
 
   getRuntimeByDaemonAndProvider(daemonId: string, provider: string): MultiremiRuntime | null {
@@ -4420,11 +5974,40 @@ runMigrations(this.db);
     return this.tasks.getTask(id);
   }
 
+  /** MUL-474: identity/status columns only, request-scoped. */
+  getTaskIdentities(ids: readonly string[]) { return this.tasks.getTaskIdentities(ids); }
+
+  getTaskIdentity(id: string): MultiremiTaskIdentity | null;
+  getTaskIdentity(id: string, projection: "fanout"): import("@multiremi/store/context.js").TaskMessageFanoutSubject | null;
+  getTaskIdentity(id: string, projection?: "fanout") {
+    return projection ? this.tasks.getTaskIdentity(id, projection) : this.tasks.getTaskIdentity(id);
+  }
+
+  /** Conversation-visibility subjects for many source ids; see TasksRepo.getConversationSourceSubjects. */
+  getConversationSourceSubjects(sourceIds: readonly string[]) {
+    return this.tasks.getConversationSourceSubjects(sourceIds);
+  }
+
+  taskOfferRetryDeadlines(runtimeId: string) { return this.tasks.taskOfferRetryDeadlines(runtimeId); }
+  pendingTaskOfferRuntimeIds(workspaceId: string) { return this.tasks.pendingTaskOfferRuntimeIds(workspaceId); }
+
+  hasPendingTaskOffers(workspaceId: string) { return this.tasks.hasPendingTaskOffers(workspaceId); }
+
+  private publishDaemonDispatchConditionsChanged(workspaceId: string, runtimeId?: string): void {
+    this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId,
+      actorType: "system", actorId: null, payload: runtimeId ? { runtime_id: runtimeId } : {} });
+  }
+
+  /** MUL-474: the `status` route's projection, without the prompt column. */
+  getTaskStatusSnapshot(id: string): TaskStatusSnapshot | null {
+    return this.tasks.getTaskStatusSnapshot(id);
+  }
+
   getTaskByRef(ref: string, input: { issueId?: string | null } = {}): MultiremiTask | null {
     return this.tasks.getTaskByRef(ref, input);
   }
 
-  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "topic" {
+  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "session" | "topic" {
     return this.tasks.getTaskChatExecutionKind(task);
   }
 
@@ -4454,8 +6037,22 @@ runMigrations(this.db);
     return activityRepositories(this.db, workspaceId, subject, id);
   }
 
-  notifyTaskRepositoryActivity(task: MultiremiTask) {
-    if (!task.chatSessionId) this.notifyRepositoryActivity(task.workspaceId, this.affectedActivity(task.workspaceId, "task", task.id));
+  private notifyTaskRepositoryActivity(task: MultiremiTask) {
+    if (this.ctx.workspaceEventListeners.size && !task.chatSessionId) this.notifyRepositoryActivity(task.workspaceId, this.affectedActivity(task.workspaceId, "task", task.id));
+  }
+
+  /** Full rows for one runtime's pending statuses; avoids a whole-table read. */
+  listTasksForRuntimeStatuses(runtimeId: string, statuses: readonly MultiremiTaskStatus[]): MultiremiTask[] {
+    return this.tasks.listTasksForRuntimeStatuses(runtimeId, statuses);
+  }
+
+  /** `id/status/runtime_id/agent_id` projection for lifecycle guards. */
+  listTaskRefs(input: {
+    statuses: readonly MultiremiTaskStatus[];
+    runtimeId?: string | null;
+    agentIds?: readonly string[];
+  }): TaskRef[] {
+    return this.tasks.listTaskRefs(input);
   }
 
   listTasksChunk(
@@ -4474,8 +6071,8 @@ runMigrations(this.db);
     return this.tasks.listAgentTasks(agentId);
   }
 
-  listWorkspaceAgentTaskSnapshot(workspaceId = "local"): MultiremiTask[] {
-    return this.tasks.listWorkspaceAgentTaskSnapshot(workspaceId);
+  listWorkspaceAgentTaskSnapshot(...args: Parameters<TasksRepo["listWorkspaceAgentTaskSnapshot"]>): MultiremiTask[] {
+    return this.tasks.listWorkspaceAgentTaskSnapshot(...args);
   }
 
   listWorkspaceAgentRunCounts(workspaceId = "local", days = 30): MultiremiAgentRunCount[] {
@@ -4490,8 +6087,36 @@ runMigrations(this.db);
     return this.tasks.claimTask(runtimeId, options);
   }
 
-  startTask(taskId: string): MultiremiTask {
-    return this.tasks.startTask(taskId);
+  recordTaskOffered(taskId: string, runtimeId: string, at?: string): boolean {
+    return this.tasks.recordTaskOffered(taskId, runtimeId, at);
+  }
+
+  acceptTaskOffer(taskId: string, runtimeId: string, at?: string): boolean {
+    return this.tasks.acceptTaskOffer(taskId, runtimeId, at);
+  }
+
+  releaseTaskOfferLease(taskId: string): void { this.tasks.releaseTaskOfferLease(taskId); }
+
+  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown"): boolean {
+    return this.tasks.requeueTaskOffer(taskId, runtimeId, outcome);
+  }
+
+  startTask(taskId: string, usageRunId?: string, expectedRuntimeId?: string): MultiremiTask {
+    return this.tasks.startTask(taskId, usageRunId, expectedRuntimeId);
+  }
+
+  startTaskFromDaemon(taskId: string, authority: Parameters<TasksRepo["startTaskFromDaemon"]>[1], usageRunId?: string): "started" | "replayed" {
+    return this.tasks.startTaskFromDaemon(taskId, authority, usageRunId);
+  }
+
+  completeTaskFromDaemon(taskId: string, input: Parameters<TasksRepo["completeTask"]>[1],
+    authority: Parameters<TasksRepo["completeTaskFromDaemon"]>[2]): MultiremiTask {
+    return this.tasks.completeTaskFromDaemon(taskId, input, authority);
+  }
+
+  failTaskFromDaemon(taskId: string, input: Parameters<TasksRepo["failTask"]>[1],
+    authority: Parameters<TasksRepo["failTaskFromDaemon"]>[2]): MultiremiTask {
+    return this.tasks.failTaskFromDaemon(taskId, input, authority);
   }
 
   renewTaskDispatchLease(taskId: string): MultiremiTask {
@@ -4504,13 +6129,23 @@ runMigrations(this.db);
 
   createTaskHumanRequest(input: CreateTaskHumanRequestInput): MultiremiTaskHumanRequest {
     const request = this.tasks.createTaskHumanRequest(input);
+    this.feishuBot.materializeTaskDeliveries(input.taskId);
     const wakeTask = this.feishuBot.prepareHumanRequestPush(request);
     if (wakeTask) this.ctx.notifyTaskEnqueued(wakeTask);
+    this.notifyHumanRequest("created", request);
     return request;
   }
 
   getTaskHumanRequest(requestId: string): MultiremiTaskHumanRequest | null {
     return this.tasks.getTaskHumanRequest(requestId);
+  }
+
+  cancelPendingHumanRequestsWithinTransaction(taskId: string, now: string): void {
+    this.tasks.cancelPendingHumanRequestsWithinTransaction(taskId, now);
+  }
+
+  prepareTaskStreamQuestionCard(requestId: string, recipientOpenId: string): Record<string, unknown> | null {
+    return this.feishuBot.prepareTaskStreamQuestionCard(requestId, recipientOpenId);
   }
 
   listTaskHumanRequests(taskId: string): MultiremiTaskHumanRequest[] {
@@ -4519,17 +6154,51 @@ runMigrations(this.db);
 
   respondTaskHumanRequest(
     requestId: string,
-    input: { response: Record<string, unknown>; respondedBy?: string | null },
+    input: { response: Record<string, unknown>; respondedBy?: string | null; cardCredential?: QuestionCardCredential; expectedRouteRevision?: number },
   ): MultiremiTaskHumanRequest | null {
-    return this.tasks.respondTaskHumanRequest(requestId, input);
+    const request = this.tasks.respondTaskHumanRequest(requestId, input);
+    // Questions.answer persists the card update intent in the answer transaction.
+    if (request) this.notifyHumanRequest("responded", request);
+    return request;
   }
 
   expireTaskHumanRequest(requestId: string, status: "timeout" | "cancelled"): MultiremiTaskHumanRequest | null {
-    return this.tasks.expireTaskHumanRequest(requestId, status);
+    const request = this.tasks.expireTaskHumanRequest(requestId, status);
+    if (request) this.feishuBot.enqueueDecisionCardPatch(request);
+    // The store's terminal statuses are `timeout` and `cancelled`; the hub's event
+    // names are `expired` and `cancelled`. The mapping lives here rather than in the
+    // feed so a consumer never has to know the store's spelling.
+    if (request) this.notifyHumanRequest(status === "timeout" ? "expired" : "cancelled", request);
+    return request;
+  }
+
+  /**
+   * Publish one human-request transition, resolving the owning task's workspace.
+   *
+   * The workspace is looked up here because the request row is keyed by task only,
+   * and a consumer (the hub's feed) would otherwise need a second read on the write
+   * path. A task that cannot be resolved simply publishes nothing: a transition
+   * without a workspace cannot be routed.
+   */
+  private notifyHumanRequest(
+    type: "created" | "responded" | "expired" | "cancelled",
+    request: MultiremiTaskHumanRequest,
+  ): void {
+    const task = this.tasks.getTaskIdentity(request.taskId);
+    if (!task) return;
+    this.ctx.notifyHumanRequest({ type, request, workspaceId: task.workspaceId });
+  }
+
+  enqueueDecisionCardPatch(request: MultiremiTaskHumanRequest): void {
+    this.feishuBot.enqueueDecisionCardPatch(request);
   }
 
   createTaskSteerMessage(input: CreateTaskSteerMessageInput): MultiremiTaskSteerMessage {
     return this.tasks.createTaskSteerMessage(input);
+  }
+
+  createTaskSteerMessageWithinTransaction(input: CreateTaskSteerMessageInput): MultiremiTaskSteerMessage {
+    return this.tasks.createTaskSteerMessageWithinTransaction(input);
   }
 
   getTaskSteerMessage(steerId: string): MultiremiTaskSteerMessage | null {
@@ -4559,29 +6228,39 @@ runMigrations(this.db);
     action: MultiremiOrganizerActionKind;
     reason: string;
     content?: string | null;
+    cold?: boolean;
   }): {
     task: MultiremiTask;
     replacementTask: MultiremiTask | null;
     message: MultiremiTaskSteerMessage | null;
     audit: MultiremiOrganizerAction;
-    comment: MultiremiIssueComment;
+    comment: MultiremiIssueComment | import("@multiremi/contracts/unified-model.js").UnifiedMessage;
   } {
+    const childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChange[] = [];
+    // MUL-400 S1 (QA round 3): the audit comment is written inside this
+    // transaction, so its realtime push waits for the COMMIT. On rollback the
+    // queue is dropped and no client ever sees a comment that does not exist.
+    const deferredEvents = createCommitEventQueue();
     let redispatchResult: ReturnType<TasksRepo["redispatchTaskWithinTransaction"]> | null = null;
+    let cancelledResult: ReturnType<TasksRepo["cancelTaskWithinTransaction"]> | null = null;
     const result = this.db.transaction(() => {
       const supervisorTask = this.getTask(input.supervisorTaskId);
       const supervisorAgent = this.getAgent(input.supervisorAgentId);
       if (
         !supervisorTask
         || !supervisorAgent
-        || !agentRoleAtLeast(supervisorAgent.role, "supervisor")
         || supervisorTask.agentId !== supervisorAgent.id
         || supervisorTask.workspaceId !== supervisorAgent.workspaceId
       ) {
         throw new OrganizerActionError("organizer_supervisor_required", "a current supervisor task is required");
       }
+      this.ctx.lockWorkspaceRuntimeLifecycle(supervisorTask.workspaceId);
       const target = this.getTask(input.targetTaskId);
       if (!target || target.workspaceId !== supervisorTask.workspaceId) {
         throw new OrganizerActionError("organizer_target_forbidden", "target task is outside the supervisor workspace");
+      }
+      if (!agentRoleAtLeast(supervisorAgent.role, "supervisor") && !isRelatedTurnController(this, supervisorAgent.id, target)) {
+        throw new OrganizerActionError("organizer_target_forbidden", "only a supervisor, squad leader or parent owner may retry this turn");
       }
       if (target.id === supervisorTask.id) {
         throw new OrganizerActionError("organizer_self_action_forbidden", "a supervisor cannot act on its own task");
@@ -4605,6 +6284,17 @@ runMigrations(this.db);
           409,
         );
       }
+      const sourceTurn = this.getTurnForAttempt(supervisorTask.id);
+      const sourceScope = sourceTurn ? this.getIssueSessionWithOwnerScope(sourceTurn.session_id) : null;
+      if (!sourceTurn || !sourceScope || sourceScope.ownerWorkspaceId !== supervisorTask.workspaceId
+        || sourceScope.session.workspaceId !== supervisorTask.workspaceId
+        || !sourceScope.session.chatId && sourceScope.session.issueId !== reportIssue.id) {
+        throw new OrganizerActionError(
+          "organizer_report_issue_required",
+          "the supervisor report conversation must have a current owner in this workspace",
+          409,
+        );
+      }
       const reason = input.reason.trim();
       if (!reason) throw new OrganizerActionError("organizer_reason_required", "reason is required", 400);
       if (reason.length > 2_000) throw new OrganizerActionError("organizer_reason_too_long", "reason must be at most 2000 characters", 400);
@@ -4613,15 +6303,19 @@ runMigrations(this.db);
       let replacementTask: MultiremiTask | null = null;
       let message: MultiremiTaskSteerMessage | null = null;
       if (input.action === "cancel") {
-        task = this.tasks.cancelTask(target.id);
+        // Caller-owned transaction: inside it `cancelTask`'s own transaction is
+        // only a SAVEPOINT (B1, MUL-426), so its child-status replay and events
+        // would run before this COMMIT.
+        cancelledResult = this.tasks.cancelTaskWithinTransaction(target.id, childStatusChanges, deferredEvents);
+        task = cancelledResult.task;
       } else if (input.action === "redispatch") {
-        redispatchResult = this.tasks.redispatchTaskWithinTransaction(target.id);
+        redispatchResult = this.tasks.redispatchTaskWithinTransaction(target.id, childStatusChanges, deferredEvents, input.cold);
         task = redispatchResult.cancelled;
         replacementTask = redispatchResult.replacement;
       } else {
         const content = String(input.content ?? "").trim();
         if (!content) throw new OrganizerActionError("organizer_content_required", "steer content is required", 400);
-        message = this.tasks.createTaskSteerMessage({
+        message = this.tasks.createTaskSteerMessageWithinTransaction({
           taskId: target.id,
           kind: input.action,
           content,
@@ -4640,31 +6334,62 @@ runMigrations(this.db);
         action: input.action,
         reason,
       });
-      const comment = this.issues.createIssueComment(reportIssue.id, {
-        authorType: "agent",
-        authorId: supervisorAgent.id,
-        taskId: supervisorTask.id,
-        body: [
-          `Organizer action: ${input.action}`,
-          `Target task: ${target.id}`,
-          ...(target.issueId ? [`Target issue: ${target.issueId}`] : []),
-          ...(replacementTask ? [`Replacement task: ${replacementTask.id}`] : []),
-          `Criterion: ${reason}`,
-          `Audit record: ${audit.id}`,
-        ].join("\n"),
-      }, { deferAgentMentionDispatch: true });
-      this.issues.notifyOrganizerAction(reportIssue, comment.body, "agent", supervisorAgent.id, {
-        organizer_action_id: audit.id,
-        action: input.action,
-        target_task_id: target.id,
-        target_issue_id: target.issueId,
-        replacement_task_id: replacementTask?.id ?? null,
-        comment_id: comment.id,
-      });
+      const reportBody = [
+        `Organizer action: ${input.action}`,
+        `Target task: ${target.id}`,
+        ...(target.issueId ? [`Target issue: ${target.issueId}`] : []),
+        ...(replacementTask ? [`Replacement task: ${replacementTask.id}`] : []),
+        `Criterion: ${reason}`,
+        `Audit record: ${audit.id}`,
+      ].join("\n");
+      const delegatorId = supervisorTask.delegatedByAgentId !== supervisorAgent.id
+        ? supervisorTask.delegatedByAgentId : null;
+      let comment: MultiremiIssueComment | import("@multiremi/contracts/unified-model.js").UnifiedMessage;
+      if (sourceScope.session.chatId) {
+        // The Issue is only a projection for a Chat-owned patrol. Its report
+        // remains on the private conversation, including when the audit pointer is missing.
+        comment = this.inbox.sendMessageWithinTransaction({
+          session_id: sourceScope.session.id,
+          sender: { type: "agent", id: supervisorAgent.id },
+          source_turn_id: sourceTurn.id,
+          to: delegatorId ? { type: "agent", ref: delegatorId } : { type: "none" },
+          message_kind: "report",
+          wake_requested: delegatorId ? "now" : "inbox_only",
+          body_md: reportBody,
+        }, deferredEvents).message;
+      } else {
+        comment = this.issues.createIssueComment(reportIssue.id, {
+          issueSessionId: sourceScope.session.id,
+          authorType: "agent",
+          authorId: supervisorAgent.id,
+          taskId: supervisorTask.id,
+          body: reportBody,
+        }, { withinTransaction: true, deferredEvents, childStatusChanges });
+        if (delegatorId) {
+          this.inbox.sendMessageWithinTransaction({
+            id: comment.id, session_id: comment.issueSessionId!,
+            sender: { type: "agent", id: supervisorAgent.id }, source_turn_id: sourceTurn.id,
+            to: { type: "agent", ref: delegatorId }, message_kind: "report", wake_requested: "now",
+            body_md: comment.body,
+          }, deferredEvents);
+        }
+        this.issues.notifyOrganizerAction(reportIssue, comment.body, "agent", supervisorAgent.id, {
+          organizer_action_id: audit.id,
+          action: input.action,
+          target_task_id: target.id,
+          target_issue_id: target.issueId,
+          replacement_task_id: replacementTask?.id ?? null,
+          comment_id: comment.id,
+        });
+      }
       return { task, replacementTask, message, audit, comment };
     })();
-    if (redispatchResult) this.tasks.notifyRedispatchedTask(redispatchResult);
-    this.issues.dispatchDeferredAgentCommentMentions(result.comment.id);
+    afterCommit(this.db,()=>{
+      this.tasks.runCollectedChildStatusChanges(childStatusChanges);
+      if (cancelledResult) this.tasks.notifyCancelledTask(cancelledResult);
+      if (redispatchResult) this.tasks.notifyRedispatchedTask(redispatchResult);
+      this.ctx.emitCommitEvents(deferredEvents);
+    });
     return result;
   }
 
@@ -4674,16 +6399,89 @@ runMigrations(this.db);
     return task;
   }
 
+  /** PR 5: the `task.activity` count of an active attempt; see `TasksRepo.recordRunningSubagents`. */
+  recordRunningSubagents(taskId: string, count: number): boolean {
+    return this.tasks.recordRunningSubagents(taskId, count);
+  }
+
+  getRunningSubagents(taskId: string): number | null {
+    return this.tasks.getRunningSubagents(taskId);
+  }
+
+  /** PR 6: the whole `task.activity` frame (subagents and background tasks); see `TasksRepo.recordTaskActivity`. */
+  recordTaskActivity(taskId: string, activity: { runningSubagents: number; runningBackgroundTasks?: number }): boolean {
+    return this.tasks.recordTaskActivity(taskId, activity);
+  }
+
+  getRunningBackgroundTasks(taskId: string): number | null {
+    return this.tasks.getRunningBackgroundTasks(taskId);
+  }
+
+  // ── Background tasks (PR 6): see BackgroundTasksRepo ──────────────────────
+
+  upsertLaneBackgroundSnapshot(runtimeId: string, workspaceId: string, payload: DaemonLaneBackgroundTasksPayload): number {
+    return this.backgroundTasks.upsertLaneSnapshot(runtimeId, workspaceId, payload);
+  }
+
+  reconcileParkedLanes(runtimeId: string, parkedLanes: readonly DaemonParkedLane[], activeTaskIds: readonly string[]): number {
+    return this.backgroundTasks.reconcileParkedLanes(runtimeId, parkedLanes, activeTaskIds);
+  }
+
+  /** The sweep: rows of a deleted runtime end `lost`, runtimes silent for 10 minutes turn running rows `unknown`, retention. */
+  sweepBackgroundTasks(now?: number): { unknown: number; lost: number; deleted: number } {
+    return this.backgroundTasks.sweep(now);
+  }
+
+  requestBackgroundTaskStop(sessionId: string, target: BackgroundTaskStopTarget, memberId: string | null): BackgroundTaskStopResult {
+    return this.backgroundTasks.requestStop(sessionId, target, memberId);
+  }
+
+  laneBackgroundWake(runtimeId: string, workspaceId: string, payload: DaemonLaneBackgroundWakePayload): DaemonLaneBackgroundWakeReply {
+    return this.backgroundTasks.laneBackgroundWake(runtimeId, workspaceId, payload);
+  }
+
+  listSessionBackgroundTasks(sessionId: string): SessionBackgroundTasks {
+    return this.backgroundTasks.listSessionBackgroundTasks(sessionId);
+  }
+
+  /**
+   * ADR 0025: the command catalogue of a Chat menu. The caller has authorized
+   * the user for the agent, and for `sessionId` when it is set.
+   */
+  getChatSlashCommands(input: { agent: MultiremiAgent; sessionId: string | null }): ChatSlashCommandsResponse {
+    return readChatSlashCommands(this.db, {
+      agent: { id: input.agent.id, provider: input.agent.provider || null, runtimeId: input.agent.runtimeId ?? null },
+      workspaceId: input.agent.workspaceId, sessionId: input.sessionId,
+    });
+  }
+
+  countRunningBackgroundTasksBySession(sessionIds: readonly string[]): Map<string, number> {
+    return this.backgroundTasks.countRunningBySession(sessionIds);
+  }
+
+  runtimesWithAliveBackgroundTasks(sessionId: string): string[] {
+    return this.backgroundTasks.runtimesWithAliveTasks(sessionId);
+  }
+
+  backgroundTaskDownlinks(runtimeId: string): BackgroundTaskDownlinks {
+    return this.backgroundTasks.downlinkEntities(runtimeId);
+  }
+
   pinTaskSession(taskId: string, sessionId?: string | null, workDir?: string | null): MultiremiTask {
     return this.tasks.pinTaskSession(taskId, sessionId, workDir);
   }
 
+  /** @deprecated Legacy reader fixtures only; production producers use the daemon trace store. */
   appendTaskMessages(taskId: string, messages: TaskMessageInput[]): MultiremiTaskMessage[] {
     return this.tasks.appendTaskMessages(taskId, messages);
   }
 
-  listTaskMessages(taskId: string, sinceSeq?: number | null): MultiremiTaskMessage[] {
-    return this.tasks.listTaskMessages(taskId, sinceSeq);
+  getTaskMessagePageRows(): number {
+    return this.tasks.getTaskMessagePageRows();
+  }
+
+  listTaskMessages(taskId: string, sinceSeq?: number | null, throughSeq?: number, limit?: number): MultiremiTaskMessage[] {
+    return this.tasks.listTaskMessages(taskId, sinceSeq, throughSeq, limit);
   }
 
   recordTaskPrompt(taskId: string, input: RecordTaskPromptInput): MultiremiTaskPromptArtifact {
@@ -4694,17 +6492,15 @@ runMigrations(this.db);
     return this.tasks.getTaskPrompt(taskId);
   }
 
-  completeTask(taskId: string, input: {
-    output: string;
-    branchName?: string | null;
-    sessionId?: string | null;
-    workDir?: string | null;
-  }): MultiremiTask {
-    return this.tasks.completeTask(taskId, input);
+  completeTask(taskId: string, input: Parameters<TasksRepo["completeTask"]>[1],
+    authority?: Parameters<TasksRepo["completeTask"]>[2]): MultiremiTask {
+    return this.tasks.completeTask(taskId, input, authority);
   }
 
   failTask(taskId: string, input: {
     error: string;
+    traceEventCount?: number;
+    completionFields?: DaemonTaskCompletionFields | null;
     sessionId?: string | null;
     workDir?: string | null;
     failureReason?: string | null;
@@ -4713,20 +6509,38 @@ runMigrations(this.db);
     return this.tasks.failTask(taskId, input);
   }
 
-  cancelTaskWithinTransaction(taskId: string): import("./repos/tasks-repo.js").CancelTaskResult {
-    return this.tasks.cancelTaskWithinTransaction(taskId);
+  cancelTaskWithinTransaction(
+    taskId: string,
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: import("./context.js").CommitEventQueue,
+  ): import("./repos/tasks-repo.js").CancelTaskResult {
+    return this.tasks.cancelTaskWithinTransaction(taskId, childStatusChanges, deferredEvents);
+  }
+
+  runCollectedChildStatusChanges(
+    changes: import("./repos/tasks-repo.js").ChildStatusChange[],
+    seen?: Set<string>,
+  ): void {
+    this.tasks.runCollectedChildStatusChanges(changes, seen);
   }
 
   notifyCancelledTask(result: import("./repos/tasks-repo.js").CancelTaskResult): void {
     this.tasks.notifyCancelledTask(result);
   }
 
-  cancelTask(taskId: string): MultiremiTask {
-    return this.tasks.cancelTask(taskId);
+  cancelTask(taskId: string, options: { replacementPlanned?: boolean } = {}): MultiremiTask {
+    return this.tasks.cancelTask(taskId, options);
   }
 
   cancelTasksByTriggerComments(workspaceId: string, commentIds: string[]): number {
     return this.tasks.cancelTasksByTriggerComments(workspaceId, commentIds);
+  }
+
+  cancelTasksByTriggerCommentsWithinTransaction(workspaceId: string, commentIds: string[],
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: import("./context.js").CommitEventQueue,
+    recovery?: readonly import("./repos/tasks-repo.js").TriggerCommentRecoveryLane[]): import("./repos/tasks-repo.js").CancelTaskResult[] {
+    return this.tasks.cancelTasksByTriggerCommentsWithinTransaction(workspaceId, commentIds, childStatusChanges, deferredEvents, recovery);
   }
 
   getTaskStatus(taskId: string): MultiremiTaskStatus {
@@ -4737,7 +6551,12 @@ runMigrations(this.db);
     return this.tasks.reportTaskUsage(taskId, usage);
   }
 
-  recoverOrphans(runtimeId: string): { orphaned: number; retried: number } {
-    return this.tasks.recoverOrphans(runtimeId);
+  recoverOrphanAttempt(runtimeId: string, attemptId: string): { orphaned: number; retried: number } {
+    return this.tasks.recoverOrphanAttempt(runtimeId, attemptId);
+  }
+
+  recoverOrphans(runtimeId: string, activeTaskIds?: readonly string[]): { orphaned: number; retried: number } {
+    return this.tasks.recoverOrphans(runtimeId, activeTaskIds);
   }
 }
+import { Questions } from './inbox/questions.js';

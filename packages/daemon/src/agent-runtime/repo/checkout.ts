@@ -1,9 +1,12 @@
+import { DEFAULT_CO_AUTHORED_BY, type CoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync, statSync, lstatSync, realpathSync, appendFileSync, chmodSync, copyFileSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, statSync, lstatSync, realpathSync, chmodSync, copyFileSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import type { RepoSpec } from "@daemon/contracts/types.js";
 import { createLogger } from "@shared/logger.js";
+import { withoutRepositoryEnvironment } from "../workspace/git-ops.js";
+import { renameReadOnlyDirectory } from "../workspace/read-only-rename.js";
 import {
   appendGitCredentialBrokerEnv,
   preferredHttpsCloneUrl,
@@ -26,6 +29,7 @@ export interface MultiremiWorktreeParams {
   /** Stable branch for Issue workspaces, for example agent/MUL-28. */
   branchName?: string;
   coAuthoredByEnabled?: boolean;
+  coAuthoredBy?: CoAuthoredByIdentity;
   // Leave an existing worktree untouched (no reset/clean/checkout) and return
   // its current branch. Used by the daemon's pre-flight auto-checkout so a
   // resumed task never wipes uncommitted work; the CLI keeps the default
@@ -106,7 +110,6 @@ export interface ManagedWorktreeParams {
   workDir: string;
 }
 
-const AGENT_GIT_EXCLUDE_PATTERNS = [".agent_context", ".multiremi", "CLAUDE.md", "AGENTS.md", ".claude", ".opencode"];
 const MODERN_FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
 const MIRRORED_TAG_FETCH_REFSPEC = "+refs/tags/*:refs/tags/*";
 const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
@@ -169,10 +172,12 @@ case "$COMMIT_SOURCE" in
   merge|squash) exit 0 ;;
 esac
 
-TRAILER="Co-authored-by: Remi <remi@openremi.fun>"
+CO_AUTHOR=$(git config --get multiremi.coAuthoredBy)
+[ -n "$CO_AUTHOR" ] || exit 0
+TRAILER="Co-authored-by: $CO_AUTHOR"
 
 # Don't add if already present.
-if grep -qF "$TRAILER" "$COMMIT_MSG_FILE"; then
+if grep -qxF -- "$TRAILER" "$COMMIT_MSG_FILE"; then
   exit 0
 fi
 
@@ -385,7 +390,9 @@ export class MultiremiRepoCache {
           throw new Error(`snapshot extraction failed${error ? `: ${error}` : ""}`);
         }
         makeTreeReadOnly(temporaryPath);
-        renameSync(temporaryPath, snapshotPath);
+        // A crash before the root regains 0555 at snapshotPath is repaired by
+        // the reuse branch above, which re-protects the tree under this lock.
+        renameReadOnlyDirectory(temporaryPath, snapshotPath);
         published = true;
         // Relative links survive the rename; absolute links must also remain
         // contained at the published location, not point back into staging.
@@ -429,8 +436,7 @@ export class MultiremiRepoCache {
         throw new Error(`worktree ${worktreePath} is on ${currentBranch}, expected ${requestedBranch}; refusing to switch a persistent workspace`);
       }
       const resolution = resolveBaseRef(barePath, params.ref, params.preferredRef);
-      excludeAgentFiles(worktreePath);
-      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled !== false);
+      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled === false ? null : params.coAuthoredBy ?? DEFAULT_CO_AUTHORED_BY);
       return { path: worktreePath, branch_name: currentBranch, branchName: currentBranch, created: false, ...worktreeBaseResult(worktreePath, resolution) };
     }
 
@@ -454,8 +460,7 @@ export class MultiremiRepoCache {
       if (requestedBranch && currentBranch !== requestedBranch) {
         throw new Error(`worktree ${worktreePath} is on ${currentBranch}, expected ${requestedBranch}; refusing to switch a persistent workspace`);
       }
-      excludeAgentFiles(worktreePath);
-      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled !== false);
+      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled === false ? null : params.coAuthoredBy ?? DEFAULT_CO_AUTHORED_BY);
       return { path: worktreePath, branch_name: currentBranch, branchName: currentBranch, created: false, ...worktreeBaseResult(worktreePath, resolution) };
     }
 
@@ -471,8 +476,7 @@ export class MultiremiRepoCache {
     } else {
       git(barePath, ["worktree", "add", "-b", branchName, worktreePath, baseRef]);
     }
-    excludeAgentFiles(worktreePath);
-    applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled !== false);
+    applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled === false ? null : params.coAuthoredBy ?? DEFAULT_CO_AUTHORED_BY);
     return { path: worktreePath, branch_name: branchName, branchName, created: true, ...worktreeBaseResult(worktreePath, resolution) };
   }
 
@@ -987,7 +991,8 @@ function ensureRemoteTrackingLayout(barePath: string, env?: NodeJS.ProcessEnv): 
 }
 
 function gitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base, GIT_TERMINAL_PROMPT: "0" };
+  // A daemon started from a git hook must not point the cache's git at another repository.
+  const env: NodeJS.ProcessEnv = { ...withoutRepositoryEnvironment(base), GIT_TERMINAL_PROMPT: "0" };
   const existing = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
   const index = Number.isFinite(existing) && existing >= 0 ? existing : 0;
   env.GIT_CONFIG_COUNT = String(index + 1);
@@ -1218,7 +1223,8 @@ function repoNameFromUrl(repoUrl: string): string {
   return safePathPart(rawName.replace(/\.git$/, "")) || "repo";
 }
 
-function worktreeDirectoryName(repoUrl: string): string {
+/** Directory name a repository's worktree gets inside a workspace. */
+export function worktreeDirectoryName(repoUrl: string): string {
   const name = repoNameFromUrl(repoUrl);
   if (!RESERVED_ISSUE_WORKSPACE_DIRECTORIES.has(name.toLowerCase())) return name;
   const digest = createHash("sha256").update(repoUrl.trim()).digest("hex").slice(0, 8);
@@ -1238,23 +1244,19 @@ function shortId(value: string): string {
   return normalized.length > 12 ? normalized.slice(0, 12) : normalized;
 }
 
-function excludeAgentFiles(worktreePath: string): void {
-  const gitDir = git(worktreePath, ["rev-parse", "--git-dir"]);
-  const excludePath = join(gitDir.startsWith("/") ? gitDir : join(worktreePath, gitDir), "info", "exclude");
-  mkdirSync(dirname(excludePath), { recursive: true });
-  const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
-  const additions = AGENT_GIT_EXCLUDE_PATTERNS.filter((pattern) => !existing.split(/\r?\n/).includes(pattern));
-  if (additions.length) appendFileSync(excludePath, `${additions.join("\n")}\n`);
-}
-
-function applyCoAuthoredByHook(worktreePath: string, enabled: boolean): void {
+function applyCoAuthoredByHook(worktreePath: string, identity: CoAuthoredByIdentity | null): void {
   try {
-    if (enabled) installCoAuthoredByHook(worktreePath);
-    else removeCoAuthoredByHook(worktreePath);
+    if (identity) {
+      git(worktreePath, ["config", "--local", "multiremi.coAuthoredBy", `${identity.name} <${identity.email}>`]);
+      installCoAuthoredByHook(worktreePath);
+    } else {
+      git(worktreePath, ["config", "--local", "--unset", "multiremi.coAuthoredBy"], { allowFailure: true });
+      removeCoAuthoredByHook(worktreePath);
+    }
   } catch (error) {
     log.warn("Failed to apply co-authored-by hook; continuing checkout", {
       worktreePath,
-      enabled,
+      enabled: identity !== null,
       error: redactGitCredentialError(errorMessage(error)),
     });
   }

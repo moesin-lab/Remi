@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createResponsibleTestIssue } from './helpers.js';
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
+import { snapshotStatsForFile, createLocalSnapshotStore as createSnapshotStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
-function importPlugin(store: ReturnType<typeof createStore>, version = "1.0.0") {
+function importPlugin(store: ReturnType<typeof createSnapshotStore>, version = "1.0.0") {
   return store.importAgentPlugin({
     provider: "claude",
     manifest: { name: "execution-proof", version },
@@ -13,7 +14,7 @@ function importPlugin(store: ReturnType<typeof createStore>, version = "1.0.0") 
 
 describe("Multiremi store - Agent Plugin execution snapshots", () => {
   it("fails closed when a daemon downgrades its Plugin protocol", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_plugin_protocol_downgrade",
       name: "Plugin protocol runtime",
@@ -56,7 +57,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
   });
 
   it("waits for exact Runtime readiness and freezes bindings in the claim transaction", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_plugin_claim",
       name: "Plugin claim runtime",
@@ -108,7 +109,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
   });
 
   it("keeps infrastructure retries on the old version while manual work resolves the new active version", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_plugin_retry_snapshot",
       name: "Plugin retry runtime",
@@ -123,7 +124,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
       observedDigest: plugin.activeVersion!.artifactDigest,
     });
 
-    const issue = store.createIssue({ title: "old version run", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "old version run", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "run v1" });
     const claimed = store.claimTask(runtime.id)!;
     store.startTask(task.id);
@@ -160,7 +161,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
   });
 
   it("keeps an empty frozen retry independent from plugins bound later", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_empty_plugin_retry",
       name: "Empty Plugin retry runtime",
@@ -168,7 +169,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
       workspaceId: "local",
     });
     const agent = store.createAgent({ name: "Empty Plugin retry worker", provider: "claude" });
-    const issue = store.createIssue({ title: "Retry without Plugins", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Retry without Plugins", workspaceId: "local" });
     const task = store.createTask({
       agentId: agent.id,
       issueId: issue.id,
@@ -195,7 +196,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
   });
 
   it("starts a fresh provider session when an Agent Plugin binding changes", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_plugin_session_fingerprint",
       name: "Plugin session runtime",
@@ -239,7 +240,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
   });
 
   it("cancels an unstarted frozen retry when the Agent provider changes", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_plugin_provider_drift",
       name: "Plugin provider drift runtime",
@@ -254,7 +255,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
       observedDigest: plugin.activeVersion!.artifactDigest,
     });
 
-    const issue = store.createIssue({ title: "provider drift", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "provider drift", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "run once" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
@@ -267,3 +268,8 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
     expect(store.getTask(retry.id)?.status).toBe("cancelled");
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

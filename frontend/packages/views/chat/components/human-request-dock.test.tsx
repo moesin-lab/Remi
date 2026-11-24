@@ -1,20 +1,33 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
+import { ApiError } from "@multiremi/core/api";
+import type { QuestionView } from "@multiremi/core/api/schemas";
 import enChat from "../../locales/en/chat.json";
+import enIssues from "../../locales/en/issues.json";
+import enCommon from "../../locales/en/common.json";
 import { HumanRequestDock } from "./human-request-dock";
 
-const { listTaskHumanRequests, respondTaskHumanRequest } = vi.hoisted(() => ({
-  listTaskHumanRequests: vi.fn(),
-  respondTaskHumanRequest: vi.fn(async () => ({})),
+const { listMessages, sendMessage, getQuestion, actOnQuestion, getIssue } = vi.hoisted(() => ({
+  listMessages: vi.fn(),
+  sendMessage: vi.fn(async () => ({})),
+  getQuestion: vi.fn(), actOnQuestion: vi.fn(), getIssue: vi.fn(),
 }));
 
-vi.mock("@multiremi/core/api", () => ({
-  api: { listTaskHumanRequests, respondTaskHumanRequest },
+vi.mock("@multiremi/core/api", async importOriginal => ({
+  ApiError: (await importOriginal<typeof import("@multiremi/core/api")>()).ApiError,
+  api: { listMessages, sendMessage, getQuestion, actOnQuestion, getIssue },
 }));
+vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws" }));
+vi.mock("@multiremi/core/paths", () => ({ useWorkspaceSlug: () => "ws", useWorkspacePaths: () => ({
+  inboxItem: (id: string) => `/ws/inbox?item=${id}`, issueDetail: (id: string) => `/ws/issues/${id}`, squadDetail: (id: string) => `/ws/squads/${id}`,
+}) }));
+vi.mock("../../navigation", () => ({ AppLink: (props: { href: string; children: React.ReactNode }) => <a {...props} /> }));
 
-const TEST_RESOURCES = { en: { chat: enChat } };
+const TEST_RESOURCES = { en: { chat: enChat, issues: enIssues, common: enCommon } };
+const NAMES: Record<string, string> = { worker: "Worker", lead: "Lead", human: "Member One" };
+const getActorName = (_type: string, id: string) => NAMES[id] ?? id;
 
 const PERMISSION_REQUEST = {
   id: "hrq_perm",
@@ -59,61 +72,216 @@ const QUESTION_REQUEST = {
   respondedAt: null,
 };
 
-function renderDock(requests: unknown[]) {
-  listTaskHumanRequests.mockResolvedValue({ requests });
-  mountDock();
+type Request = typeof PERMISSION_REQUEST & typeof QUESTION_REQUEST & { payload: { context?: { text: string } } };
+
+/** The Issue human stage by default: nobody is named and this member may answer. */
+function questionView(request: Request, patch: Partial<QuestionView> = {}): QuestionView {
+  return { id: request.id, kind: request.kind, session_id: "session_1", workspace_id: "ws", source_issue_id: "issue", source_agent_id: "worker", source_turn_id: "turn_1", source_attempt_id: null,
+    original_questions: request.payload.questions ?? [], original_context: request.payload.context ?? null, original_message: request.payload.message ?? request.payload.tool_call?.title ?? "",
+    options: request.kind === "permission" ? request.payload.options.map(option => ({ label: option.name, value: option.optionId })) : null,
+    summary: null, current_handler: null, stage: "human", route_revision: 1, answer_revision: 0, status: "pending", wait_status: "waiting", wait_reason: null, answer: null, history: [], actions: { allowed: ["answer", "close"] }, ...patch };
 }
 
-function mountDock() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+function renderDock(requests: unknown[], views: Record<string, Partial<QuestionView>> = {}, props: DockProps = { getActorName }) {
+  getQuestion.mockImplementation(async (id: string) => {
+    const request = requests.find(value => (value as { id: string }).id === id) as Request;
+    return questionView(request, views[id]);
+  });
+  listMessages.mockResolvedValue({ messages: requests.map(value => {
+    const request = value as typeof PERMISSION_REQUEST;
+    return { id: request.id, task_id: "turn_1", created_at: request.createdAt,
+      resolved_at: request.status === "pending" ? null : request.createdAt,
+      metadata: { human_request: request } };
+  }), next_cursor: null });
+  return mountDock(props);
+}
+
+/** Opens the drawer from a summary line; the drawer reuses the full question card. */
+async function openQuestion(action = "Answer") {
+  fireEvent.click(await screen.findByRole("button", { name: action }));
+  const dialog = await screen.findByRole("dialog");
+  await waitFor(() => expect(dialog.querySelector("[data-question-id]")).not.toBeNull());
+  return within(dialog);
+}
+
+type DockProps = Partial<React.ComponentProps<typeof HumanRequestDock>>;
+
+function mountDock(props: DockProps = { getActorName }) {
+  // The app's own defaults: a list is fresh until something invalidates it.
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0, staleTime: Infinity } } });
+  return { qc, ...render(
     <QueryClientProvider client={qc}>
       <I18nProvider locale="en" resources={TEST_RESOURCES}>
-        <HumanRequestDock taskId="tsk_1" />
+        <HumanRequestDock taskId="tsk_1" sessionId="session_1" turnId="turn_1" {...props} />
       </I18nProvider>
     </QueryClientProvider>,
-  );
+  ) };
 }
 
+/** Decision rows as `GET /api/sessions/:id/messages?message_kind=decision` returns them. */
+function decisionRows(rows: Array<{ request: typeof QUESTION_REQUEST | typeof PERMISSION_REQUEST; turn: string }>) {
+  return { messages: rows.map(({ request, turn }) => ({ id: request.id, task_id: turn, created_at: request.createdAt,
+    resolved_at: request.status === "pending" ? null : request.createdAt, metadata: { human_request: request } })), next_cursor: null };
+}
+
+const line = (container: HTMLElement, id: string) => container.querySelector<HTMLElement>(`[data-question-summary="${id}"]`)!;
+
 beforeEach(() => {
-  listTaskHumanRequests.mockReset();
-  respondTaskHumanRequest.mockClear();
+  listMessages.mockReset();
+  sendMessage.mockClear();
+  getIssue.mockReset(); getIssue.mockRejectedValue(new Error("not loaded"));
+  getQuestion.mockReset(); actOnQuestion.mockReset(); actOnQuestion.mockImplementation(async (id: string) => getQuestion(id));
 });
 
 describe("HumanRequestDock", () => {
-  it("renders nothing when there are no pending requests", async () => {
-    renderDock([{ ...PERMISSION_REQUEST, status: "responded", response: { option_id: "opt-allow" } }]);
-    await waitFor(() => expect(listTaskHumanRequests).toHaveBeenCalled());
-    expect(screen.queryByText("Permission required")).toBeNull();
+  it("renders nothing when the turn asked nothing", async () => {
+    const view = renderDock([]);
+    await waitFor(() => expect(listMessages).toHaveBeenCalled());
+    expect(view.container).toBeEmptyDOMElement();
+  });
+
+  it("shows one summary line per question with its status, title and a way into the drawer", async () => {
+    const view = renderDock([PERMISSION_REQUEST, QUESTION_REQUEST], {
+      hrq_q: { stage: "parent_owner", current_handler: { type: "agent", id: "lead" }, actions: { allowed: [] } },
+    });
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("Waiting for Lead"));
+    const permission = line(view.container, "hrq_perm");
+    expect(permission).toHaveTextContent("Awaiting answer");
+    expect(permission).toHaveTextContent("Bash: rm -rf ./dist");
+    expect(within(permission).getByRole("button", { name: "Answer" })).toHaveAttribute("aria-haspopup", "dialog");
+    const agentHeld = line(view.container, "hrq_q");
+    expect(agentHeld).toHaveTextContent("Which environment should I deploy to?");
+    expect(within(agentHeld).getByRole("button", { name: "View" })).toHaveAttribute("aria-haspopup", "dialog");
+    // Lines load their Q on mount; the questions themselves stay in the drawer.
+    expect(getQuestion).toHaveBeenCalledWith("hrq_perm");
+    expect(getQuestion).toHaveBeenCalledWith("hrq_q");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText("staging")).toBeNull();
+  });
+
+  it("lists a question the daemon asks after the line list was read, once the Q key space is invalidated", async () => {
+    // The daemon creates a Q mid-turn through turn.decision: no task event
+    // follows, only `decision:created`, whose handler invalidates ["question", wsId].
+    getQuestion.mockImplementation(async (id: string) => questionView(QUESTION_REQUEST as Request, { id }));
+    listMessages.mockResolvedValue(decisionRows([]));
+    const view = mountDock();
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(1));
+    expect(view.container).toBeEmptyDOMElement();
+    listMessages.mockResolvedValue(decisionRows([{ request: QUESTION_REQUEST, turn: "turn_1" }]));
+    await act(async () => { await view.qc.invalidateQueries({ queryKey: ["question", "ws"] }); });
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("Awaiting answer"));
+    expect(within(line(view.container, "hrq_q")).getByRole("button", { name: "Answer" })).toBeInTheDocument();
+  });
+
+  it("shows a native AskUserQuestion whose payload also carries its decision's choice options", async () => {
+    // The daemon's turn.decision copies the decision options ({label, value}) onto the payload.
+    const native = { ...QUESTION_REQUEST, payload: { ...QUESTION_REQUEST.payload, options: [
+      { label: "staging", value: JSON.stringify({ question: "question_0", answer: "staging" }) },
+      { label: "production", value: JSON.stringify({ question: "question_0", answer: "production" }) },
+    ] } };
+    const view = renderDock([native]);
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("Awaiting answer"));
+    expect(within(line(view.container, "hrq_q")).getByRole("button", { name: "Answer" })).toBeInTheDocument();
+  });
+
+  it("keeps a Chat's open question answerable without an in-flight turn, and leaves settled ones of other turns out", async () => {
+    getQuestion.mockImplementation(async (id: string) => questionView((id === "hrq_q" ? QUESTION_REQUEST : PERMISSION_REQUEST) as Request,
+      { id, source_issue_id: null, current_handler: { type: "member", id: "human" } }));
+    listMessages.mockResolvedValue(decisionRows([
+      { request: QUESTION_REQUEST, turn: "turn_earlier" },
+      { request: { ...PERMISSION_REQUEST, status: "responded" }, turn: "turn_earlier" },
+    ]));
+    const view = mountDock({ taskId: null, turnId: undefined, open: true, getActorName });
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("Awaiting answer"));
+    expect(within(line(view.container, "hrq_q")).getByRole("button", { name: "Answer" })).toBeInTheDocument();
+    expect(view.container.querySelector('[data-question-summary="hrq_perm"]')).toBeNull();
+  });
+
+  it("shows the running turn's answered requests beside the Chat's open ones", async () => {
+    getQuestion.mockImplementation(async (id: string) => questionView((id === "hrq_q" ? QUESTION_REQUEST : PERMISSION_REQUEST) as Request, { id }));
+    listMessages.mockResolvedValue(decisionRows([
+      { request: QUESTION_REQUEST, turn: "turn_earlier" },
+      { request: { ...PERMISSION_REQUEST, status: "responded" }, turn: "turn_1" },
+    ]));
+    const view = mountDock({ taskId: "tsk_1", turnId: "turn_1", open: true, getActorName });
+    await waitFor(() => expect(line(view.container, "hrq_q")).toBeTruthy());
+    await waitFor(() => expect(line(view.container, "hrq_perm")).toBeTruthy());
+  });
+
+  it("keeps the turn's answered question as a line with its answerer and answer", async () => {
+    const answer = { response: { answers: { "Which environment should I deploy to?": "staging" } }, body_md: "", actor: { type: "member", id: "human" }, at: "now", reply_message_id: "reply" };
+    const view = renderDock([{ ...QUESTION_REQUEST, status: "responded" }], {
+      hrq_q: { status: "answered", wait_status: "consumed", answer, actions: { allowed: [] } },
+    });
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("Answered"));
+    expect(line(view.container, "hrq_q")).toHaveTextContent("Member One: staging");
+    const drawer = await openQuestion("View");
+    expect(drawer.getByRole("region", { name: "Answered and closed" })).toBeInTheDocument();
+    expect(drawer.getByText("Answered · execution resumed")).toBeInTheDocument();
+  });
+
+  it("opens the right-side drawer titled for the question and its asker", async () => {
+    renderDock([QUESTION_REQUEST]);
+    const drawer = await openQuestion();
+    expect(screen.getByRole("dialog")).toHaveAttribute("data-side", "right");
+    expect(drawer.getByText("Questions")).toBeInTheDocument();
+    expect(drawer.getByText("Asked by Worker", { selector: "p" })).toBeInTheDocument();
+    expect(drawer.getByRole("region", { name: "Awaiting answers" })).toBeInTheDocument();
+  });
+
+  it("names the subagent whose child session asked, on the line and in the drawer", async () => {
+    const view = renderDock([PERMISSION_REQUEST], { hrq_perm: { source_subagent: { item_id: "sa:agent-1", name: "Count files" } } });
+    await waitFor(() => expect(line(view.container, "hrq_perm")).toHaveTextContent("From subagent Count files"));
+    const drawer = await openQuestion();
+    expect(drawer.getByText("From subagent Count files")).toHaveAttribute("data-question-subagent", "sa:agent-1");
+  });
+
+  it("labels an unnamed subagent generically and the root session not at all", async () => {
+    const view = renderDock([PERMISSION_REQUEST, QUESTION_REQUEST], { hrq_q: { source_subagent: { item_id: "sa:agent-2", name: " " } } });
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("From a subagent"));
+    await waitFor(() => expect(line(view.container, "hrq_perm")).toHaveTextContent("Bash: rm -rf ./dist"));
+    expect(line(view.container, "hrq_perm").querySelector("[data-question-subagent]")).toBeNull();
   });
 
   it("responds to a permission request with the clicked option", async () => {
     renderDock([PERMISSION_REQUEST]);
-    await screen.findByText("Permission required");
-    expect(screen.getByText("Bash: rm -rf ./dist")).toBeTruthy();
+    const drawer = await openQuestion();
+    expect(drawer.getByText("Bash: rm -rf ./dist")).toBeTruthy();
 
-    fireEvent.click(screen.getByText("Allow once"));
+    fireEvent.click(drawer.getByText("Allow once"));
+    fireEvent.click(drawer.getByRole("button", { name: "Answer" }));
     await waitFor(() =>
-      expect(respondTaskHumanRequest).toHaveBeenCalledWith("tsk_1", "hrq_perm", { option_id: "opt-allow" }),
+      expect(actOnQuestion).toHaveBeenCalledWith("hrq_perm", "answer", expect.objectContaining({ expected_route_revision: 1, response: { option_id: "opt-allow" } })),
     );
   });
 
-  it("submits question answers keyed by question text", async () => {
-    renderDock([QUESTION_REQUEST]);
-    await screen.findByText("Agent question");
+  it("submits question answers keyed by question text and keeps the line and drawer on the result", async () => {
+    const view = renderDock([QUESTION_REQUEST]);
+    await screen.findByRole("button", { name: "Answer" });
+    actOnQuestion.mockImplementationOnce(async (id: string, _action: string, input: { response: Record<string, unknown> }) => ({
+      ...await getQuestion(id), status: "answered", wait_status: "consumed", actions: { allowed: [] },
+      answer: { response: input.response, body_md: JSON.stringify(input.response), actor: { type: "member", id: "human" }, at: "now", reply_message_id: "reply" },
+    }));
+    const drawer = await openQuestion();
 
-    const submit = screen.getByText("Submit").closest("button")!;
+    const submit = drawer.getByText("Submit").closest("button")!;
     expect(submit.disabled).toBe(true);
 
-    fireEvent.click(screen.getByText("staging"));
+    fireEvent.click(drawer.getByText("staging"));
     await waitFor(() => expect(submit.disabled).toBe(false));
 
     fireEvent.click(submit);
     await waitFor(() =>
-      expect(respondTaskHumanRequest).toHaveBeenCalledWith("tsk_1", "hrq_q", {
-        answers: { "Which environment should I deploy to?": "staging" },
-      }),
+      expect(actOnQuestion).toHaveBeenCalledWith("hrq_q", "answer", expect.objectContaining({ expected_route_revision: 1, response: { answers: { "Which environment should I deploy to?": "staging" } } })),
     );
+    await drawer.findByText("Answered · execution resumed");
+    expect(drawer.queryByText("Answer consumed by original call")).toBeNull();
+    expect(drawer.queryByRole("button", { name: "staging" })).toBeNull();
+    expect(drawer.queryByText("production")).toBeNull();
+    expect(drawer.getByText("staging")).toBeInTheDocument();
+    expect(line(view.container, "hrq_q")).toHaveTextContent("Answered");
+    expect(line(view.container, "hrq_q")).toHaveTextContent("Member One: staging");
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("renders markdown context and hides a message that duplicates the first question", async () => {
@@ -125,18 +293,19 @@ describe("HumanRequestDock", () => {
       },
     }]);
 
-    const emphasized = await screen.findByText("deployment tradeoffs");
+    const drawer = await openQuestion();
+    const emphasized = await drawer.findByText("deployment tradeoffs");
     expect(emphasized.tagName).toBe("STRONG");
-    expect(screen.getAllByText("Which environment should I deploy to?")).toHaveLength(1);
+    expect(drawer.getAllByText("Which environment should I deploy to?")).toHaveLength(1);
   });
 
   it("renders an old question payload without context", async () => {
     renderDock([QUESTION_REQUEST]);
 
-    await screen.findByText("Agent question");
-    expect(screen.queryByText("Earlier context omitted")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Expand" })).toBeNull();
-    expect(screen.getAllByText("Which environment should I deploy to?")).toHaveLength(1);
+    const drawer = await openQuestion();
+    expect(drawer.queryByText("Earlier context omitted")).toBeNull();
+    expect(drawer.queryByRole("button", { name: "Expand" })).toBeNull();
+    expect(drawer.getAllByText("Which environment should I deploy to?")).toHaveLength(1);
   });
 
   it("collapses overflowing context and toggles it open", async () => {
@@ -150,10 +319,11 @@ describe("HumanRequestDock", () => {
         },
       }]);
 
-      const expand = await screen.findByRole("button", { name: "Expand" });
+      const drawer = await openQuestion();
+      const expand = await drawer.findByRole("button", { name: "Expand" });
       expect(expand).toHaveAttribute("aria-expanded", "false");
       fireEvent.click(expand);
-      expect(screen.getByRole("button", { name: "Collapse" })).toHaveAttribute("aria-expanded", "true");
+      expect(drawer.getByRole("button", { name: "Collapse" })).toHaveAttribute("aria-expanded", "true");
     } finally {
       scrollHeight.mockRestore();
     }
@@ -175,26 +345,44 @@ describe("HumanRequestDock", () => {
       },
     }]);
 
-    const option = await screen.findByRole("button", { name: longLabel });
+    const drawer = await openQuestion();
+    const option = await drawer.findByRole("button", { name: longLabel });
     expect(option).toHaveClass("max-w-full", "whitespace-normal", "break-words");
   });
 
   it("shows a retry action when the request cannot be loaded", async () => {
-    listTaskHumanRequests.mockRejectedValueOnce(new Error("forbidden"));
+    listMessages.mockRejectedValueOnce(new Error("forbidden"));
     mountDock();
 
     expect(await screen.findByText("Could not load this request.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
+  it("marks a question that can no longer be read without offering a retry", async () => {
+    const view = renderDock([QUESTION_REQUEST]);
+    getQuestion.mockRejectedValue(new ApiError("gone", 404, "Not Found"));
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("This question is no longer available"));
+    expect(getQuestion).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("retries a question that failed to load for another reason", async () => {
+    const view = renderDock([QUESTION_REQUEST]);
+    getQuestion.mockRejectedValueOnce(new Error("offline")).mockRejectedValueOnce(new Error("offline"));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(line(view.container, "hrq_q")).toHaveTextContent("Awaiting answer"));
+    expect(screen.getByRole("button", { name: "Answer" })).toBeInTheDocument();
+  });
+
   it("keeps the request actionable and shows feedback after a response failure", async () => {
-    respondTaskHumanRequest.mockRejectedValueOnce(new Error("network down"));
+    actOnQuestion.mockRejectedValueOnce(new Error("network down"));
     renderDock([PERMISSION_REQUEST]);
-    await screen.findByText("Permission required");
+    const drawer = await openQuestion();
 
-    fireEvent.click(screen.getByText("Allow once"));
+    fireEvent.click(drawer.getByText("Allow once"));
+    fireEvent.click(drawer.getByRole("button", { name: "Answer" }));
 
-    expect(await screen.findByText("Response failed. Try again.")).toBeTruthy();
-    expect(screen.getByText("Allow once").closest("button")?.disabled).toBe(false);
+    expect(await drawer.findByRole("alert")).toHaveTextContent("network down");
+    expect(drawer.getByText("Allow once").closest("button")?.disabled).toBe(false);
   });
 });

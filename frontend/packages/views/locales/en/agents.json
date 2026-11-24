@@ -132,7 +132,7 @@
   "fallback": {
     "model_label": "Fallback model",
     "thinking_label": "Fallback reasoning effort",
-    "description": "Only takes over the current task when the primary model's gateway resources are unavailable.",
+    "description": "Takes over the current task when the primary model or gateway is unavailable.",
     "unconfigured": "Not configured",
     "same_as_primary": "Must differ from the primary model",
     "clear": "Remove fallback model",
@@ -141,6 +141,9 @@
     "switch_count": "{{count}} switch",
     "reason_gateway": "Gateway resources unavailable",
     "reason_no_account": "No available gateway account",
+    "reason_model_unavailable": "Primary model unavailable",
+    "reason_server": "Provider server error",
+    "reason_queued": "No Runtime supports the primary model",
     "reason_unknown": "Resource unavailable"
   },
   "inspector": {
@@ -204,7 +207,8 @@
     "label": "Model",
     "default_provider": "Default (provider)",
     "discovery_failed": "discovery failed",
-    "clear_full": "Clear selection (use provider default)"
+    "clear_full": "Clear selection (use provider default)",
+    "blocked_by_policy": "This model is blocked by group policy. Select another model."
   },
   "tabs": {
     "activity": "Activity",
@@ -284,7 +288,7 @@
       "unsaved_changes": "Unsaved changes"
     },
     "instructions": {
-      "intro": "Define this agent's identity and working style. Injected into the agent's context for every task. Markdown is supported.",
+      "intro": "Define this agent's identity and working style. Written at the top of the AGENTS.md of every session this agent runs, in Chat and in Issues, and applies on every turn. Markdown is supported.",
       "placeholder": "Define this agent's role, expertise, and working style.\n\n# Example\nYou are a frontend engineer specializing in React and TypeScript.\n\n## Working Style\n- Write small, focused PRs — one commit per logical change\n- Prefer composition over inheritance\n- Always add unit tests for new components\n\n## Constraints\n- Do not modify shared/ types without explicit approval\n- Follow the existing component patterns in features/"
     },
     "env": {
@@ -352,7 +356,7 @@
     },
     "integrations": {
       "intro": "Connect this agent to external chat platforms so people can work with it where they already are.",
-      "members_note": "Only workspace owners and admins can bind a Lark Bot to an agent. You can view connected bots in Settings → Integrations."
+      "members_note": "Only workspace owners and admins can bind a Lark Bot to an agent. You can view connected bots in IM platforms → Feishu → Bot."
     },
     "activity": {
       "section_now": "Now",
@@ -430,6 +434,17 @@
   },
   "transcript": {
     "dialog_title": "Agent Execution Transcript",
+    "view_live": "View live execution",
+    "view_finished": "View finished execution",
+    "trace_loading": "Loading execution trace…",
+    "trace_live": "Live updates",
+    "trace_finished": "Execution finished · {{count}} events",
+    "trace_unreachable": "Runtime {{name}} is offline; execution trace is temporarily unavailable",
+    "trace_last_seen": "Last online {{time}}",
+    "trace_lost": "Execution trace was lost",
+    "trace_not_found": "No execution trace is available",
+    "trace_failed": "Could not load the execution trace",
+    "trace_retry": "Retry",
     "execution_view": "Execution",
     "prompt_view": "Input Prompt",
     "copy_prompt": "Copy prompt",
@@ -437,11 +452,16 @@
     "prompt_loading": "Loading input prompt...",
     "prompt_not_recorded": "No input prompt was recorded. This task may have run on an older runtime.",
     "prompt_load_failed": "The input prompt could not be loaded. Try again later.",
+    "prompt_sent_title": "Sent to the agent this turn",
+    "prompt_messages_fallback": "This attempt did not record the exact text it sent; showing this turn's messages.",
+    "prompt_steers": "Sent during the turn",
+    "session_instructions": "Session instructions",
+    "session_instructions_note": "Remi's part of this session's AGENTS.md when the attempt ran. Instruction files in the local workspace stay on the machine and are not shown.",
     "status_queued": "Queued",
     "status_dispatched": "Waiting",
     "status_waiting_local_directory": "Waiting for local directory",
     "status_running": "Running",
-    "status_awaiting_human": "Waiting for review",
+    "status_awaiting_human": "Waiting for an answer",
     "status_completed": "Completed",
     "status_failed": "Failed",
     "status_cancelled": "Cancelled",
@@ -458,22 +478,21 @@
     "final_answer": "Final answer",
     "copy_answer": "Copy",
     "tokens_context": "{{value}} ctx",
+    "context_usage": "Context {{value}}",
     "waiting_dispatch": "Waiting for an available runtime...",
     "waiting_start": "Waiting for the task to start...",
     "waiting_local_directory": "Waiting for the local directory to become available...",
-    "waiting_human": "Waiting for review...",
+    "waiting_human": "Waiting for an answer...",
     "waiting_events": "Waiting for events...",
     "no_data": "No execution data recorded.",
     "sort_label": "Sort",
     "sort_chronological": "Oldest first",
     "sort_newest_first": "Newest first",
     "plan": "Plan",
-    "command_not_recorded": "Command not recorded (task from an older version)",
-    "tool_running": "Running…",
     "nested_steps_one": "{{count}} step",
     "nested_steps_other": "{{count}} steps",
-    "collab_activity_hidden": "Subagent internal activity is not captured",
     "step_not_finished": "Not finished",
+    "steer_not_delivered": "Not delivered",
     "human_answer_label": "Answer:",
     "human_status": "status: {{value}}",
     "human_responded_by": "by: {{value}}"

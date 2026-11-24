@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cliCommandInventory } from "../apps/remi/cli/index.js";
+import { RETIRED_CLI_ROUTES, WORKSPACE_OPERATOR_RETIRED_ROUTES } from "../packages/server/src/api/retired-cli-routes.js";
 import {
   cliCoverageReport,
   cliRuntimeCapabilities,
@@ -19,12 +20,12 @@ const RUNTIME_MANIFEST_PATH = resolve(ROOT, "packages/server/src/api/cli-capabil
 const MAX_PLANNED_ROUTES = 0;
 
 const DOMAINS = [
-  "context", "workspace", "member", "invite", "token",
+  "context", "db", "workspace", "account", "member", "invite", "token",
   "project", "repo", "knowledge", "memory", "wiki",
   "issue", "comment", "session", "share", "label", "attachment",
-  "chat", "task",
+  "chat", "task", "message", "turn",
   "agent", "squad", "skill", "plugin",
-  "runtime", "daemon", "autopilot", "scm", "messaging", "feishu",
+  "runtime", "daemon", "autopilot", "automation", "scm", "messaging", "feishu",
   "inbox", "notification", "pin", "dashboard", "platform", "billing", "lark",
 ];
 
@@ -64,6 +65,8 @@ const DOMAIN_ALIASES: Record<string, string> = {
   install: "lark",
   models: "runtime",
   "execution-groups": "runtime",
+  "execution-profiles": "runtime",
+  "execution-endpoints": "runtime",
   "project-docs": "wiki",
   "project-knowledge": "memory",
   readyz: "platform",
@@ -92,6 +95,9 @@ function main(): void {
     max_planned_routes: MAX_PLANNED_ROUTES,
     domains: DOMAINS,
     commands,
+    retired: Object.fromEntries(inventory.filter((entry) => entry.retired).map((entry) => [
+      `remi ${entry.path.join(" ")}`, { command: entry.id, replacement: entry.retired!.replacement },
+    ])),
     aliases: {
       ...Object.fromEntries(inventory.flatMap((entry) => entry.aliases
         .filter((alias) => alias.deprecatedSince)
@@ -123,7 +129,50 @@ function main(): void {
   console.log(`CLI capabilities: ${report.mapped} mapped / ${report.exempt} exempt / ${report.missing} missing (${report.total} routes)`);
 }
 
-function classifyRoute(route: string): CliManifestRoute {
+export function classifyRoute(route: string): CliManifestRoute {
+  if (route.includes(" /internal/slot/")) {
+    return { cli_exempt: true, category: "platform_updater_internal", reason: "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token." };
+  }
+  if (route === "GET /api/chat/sessions/:sessionId/background-tasks"
+    || route === "POST /api/chat/sessions/:sessionId/background-tasks/stop") return {
+    cli_exempt: true, category: "pure_ui", reason: "Chat background-task panel state and stop actions are exposed in the Web UI (ADR 0022).",
+  };
+  if (/^GET \/api\/sessions\/:sessionId\/log(?:\/entry|\/locate)?$/.test(route)) return {
+    cli_exempt: true, category: "pure_ui", reason: "Read-only SSR and replica display wire (head, turn cards, window and location); CLI reads use message.list/get.",
+  };
+  // ADR 0020: no queue CLI. Agents never act on a member's queue; CLI senders choose
+  // the wake directly with `remi message send --wake`.
+  if (/^(?:GET|POST|PATCH|DELETE) \/api\/sessions\/:sessionId\/queue(?:\/resume|\/:qid(?:\/steer)?)?$/.test(route)) return {
+    cli_exempt: true, category: "pure_ui", reason: "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake.",
+  };
+  // ADR 0025: the Chat composer's "/" menu; an agent sees its own commands, and the CLI sends text with message.send.
+  if (route === "GET /api/chat/slash-commands") return {
+    cli_exempt: true, category: "pure_ui", reason: "Chat composer slash-command menu (the agent's advertised commands and skills, ADR 0025); a CLI sender types the command into message.send.",
+  };
+  if ((RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])) return {
+    cli_exempt: true, category: "retired_route", reason: `已移除：改用 ${(RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])}`,
+  };
+  if (route === "GET /api/inbox") return { command: "inbox" };
+  if (route === "GET /api/sessions/:sessionId/messages") return { command: "message.list" };
+  const unified: Record<string, string> = {
+    "GET /api/issues/:id/responsibility": "issue.responsibility",
+    "GET /api/issues/:id/questions": "issue.question.list",
+    "GET /api/messages/:id/question": "message.question.get",
+    "POST /api/messages/:id/question/answer": "message.question.answer",
+    "POST /api/messages/:id/question/escalate": "message.question.escalate",
+    "POST /api/messages/:id/question/present": "message.question.present",
+    "POST /api/messages/:id/question/continue": "message.question.continue",
+    "POST /api/messages/:id/question/close": "message.question.close",
+    "POST /api/sessions/:sessionId/messages": "message.send",
+    "GET /api/messages/:id": "message.get", "PATCH /api/messages/:id": "message.edit",
+    "DELETE /api/messages/:id": "message.delete", "POST /api/messages/:id/resolve": "message.resolve",
+    "POST /api/messages/:id/reactions": "message.react", "POST /api/inbox/read": "inbox.read",
+    "GET /api/turns": "turn.list", "GET /api/turns/:id": "turn.get",
+    "POST /api/turns/:id/cancel": "turn.cancel", "POST /api/turns/:id/wrap-up": "turn.wrap-up",
+    "POST /api/turns/:id/retry": "turn.retry", "GET /api/turns/:id/trace": "turn.trace.read",
+    "POST /api/turns/:id/automation/quiet": "automation.quiet",
+  };
+  if (unified[route]) return { command: unified[route]! };
   const mapped = mappedResourceCommand(route);
   if (mapped) return { command: mapped };
   const exempt = exemptRoute(route);
@@ -136,19 +185,27 @@ function mappedResourceCommand(route: string): string | null {
   const operation = mappedOperationsCommand(route);
   if (operation) return operation;
   const exact: Record<string, string> = {
+    "GET /api/runtimes/:id/external-chats": "chat.external.sources",
+    "GET /api/runtimes/:id/external-chats/:sourceId/models": "chat.external.models",
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads": "chat.external.list",
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId": "chat.external.get",
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/messages": "chat.external.send",
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/receipts/:requestId": "chat.external.receipt",
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/interrupt": "chat.external.interrupt",
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/requests/:requestId": "chat.external.respond",
     "GET /api/cli/context": "context.get",
     "GET /api/cli/capabilities": "context.get",
     "GET /api/workspaces": "workspace.list",
     "POST /api/workspaces": "workspace.create",
     "GET /api/invitations": "invite.list",
-    "GET /api/me": "member.get",
-    "PATCH /api/me": "member.update",
-    "PATCH /api/me/onboarding": "member.onboarding.update",
-    "POST /api/me/onboarding/complete": "member.onboarding.complete",
-    "POST /api/me/onboarding/cloud-waitlist": "member.onboarding.cloud-waitlist",
-    "POST /api/me/onboarding/runtime-bootstrap": "member.onboarding.runtime-bootstrap",
-    "POST /api/me/onboarding/no-runtime-bootstrap": "member.onboarding.no-runtime-bootstrap",
-    "GET /api/multiremi/members": "member.list",
+    "GET /api/me": "account.get",
+    "PATCH /api/me": "account.update",
+    "PATCH /api/me/onboarding": "account.onboarding.update",
+    "POST /api/me/onboarding/complete": "account.onboarding.complete",
+    "POST /api/me/onboarding/cloud-waitlist": "account.onboarding.cloud-waitlist",
+    "POST /api/me/onboarding/runtime-bootstrap": "account.onboarding.runtime-bootstrap",
+    "POST /api/me/onboarding/no-runtime-bootstrap": "account.onboarding.no-runtime-bootstrap",
+    "GET /api/multiremi/members": "workspace.operator",
     "POST /api/multiremi/members": "member.create",
     "GET /api/tokens": "token.list",
     "POST /api/tokens": "token.create",
@@ -168,6 +225,8 @@ function mappedResourceCommand(route: string): string | null {
     "POST /api/knowledge/submissions": "knowledge.submit",
     "GET /api/knowledge/runs": "knowledge.runs",
     "GET /api/knowledge/runs/:id": "knowledge.run.show",
+    "GET /api/chat/sessions/:sessionId/messages": "session.log.window",
+    "GET /api/chat/sessions/:sessionId/messages/page": "chat.message.page",
     "POST /api/knowledge/migrate-legacy": "knowledge.migrate-legacy",
     "POST /api/projects/:id/knowledge/publish": "memory.publish",
     "POST /api/workspaces/:id/repos/:repositoryId/wiki/publish": "wiki.publish",
@@ -180,6 +239,7 @@ function mappedResourceCommand(route: string): string | null {
     "GET /api/multiremi/issues": "issue.list",
     "POST /api/multiremi/issues": "issue.create",
     "GET /api/issues/grouped": "issue.grouped",
+    "GET /api/issues/status-pages": "issue.status-pages",
     "GET /api/multiremi/issues/grouped": "issue.grouped",
     "GET /api/issues/search": "issue.search",
     "GET /api/multiremi/issues/search": "issue.search",
@@ -234,6 +294,20 @@ function mappedResourceCommand(route: string): string | null {
   };
   if (exact[route]) return exact[route]!;
   const rules: Array<[RegExp, string]> = [
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions$/, "session.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions$/, "session.create"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId$/, "session.get"],
+    [/^PATCH \/api\/multiremi\/chats\/:id\/sessions\/:sessionId$/, "session.update"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/adopt$/, "session.adopt"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/events$/, "session.event.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/messages$/, "session.message.create"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/participants$/, "session.participant.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/participants$/, "session.participant.add"],
+    [/^DELETE \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/participants\/:participantType\/:participantId$/, "session.participant.remove"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/tasks$/, "session.task.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/tasks$/, "session.task.create"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/results$/, "session.result.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/results$/, "session.result.publish"],
     [/^GET \/api\/workspaces\/:id$/, "workspace.get"],
     [/^(?:PUT|PATCH) \/api\/workspaces\/:id$/, "workspace.update"],
     [/^DELETE \/api\/workspaces\/:id$/, "workspace.delete"],
@@ -253,10 +327,13 @@ function mappedResourceCommand(route: string): string | null {
     [/^POST \/api\/workspaces\/:id\/relay-config\/:engine\/probe$/, "workspace.relay.probe"],
     [/^GET \/api\/workspaces\/:id\/relay-config\/:engine\/reasoning-levels$/, "workspace.relay.reasoning-levels.get"],
     [/^PUT \/api\/workspaces\/:id\/relay-config\/:engine\/reasoning-levels$/, "workspace.relay.reasoning-levels.update"],
+    [/^PUT \/api\/workspaces\/:id\/relay-config\/:engine\/context-window$/, "workspace.relay.context-window.update"],
     [/^GET \/api\/workspaces\/:id\/bot-menu$/, "workspace.bot-menu.get"],
     [/^PUT \/api\/workspaces\/:id\/bot-menu$/, "workspace.bot-menu.update"],
     [/^POST \/api\/workspaces\/:id\/bot-menu\/publish$/, "workspace.bot-menu.publish"],
     [/^GET \/api\/workspaces\/:id\/bot-menu\/publish\/:requestId$/, "workspace.bot-menu.publish-status"],
+    [/^GET \/api\/workspaces\/:id\/feishu-bots$/, "workspace.feishu-bot.list"],
+    [/^POST \/api\/workspaces\/:id\/feishu-bots$/, "workspace.feishu-bot.create"],
     [/^GET \/api\/workspaces\/:id\/feishu-bot$/, "workspace.feishu-bot.get"],
     [/^PUT \/api\/workspaces\/:id\/feishu-bot$/, "workspace.feishu-bot.set"],
     [/^DELETE \/api\/workspaces\/:id\/feishu-bot$/, "workspace.feishu-bot.delete"],
@@ -279,15 +356,20 @@ function mappedResourceCommand(route: string): string | null {
     [/^PUT \/api\/workspaces\/:id\/prompts$/, "workspace.prompt.update"],
     [/^GET \/api\/workspaces\/:id\/issue-archive$/, "workspace.issue-archive.get"],
     [/^PUT \/api\/workspaces\/:id\/issue-archive$/, "workspace.issue-archive.update"],
+    [/^GET \/api\/workspaces\/:id\/storage$/, "workspace.storage.get"],
+    [/^PUT \/api\/workspaces\/:id\/storage$/, "workspace.storage.set"],
+    [/^GET \/api\/workspaces\/:id\/storage\/daemons$/, "runtime.storage"],
     [/^GET \/api\/workspaces\/:id\/issue-topics$/, "workspace.issue-topics.get"],
     [/^PUT \/api\/workspaces\/:id\/issue-topics$/, "workspace.issue-topics.set"],
+    [/^GET \/api\/workspaces\/:id\/services\/magpie$/, "workspace.magpie.get"],
+    [/^PUT \/api\/workspaces\/:id\/services\/magpie$/, "workspace.magpie.set"],
     [/^GET \/api\/workspaces\/:id\/runtime-provisions$/, "workspace.runtime-provision.list"],
     [/^POST \/api\/workspaces\/:id\/runtime-provisions$/, "workspace.runtime-provision.create"],
     [/^GET \/api\/workspaces\/:id\/runtime-provisions\/:provisionId$/, "workspace.runtime-provision.get"],
     [/^PATCH \/api\/workspaces\/:id\/runtime-provisions\/:provisionId$/, "workspace.runtime-provision.update"],
     [/^DELETE \/api\/workspaces\/:id\/runtime-provisions\/:provisionId$/, "workspace.runtime-provision.delete"],
     [/^GET \/api\/workspaces\/:id\/runtime-provisions\/:provisionId\/states$/, "workspace.runtime-provision.states"],
-    [/^GET \/api\/workspaces\/:id\/members$/, "member.list"],
+    [/^GET \/api\/workspaces\/:id\/members$/, "workspace.operator"],
     [/^PATCH \/api\/workspaces\/:id\/members\/:memberId$/, "member.update"],
     [/^DELETE \/api\/workspaces\/:id\/members\/:memberId$/, "member.delete"],
     [/^POST \/api\/workspaces\/:id\/members$/, "invite.create"],
@@ -354,10 +436,16 @@ function mappedResourceCommand(route: string): string | null {
     [/^GET \/api\/issues\/:id\/task-runs$/, "issue.task-runs"],
     [/^GET \/api\/issues\/:id\/usage$/, "issue.usage"],
     [/^GET \/api\/issues\/:id\/workspace$/, "issue.workspace"],
+    [/^POST \/api\/issues\/:id\/workspace\/abandon$/, "issue.workspace.abandon"],
     [/^POST \/api\/issues\/:id\/rerun$/, "issue.rerun"],
     [/^POST \/api\/issues\/:id\/tasks\/:taskId\/cancel$/, "issue.cancel"],
     [/^POST \/api\/issues\/:id\/squad-evaluated$/, "issue.squad-evaluated"],
     [/^GET \/api\/(?:multiremi\/)?issues\/:id\/dependencies$/, "issue.dependency.list"],
+    [/^GET \/api\/issues\/:id\/decisions$/, "issue.decision.list"],
+    [/^POST \/api\/issues\/:id\/decisions$/, "issue.decision.request"],
+    [/^POST \/api\/issues\/:id\/decisions\/:decisionId\/answer$/, "issue.decision.answer"],
+    [/^POST \/api\/issues\/:id\/decisions\/:decisionId\/escalate$/, "issue.decision.escalate"],
+    [/^POST \/api\/issues\/:id\/decisions\/:decisionId\/withdraw$/, "issue.decision.withdraw"],
     [/^POST \/api\/(?:multiremi\/)?issues\/:id\/dependencies$/, "issue.dependency.add"],
     [/^DELETE \/api\/(?:multiremi\/)?issues\/:id\/dependencies\/:dependencyId$/, "issue.dependency.remove"],
     [/^GET \/api\/(?:multiremi\/)?issues\/:id\/reactions$/, "issue.reaction.list"],
@@ -384,31 +472,27 @@ function mappedResourceCommand(route: string): string | null {
     [/^POST \/api\/(?:multiremi\/)?comments\/:id\/reactions$/, "comment.reaction.add"],
     [/^DELETE \/api\/(?:multiremi\/)?comments\/:id\/reactions$/, "comment.reaction.remove"],
     [/^GET \/api\/multiremi\/comments\/:id\/attachments$/, "comment.attachment.list"],
-    [/^GET \/api\/issues\/:id\/sessions$/, "session.list"],
+    [/^GET \/api\/issues\/:id\/sessions$/, "issue.session.list"],
     [/^GET \/api\/sessions\/:sessionId$/, "session.show"],
     [/^GET \/api\/sessions\/:sessionId\/inherited-context$/, "session.inherited-context"],
-    [/^POST \/api\/issues\/:id\/sessions$/, "session.create"],
-    [/^GET \/api\/issues\/:id\/sessions\/:sessionId$/, "session.get"],
-    [/^PATCH \/api\/issues\/:id\/sessions\/:sessionId$/, "session.update"],
-    [/^GET \/api\/issues\/:id\/sessions\/:sessionId\/participants$/, "session.participant.list"],
-    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/participants$/, "session.participant.add"],
-    [/^DELETE \/api\/issues\/:id\/sessions\/:sessionId\/participants\/:participantType\/:participantId$/, "session.participant.remove"],
-    [/^GET \/api\/issues\/:id\/sessions\/:sessionId\/events$/, "session.event.list"],
-    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/messages$/, "session.message.create"],
-    [/^GET \/api\/issues\/:id\/sessions\/:sessionId\/tasks$/, "session.task.list"],
-    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/tasks$/, "session.task.create"],
-    [/^GET \/api\/issues\/:id\/session-results$/, "session.result.list"],
-    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/results$/, "session.result.publish"],
-    [/^GET \/api\/issues\/:issueId\/session-archives$/, "session.archive.list"],
-    [/^POST \/api\/issues\/:issueId\/session-archives\/:archiveId\/verify$/, "session.archive.verify"],
-    [/^POST \/api\/issues\/:issueId\/session-archives\/:archiveId\/retry$/, "session.archive.retry"],
-    [/^GET \/api\/workspaces\/:id\/session-archive$/, "session.config.get"],
-    [/^PUT \/api\/workspaces\/:id\/session-archive$/, "session.config.update"],
+    [/^POST \/api\/issues\/:id\/sessions$/, "issue.session.create"],
+    [/^GET \/api\/issues\/:id\/sessions\/:sessionId$/, "issue.session.get"],
+    [/^PATCH \/api\/issues\/:id\/sessions\/:sessionId$/, "issue.session.update"],
+    [/^GET \/api\/issues\/:id\/sessions\/:sessionId\/participants$/, "issue.session.participant.list"],
+    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/participants$/, "issue.session.participant.add"],
+    [/^DELETE \/api\/issues\/:id\/sessions\/:sessionId\/participants\/:participantType\/:participantId$/, "issue.session.participant.remove"],
+    [/^GET \/api\/issues\/:id\/sessions\/:sessionId\/events$/, "issue.session.event.list"],
+    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/messages$/, "issue.session.message.create"],
+    [/^GET \/api\/issues\/:id\/sessions\/:sessionId\/tasks$/, "issue.session.task.list"],
+    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/tasks$/, "issue.session.task.create"],
+    [/^GET \/api\/issues\/:id\/session-results$/, "issue.session.result.list"],
+    [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/results$/, "issue.session.result.publish"],
     [/^GET \/api\/issues\/:id\/share$/, "share.get"],
     [/^POST \/api\/issues\/:id\/share$/, "share.create"],
     [/^POST \/api\/issues\/:id\/share\/extend$/, "share.extend"],
     [/^DELETE \/api\/issues\/:id\/share$/, "share.delete"],
     [/^GET \/api\/shares\/:token$/, "share.view"],
+    [/^GET \/api\/shares\/:token\/tasks\/:task_id\/trace$/, "share.trace.read"],
     [/^GET \/api\/shares\/:token\/attachments\/:attachmentId\/content$/, "share.view"],
     [/^GET \/api\/(?:multiremi\/)?labels\/:id$/, "label.get"],
     [/^(?:PUT|PATCH) \/api\/(?:multiremi\/)?labels\/:id$/, "label.update"],
@@ -423,8 +507,7 @@ function mappedResourceCommand(route: string): string | null {
     [/^PATCH \/api\/multiremi\/chats\/:id$/, "chat.update"],
     [/^PATCH \/api\/chat\/sessions\/:sessionId$/, "chat.update"],
     [/^DELETE \/api\/chat\/sessions\/:sessionId$/, "chat.delete"],
-    [/^GET \/api\/(?:multiremi\/chats\/:id|chat\/sessions\/:sessionId)\/messages$/, "chat.message.list"],
-    [/^GET \/api\/chat\/sessions\/:sessionId\/messages\/page$/, "chat.message.list"],
+    [/^GET \/api\/multiremi\/chats\/:id\/messages$/, "session.log.window"],
     [/^POST \/api\/(?:multiremi\/chats\/:id|chat\/sessions\/:sessionId)\/messages$/, "chat.message.create"],
     [/^GET \/api\/chat\/sessions\/:sessionId\/pending-task$/, "chat.pending"],
     [/^POST \/api\/chat\/sessions\/:sessionId\/read$/, "chat.read"],
@@ -439,7 +522,8 @@ function mappedResourceCommand(route: string): string | null {
     [/^POST \/api\/(?:multiremi\/)?tasks\/:id\/steer$/, "task.steer"],
     [/^GET \/api\/(?:multiremi\/)?tasks\/:id\/steer$/, "task.steer.list"],
     [/^GET \/api\/(?:multiremi\/)?tasks\/:id\/inspection$/, "task.inspect"],
-    [/^GET \/api\/(?:multiremi\/tasks\/:id|tasks\/:taskId)\/messages$/, "task.message.list"],
+    [/^GET \/api\/tasks\/:id\/trace$/, "task.trace.read"],
+    [/^GET \/api\/(?:multiremi\/tasks\/:id|tasks\/:taskId)\/messages$/, "task.trace.read"],
     [/^GET \/api\/tasks\/:taskId\/prompt$/, "task.prompt"],
     [/^GET \/api\/(?:multiremi\/)?tasks\/:id\/human-requests$/, "task.request.list"],
     [/^POST \/api\/(?:multiremi\/)?tasks\/:id\/human-requests\/:requestId\/respond$/, "task.request.respond"],
@@ -503,6 +587,24 @@ function mappedOperationsCommand(route: string): string | null {
     "GET /api/multiremi/runtimes": "runtime.list",
     "POST /api/multiremi/runtimes": "runtime.create",
     "GET /api/execution-groups": "runtime.group.list",
+    "GET /api/execution-groups/:id": "runtime.group.get",
+    "POST /api/execution-groups": "runtime.group.create",
+    "PUT /api/execution-groups/:id": "runtime.group.update",
+    "DELETE /api/execution-groups/:id": "runtime.group.delete",
+    "GET /api/execution-profiles/:id": "runtime.profile.get",
+    "POST /api/execution-profiles": "runtime.profile.create",
+    "PUT /api/execution-profiles/:id": "runtime.profile.update",
+    "DELETE /api/execution-profiles/:id": "runtime.profile.delete",
+    "GET /api/execution-profiles": "runtime.profile.list",
+    "POST /api/execution-endpoints/inspect": "runtime.endpoint.inspect",
+    "GET /api/execution-endpoints/:id/catalog": "runtime.endpoint.catalog",
+    "GET /api/execution-endpoints": "runtime.endpoint.list",
+    "GET /api/execution-endpoints/:id": "runtime.endpoint.get",
+    "POST /api/execution-endpoints": "runtime.endpoint.create",
+    "PUT /api/execution-endpoints/:id": "runtime.endpoint.update",
+    "DELETE /api/execution-endpoints/:id": "runtime.endpoint.delete",
+    "GET /api/workspaces/:workspaceId/system-model-endpoints": "workspace.system-model-endpoints.get",
+    "PUT /api/workspaces/:workspaceId/system-model-endpoints": "workspace.system-model-endpoints.set",
     "GET /api/multiremi/execution-groups": "runtime.group.list",
     "GET /api/models": "runtime.model.catalog",
     "GET /api/multiremi/models": "runtime.model.catalog",
@@ -550,6 +652,10 @@ function mappedOperationsCommand(route: string): string | null {
     "PUT /api/pins/reorder": "pin.reorder",
     "PUT /api/multiremi/pins/reorder": "pin.reorder",
     "GET /api/dashboard/usage/daily": "dashboard.usage.daily",
+    "GET /api/usage/report": "dashboard.usage.report",
+    "GET /api/usage/prices": "dashboard.usage.prices.list",
+    "POST /api/usage/prices": "dashboard.usage.prices.set",
+    "PATCH /api/usage/prices/:id": "dashboard.usage.prices.close",
     "GET /api/dashboard/usage/by-agent": "dashboard.usage.by-agent",
     "GET /api/dashboard/runtime/daily": "dashboard.runtime.daily",
     "GET /api/dashboard/agent-runtime": "dashboard.agent-runtime",
@@ -616,6 +722,8 @@ function mappedOperationsCommand(route: string): string | null {
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/local-skills\/:requestId$/, "runtime.skill.status"],
     [/^POST \/api\/(?:multiremi\/)?runtimes\/:id\/local-skills\/import$/, "runtime.skill.import"],
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/local-skills\/import\/:requestId$/, "runtime.skill.import-status"],
+    [/^POST \/api\/runtimes\/:id\/gc-runs$/, "runtime.gc"],
+    [/^GET \/api\/runtimes\/:id\/gc-runs\/:requestId$/, "runtime.gc-status"],
     [/^POST \/api\/(?:multiremi\/)?runtimes\/:id\/directory-scans$/, "runtime.directory.scan"],
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/directory-scans\/:requestId$/, "runtime.directory.status"],
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/usage$/, "runtime.usage"],
@@ -626,13 +734,16 @@ function mappedOperationsCommand(route: string): string | null {
     [/^GET \/api\/multiremi\/daemons\/:daemonId\/retirement-plan$/, "daemon.retirement-plan"],
     [/^POST \/api\/multiremi\/daemons\/:daemonId\/retire$/, "daemon.retire"],
     [/^GET \/api\/daemons\/:daemonId$/, "daemon.get"],
+    [/^GET \/api\/daemons\/:daemonId\/drain$/, "daemon.drain.status"],
+    [/^POST \/api\/daemons\/:daemonId\/drain$/, "daemon.drain"],
+    [/^DELETE \/api\/daemons\/:daemonId\/drain$/, "daemon.undrain"],
     [/^PATCH \/api\/daemons\/:daemonId$/, "daemon.dedicated.set"],
     [/^GET \/api\/(?:multiremi\/)?autopilots\/:id$/, "autopilot.get"],
     [/^PATCH \/api\/(?:multiremi\/)?autopilots\/:id$/, "autopilot.update"],
     [/^DELETE \/api\/(?:multiremi\/)?autopilots\/:id$/, "autopilot.delete"],
     [/^GET \/api\/(?:multiremi\/)?autopilots\/:id\/runs$/, "autopilot.run.list"],
     [/^GET \/api\/autopilots\/:id\/runs\/:runId$/, "autopilot.run.get"],
-    [/^POST \/api\/(?:multiremi\/)?autopilots\/:id\/(?:run|trigger)$/, "autopilot.run"],
+    [/^POST \/api\/(?:multiremi\/)?autopilots\/:id\/(?:run|trigger)$/, "autopilot.run-now"],
     [/^GET \/api\/(?:multiremi\/)?autopilots\/:id\/deliveries$/, "autopilot.delivery.list"],
     [/^GET \/api\/(?:multiremi\/)?autopilots\/:id\/deliveries\/:deliveryId$/, "autopilot.delivery.get"],
     [/^POST \/api\/(?:multiremi\/)?autopilots\/:id\/deliveries\/:deliveryId\/replay$/, "autopilot.delivery.replay"],
@@ -641,6 +752,7 @@ function mappedOperationsCommand(route: string): string | null {
     [/^DELETE \/api\/autopilots\/:id\/triggers\/:triggerId$/, "autopilot.trigger.delete"],
     [/^POST \/api\/autopilots\/:id\/triggers\/:triggerId\/rotate-webhook-token$/, "autopilot.trigger.rotate-token"],
     [/^PUT \/api\/autopilots\/:id\/triggers\/:triggerId\/signing-secret$/, "autopilot.trigger.set-secret"],
+    [/^GET \/api\/workspaces\/:workspaceId\/scm\/repositories\/:repositoryId\/change-requests\/:number\/checks$/, "scm.change-request.checks"],
     [/^GET \/api\/workspaces\/:workspaceId\/scm\/connections$/, "scm.connection.list"],
     [/^POST \/api\/workspaces\/:workspaceId\/scm\/connections$/, "scm.connection.create"],
     [/^GET \/api\/workspaces\/:workspaceId\/scm\/connections\/:connectionId$/, "scm.connection.get"],
@@ -742,14 +854,30 @@ function exemptRoute(route: string): CliManifestRoute | null {
     category,
     reason,
   });
-  if (path === "/ws" || path === "/api/daemon/ws" || path === "/api/realtime/ws") {
+  if (
+    path === "/ws"
+    || path === "/api/daemon/ws"
+    || path === "/api/realtime/ws"
+    || path === "/api/trace/ws"
+  ) {
     return exempt("websocket_transport", "Long-lived WebSocket transport is outside the CLI command surface.");
+  }
+  // MUL-462: the split-API peer channel lives off the dashboard surface —
+  // nginx never routes `/internal/`, and the two API processes authenticate
+  // each other with MULTIREMI_PEER_SECRET. It is machine-to-server traffic with
+  // no user-facing command, so it takes a fixed exempt category rather than
+  // becoming a `planned_command` that would never be implemented.
+  if (path.startsWith("/internal/")) {
+    return exempt("daemon_internal_protocol", "Cross-process API peer channel is machine-to-server traffic; it has no user-facing CLI workflow.");
+  }
+  if (route === "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired") {
+    return exempt("daemon_internal_protocol", "Read-only v1 daemon upgrade bridge for plugin desired state is machine-to-server traffic, not a user CLI command.");
   }
   if (path.startsWith("/api/daemon/") || /\/runtimes\/[^/]+\/heartbeat$/.test(path) || path === "/api/multiremi/scheduler/tick") {
     return exempt("daemon_internal_protocol", "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic.");
   }
   if (path === "/api/multiremi/autopilots/:id/run-scheduled") {
-    return exempt("daemon_internal_protocol", "Scheduler execution is machine-to-server traffic; users trigger an autopilot with remi autopilot run.");
+    return exempt("daemon_internal_protocol", "Scheduler execution is machine-to-server traffic; users trigger an autopilot with remi autopilot run-now.");
   }
   if (path === "/api/multiremi/autopilots/:id/webhook") {
     return exempt("oauth_or_webhook_callback", "Autopilot webhook reception is invoked by an external system, not a user command.");
@@ -787,7 +915,6 @@ function plannedCommand(route: string): { domain: string; command: string } {
   else if (rawDomain === "workspaces" && segments.includes("feishu")) rawDomain = "feishu";
   else if (rawDomain === "issues" && segments.includes("change-requests")) rawDomain = "scm";
   else if (rawDomain === "workspaces" && segments.includes("lark")) rawDomain = "lark";
-  else if (rawDomain === "workspaces" && segments.includes("session-archive")) rawDomain = "session";
   if (rawDomain === "auth") rawDomain = "context";
   if (rawDomain === "me") rawDomain = "member";
   if (rawDomain === "remi" || rawDomain === "install.sh") rawDomain = "platform";
@@ -815,4 +942,4 @@ function normalizeAction(value: string): string {
   return value.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "update";
 }
 
-main();
+if (import.meta.main) main();

@@ -1,3 +1,7 @@
+import { STORAGE_SETTINGS_DEFAULTS, storageThresholdErrors, validateStorageSettingsPatch } from "@multiremi/contracts/storage.js";
+import { MultiremiApiError } from "../helpers.js";
+import { validateCoAuthoredByName, validateCoAuthoredByEmail } from "@multiremi/contracts/co-authored-by";
+import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import type { Context, Hono } from "hono";
 import {
   backfillWorkspaceRepositoryDefaultBranches,
@@ -5,6 +9,7 @@ import {
   currentTaskParentId,
   denyCurrentUserWorkspaceAccess,
   gatewayReasoningLevels,
+  validateGatewayContextWindow,
   importWorkspaceRepository,
   inspectWorkspaceRepository,
   isFirstAgentInWorkspace,
@@ -51,7 +56,7 @@ import {
 import {
   IssueTopicConfigError,
   parseIssueTopicConfig,
-  readWorkspaceIssueTopics,
+  readWorkspaceIssueTopicsLenient,
 } from "@multiremi/issue-topics/config.js";
 import {
   SshMeshMutationConflictError,
@@ -62,6 +67,7 @@ import type {
   CreateWorkspaceRuntimeProvisionInput,
   CreateWorkspaceInput,
   IssueTopicConfig,
+  IssueTopicConfigInvalid,
   MultiremiBotMenuPublishRequest,
   MultiremiRepositoryWikiDoc,
   MultiremiRepositoryWikiDocRevision,
@@ -72,7 +78,12 @@ import type {
   UpdateWorkspaceRuntimeProvisionInput,
 } from "@multiremi/contracts/types.js";
 import { createId, nowIso } from "@multiremi/ids.js";
-import { REPOSITORY_WIKI_BATCH_LIMIT, RepositoryWikiLogHistoryError, RepositoryWikiUnavailableError } from "@multiremi/repository-wiki/service.js";
+import {
+  REPOSITORY_WIKI_BATCH_LIMIT,
+  REPOSITORY_WIKI_BODY_BATCH_LIMIT,
+  RepositoryWikiLogHistoryError,
+  RepositoryWikiUnavailableError,
+} from "@multiremi/repository-wiki/service.js";
 import { normalizeRepositoryWikiPath } from "@multiremi/store/repos/repository-wiki-repo.js";
 import {
   defaultRepositoryWikiPath,
@@ -81,6 +92,7 @@ import {
 import {
   mergeWorkspacePromptSettings,
   readWorkspacePromptSettings,
+  workspacePromptsResponse,
   WorkspacePromptRevisionConflictError,
 } from "../../prompts/workspace-settings.js";
 import { buildPlatformPromptTemplatePreview } from "../../prompts/platform-template.js";
@@ -94,6 +106,7 @@ import {
 } from "@multiremi/relay/discovery.js";
 import {
   extractBaseUrl,
+  isRelayEngine,
   validateRelayFragment,
 } from "@multiremi/relay/fragment.js";
 import type { RouterDeps } from "./deps.js";
@@ -101,7 +114,8 @@ import { sanitizeWorkspaceProgressSummarySettings } from "@daemon/agent-runtime/
 import { sanitizeIssueAutoTitleSettings } from "@multiremi/issue-title/settings.js";
 import {
   BotMenuConfigError,
-  parseBotMenuConfig,
+  parseUnifiedBotMenuConfig,
+  botMenuView,
   readWorkspaceBotMenu,
   resolveBotMenuConfig,
 } from "../../bot-menu/config.js";
@@ -116,6 +130,7 @@ import {
   createFormalWriteRun,
   createRepositoryMutationSubmission,
   knowledgePolicyErrorResponse,
+  openVikingTimeoutResponse,
   rawSubmissionResponse,
   resolveKnowledgeWriteActor,
 } from "../helpers/knowledge.js";
@@ -123,21 +138,54 @@ import { sha256Text } from "@multiremi/project-knowledge/codec.js";
 
 export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  const workspaceResponse = (workspace: import("@multiremi/contracts/types.js").MultiremiWorkspace) => ({
+    ...workspace, operator: { userId: "local", memberId: store.getWorkspaceOperator(workspace.id)!.id },
+  });
+
+  app.get("/api/workspaces/:id/services/magpie", (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    if (denied) return denied;
+    const workspace = store.getWorkspace(workspaceId);
+    if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    return c.json({ url: workspace.settings.magpie_url ?? null });
+  });
+  app.put("/api/workspaces/:id/services/magpie", async (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
+      ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    const body = await readJsonStrict<{ url?: unknown }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    let url: string | null = null;
+    if (body.url !== null) {
+      if (typeof body.url !== "string" || body.url.length > 2048) return c.json({ error: "url must be HTTP(S) or null" }, 400);
+      try {
+        const parsed = new URL(body.url);
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+          return c.json({ error: "Use HTTP(S) without credentials, query or fragment" }, 400);
+        }
+        url = parsed.href;
+      } catch { return c.json({ error: "Invalid service URL" }, 400); }
+    }
+    const workspace = store.getWorkspace(workspaceId);
+    if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    store.updateWorkspace(workspaceId, { settings: { ...workspace.settings, magpie_url: url } });
+    return c.json({ url });
+  });
 
   app.get("/api/workspaces", (c) => {
-    const userId = authenticatedRequestUserId(c);
     const token = currentAccessToken(c);
+    const workspaceBound = token?.type === "task"
+      || token?.type === "pat" && token.userId === "local" && token.purpose !== "session";
     const all = store.listWorkspaces().filter((workspace) =>
-      token?.type !== "task" || workspace.id === token.workspaceId
+      !workspaceBound || workspace.id === token!.workspaceId
     );
-    // Master token / open mode (no identity) is admin and sees everything;
-    // a logged-in user sees only the workspaces they are a member of.
-    if (!userId) return c.json(all);
-    return c.json(all.filter((ws) => store.getUserRoleInWorkspace(userId, ws.id) !== null));
+    return c.json(all.map(workspaceResponse));
   });
   app.post("/api/workspaces", async (c) => {
     const body = sanitizeWorkspaceSettingsInput(await readJson<any>(c));
-    const actingUserId = authenticatedRequestUserId(c) ?? "local";
+    const actingUserId = currentRequestUserId(c);
     const result = safeCreateWorkspace(store, body, actingUserId);
     if ("error" in result) return c.json({ error: result.error }, result.status);
     const provider = "claude";
@@ -154,7 +202,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       });
       publishAgentLifecycleEvent(c, store, "agent:created", agent);
     }
-    return c.json(result, 201);
+    return c.json(workspaceResponse(result), 201);
   });
   app.get("/api/workspaces/:id", (c) => {
     const workspaceId = c.req.param("id");
@@ -162,7 +210,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
-    return c.json(workspace);
+    return c.json(workspaceResponse(workspace));
   });
   app.get("/api/workspaces/:id/runtime-provisions", (c) => {
     const workspaceId = c.req.param("id");
@@ -179,7 +227,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     try {
       const provision = store.createWorkspaceRuntimeProvision(workspaceId, {
         ...body,
-        createdBy: authenticatedRequestUserId(c) ?? "local",
+        createdBy: currentRequestUserId(c),
       });
       return c.json({ provision: runtimeProvisionResponse(provision) }, 201);
     } catch (error) {
@@ -205,7 +253,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     try {
       return c.json({ provision: runtimeProvisionResponse(store.updateWorkspaceRuntimeProvision(provision.id, {
         ...body,
-        createdBy: authenticatedRequestUserId(c) ?? "local",
+        createdBy: currentRequestUserId(c),
       })) });
     } catch (error) {
       return runtimeProvisionError(c, error);
@@ -217,7 +265,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const provision = store.getWorkspaceRuntimeProvision(c.req.param("provisionId"));
     if (!provision || provision.workspaceId !== workspaceId) return c.json({ error: "runtime provision not found" }, 404);
-    store.deleteWorkspaceRuntimeProvision(provision.id, authenticatedRequestUserId(c) ?? "local");
+    store.deleteWorkspaceRuntimeProvision(provision.id, currentRequestUserId(c));
     return c.json({ deleted: true, id: provision.id });
   });
   app.get("/api/workspaces/:id/runtime-provisions/:provisionId/states", (c) => {
@@ -257,7 +305,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
     try {
-      return c.json(issueTopicConfigResponse(workspaceId, readWorkspaceIssueTopics(workspace.settings)));
+      let invalid: IssueTopicConfigInvalid | undefined;
+      const config = readWorkspaceIssueTopicsLenient(workspace.settings, (error) => {
+        invalid = { code: error.code, message: error.message };
+      });
+      return c.json({
+        ...issueTopicConfigResponse(workspaceId, config),
+        ...(invalid ? { invalid } : {}),
+      });
     } catch (error) {
       return issueTopicConfigErrorResponse(c, error);
     }
@@ -275,14 +330,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       project_ids?: unknown;
       notify_mode?: unknown;
       notify_open_id?: unknown;
+      /** @deprecated Accepted for old clients; ignored, never validated or stored. */
+      responsible_member_id?: unknown;
     }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const fields = Object.keys(body);
-    if (fields.some((key) => !["enabled", "chat_id", "project_ids", "notify_mode", "notify_open_id"].includes(key))) {
+    if (fields.some((key) => !["enabled", "chat_id", "project_ids", "notify_mode", "notify_open_id",'responsible_member_id'].includes(key))) {
       return c.json({ error: "only enabled, chat_id, project_ids, notify_mode, and notify_open_id are allowed" }, 400);
     }
     try {
-      const previous = readWorkspaceIssueTopics(workspace.settings);
+      const previous = readWorkspaceIssueTopicsLenient(workspace.settings);
       const issueTopics = parseIssueTopicConfig({
         enabled: body.enabled,
         chatId: body.chat_id,
@@ -308,54 +365,59 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.get("/api/workspaces/:id/bot-menu", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (botId !== "default" && !store.feishuBotFor(botId).getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     try {
-      return c.json({ workspace_id: workspaceId, bot_menu: readWorkspaceBotMenu(workspace.settings) });
+      return c.json({ workspace_id: workspaceId, bot_id: botId, ...botMenuView(workspace.settings, botId) });
     } catch (error) {
       return botMenuError(c, error);
     }
   });
   app.put("/api/workspaces/:id/bot-menu", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (botId !== "default" && !store.feishuBotFor(botId).getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const body = await readJsonStrict<{ bot_menu?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const botMenu = parseBotMenuConfig(body.bot_menu);
-      const updated = store.updateWorkspace(workspaceId, {
-        settings: { ...workspace.settings, botMenu },
-      });
+      const botMenu = parseUnifiedBotMenuConfig(body.bot_menu);
+      const updated = store.updateBotMenu(workspaceId, botId, botMenu);
+      if (!updated) return c.json({ error: "bot or workspace not found" }, 404);
       publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, { workspace: updated });
-      return c.json({ workspace_id: workspaceId, bot_menu: botMenu });
+      return c.json({ workspace_id: workspaceId, bot_id: botId, ...botMenuView(updated.settings, botId) });
     } catch (error) {
       return botMenuError(c, error);
     }
   });
   app.post("/api/workspaces/:id/bot-menu/publish", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (botId !== "default" && !store.feishuBotFor(botId).getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const body = await readJsonStrict<{ dry_run?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     if (typeof body.dry_run !== "boolean") {
       return c.json({ error: "dry_run must be explicitly true or false" }, 400);
     }
     try {
-      const botMenu = readWorkspaceBotMenu(workspace.settings);
+      const botMenu = readWorkspaceBotMenu(workspace.settings, botId);
       const resolved = resolveBotMenuConfig(
         botMenu,
         workspaceId,
-        store.listWorkspaceMembers(workspaceId),
+        store.listWorkspaceMembers(workspaceId, { includeArchived: true }),
         (userId) => store.getUser(userId),
       );
       const publishers = store.listRuntimes()
@@ -367,7 +429,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         .sort((a, b) => String(b.lastHeartbeatAt ?? "").localeCompare(String(a.lastHeartbeatAt ?? "")));
       // Publish only through the machine that owns this workspace's configured
       // bot credentials. There is no environment-driven concierge fallback.
-      const conciergeRuntimeId = store.getFeishuBotConfig(workspaceId)?.runtimeId ?? null;
+      const bot = store.feishuBotFor(botId).getConfig(workspaceId);
+      const conciergeRuntimeId = bot?.runtimeId ?? null;
       if (!conciergeRuntimeId) {
         return c.json({ error: "no Feishu concierge is configured for this workspace" }, 409);
       }
@@ -375,8 +438,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       if (!runtime) {
         return c.json({ error: "the machine hosting the Feishu concierge is not online" }, 503);
       }
+      if (Number(runtime.metadata.feishu_bot_menu_protocol ?? 0) < BOT_MENU_PROTOCOL_VERSION) {
+        return c.json({ error: "update the bot Runtime before publishing bot-scoped menus", code: "bot_menu_runtime_upgrade_required" }, 409);
+      }
+      resolved.target = { botId, appId: bot!.appId, domain: bot!.domain, revision: bot!.revision };
       const request = store.createBotMenuPublishRequest(runtime.id, {
         workspaceId,
+        botId,
         config: resolved,
         dryRun: body.dry_run,
         createdBy: currentRequestUserId(c),
@@ -388,11 +456,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.get("/api/workspaces/:id/bot-menu/publish/:requestId", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const request = store.findBotMenuPublishRequest(workspaceId, c.req.param("requestId"));
-    if (!request) return c.json({ error: "bot menu publish request not found" }, 404);
+    if (!request || request.botId !== botId) return c.json({ error: "bot menu publish request not found" }, 404);
     return c.json(botMenuPublishResponse(request));
   });
   app.get("/api/workspaces/:id/prompts", (c) => {
@@ -401,7 +470,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
-    return c.json(readWorkspacePromptSettings(workspace));
+    return c.json(workspacePromptsResponse(readWorkspacePromptSettings(workspace)));
   });
   app.get("/api/workspaces/:id/prompt-template", (c) => {
     const workspaceId = c.req.param("id");
@@ -430,7 +499,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       if (merged.settings !== workspace.settings) {
         store.updateWorkspace(workspaceId, { settings: merged.settings });
       }
-      return c.json(merged.prompts);
+      return c.json(workspacePromptsResponse(merged.prompts));
     } catch (error) {
       if (error instanceof WorkspacePromptRevisionConflictError) {
         return c.json({
@@ -452,13 +521,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       await readJson<Partial<CreateWorkspaceInput>>(c),
     );
     if (hasOwn(body, "settings")) {
+      if(body.settings && hasOwn(body.settings,'issueTopics')) {
+        const humanDenied=requireHumanWorkspaceAdmin(c,store,c.req.param('id'));if(humanDenied)return humanDenied;
+      }
       const adminDenied = requireWorkspaceAdmin(c, store, c.req.param("id"));
       if (adminDenied) return adminDenied;
     }
     if (hasOwn(body, "repos")) {
       return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
     }
-    return c.json(store.updateWorkspace(c.req.param("id"), body));
+    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
   });
   app.patch("/api/workspaces/:id", async (c) => {
     const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"))
@@ -468,13 +540,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       await readJson<Partial<CreateWorkspaceInput>>(c),
     );
     if (hasOwn(body, "settings")) {
+      if(body.settings && hasOwn(body.settings,'issueTopics')) {
+        const humanDenied=requireHumanWorkspaceAdmin(c,store,c.req.param('id'));if(humanDenied)return humanDenied;
+      }
       const adminDenied = requireWorkspaceAdmin(c, store, c.req.param("id"));
       if (adminDenied) return adminDenied;
     }
     if (hasOwn(body, "repos")) {
       return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
     }
-    return c.json(store.updateWorkspace(c.req.param("id"), body));
+    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
   });
   app.get("/api/workspaces/:id/repos", async (c) => {
     const workspaceId = c.req.param("id");
@@ -576,10 +651,26 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (missing) return c.json({ error: "repository not found" }, 404);
     try {
       const query = String(c.req.query("q") ?? "").trim();
-      const docs = query
-        ? await deps.repositoryWiki.search(workspaceId, repositoryId, query, Number(c.req.query("limit") ?? 20))
-        : await deps.repositoryWiki.list(workspaceId, repositoryId);
-      return c.json({ docs: docs.map(repositoryWikiDocResponse) });
+      const includeBody = readRepositoryWikiIncludeBody(c);
+      const ids = readRepositoryWikiIds(c);
+      if (query && (includeBody || ids)) {
+        return c.json({ error: "q cannot be combined with include_body or ids" }, 400);
+      }
+      if (query) {
+        const docs = await deps.repositoryWiki.withRequestDeadline()
+          .search(workspaceId, repositoryId, query, Number(c.req.query("limit") ?? 20));
+        return c.json({ docs: docs.map((doc) => repositoryWikiDocResponse(doc, true)) });
+      }
+      if (includeBody) {
+        if (!ids?.length) return c.json({ error: "include_body requires ids" }, 400);
+        if (ids.length > REPOSITORY_WIKI_BODY_BATCH_LIMIT) {
+          return c.json({ error: `include_body supports at most ${REPOSITORY_WIKI_BODY_BATCH_LIMIT} ids` }, 400);
+        }
+        const docs = await deps.repositoryWiki.withRequestDeadline().readBodies(workspaceId, repositoryId, ids);
+        return c.json({ docs: docs.map((doc) => repositoryWikiDocResponse(doc, true)) });
+      }
+      const docs = deps.repositoryWiki.listMetadata(workspaceId, repositoryId, ids ?? undefined);
+      return c.json({ docs: docs.map((doc) => repositoryWikiDocResponse(doc, false)) });
     } catch (error) {
       return repositoryWikiError(c, error);
     }
@@ -610,8 +701,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         source_revision: actor.sourceRevision,
         authorType: actor.kind,
         author_type: actor.kind,
-        authorId: actor.agent?.id ?? authenticatedRequestUserId(c),
-        author_id: actor.agent?.id ?? authenticatedRequestUserId(c),
+        authorId: actor.agent?.id ?? currentRequestUserId(c),
+        author_id: actor.agent?.id ?? currentRequestUserId(c),
       };
       if (actor.kind === "agent" && !actor.canPublish) {
         const submission = createRepositoryMutationSubmission({
@@ -657,7 +748,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         workspaceId,
         repositoryId,
         actor,
-        memberId: authenticatedRequestUserId(c),
+        memberId: currentRequestUserId(c),
       });
       if (actor.kind === "agent" && !actor.canPublish) {
         const currentByRef = new Map<string, MultiremiRepositoryWikiDoc>();
@@ -784,8 +875,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     if (requireWorkspaceRepository(store, workspaceId, repositoryId)) return c.json({ error: "repository not found" }, 404);
     try {
-      const docs = await deps.repositoryWiki.backlinks(workspaceId, repositoryId, c.req.param("ref"));
-      return c.json({ docs: docs.map(repositoryWikiDocResponse) });
+      const docs = await deps.repositoryWiki.withRequestDeadline()
+        .backlinks(workspaceId, repositoryId, c.req.param("ref"));
+      return c.json({ docs: docs.map((doc) => repositoryWikiDocResponse(doc)) });
     } catch (error) {
       return repositoryWikiError(c, error);
     }
@@ -797,7 +889,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     if (requireWorkspaceRepository(store, workspaceId, repositoryId)) return c.json({ error: "repository not found" }, 404);
     try {
-      const doc = await deps.repositoryWiki.get(workspaceId, repositoryId, c.req.param("ref"));
+      const doc = await deps.repositoryWiki.withRequestDeadline().get(workspaceId, repositoryId, c.req.param("ref"));
       return doc ? c.json({ doc: repositoryWikiDocResponse(doc) }) : c.json({ error: "repository wiki doc not found" }, 404);
     } catch (error) {
       return repositoryWikiError(c, error);
@@ -823,8 +915,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         source_revision: actor.sourceRevision ?? body.sourceRevision ?? body.source_revision,
         updatedByType: actor.kind,
         updated_by_type: actor.kind,
-        updatedById: actor.agent?.id ?? authenticatedRequestUserId(c),
-        updated_by_id: actor.agent?.id ?? authenticatedRequestUserId(c),
+        updatedById: actor.agent?.id ?? currentRequestUserId(c),
+        updated_by_id: actor.agent?.id ?? currentRequestUserId(c),
       };
       if (actor.kind === "agent" && !actor.canPublish) {
         const submission = createRepositoryMutationSubmission({
@@ -1217,7 +1309,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.put("/api/workspaces/:id/relay-config/:engine", async (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (!isRelayEngine(engine)) return c.json({ error: "invalid engine" }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const body = await readJsonStrict<{ fragment?: string; token_op?: string; auth_token?: string }>(c);
@@ -1256,7 +1348,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/workspaces/:id/relay-config/:engine/reveal", (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (!isRelayEngine(engine)) return c.json({ error: "invalid engine" }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1268,7 +1360,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/workspaces/:id/relay-config/:engine/probe", async (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (!isRelayEngine(engine)) return c.json({ error: "invalid engine" }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1283,7 +1375,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/workspaces/:id/relay-config/:engine/reasoning-levels", (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (engine !== "claude" && engine !== "codex") return c.json({ error: reasoningEngineError(engine) }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1292,7 +1384,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.put("/api/workspaces/:id/relay-config/:engine/reasoning-levels", async (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (engine !== "claude" && engine !== "codex") return c.json({ error: reasoningEngineError(engine) }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1321,14 +1413,29 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     // `effective.source` is the only honest answer to that.
     return c.json({ deleted, ...gatewayReasoningLevels(store, workspaceId, engine, updatedBy) });
   });
-  app.post("/api/workspaces/:id/leave", async (c) => {
+  app.put("/api/workspaces/:id/relay-config/:engine/context-window", async (c) => {
     const workspaceId = c.req.param("id");
-    const requester = loadCurrentWorkspaceMember(c, store, workspaceId);
-    if (requester instanceof Response) return requester;
-    const left = safeLeaveWorkspace(store, workspaceId, requester.member.id);
-    if ("error" in left) return c.json({ error: left.error }, left.status);
-    publishWorkspaceEvent(c, store, "member:removed", workspaceId, memberRemovedPayload(requester.member));
-    return c.body(null, 204);
+    const engine = c.req.param("engine");
+    if (engine !== "claude") return c.json({ error: "1M context is only supported for Claude" }, 400);
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    c.header("Cache-Control", "no-store");
+    const body = await readJsonStrict<{ model?: unknown; one_million?: unknown }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    const validation = validateGatewayContextWindow(body);
+    if (!validation.ok) return c.json({ error: validation.error }, 400);
+    const updatedBy = currentRequestUserId(c);
+    let deleted = false;
+    if (validation.oneMillion) {
+      store.saveGatewayModelContext(workspaceId, engine, { modelId: validation.modelId, updatedBy });
+    } else {
+      deleted = store.deleteGatewayModelContext(workspaceId, engine, validation.modelId);
+    }
+    return c.json({ deleted, ...gatewayReasoningLevels(store, workspaceId, engine, updatedBy) });
+  });
+  app.post("/api/workspaces/:id/leave", (c) => {
+    const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"));
+    return denied ?? c.json({ error: "Workspace operators are shared; leaving a workspace is no longer supported", code: "workspace_members_retired" }, 410);
   });
 
   app.get("/api/workspaces/:id/lark/installations", (c) => c.json({
@@ -1356,6 +1463,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.delete("/api/workspaces/:id/lark/installations/:installationId", (c) => c.body(null, 204));
 }
 
+/**
+ * Reasoning-level declarations exist for Claude and Codex only. Antigravity's
+ * gateway path offers no `thought_level` selector at all, so a declared level
+ * would route and then be rejected by the engine; say so instead of "invalid".
+ */
+function reasoningEngineError(engine: string): string {
+  return engine === "antigravity" ? "reasoning levels are not supported for antigravity" : "invalid engine";
+}
+
 function hasOwn(value: unknown, key: string): boolean {
   return typeof value === "object" && value !== null && Object.prototype.hasOwnProperty.call(value, key);
 }
@@ -1363,9 +1479,31 @@ function hasOwn(value: unknown, key: string): boolean {
 function sanitizeWorkspaceSettingsInput<T extends Partial<CreateWorkspaceInput>>(body: T): T {
   const settings = body.settings;
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) return body;
+  const normalized = { ...settings };
+  if (normalized.storage != null) {
+    const { patch, errors } = validateStorageSettingsPatch(normalized.storage);
+    const effective = { ...STORAGE_SETTINGS_DEFAULTS };
+    for (const key of Object.keys(patch) as (keyof typeof effective)[]) {
+      effective[key] = patch[key] ?? STORAGE_SETTINGS_DEFAULTS[key];
+    }
+    errors.push(...storageThresholdErrors(effective));
+    if (errors.length) throw new MultiremiApiError(`invalid storage settings: ${errors.join("; ")}`, 400);
+  }
+  for (const [key, validator] of [["co_authored_by_name", validateCoAuthoredByName], ["co_authored_by_email", validateCoAuthoredByEmail]] as const) {
+    if (!Object.prototype.hasOwnProperty.call(normalized, key)) continue;
+    const value = normalized[key];
+    if (value === null) {
+      // updateWorkspace replaces settings wholesale, so omission clears stored overrides.
+      delete normalized[key];
+      continue;
+    }
+    const result = typeof value === "string" ? validator(value) : { ok: false as const, error: "Must be a string or null" };
+    if (!result.ok) throw new MultiremiApiError(`${key}: ${result.error}`, 400);
+    normalized[key] = result.value;
+  }
   return {
     ...body,
-    settings: sanitizeIssueAutoTitleSettings(sanitizeWorkspaceProgressSummarySettings(settings)),
+    settings: sanitizeIssueAutoTitleSettings(sanitizeWorkspaceProgressSummarySettings(normalized)),
   };
 }
 
@@ -1501,7 +1639,7 @@ function repositoryWikiBuildState(
   };
 }
 
-function repositoryWikiDocResponse(doc: MultiremiRepositoryWikiDoc): Record<string, unknown> {
+function repositoryWikiDocResponse(doc: MultiremiRepositoryWikiDoc, includeBody = true): Record<string, unknown> {
   return {
     id: doc.id,
     repository_id: doc.repositoryId,
@@ -1510,7 +1648,9 @@ function repositoryWikiDocResponse(doc: MultiremiRepositoryWikiDoc): Record<stri
     slug: doc.slug,
     title: doc.title,
     summary: doc.summary,
-    body: doc.body,
+    // Omitting the key (not sending "") keeps "not requested" distinguishable
+    // from an empty page for every consumer.
+    ...(includeBody ? { body: doc.body } : {}),
     tags: doc.tags,
     refs: doc.refs,
     source_task_id: doc.sourceTaskId,
@@ -1584,6 +1724,7 @@ function botMenuPublishResponse(request: MultiremiBotMenuPublishRequest): Record
   return {
     id: request.id,
     workspace_id: request.workspaceId,
+    bot_id: request.botId,
     dry_run: request.dryRun,
     status: request.status,
     result: request.result,
@@ -1622,6 +1763,20 @@ function botMenuError(c: Context, error: unknown): Response {
   return c.json({ error: message }, 400);
 }
 
+function readRepositoryWikiIncludeBody(c: Context): boolean {
+  const raw = c.req.query("include_body");
+  if (raw === undefined) return false;
+  return raw === "true" || raw === "1";
+}
+
+/** Accepts `ids=a,b` and repeated `ids=`; order is preserved and duplicates dropped. */
+function readRepositoryWikiIds(c: Context): string[] | null {
+  const values = c.req.queries("ids");
+  if (!values?.length) return null;
+  const ids = values.flatMap((value) => value.split(",")).map((value) => value.trim()).filter(Boolean);
+  return ids.length ? [...new Set(ids)] : null;
+}
+
 function repositoryWikiRevisionResponse(revision: MultiremiRepositoryWikiDocRevision): Record<string, unknown> {
   return {
     id: revision.id,
@@ -1643,6 +1798,8 @@ function repositoryWikiRevisionResponse(revision: MultiremiRepositoryWikiDocRevi
 }
 
 function repositoryWikiError(c: Context, error: unknown): Response {
+  const timeout = openVikingTimeoutResponse(c, error);
+  if (timeout) return timeout;
   const message = error instanceof Error ? error.message : "repository wiki request failed";
   if (error instanceof RepositoryWikiUnavailableError) return c.json({ error: message }, 503);
   if (error instanceof RepositoryWikiLogHistoryError) return c.json({ error: message }, 409);

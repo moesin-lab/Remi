@@ -36,7 +36,7 @@ import { NewSessionButton } from "./issue-session-bar";
 
 function makeSession(overrides: Partial<IssueSession> = {}): IssueSession {
   return {
-    id: "main", issue_id: "issue-1", workspace_id: "workspace-1", title: "Main",
+    id: "main", owner_type: "issue", owner_id: "issue-1", issue_id: "issue-1", workspace_id: "workspace-1", title: "Main",
     status: "active", is_default: true, holds_workspace: true,
     parent_session_id: null, inherit_mode: "none", inherit_cutoff_seq: null,
     inherited_event_count: 0, summary: null, created_by_type: "member",
@@ -64,6 +64,14 @@ beforeEach(() => {
 });
 
 describe("NewSessionButton", () => {
+  it("does not offer a linked Chat Session as an Issue-owned inheritance parent", async () => {
+    const linked = makeSession({ id: "linked-chat", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1", title: "Private Chat work" });
+    renderWithI18n(<NewSessionButton issueId="issue-1" sessions={[...sessions, linked]} />);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Discussion" }));
+    expect(screen.queryByRole("option", { name: "Private Chat work" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Main" })).toBeInTheDocument();
+  });
   it("labels its field and creates the session", async () => {
     mockMutations.createSession.mockResolvedValue({ id: "session-2" });
     const onCreated = vi.fn();
@@ -73,7 +81,7 @@ describe("NewSessionButton", () => {
 
     expect(
       await screen.findByText(
-        "A session keeps its own conversation and agent runs, separate from the others on this issue.",
+        "A Session keeps its own conversation and agent runs in this Issue.",
       ),
     ).toBeInTheDocument();
 

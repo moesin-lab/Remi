@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import type { CanonicalMessage } from "@multiremi/contracts/messaging.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createMultiremiApp } from "@multiremi/api.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -58,6 +59,24 @@ function message(overrides: Partial<CanonicalMessage> = {}): CanonicalMessage {
 }
 
 describe("messaging outcomes", () => {
+  it("exposes proposals without an Issue in the canonical inbox and marks their conversation read", async () => {
+    const { store, ownerId } = seed();
+    const proposal = store.messagingOutcomes.proposeIssue(REF, {
+      workspaceId: "local", recipientId: ownerId, title: "Unassigned proposal", actorType: "agent", actorId: "agent_1",
+    });
+    const app = createMultiremiApp({ store });
+    const response = await app.request("/api/inbox");
+    expect(response.status).toBe(200);
+    const page = await response.json() as any;
+    const item = page.items.find((message: any) => message.id === proposal.inboxItem!.id);
+    expect(item).toBeTruthy();
+    expect(item.session_id).toBe("auto_orphan_inbox_local");
+    expect((await app.request(`/api/messages/${item.id}`)).status).toBe(200);
+    expect((await app.request("/api/inbox/read", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ all: true }),
+    })).status).toBe(200);
+    expect((await (await app.request("/api/inbox")).json() as any).unread_count).toBe(0);
+  });
   it("refuses the outcomes that have a dedicated command, and requires a reason for the rest", () => {
     const { store } = seed();
     const outcomes = store.messagingOutcomes;
@@ -165,7 +184,16 @@ describe("messaging outcomes", () => {
     expect(again.outcome.id).toBe(proposed.outcome.id);
 
     const proposalId = proposed.outcome.id;
+    const createdEventTransactionStates: boolean[] = [];
+    const stop = store.onWorkspaceEvent((event) => {
+      if (event.type === "activity:created"
+        && (event.payload.entry as { action?: string })?.action === "issue_created") {
+        createdEventTransactionStates.push(db!.inTransaction);
+      }
+    });
     const approved = outcomes.approveProposal(proposalId, { workspaceId: "local", approvedBy: ownerId });
+    stop();
+    expect(createdEventTransactionStates).toEqual([false]);
     expect(approved.created).toBe(true);
     expect(approved.proposal.proposalStatus).toBe("approved");
     expect(approved.issue?.title).toBe("API outage reported in chat");
@@ -219,6 +247,23 @@ describe("messaging outcomes", () => {
       .toThrow("Proposal not found");
   });
 
+  it("creates an Issue from a message, directly or by approval, without a designated human", () => {
+    const { store, ownerId } = seed();
+    const responsible = (issueId: string) => db!.query("SELECT responsible_member_id FROM multiremi_issues WHERE id=?").get(issueId);
+    // The routes' human-approver rule decides who may create; the store needs no human creator.
+    const direct = store.messagingOutcomes.createIssue(REF, { workspaceId: "local", title: "From a message" });
+    expect(direct.created).toBe(true);
+    expect(direct.issue).toMatchObject({ parentIssueId: null, workspaceId: "local" });
+    expect(responsible(direct.issue.id)).toEqual({ responsible_member_id: null });
+    store.messaging.ingestMessages({ connectionId: REF.connectionId, sourceId: "msrc_test", messages: [message({ externalMessageId: "external_2" })] });
+    const proposal = store.messagingOutcomes.proposeIssue({ connectionId: REF.connectionId, externalMessageId: "external_2" }, {
+      workspaceId: "local", recipientId: ownerId, actorType: "member", actorId: ownerId, title: "Approved from a message",
+    });
+    const approved = store.messagingOutcomes.approveProposal(proposal.outcome.id, { workspaceId: "local", approvedBy: ownerId });
+    expect(approved.created).toBe(true);
+    expect(responsible(approved.issue!.id)).toEqual({ responsible_member_id: null });
+  });
+
   it("creates an Issue directly, and does not create a second one on a repeat", () => {
     const { store, ownerId } = seed();
     const first = store.messagingOutcomes.createIssue(REF, {
@@ -239,6 +284,96 @@ describe("messaging outcomes", () => {
     expect(() => store.messagingOutcomes.createIssue(REF, { workspaceId: "local", title: "  " }))
       .toThrow("title is required");
   });
+
+  for (const path of ["direct", "approved proposal"] as const) {
+    function setup() {
+      const { store, ownerId } = seed();
+      const proposalId = path === "approved proposal"
+        ? store.messagingOutcomes.proposeIssue(REF, {
+          workspaceId: "local",
+          recipientId: ownerId,
+          actorType: "member",
+          actorId: ownerId,
+          title: "Queued message issue",
+        }).outcome.id
+        : null;
+      const run = () => proposalId
+        ? store.messagingOutcomes.approveProposal(proposalId, { workspaceId: "local", approvedBy: ownerId })
+        : store.messagingOutcomes.createIssue(REF, {
+          workspaceId: "local",
+          title: "Queued message issue",
+          createdBy: ownerId,
+        });
+      return { store, proposalId, run };
+    }
+
+    it(`${path} emits issue_created only after commit`, () => {
+      const { store, run } = setup();
+      const events: boolean[] = [];
+      const unsubscribe = store.onWorkspaceEvent((event) => {
+        if (event.type === "activity:created" && (event.payload.entry as { action?: string }).action === "issue_created") {
+          events.push(db!.inTransaction);
+        }
+      });
+      let issueId: string;
+      try {
+        issueId = run().issue!.id;
+      } finally {
+        unsubscribe();
+      }
+      expect(store.listIssueActivity(issueId).filter((entry) => entry.type === "issue_created")).toHaveLength(1);
+      expect(store.messaging.listOutcomes(REF.connectionId, REF.externalMessageId)
+        .filter((outcome) => outcome.outcomeKind === "issue_created")).toHaveLength(1);
+      expect(events).toEqual([false]);
+    });
+
+    it(`${path} rolls back a late failure in the transaction owner`, () => {
+      const { store, proposalId, run } = setup();
+      const events: string[] = [];
+      const unsubscribe = store.onWorkspaceEvent((event) => {
+        if (event.type === "activity:created" && (event.payload.entry as { action?: string }).action === "issue_created") {
+          events.push(event.type);
+        }
+      });
+      const originalRecord = store.messaging.recordOutcomeWithinTransaction;
+      const originalResolve = store.messaging.resolveProposal;
+      const injectedError = path === "direct"
+        ? "message outcome rollback injection"
+        : "message proposal resolution rollback injection";
+      if (path === "direct") {
+        store.messaging.recordOutcomeWithinTransaction = (input) => {
+          const outcome = originalRecord.call(store.messaging, input);
+          if (input.outcomeKind === "issue_created") {
+            expect(db!.inTransaction).toBe(true);
+            throw new Error(injectedError);
+          }
+          return outcome;
+        };
+      } else {
+        store.messaging.resolveProposal = (input) => {
+          const proposal = originalResolve.call(store.messaging, input);
+          if (input.id === proposalId && input.status === "approved") {
+            expect(db!.inTransaction).toBe(true);
+            throw new Error(injectedError);
+          }
+          return proposal;
+        };
+      }
+      try {
+        expect(run).toThrow(injectedError);
+      } finally {
+        store.messaging.recordOutcomeWithinTransaction = originalRecord;
+        store.messaging.resolveProposal = originalResolve;
+        unsubscribe();
+      }
+      expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_issues WHERE title = 'Queued message issue'").get()).toEqual({ count: 0 });
+      expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_issue_activity WHERE type = 'issue_created'").get()).toEqual({ count: 0 });
+      expect(store.messaging.listOutcomes(REF.connectionId, REF.externalMessageId)
+        .filter((outcome) => outcome.outcomeKind === "issue_created")).toHaveLength(0);
+      if (proposalId) expect(store.messaging.getOutcome(proposalId)?.proposalStatus).toBe("pending");
+      expect(events).toEqual([]);
+    });
+  }
 
   it("refuses a task id that belongs to another workspace", () => {
     const { store } = seed();

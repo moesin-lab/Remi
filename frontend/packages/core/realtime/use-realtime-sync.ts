@@ -41,7 +41,7 @@ const logger = createLogger("realtime-sync");
  * new WSClient instance is detected (workspace switch) to recover events
  * missed while disconnected.
  */
-function invalidateWorkspaceScopedQueries(qc: QueryClient): void {
+function invalidateWorkspaceScopedQueries(qc: QueryClient, includeChat = true): void {
   const wsId = getCurrentWsId();
   if (wsId) {
     qc.invalidateQueries({
@@ -65,7 +65,17 @@ function invalidateWorkspaceScopedQueries(qc: QueryClient): void {
     qc.invalidateQueries({ queryKey: agentTasksKeys.all(wsId) });
     qc.invalidateQueries({ queryKey: agentActivityKeys.all(wsId) });
     qc.invalidateQueries({ queryKey: agentRunCountsKeys.all(wsId) });
-    qc.invalidateQueries({ queryKey: chatKeys.all(wsId) });
+    if (includeChat) qc.invalidateQueries({ queryKey: chatKeys.all(wsId) });
+    else {
+      // Server state that no stream resumes: the session lists and details
+      // (unread, `running_background_tasks`), the pending roll-up (running
+      // counts) and the background-task registry (PR 6). The log, the queue
+      // and the optimistic pending task stay, as above.
+      qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+      qc.invalidateQueries({ queryKey: chatKeys.sessionDetails(wsId) });
+      qc.invalidateQueries({ queryKey: chatKeys.pendingTasks(wsId) });
+      qc.invalidateQueries({ queryKey: chatKeys.backgroundTasksAll(wsId) });
+    }
     qc.invalidateQueries({ queryKey: labelKeys.all(wsId) });
     qc.invalidateQueries({ queryKey: agentPluginKeys.all(wsId) });
     qc.invalidateQueries({ queryKey: issueKeys.workspacesAll() });
@@ -136,20 +146,35 @@ export function useRealtimeSync(
     };
   }, [ws, qc, authStore, onToast]);
 
-  // Reconnect -> refetch all data to recover missed events
+  // Reconnect -> refetch all data to recover missed events.
+  //
+  // MUL-438: a server `resync` means the same thing to this layer. The peer
+  // adapter broadcasts it after the cross-process link recovers, and the streams
+  // themselves are re-subscribed by the socket (from each stream's local head) —
+  // so what is left for this layer is the non-stream caches, exactly as on a
+  // reconnect. Both paths share one implementation on purpose: two recovery
+  // routines would drift, and the second one would be the one that gets forgotten.
   useEffect(() => {
     if (!ws) return;
 
-    const unsub = ws.onReconnect(async () => {
+    const refetch = async () => {
       logger.info("reconnected, refetching all data");
       try {
-        invalidateWorkspaceScopedQueries(qc);
+        // The log stream resumes from its cursor; invalidating every Chat cache
+        // here would discard the optimistic row before its client_id is matched.
+        // Only the Chat caches no stream resumes are refreshed.
+        invalidateWorkspaceScopedQueries(qc, false);
       } catch (e) {
         logger.error("reconnect refetch failed", e);
       }
-    });
+    };
+    const unsubReconnect = ws.onReconnect(refetch);
+    const unsubResync = ws.onResync(refetch);
 
-    return unsub;
+    return () => {
+      unsubReconnect();
+      unsubResync();
+    };
   }, [ws, qc]);
 
   // New WSClient instance (workspace switch) -> invalidate workspace-scoped

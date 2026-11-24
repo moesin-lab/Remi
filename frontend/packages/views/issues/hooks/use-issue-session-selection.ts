@@ -12,19 +12,21 @@ export interface IssueSessionSelection {
   active: IssueSession | null;
   select: (sessionId: string) => void;
   pending: boolean;
+  error: boolean;
   fetching: boolean;
   refetch: () => void;
 }
 
 /**
  * Owns which of the issue's parallel sessions is on screen. Resolution order
- * is explicit selection → the default session → the first one, so a freshly
- * loaded issue always lands on something real.
+ * is explicit selection → the Issue's own Main → another default → the first
+ * one. Associated Chat Sessions retain their own default Session.
  */
 export function useIssueSessionSelection(
   issueId: string,
   initialIssueSessionId?: string,
   onSelectionChange?: (sessionId: string) => void,
+  deferDefaultNavigation = false,
 ): IssueSessionSelection {
   const sessionsQuery = useQuery(issueSessionsOptions(issueId));
   // Stable reference: `?? []` inline would hand children a fresh array on
@@ -34,6 +36,7 @@ export function useIssueSessionSelection(
 
   const activeId =
     list.find((session) => session.id === selectedId)?.id
+    ?? list.find((session) => session.owner_type === "issue" && session.owner_id === issueId && session.is_default)?.id
     ?? list.find((session) => session.is_default)?.id
     ?? list[0]?.id
     ?? "";
@@ -42,9 +45,9 @@ export function useIssueSessionSelection(
   useEffect(() => {
     if (activeId && activeId !== selectedId) {
       setSelectedId(activeId);
-      onSelectionChange?.(activeId);
+      if (!deferDefaultNavigation) onSelectionChange?.(activeId);
     }
-  }, [activeId, onSelectionChange, selectedId]);
+  }, [activeId, deferDefaultNavigation, onSelectionChange, selectedId]);
   useEffect(() => {
     setSelectedId(initialIssueSessionId ?? "");
   }, [issueId, initialIssueSessionId]);
@@ -63,6 +66,7 @@ export function useIssueSessionSelection(
     active,
     select,
     pending: sessionsQuery.isPending,
+    error: sessionsQuery.isError,
     fetching: sessionsQuery.isFetching,
     refetch: () => void sessionsQuery.refetch(),
   };

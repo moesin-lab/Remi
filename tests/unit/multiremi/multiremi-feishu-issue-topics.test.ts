@@ -1,6 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { createResponsibleTestIssue } from './helpers.js';
+import { mutateExecutionFixture } from "./unified-test-paths.js";
+import { reportFrame } from "../../fixtures/report-session.js";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
+import { IssueTopicConfigError, readWorkspaceIssueTopicsLenient } from "@multiremi/issue-topics/config.js";
 import type { MultiremiStore } from "@multiremi/store.js";
+import { StoreContext } from "@multiremi/store/context.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 const APP_SECRET = "wJ4tQ7xR2nB8vC5mZ1kL0pS6dF3gH9jA";
@@ -18,7 +23,17 @@ afterEach(() => {
   resetMultiremiTestEnv();
 });
 
-function scaffold(options: { online?: boolean } = {}): {
+/** In allowlist mode a first message only records the sender; approve it before it can chat. */
+function admitSender(store: MultiremiStore, revision: number, openId: string): void {
+  expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
+    revision, externalSessionKey: `oc_admit_${openId}`, externalMessageId: `om_admit_${openId}`,
+    senderOpenId: openId, text: "Hello",
+  })).toThrow("allowlist");
+  const sender = store.listFeishuBotSenders("local").find((candidate) => candidate.open_id === openId)!;
+  store.setFeishuBotSenderAllowed("local", sender.id, true, "local");
+}
+
+function scaffold(options: { online?: boolean; chatQuestionHandler?: boolean } = {}): {
   store: MultiremiStore;
   revision: number;
 } {
@@ -40,6 +55,7 @@ function scaffold(options: { online?: boolean } = {}): {
   });
   store.heartbeatRuntime("rt_bot", { supportsFeishuBotConfig: true });
   const config = store.upsertFeishuBotConfig("local", {
+    ...(options.chatQuestionHandler === false ? {} : { responsibleMemberId: store.findWorkspaceMemberForUser('local','local')!.id }),
     agentId: agent.id,
     runtimeId: "rt_bot",
     appId: "cli_issue_topics",
@@ -74,26 +90,691 @@ function configureTopics(store: MultiremiStore, projectIds?: string[]): void {
 
 function prepareReport(store: MultiremiStore) {
   const agent = store.getFeishuBotConfig("local")!.agentId;
-  const issue = store.createIssue({ title: "Review requested", workspaceId: "local", assigneeType: "agent", assigneeId: agent });
+  const issue = createResponsibleTestIssue(store, { title: "Review requested", workspaceId: "local", assigneeType: "agent", assigneeId: agent });
   store.prepareFeishuIssueTopicWithinTransaction(issue);
   const root = store.claimFeishuBotOutbound("local", "rt_bot")!;
   expect(root.bodyOrigin).toBe("issue");
   expect(root.mention).toBeUndefined();
   store.reportFeishuBotOutbound("local", "rt_bot", root.id, { claimToken: root.claimToken, status: "sent", externalMessageId: `om_root_${issue.id}` });
   const leader = store.createTask({ agentId: agent, issueId: issue.id, prompt: "Work on Issue" });
-  const wake = store.prepareFeishuIssueRoundPushesWithinTransaction({ issue, leaderTask: leader });
+  const wake = store.prepareFeishuIssueRoundPushes({ issue, leaderTask: leader });
   expect(wake).toHaveLength(1);
   return wake[0]!;
 }
 
 describe("Feishu Issue topics", () => {
+  describe("MUL-531 terminal reports from commented Issues", () => {
+    function issueWithTopic(store: MultiremiStore, agentId: string, title: string) {
+      const issue = createResponsibleTestIssue(store, { title, workspaceId: "local", assigneeType: "agent", assigneeId: agentId });
+      store.prepareFeishuIssueTopicWithinTransaction(issue);
+      const root = store.claimFeishuBotOutbound("local", "rt_bot")!;
+      store.reportFeishuBotOutbound("local", "rt_bot", root.id, {
+        claimToken: root.claimToken, status: "sent", externalMessageId: `om_root_${issue.id}`,
+      });
+      return issue;
+    }
+
+    for (const scenario of ["bound", "standalone", "cross-issue", "cross-issue-chat", "active", "chat"] as const) {
+      it(`${scenario}: reports each eligible topic once, deduplicated by Issue and turn`, () => {
+        const { store } = scaffold();
+        configureTopics(store);
+        const worker = store.createAgent({ name: "Leader", provider: "codex", workspaceId: "local" });
+        const issue = issueWithTopic(store, worker.id, "Review X");
+        const crossIssue = scenario === "cross-issue" || scenario === "cross-issue-chat";
+        const second = scenario === "standalone" || crossIssue
+          ? issueWithTopic(store, worker.id, "Review Y") : null;
+        const third = crossIssue ? issueWithTopic(store, worker.id, "Review Z") : null;
+        const boundIssue = scenario === "bound" || crossIssue ? issue : null;
+        const chat = scenario === "chat" || scenario === "cross-issue-chat" ? store.createChatSession({ agentId: worker.id }) : null;
+        const projectedSession = scenario === "cross-issue-chat"
+          ? store.createIssueSession(issue.id, { chatId: chat!.id, title: "Chat-owned Issue work" }) : null;
+        const task = store.createTask({ agentId: worker.id, workspaceId: "local", prompt: "Review work",
+          ...(boundIssue ? { issueId: boundIssue.id } : {}),
+          ...(chat ? { chatSessionId: chat.id } : {}),
+          ...(projectedSession ? { issueSessionId: projectedSession.id } : {}),
+        });
+        if (scenario === "cross-issue-chat") {
+          // Issue work can carry its topic Chat transport without becoming a Chat reply.
+          expect(task.issueSessionId).toBeTruthy();
+          expect(task.chatSessionId).toBeTruthy();
+        } else if (scenario === "cross-issue") {
+          expect(task.issueSessionId).toBe(store.getOrCreateDefaultIssueSession(issue.id).id);
+          expect(task.chatSessionId).toBeNull();
+        }
+        mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running', runtime_id = 'rt_bot' WHERE id = ?", [task.id]);
+        const targets = [issue, ...(second ? [second] : []), ...(third ? [third] : [])];
+        for (const target of targets) {
+          // Two comments on one Issue must still produce one report. In the
+          // bound case they must not duplicate the existing terminal path.
+          for (let i = 0; i < 2; i++) store.createIssueComment(target.id, {
+            authorType: "agent", authorId: worker.id, taskId: task.id, body: "## 待合入确认\n请确认 PR。",
+          });
+        }
+        const active = scenario === "active"
+          ? store.createTask({ agentId: worker.id, issueId: issue.id, prompt: "Still working" }) : null;
+        if (active) mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [active.id]);
+        const output = "## 待合入确认\n请确认 PR。";
+        const authority = { runtimeId: "rt_bot", workspaceId: "local", daemonId: "bot-host" };
+        store.completeTaskFromDaemon(task.id, { output }, authority);
+        // The daemon may replay its terminal report after losing the ACK.
+        store.completeTaskFromDaemon(task.id, { output }, authority);
+        const pushes = db!.query(
+          "SELECT issue_id, wake_task_id FROM multiremi_feishu_bot_round_pushes WHERE leader_task_id = ?",
+        ).all(task.id) as { issue_id: string; wake_task_id: string }[];
+        const eligible = scenario !== "active" && scenario !== "chat" && scenario !== "cross-issue-chat";
+        expect(pushes).toHaveLength(eligible ? targets.length : 0);
+        for (const target of targets) {
+          const topic = store.listChatSessions("local").find(row => store.getFeishuIssueIdForChatSession(row.id) === target.id)!;
+          const reports = store.listMessages(topic.id, { limit: 1000 }).filter(entry =>
+            entry.dedupe_key === `relay:${target.id}:${store.getTurnForAttempt(task.id)!.id}`);
+          expect(reports).toHaveLength(eligible ? 1 : 0);
+          if (eligible) {
+            expect(reports[0]).toMatchObject({ message_kind: "report", task_id: store.getTurnForAttempt(task.id)!.id });
+            expect(reports[0].metadata.message_source).toMatchObject({ issueId: target.id, taskId: task.id });
+            const push = pushes.find(row => row.issue_id === target.id)!;
+            expect(store.getTask(push.wake_task_id)?.chatSessionId).toBe(topic.id);
+            expect(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ?")
+              .get(push.wake_task_id)).toEqual({ n: 1 });
+          }
+        }
+        if (active) expect(store.getTask(active.id)?.status).toBe("running");
+      });
+    }
+
+    for (const status of ["queued", "dispatched", "running", "awaiting_human"] as const) {
+      it(`blocks only the Issue with a ${status} task, then its final task reports normally`, () => {
+        const { store } = scaffold();
+        configureTopics(store);
+        const worker = store.createAgent({ name: "Leader", provider: "codex", workspaceId: "local" });
+        const blocked = issueWithTopic(store, worker.id, "Still working");
+        const ready = issueWithTopic(store, worker.id, "Ready for review");
+        const source = store.createTask({ agentId: worker.id, prompt: "Scheduled review" });
+        mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [source.id]);
+        for (const target of [blocked, ready]) store.createIssueComment(target.id, {
+          authorType: "agent", authorId: worker.id, taskId: source.id, body: "## 待合入确认",
+        });
+        const active = store.createTask({ agentId: worker.id, issueId: blocked.id, prompt: "Continue work" });
+        mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = ? WHERE id = ?", [status, active.id]);
+        const previousStatus = store.getIssue(ready.id)!.status;
+        const events: boolean[] = [];
+        const unsubscribe = store.onWorkspaceEvent(() => events.push(db!.inTransaction));
+        try { store.completeTask(source.id, { output: "Review both" }); }
+        finally { unsubscribe(); }
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.every(inTransaction => !inTransaction)).toBe(true);
+        expect(store.getIssue(ready.id)?.status).toBe(previousStatus);
+        expect(db!.query("SELECT issue_id FROM multiremi_feishu_bot_round_pushes WHERE leader_task_id = ?")
+          .all(source.id)).toEqual([{ issue_id: ready.id }]);
+        mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [active.id]);
+        store.completeTask(active.id, { output: "## 待合入确认" });
+        expect(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_round_pushes WHERE issue_id = ?")
+          .get(blocked.id)).toEqual({ n: 1 });
+        expect(store.listConversationLogShown(store.getOrCreateDefaultIssueSession(blocked.id).id)
+          .some(entry => entry.body_md === "## 待合入确认")).toBe(true);
+      });
+    }
+
+    it("ignores comments belonging to another task or a person regardless of their body", () => {
+      const { store } = scaffold();
+      configureTopics(store);
+      const worker = store.createAgent({ name: "Leader", provider: "codex", workspaceId: "local" });
+      const issue = issueWithTopic(store, worker.id, "Unrelated review");
+      const source = store.createTask({ agentId: worker.id, prompt: `Review ${issue.key}: 待合入确认` });
+      const other = store.createTask({ agentId: worker.id, prompt: "Other review" });
+      store.createIssueComment(issue.id, { authorType: "agent", authorId: worker.id, taskId: other.id, body: "## 待合入确认" });
+      store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: `## 待合入确认\n${source.id}` });
+      mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [source.id]);
+      store.completeTask(source.id, { output: `## 待合入确认\n${issue.key}` });
+      expect(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_round_pushes WHERE leader_task_id = ?")
+        .get(source.id)).toEqual({ n: 0 });
+    });
+
+    for (const status of ["failed", "cancelled"] as const) {
+      it(`${status}: reports the terminal turn without changing the commented Issue status`, () => {
+        const { store } = scaffold();
+        configureTopics(store);
+        const worker = store.createAgent({ name: "Reviewer", provider: "codex" });
+        const issue = issueWithTopic(store, worker.id, "Reviewed elsewhere");
+        const task = store.createTask({ agentId: worker.id, prompt: "Review work" });
+        const turn = store.getTurnForAttempt(task.id)!;
+        mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [task.id]);
+        store.createIssueComment(issue.id, { authorType: "agent", authorId: worker.id, taskId: task.id, body: "Review result" });
+        const previousStatus = store.getIssue(issue.id)!.status;
+        if (status === "failed") store.failTask(task.id, { error: "Review failed", failureReason: "agent_error" });
+        else store.cancelTurn(turn.id);
+        const topic = store.listChatSessions("local").find(row => store.getFeishuIssueIdForChatSession(row.id) === issue.id)!;
+        const reports = store.listMessages(topic.id).filter(message => message.dedupe_key === `relay:${issue.id}:${turn.id}`);
+        expect(reports).toHaveLength(1);
+        expect(reports[0]).toMatchObject({ task_id: turn.id, message_kind: "report" });
+        expect(reports[0].metadata.message_outcome).toBe(status);
+        expect(store.getTurn(turn.id)?.status).toBe(status);
+        expect(store.getIssue(issue.id)?.status).toBe(previousStatus);
+
+        // An explicit replacement keeps the same work identity, so even its
+        // later success cannot create a second report or transport push.
+        const replacement = store.retryTurn(turn.id).current_attempt_id!;
+        mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [replacement]);
+        store.completeTask(replacement, { output: "Review complete" });
+        expect(store.listMessages(topic.id).filter(message => message.dedupe_key === `relay:${issue.id}:${turn.id}`)).toHaveLength(1);
+        expect(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_round_pushes WHERE issue_id = ?").get(issue.id)).toEqual({ n: 1 });
+      });
+    }
+
+    it("reports comments from an earlier attempt only when the same turn finally ends", () => {
+      const { store } = scaffold();
+      configureTopics(store);
+      const worker = store.createAgent({ name: "Reviewer", provider: "codex" });
+      const origin = issueWithTopic(store, worker.id, "Original work");
+      const target = issueWithTopic(store, worker.id, "Cross-Issue review");
+      const task = store.createTask({ agentId: worker.id, issueId: origin.id, prompt: "Review work" });
+      const turn = store.getTurnForAttempt(task.id)!;
+      mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running', runtime_id = 'rt_bot' WHERE id = ?", [task.id]);
+      store.createIssueComment(target.id, { authorType: "agent", authorId: worker.id, taskId: task.id, body: "Review before recovery" });
+      store.failTask(task.id, { error: "Runtime unavailable", failureReason: "runtime_offline" });
+      const replacement = store.getTurn(turn.id)!.current_attempt_id!;
+      expect(replacement).not.toBe(task.id);
+      expect(store.getTurn(turn.id)?.status).toBe("running");
+      expect(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_round_pushes").get()).toEqual({ n: 0 });
+      mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [replacement]);
+      store.completeTask(replacement, { output: "Review finished" });
+      for (const issue of [origin, target]) {
+        const topic = store.listChatSessions("local").find(row => store.getFeishuIssueIdForChatSession(row.id) === issue.id)!;
+        const reports = store.listMessages(topic.id).filter(message => message.dedupe_key === `relay:${issue.id}:${turn.id}`);
+        expect(reports).toHaveLength(1);
+        expect(reports[0]).toMatchObject({ task_id: turn.id, message_kind: "report" });
+        expect(reports[0].metadata.message_outcome).toBe("done");
+      }
+    });
+
+    it("reads canonical Issue messages after the retired comment table is removed; an active Chat does not suppress it", () => {
+      const { store } = scaffold();
+      configureTopics(store);
+      const worker = store.createAgent({ name: "Reviewer", provider: "codex" });
+      const issue = issueWithTopic(store, worker.id, "Unified review");
+      const task = store.createTask({ agentId: worker.id, prompt: "Review work" });
+      const turn = store.getTurnForAttempt(task.id)!;
+      const session = store.getOrCreateDefaultIssueSession(issue.id);
+      db!.exec("DROP TABLE multiremi_issue_comments");
+      store.sendMessage({ session_id: session.id, sender: { type: "agent", id: worker.id }, source_turn_id: turn.id,
+        to: { type: "none" }, message_kind: "final", body_md: "Ready for review", wake_requested: "inbox_only" });
+      const chat = store.listChatSessions("local").find(row => store.getFeishuIssueIdForChatSession(row.id) === issue.id)!;
+      const chatTask = store.createTask({ agentId: chat.agentId, chatSessionId: chat.id, issueId: issue.id, prompt: "Chat in progress" });
+      mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id IN (?, ?)", [task.id, chatTask.id]);
+      store.completeTask(task.id, { output: "Review finished" });
+      expect(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_round_pushes WHERE leader_task_id = ?").get(task.id)).toEqual({ n: 1 });
+      expect(store.getTask(chatTask.id)?.status).toBe("running");
+    });
+
+    it("rolls back reports for every commented Issue and publishes no events if the second topic fails", () => {
+      const { store } = scaffold();
+      configureTopics(store);
+      const worker = store.createAgent({ name: "Scheduled leader", provider: "codex", workspaceId: "local" });
+      const issue = issueWithTopic(store, worker.id, "Review X");
+      const second = issueWithTopic(store, worker.id, "Review Y");
+      const task = store.createTask({ agentId: worker.id, prompt: "Scheduled review" });
+      mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [task.id]);
+      store.createIssueComment(issue.id, { authorType: "agent", authorId: worker.id, taskId: task.id, body: "## 待合入确认" });
+      store.createIssueComment(second.id, { authorType: "agent", authorId: worker.id, taskId: task.id, body: "## 待合入确认" });
+      const events: string[] = [];
+      const unsubscribe = store.onWorkspaceEvent(event => events.push(event.type));
+      const database = db!;
+      const originalRun = database.run;
+      let prepared = 0;
+      database.run = function (sql, ...params) {
+        const result = originalRun.call(this, sql, ...params);
+        if (sql.includes("INSERT INTO multiremi_feishu_bot_round_pushes") && ++prepared === 2) {
+          throw new Error("MUL-531 rollback injection");
+        }
+        return result;
+      };
+      try {
+        expect(() => store.completeTask(task.id, { output: "## 待合入确认" })).toThrow("MUL-531 rollback injection");
+      } finally {
+        database.run = originalRun;
+        unsubscribe();
+      }
+      expect(store.getTask(task.id)?.status).toBe("running");
+      expect(prepared).toBe(2);
+      expect(events).toEqual([]);
+      expect(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_round_pushes WHERE leader_task_id = ?")
+        .get(task.id)).toEqual({ n: 0 });
+      for (const target of [issue, second]) {
+        const topic = store.listChatSessions("local").find(row => store.getFeishuIssueIdForChatSession(row.id) === target.id)!;
+        expect(store.listMessages(topic.id, { limit: 1000 }).filter(entry =>
+          entry.dedupe_key === `relay:${target.id}:${store.getTurnForAttempt(task.id)!.id}`)).toHaveLength(0);
+      }
+    });
+  });
+
+  describe("unexpected configuration errors", () => {
+    it("propagates an ordinary Error from the settings getter unchanged", () => {
+      const failure = new Error("Unexpected settings getter failure");
+      const settings = { get issueTopics(): unknown { throw failure; } };
+      const onInvalid = spyOn({ report: () => {} }, "report");
+      let caught: unknown;
+      try {
+        readWorkspaceIssueTopicsLenient(settings, onInvalid);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      expect(onInvalid).not.toHaveBeenCalled();
+    });
+
+    it("propagates an ordinary Error from the invalid callback unchanged", () => {
+      const failure = new Error("Unexpected invalid callback failure");
+      const onInvalid = spyOn({ report: (_error: IssueTopicConfigError) => { throw failure; } }, "report");
+      let caught: unknown;
+      try {
+        readWorkspaceIssueTopicsLenient({ issueTopics: null }, onInvalid);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      expect(onInvalid).toHaveBeenCalledTimes(1);
+      expect(onInvalid.mock.calls[0]?.[0]).toBeInstanceOf(IssueTopicConfigError);
+    });
+  });
+
+  const invalidValue = "invalid-private-config-value";
+  const invalidConfigs: {
+    name: string;
+    raw: unknown;
+    enabled: boolean;
+    chatId: string;
+    message: string;
+  }[] = [
+    {
+      name: "unknown notification mode",
+      raw: { enabled: true, chatId: "oc_issue_topics", notifyMode: invalidValue },
+      enabled: true, chatId: "oc_issue_topics",
+      message: "issueTopics.notifyMode must be group_owner, person, or none",
+    },
+    {
+      name: "non-array project IDs",
+      raw: { enabled: true, chatId: "oc_issue_topics", projectIds: invalidValue },
+      enabled: true, chatId: "oc_issue_topics",
+      message: "issueTopics.projectIds must be an array",
+    },
+    {
+      name: "empty project ID",
+      raw: { enabled: true, chatId: "oc_issue_topics", projectIds: ["", invalidValue] },
+      enabled: true, chatId: "oc_issue_topics",
+      message: "issueTopics.projectIds[0] must be a non-empty string",
+    },
+    {
+      name: "non-boolean enabled",
+      raw: { enabled: "true", chatId: "oc_issue_topics" },
+      enabled: false, chatId: "oc_issue_topics",
+      message: "issueTopics.enabled must be a boolean",
+    },
+    {
+      name: "enabled without chat ID",
+      raw: { enabled: true },
+      enabled: true, chatId: "",
+      message: "issueTopics.chatId is required when enabled",
+    },
+    {
+      name: "string config", raw: invalidValue,
+      enabled: false, chatId: "", message: "issueTopics must be an object",
+    },
+    {
+      name: "array config", raw: [],
+      enabled: false, chatId: "", message: "issueTopics must be an object",
+    },
+    {
+      name: "null config", raw: null,
+      enabled: false, chatId: "", message: "issueTopics must be an object",
+    },
+  ];
+
+  for (const scenario of invalidConfigs) {
+    for (const matching of [true, false]) {
+      it(`accepts inbound messages with ${scenario.name} (${matching ? "matching" : "other"} group)`, () => {
+        const { store, revision } = scaffold();
+        expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
+          revision, externalSessionKey: "oc_discovery", externalMessageId: "om_discovery",
+          senderOpenId: "ou_issue_topic_owner", text: "Hello",
+        })).toThrow("allowlist");
+        store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
+        store.updateWorkspace("local", { settings: { issueTopics: scenario.raw } });
+        const warn = spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const chatId = matching ? "oc_issue_topics" : "oc_other";
+          const result = store.submitFeishuBotMessage("local", "rt_bot", {
+            revision, chatType: "group", chatId,
+            externalSessionKey: `${chatId}:thread:om_invalid_config`, externalMessageId: "om_invalid_config",
+            senderOpenId: "ou_issue_topic_owner", text: "Accept this group message",
+          });
+          expect(result.senderAllowed).toBe(true);
+          expect(store.getTask(result.taskId)).not.toBeNull();
+          const issueId = store.getFeishuIssueIdForChatSession(result.chatSessionId);
+          const createsIssue = matching && scenario.enabled && scenario.chatId === "oc_issue_topics";
+          expect(Boolean(issueId)).toBe(createsIssue);
+          expect(store.listIssues({ workspaceId: "local" })).toHaveLength(createsIssue ? 1 : 0);
+          if (createsIssue) {
+            expect(store.getIssue(issueId!)?.projectId).toBeNull();
+            expect(store.getTask(result.taskId)?.issueId).toBe(issueId);
+          }
+          expect(warn).toHaveBeenCalledTimes(1);
+          expect(warn.mock.calls[0]?.[0]).toContain("invalid issueTopics config for local");
+          expect(JSON.stringify(warn.mock.calls)).not.toContain(invalidValue);
+          expect(store.getWorkspace("local")?.settings.issueTopics).toEqual(scenario.raw);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+    }
+
+    it(`returns recovered settings and a static reason for ${scenario.name}`, async () => {
+      const { store } = scaffold();
+      store.updateWorkspace("local", { settings: { issueTopics: scenario.raw } });
+      const app = createMultiremiApp({ store, authToken: "MASTER" });
+      const response = await app.request("/api/workspaces/local/issue-topics", { headers: JSON_HEADERS });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        workspace_id: "local",
+        config: {
+          enabled: scenario.enabled, chat_id: scenario.chatId,
+          project_ids: null, notify_mode: "group_owner", notify_open_id: null,
+        },
+        invalid: { code: "issue_topic_config_invalid", message: scenario.message },
+      });
+      expect(store.getWorkspace("local")?.settings.issueTopics).toEqual(scenario.raw);
+    });
+
+    it(`repairs ${scenario.name} with valid replacement settings`, async () => {
+      const { store } = scaffold();
+      store.updateWorkspace("local", { settings: { preserved: "setting", issueTopics: scenario.raw } });
+      const app = createMultiremiApp({ store, authToken: "MASTER" });
+      const path = "/api/workspaces/local/issue-topics";
+      const response = await app.request(path, {
+        method: "PUT", headers: JSON_HEADERS,
+        body: JSON.stringify({ enabled: true, chat_id: "oc_repaired", project_ids: null, notify_mode: "none" }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toEqual({
+        workspace_id: "local",
+        config: { enabled: true, chat_id: "oc_repaired", project_ids: null, notify_mode: "none", notify_open_id: null },
+      });
+      expect(store.getWorkspace("local")?.settings).toEqual({
+        preserved: "setting", issueTopics: { enabled: true, chatId: "oc_repaired", notifyMode: "none" },
+      });
+      expect(await (await app.request(path, { headers: JSON_HEADERS })).json()).toEqual(body);
+    });
+  }
+
+  for (const scenario of ["missing recipient", "invalid recipient", "invalid projects", "different chat"] as const) {
+    it(`accepts inbound messages with an invalid person config (${scenario})`, () => {
+      const { store, revision } = scaffold();
+      expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
+        revision, externalSessionKey: "oc_discovery", externalMessageId: "om_discovery",
+        senderOpenId: "ou_issue_topic_owner", text: "Hello",
+      })).toThrow("allowlist");
+      store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
+      const project = store.createProject({ title: "Topic project", workspaceId: "local" });
+      const issueTopics = {
+        enabled: true, chatId: "oc_issue_topics", notifyMode: "person",
+        ...(scenario === "missing recipient" ? {} : { notifyOpenId: "invalid-private-recipient" }),
+        projectIds: scenario === "invalid projects" ? [42] : [project.id],
+      };
+      store.updateWorkspace("local", { settings: { issueTopics } });
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = store.submitFeishuBotMessage("local", "rt_bot", {
+          revision, chatType: "group", chatId: scenario === "different chat" ? "oc_other" : "oc_issue_topics",
+          externalSessionKey: "oc_issue_topics:thread:om_invalid_config", externalMessageId: "om_invalid_config",
+          senderOpenId: "ou_issue_topic_owner", text: "Accept this group message",
+        });
+        expect(result.senderAllowed).toBe(true);
+        expect(store.getTask(result.taskId)).not.toBeNull();
+        const issueId = store.getFeishuIssueIdForChatSession(result.chatSessionId);
+        if (scenario === "different chat") {
+          expect(issueId).toBeNull();
+          expect(store.listIssues({ workspaceId: "local" })).toHaveLength(0);
+        } else {
+          expect(store.getIssue(issueId!)?.projectId).toBe(scenario === "invalid projects" ? null : project.id);
+          expect(store.getTask(result.taskId)?.issueId).toBe(issueId);
+          expect(store.listIssues({ workspaceId: "local" })).toHaveLength(1);
+        }
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]?.[0]).toContain("invalid issueTopics config for local");
+        expect(JSON.stringify(warn.mock.calls)).not.toContain("invalid-private-recipient");
+        expect(store.getWorkspace("local")?.settings.issueTopics).toEqual(issueTopics);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
+
+  it("returns recovered settings and static validation details for an invalid stored config", async () => {
+    const { store } = scaffold();
+    const issueTopics = {
+      enabled: true, chatId: "oc_issue_topics", notifyMode: "person", notifyOpenId: "invalid-private-recipient",
+    };
+    store.updateWorkspace("local", { settings: { issueTopics } });
+    const app = createMultiremiApp({ store, authToken: "MASTER" });
+    const response = await app.request("/api/workspaces/local/issue-topics", { headers: JSON_HEADERS });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      workspace_id: "local",
+      config: { enabled: true, chat_id: "oc_issue_topics", project_ids: null, notify_mode: "person", notify_open_id: null },
+      invalid: {
+        code: "issue_topic_config_invalid",
+        message: "issueTopics.notifyOpenId must be a bot-scoped open_id when notifyMode is person",
+      },
+    });
+    expect(store.getWorkspace("local")?.settings.issueTopics).toEqual(issueTopics);
+  });
+
+  it("keeps the full response unchanged for valid stored settings", async () => {
+    const { store } = scaffold();
+    const project = store.createProject({ title: "Topic project", workspaceId: "local" });
+    store.updateWorkspace("local", { settings: { issueTopics: {
+      enabled: true, chatId: "oc_issue_topics", projectIds: [project.id], notifyMode: "person", notifyOpenId: "ou_reviewer",
+    } } });
+    const app = createMultiremiApp({ store, authToken: "MASTER" });
+    const response = await app.request("/api/workspaces/local/issue-topics", { headers: JSON_HEADERS });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      workspace_id: "local",
+      config: { enabled: true, chat_id: "oc_issue_topics", project_ids: [project.id], notify_mode: "person", notify_open_id: "ou_reviewer" },
+    });
+  });
+
+  for (const notifyOpenId of [undefined, "invalid-private-recipient"]) {
+    it(`rejects an omitted recipient repair with a static 400 (stored recipient=${notifyOpenId === undefined ? "missing" : "invalid"})`, async () => {
+      const { store } = scaffold();
+      const issueTopics = { enabled: true, chatId: "oc_issue_topics", notifyMode: "person", notifyOpenId };
+      store.updateWorkspace("local", { settings: { issueTopics } });
+      const app = createMultiremiApp({ store, authToken: "MASTER" });
+      const response = await app.request("/api/workspaces/local/issue-topics", {
+        method: "PUT", headers: JSON_HEADERS, body: JSON.stringify({ enabled: true, chat_id: "oc_repaired" }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        code: "issue_topic_config_invalid",
+        error: "issueTopics.notifyOpenId must be a bot-scoped open_id when notifyMode is person",
+      });
+      expect(store.getWorkspace("local")?.settings.issueTopics).toEqual(JSON.parse(JSON.stringify(issueTopics)));
+    });
+  }
+
+  for (const repair of [{ notify_mode: "none" }, { notify_open_id: "ou_repaired" }]) {
+    it(`repairs an invalid stored person config by replacing ${Object.keys(repair)[0]}`, async () => {
+      const { store } = scaffold();
+      store.updateWorkspace("local", { settings: { preserved: "setting", issueTopics: {
+        enabled: true, chatId: "oc_issue_topics", notifyMode: "person", notifyOpenId: "invalid-private-recipient", projectIds: [42],
+      } } });
+      const app = createMultiremiApp({ store, authToken: "MASTER" });
+      const path = "/api/workspaces/local/issue-topics";
+      const response = await app.request(path, {
+        method: "PUT", headers: JSON_HEADERS,
+        body: JSON.stringify({ enabled: true, chat_id: "oc_repaired", ...repair }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).not.toHaveProperty("invalid");
+      expect(body.config).toMatchObject({
+        chat_id: "oc_repaired", project_ids: null,
+        notify_mode: "notify_mode" in repair ? "none" : "person",
+        notify_open_id: "notify_open_id" in repair ? "ou_repaired" : null,
+      });
+      expect(store.getWorkspace("local")?.settings.preserved).toBe("setting");
+      expect(JSON.stringify(store.getWorkspace("local")?.settings)).not.toContain("invalid-private-recipient");
+      expect(await (await app.request(path, { headers: JSON_HEADERS })).json()).toEqual(body);
+    });
+  }
+
+  for (const rollback of [false, true]) {
+    it(`MUL-465 existing round wake: ${rollback ? "rolls back without publishing" : "persists Chat before terminal events after commit"} on SQLite`, () => {
+      const { store } = scaffold();
+      configureTopics(store);
+      const wake = prepareReport(store);
+      const issue = store.getIssue(wake.issueId!)!;
+      // The Issue-owned work round is independent of the topic Chat; complete it
+      // through the store so it cannot keep the next round's active-task gate closed.
+      const previousLeader = store.listTasks().find(task => task.issueId === issue.id && task.issueSessionId)!;
+      expect(previousLeader.chatSessionId).toBeNull();
+      mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [previousLeader.id]);
+      expect(store.completeTask(previousLeader.id, { output: "Previous round result" }).status).toBe("completed");
+      expect(store.getTask(wake.id)!.status).toBe("queued");
+      const session = store.getOrCreateDefaultIssueSession(issue.id);
+      const leader = store.createSessionTask(session.id, { agentId: wake.agentId, prompt: "Next round" });
+      mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [leader.id]);
+      const previousSystemMessages = store.listChatMessagesFromLog(wake.chatSessionId!).filter(message => message.role === "system").length;
+      const events: Array<{ type: string; inTransaction: boolean }> = [];
+      const terminalActivities: Array<{ index: number; inTransaction: boolean }> = [];
+      const unsubscribe = store.onWorkspaceEvent(event => {
+        events.push({ type: event.type, inTransaction: db!.inTransaction });
+        if (event.type === "activity:created"
+          && (event.payload.entry as { action?: string } | undefined)?.action === "task_completed") {
+          terminalActivities.push({ index: events.length - 1, inTransaction: db!.inTransaction });
+        }
+      });
+      const logEvents: Array<{ id: string; index: number; inTransaction: boolean }> = [];
+      store.setConversationLogListener({ onEntry: (sessionId, entry) => {
+        if (sessionId === wake.chatSessionId && "kind" in entry && entry.author_type === "system") {
+          events.push({ type: "log:wake", inTransaction: db!.inTransaction });
+          logEvents.push({ id: entry.id, index: events.length - 1, inTransaction: db!.inTransaction });
+        }
+      } });
+      const database = db!;
+      const originalRun = database.run;
+      let injected = false;
+      if (rollback) database.run = function run(sql, ...params) {
+        const result = originalRun.call(this, sql, ...params);
+        if (sql.includes("INSERT INTO multiremi_feishu_bot_round_pushes")) {
+          injected = true;
+          throw new Error("MUL-465 SQLite round rollback injection");
+        }
+        return result;
+      };
+      try {
+        const complete = () => store.completeTask(leader.id, { output: "Next round result" });
+        if (rollback) expect(complete).toThrow("MUL-465 SQLite round rollback injection");
+        else expect(complete().status).toBe("completed");
+      } finally {
+        database.run = originalRun;
+        unsubscribe();
+        store.setConversationLogListener(null);
+      }
+      if (rollback) {
+        expect(injected).toBe(true);
+        expect(store.getTask(leader.id)!.status).toBe("running");
+        expect(store.listTaskSteerMessages(wake.id)).toHaveLength(0);
+        expect(events).toEqual([]);
+        expect(logEvents).toEqual([]);
+        expect(terminalActivities).toEqual([]);
+      } else {
+        expect(store.listTaskSteerMessages(wake.id)).toHaveLength(0);
+        expect(logEvents).toHaveLength(1);
+        expect(logEvents[0].inTransaction).toBe(false);
+        const message = store.getConversationLogEntryById(logEvents[0].id)!;
+        expect(message.kind).toBe("message");
+        expect(message.author_type).toBe("system");
+        expect(message.body_md).toContain(leader.id);
+        expect(terminalActivities).toHaveLength(1);
+        expect(terminalActivities[0].inTransaction).toBe(false);
+        expect(logEvents[0].index).toBeLessThan(terminalActivities[0].index);
+        expect(store.listChatMessagesFromLog(wake.chatSessionId!).filter(message => message.role === "system")).toHaveLength(previousSystemMessages + 1);
+      }
+    });
+  }
+
+  it("auto-creates a group Issue with no designated human and no Chat question handler configured", () => {
+    const { store, revision } = scaffold({ chatQuestionHandler: false });
+    expect(store.getFeishuBotConfig("local")?.responsibleMemberId ?? null).toBeNull();
+    configureTopics(store);
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
+      revision, externalSessionKey: "oc_no_human_discovery", externalMessageId: "om_no_human_discovery",
+      senderOpenId: "ou_issue_topic_owner", text: "Hello",
+    })).toThrow("allowlist");
+    store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
+    const created = store.submitFeishuBotMessage("local", "rt_bot", {
+      revision, chatType: "group", chatId: "oc_issue_topics",
+      externalSessionKey: "oc_issue_topics:thread:om_no_human_root",
+      externalMessageId: "om_no_human_root", senderOpenId: "ou_issue_topic_owner",
+      text: "Group work that needs no designated human",
+    });
+    const issueId = store.getFeishuIssueIdForChatSession(created.chatSessionId)!;
+    expect(store.getIssue(issueId)).toMatchObject({ parentIssueId: null, assigneeType: "agent", assigneeId: created.agentId });
+    expect(db!.query("SELECT responsible_member_id FROM multiremi_issues WHERE id=?").get(issueId)).toEqual({ responsible_member_id: null });
+    // The work starts; no "configure a root human" status is posted into the Chat.
+    expect(store.getTask(created.taskId)).toMatchObject({ agentId: created.agentId });
+    expect(store.listMessages(created.chatSessionId).filter(message => message.sender_type === "platform" && message.message_kind === "status")).toEqual([]);
+  });
+
+  for (const rollback of [false, true]) {
+    it(`publishes group Issue creation ${rollback ? "never on rollback" : "after commit"}`, () => {
+      const { store, revision } = scaffold();
+      configureTopics(store);
+      expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
+        revision, externalSessionKey: "oc_audit_discovery", externalMessageId: "om_audit_discovery",
+        senderOpenId: "ou_issue_topic_owner", text: "Hello",
+      })).toThrow("allowlist");
+      store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
+      const events: boolean[] = [];
+      const unsubscribe = store.onWorkspaceEvent((event) => {
+        if (event.type === "activity:created" && (event.payload.entry as { action?: string })?.action === "issue_created") {
+          events.push(db!.inTransaction);
+        }
+      });
+      const original = StoreContext.prototype.appendIssueActivity;
+      if (rollback) StoreContext.prototype.appendIssueActivity = function patched(this: StoreContext, issueId, input, queue) {
+        original.call(this, issueId, input, queue);
+        if (input.type === "issue_created") throw new Error("Feishu group rollback injection");
+      };
+      try {
+        const send = () => store.submitFeishuBotMessage("local", "rt_bot", {
+          revision, chatType: "group", chatId: "oc_issue_topics",
+          externalSessionKey: "oc_issue_topics:thread:om_audit_root",
+          externalMessageId: "om_audit_root", senderOpenId: "ou_issue_topic_owner",
+          text: "Audit Feishu group Issue",
+        });
+        if (rollback) expect(send).toThrow("Feishu group rollback injection");
+        else {
+          const created = send();
+          const issueId = store.getFeishuIssueIdForChatSession(created.chatSessionId)!;
+          expect(store.listIssueActivity(issueId).filter((entry) => entry.type === "issue_created")).toHaveLength(1);
+        }
+      } finally {
+        StoreContext.prototype.appendIssueActivity = original;
+        unsubscribe();
+      }
+      expect(events).toEqual(rollback ? [] : [false]);
+      if (rollback) expect(store.listIssues({ workspaceId: "local" })).toHaveLength(0);
+    });
+  }
+
   for (const kind of ["round", "human-request"] as const) {
     for (const legacyPin of [false, true]) {
       it(`schedules ${kind} notifications on the changed provider (legacy pin=${legacyPin})`, () => {
         const { store } = scaffold();
         configureTopics(store);
         const botAgentId = store.getFeishuBotConfig("local")!.agentId;
-        const issue = store.createIssue({ title: "Cross-provider notification", workspaceId: "local" });
+        const issue = createResponsibleTestIssue(store, { title: "Cross-provider notification", workspaceId: "local" });
         store.prepareFeishuIssueTopicWithinTransaction(issue);
         const root = store.claimFeishuBotOutbound("local", "rt_bot")!;
         store.reportFeishuBotOutbound("local", "rt_bot", root.id, {
@@ -104,17 +785,36 @@ describe("Feishu Issue topics", () => {
         store.registerRuntime({ id: "rt_claude", name: "Claude", provider: "claude", workspaceId: "local" });
         store.updateAgent(botAgentId, { provider: "claude" });
         const wake = kind === "round"
-          ? store.prepareFeishuIssueRoundPushesWithinTransaction({ issue, leaderTask: sourceTask })[0]!
-          : store.prepareFeishuBotHumanRequestPush(store.createTaskHumanRequest({
-            taskId: sourceTask.id, kind: "question", payload: { message: "Continue?" },
-          }))!;
+          ? store.prepareFeishuIssueRoundPushes({ issue, leaderTask: sourceTask })[0]!
+          : (() => {
+            expect(store.claimTask("rt_bot")?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
+            const question = store.getDaemonTurnBridge().rpc("turn.decision", { turn_id: store.getTurnForAttempt(sourceTask.id)!.id,
+              attempt_id: sourceTask.id, wait_id: `changed-provider-wait:${legacyPin}`, dedupe_key: "changed-provider-question",
+              body_md: "Continue?", options: [], metadata: { kind: "question", questions: [{ question: "Continue?" }] } },
+              { runtimeId: "rt_bot", daemonId: "bot-host", workspaceId: "local" });
+            expect(question.ok).toBe(true);
+            expect(store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)).toBeNull();
+            return store.listTasks().find(task => task.agentId === botAgentId && task.status === "queued")!;
+          })();
         expect(wake.runtimeId).toBeNull();
         if (legacyPin) {
-          db!.run("UPDATE multiremi_tasks SET runtime_id = 'rt_bot' WHERE id = ?", [wake.id]);
+          mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET runtime_id = 'rt_bot' WHERE id = ?", [wake.id]);
         }
         expect(store.claimTask("rt_claude")?.id).toBe(wake.id);
         expect(store.getTask(wake.id)?.runtimeId).toBe("rt_claude");
-        expect(store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)?.taskId).toBe(wake.id);
+        if (kind === "round") expect(store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)?.taskId).toBe(wake.id);
+        else {
+          store.startTask(wake.id);
+          const notification = store.listMessages(wake.issueSessionId!).find(message => message.metadata.question_present_request === true)!;
+          const questionId = String(notification.metadata.root_question_id);
+          const before = store.getQuestion(questionId)!;
+          store.presentQuestion(questionId, { expected_route_revision: before.route_revision, summary: "Please decide whether the Issue should continue." },
+            { type: "agent", id: botAgentId }, store.getTurnForAttempt(wake.id)!.id);
+          const delivery = store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)!;
+          expect(delivery.humanRequestId).toBe(questionId);
+          expect(delivery.taskId).toBeUndefined();
+          expect(store.getQuestion(questionId)).toMatchObject({ status: "pending", wait_status: "waiting", original_message: "Continue?", summary: { agent_id: botAgentId } });
+        }
       });
     }
   }
@@ -128,7 +828,7 @@ describe("Feishu Issue topics", () => {
       userId: creatorKind === "unbound-member-id" ? null : user.id,
     });
     const createdBy = creatorKind === "user-id" ? user.id : member.id;
-    const issue = store.createIssue({ title: "Member-created topic", createdBy });
+    const issue = createResponsibleTestIssue(store, { title: "Member-created topic", createdBy });
 
     expect(store.prepareFeishuIssueTopicWithinTransaction(issue)).toBe(true);
     const chat = store.getChatSession(`chat_issue_topic_${issue.id}`)!;
@@ -197,22 +897,18 @@ describe("Feishu Issue topics", () => {
     expect(store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)?.mention).toBeUndefined();
   });
 
-  it("uses the existing authenticated result endpoint to prepare a recipient", async () => {
+  it("uses the authenticated result frame to prepare the same recipient and signals a lost lease", async () => {
     const { store } = scaffold();
     configureTopics(store);
     prepareReport(store);
     const delivery = store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)!;
     const token = await store.createAccessToken({ name: "bot-host", type: "daemon", workspaceId: "local", daemonId: "bot-host" });
     const app = createMultiremiApp({ store, authToken: "MASTER" });
-    const request = (body: object) => app.request(`/api/daemon/runtimes/rt_bot/feishu-bot/outbound/${delivery.id}/result`, {
-      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token.token}` },
-      body: JSON.stringify({ status: "prepared", claim_token: delivery.claimToken, ...body }),
-    });
-    expect((await request({ mention_open_id: "all" })).status).toBe(400);
-    expect((await request({ mention_open_id: "ou_owner", claim_token: "stale" })).status).toBe(409);
+    const request = (body: object) => reportFrame(store, "feishu.outbound_result", { runtime_id: "rt_bot", request_id: delivery.id, status: "prepared", claim_token: delivery.claimToken, ...body }, { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token.token}` }, authToken: "" });
+    expect(await request({ mention_open_id: "all" })).toMatchObject({ ok: false, code: "invalid_report", retryable: false });
+    expect(await request({ mention_open_id: "ou_owner", claim_token: "stale" })).toEqual({ ok: true, lease_lost: true });
     const response = await request({ mention_open_id: "ou_owner" });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: "ok", mention_open_id: "ou_owner" });
+    expect(response).toEqual({ ok: true, mention_open_id: "ou_owner" });
   });
   it("stores explicit notification targets and preserves them for older clients", async () => {
     const { store } = scaffold();
@@ -294,6 +990,7 @@ describe("Feishu Issue topics", () => {
       reply_to_message_id: "om_issue_root",
     });
 
+    admitSender(store, revision, "ou_issue_topic_owner");
     const inbound = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
       externalSessionKey: "oc_issue_topics:thread:om_issue_root",
@@ -301,17 +998,22 @@ describe("Feishu Issue topics", () => {
       replyToMessageId: "om_issue_reply",
       chatId: "oc_issue_topics",
       threadId: "om_issue_root",
+      senderOpenId: "ou_issue_topic_owner",
       text: "Continue this Issue.",
     });
     expect(inbound.chatSessionId).toBe(String(binding.chat_session_id));
     expect(store.getFeishuIssueIdForChatSession(inbound.chatSessionId)).toBe(issue.id);
     expect(store.getChatSession(inbound.chatSessionId)).not.toHaveProperty("issueId");
     store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "Verify topic update delivery" });
-    expect(store.flushDueAgentIssueUpdates(new Date(Date.now() + 60_000))).toEqual({ delivered: 1, dropped: 0 });
-    expect(store.listChatMessages(inbound.chatSessionId).at(-1)?.body).toContain("Verify topic update delivery");
+    const session = store.getOrCreateDefaultIssueSession(issue.id);
+    const round = store.createSessionTask(session.id, { agentId: store.getFeishuBotConfig("local")!.agentId, prompt: "Report progress" });
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [round.id]);
+    store.completeTask(round.id, { output: "Round complete" });
+    expect(store.listChatMessages(inbound.chatSessionId).at(-1)?.body).toContain(`会话 ${session.id}`);
+    expect(store.listConversationLogShown(session.id).some(entry => entry.body_md === "Verify topic update delivery")).toBe(true);
   });
 
-  it("wakes the bound topic Agent when an Issue task asks a human", () => {
+  it("presents the same Issue question without waking the asking Remi again", () => {
     const { store } = scaffold();
     configureTopics(store);
     const wake = prepareReport(store);
@@ -323,6 +1025,7 @@ describe("Feishu Issue topics", () => {
     });
     const sourceTask = store.createTask({ agentId: store.getFeishuBotConfig("local")!.agentId, issueId: store.getTask(wake.id)!.issueId,
       workspaceId: "local", prompt: "Run the Issue" });
+    const tasksBefore = store.listTasks().length;
     const request = store.createTaskHumanRequest({
       taskId: sourceTask.id,
       kind: "question",
@@ -332,22 +1035,32 @@ describe("Feishu Issue topics", () => {
       },
     });
 
-    const topicWake = store.listTasks().find(task => task.id !== wake.id && task.id !== sourceTask.id);
+    const topicWake = store.getTask(wake.id);
     expect(topicWake).toMatchObject({ chatSessionId: store.getTask(wake.id)!.chatSessionId, holdsWorkspace: false });
-    expect(topicWake?.prompt).toContain(`Human request id: ${request.id}`);
+    expect(store.listTasks()).toHaveLength(tasksBefore);
+    // The asking owner of a root is skipped: the Q waits at the human stage for any member.
+    expect(store.getQuestion(request.id)).toMatchObject({ stage: "human", status: "pending", current_handler: null });
     const delivery = store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)!;
-    expect(delivery.taskId).toBe(topicWake?.id);
+    expect(delivery.id).not.toBe(roundDelivery.id);
+    expect(delivery.taskId).toBeUndefined();
+    expect(delivery.humanRequestId).toBe(request.id);
+    expect(delivery.humanRequestTaskId).toBe(sourceTask.id);
     expect(delivery.body).toContain("Should I continue?");
+    expect(db!.query("SELECT status, external_message_id FROM multiremi_feishu_bot_outbound_deliveries WHERE id = ?")
+      .get(roundDelivery.id)).toMatchObject({ status: "sent", external_message_id: "om_round_push" });
 
     // Replaying the same request report is idempotent and does not enqueue a
     // second wake Task or outbound delivery.
-    expect(store.prepareFeishuBotHumanRequestPush(request)?.id).toBe(topicWake?.id);
-    expect(store.listTasks().filter(task => task.prompt.includes(`Human request id: ${request.id}`))).toHaveLength(1);
+    expect(store.prepareFeishuBotHumanRequestPush(request)).toBeNull();
+    expect(store.listTasks()).toHaveLength(tasksBefore);
+    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_outbound_deliveries WHERE human_request_id = ?")
+      .get(request.id)).toMatchObject({ count: 1 });
   });
 
   it("keeps a private Feishu chat independent when its Agent creates an Issue", async () => {
     const { store, revision } = scaffold();
     configureTopics(store);
+    admitSender(store, revision, "ou_issue_topic_owner");
     const inbound = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
       chatType: "p2p",
@@ -387,8 +1100,8 @@ describe("Feishu Issue topics", () => {
   it("turns a new configured group topic into one Issue and reuses it for replies", () => {
     const { store, revision } = scaffold();
     configureTopics(store);
-    store.submitFeishuBotMessage("local", "rt_bot", { revision, externalSessionKey: "oc_discovery",
-      externalMessageId: "om_discovery", senderOpenId: "ou_issue_topic_owner", text: "Hello" });
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", { revision, externalSessionKey: "oc_discovery",
+      externalMessageId: "om_discovery", senderOpenId: "ou_issue_topic_owner", text: "Hello" })).toThrow("allowlist");
     store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
     const first = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
@@ -451,16 +1164,23 @@ describe("Feishu Issue topics", () => {
       externalSessionKey: "oc_issue_topics:thread:approval", externalMessageId: messageId,
       senderOpenId: openId, text: "Create the requested Issue",
     });
+    const agentId = store.getFeishuBotConfig("local")!.agentId;
+    // Hold auto-creation back while both approved senders contribute to the Chat.
+    store.updateAgent(agentId, { issueCreationRequiresProposal: true });
+    admitSender(store, revision, "ou_first");
+    admitSender(store, revision, "ou_second");
     const first = send("ou_first", "om_first");
     const second = send("ou_second", "om_second");
     expect(second.chatSessionId).toBe(first.chatSessionId);
     expect(store.getFeishuIssueIdForChatSession(first.chatSessionId)).toBeNull();
+    store.updateAgent(agentId, { issueCreationRequiresProposal: false });
     const senders = store.listFeishuBotSenders("local");
-    store.setFeishuBotSenderAllowed("local", senders.find(s => s.open_id === "ou_second")!.id, true, "local");
+    // A revoked earlier contributor still blocks automatic creation for the Chat.
+    store.setFeishuBotSenderAllowed("local", senders.find(s => s.open_id === "ou_first")!.id, false, "local");
+    expect(() => send("ou_first", "om_revoked")).toThrow("allowlist");
     send("ou_second", "om_partial_approval");
     expect(store.listIssues({ workspaceId: "local" })).toHaveLength(0);
     store.setFeishuBotSenderAllowed("local", senders.find(s => s.open_id === "ou_first")!.id, true, "local");
-    const agentId = store.getFeishuBotConfig("local")!.agentId;
     store.updateAgent(agentId, { issueCreationRequiresProposal: true });
     send("ou_second", "om_agent_restricted");
     expect(store.listIssues({ workspaceId: "local" })).toHaveLength(0);
@@ -473,6 +1193,7 @@ describe("Feishu Issue topics", () => {
   it("creates a dedicated Issue topic without binding the source Feishu conversation", async () => {
     const { store, revision } = scaffold();
     configureTopics(store);
+    admitSender(store, revision, "ou_issue_topic_owner");
     const inbound = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
       externalSessionKey: "oc_source:thread:om_source_root",

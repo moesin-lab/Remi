@@ -38,7 +38,7 @@ const AGENT_FIELDS: readonly CliOptionSpec[] = [
   { name: "description", type: "string", valueName: "text", description: "Agent description" },
   { name: "instructions", type: "string", valueName: "text", description: "Agent instructions" },
   { name: "avatar-url", type: "string", valueName: "url", description: "Agent avatar URL" },
-  { name: "provider", type: "string", valueName: "claude|codex|antigravity", description: "Agent provider" },
+  { name: "provider", type: "string", valueName: "claude|codex|grok|antigravity", description: "Agent provider" },
   { name: "runtime", type: "string", valueName: "runtime-id", description: "Legacy Runtime execution target", conflictsWith: ["execution-group"] },
   { name: "execution-group", type: "string", valueName: "group-id", description: "Execution group", conflictsWith: ["runtime"] },
   { name: "model", type: "string", valueName: "model", description: "Agent model" },
@@ -148,7 +148,7 @@ function agentSpecs(): CommandSpec[] {
       renderResource(invocation, response.data);
     }),
     spec("agent.default", ["agent", "default"], "Create or get the current user's default agent", "write", HUMAN, [], [
-      { name: "provider", type: "string", valueName: "claude|codex|antigravity", description: "Agent provider" },
+      { name: "provider", type: "string", valueName: "claude|codex|grok|antigravity", description: "Agent provider" },
       { name: "runtime", type: "string", valueName: "runtime-id", description: "Legacy Runtime execution target", conflictsWith: ["execution-group"] },
       { name: "execution-group", type: "string", valueName: "group-id", description: "Execution group", conflictsWith: ["runtime"] },
     ], async (invocation) => {
@@ -298,7 +298,7 @@ function skillSpecs(): CommandSpec[] {
       const skill = await resolveSkill(client, invocation, positional(invocation, 0, "skill"));
       renderResource(invocation, (await client.request({ method: "DELETE", path: `/api/skills/${encodePath(String(skill.id))}` })).data);
     }, [{ path: ["skill", "delete"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi skill archive" }]),
-    spec("skill.import", ["skill", "import"], "Import a skill", "write", HUMAN, [], [...INPUT_OPTIONS, {
+    spec("skill.import", ["skill", "import"], "Import a complete skill bundle or update the same source", "write", HUMAN, [], [...INPUT_OPTIONS, {
       name: "url", type: "string", valueName: "url", description: "Skill source URL",
     }, ...SKILL_FIELDS.slice(0, 2)], async (invocation) => {
       renderResource(invocation, (await (await clientFor(invocation)).request({ method: "POST", path: "/api/skills/import", body: await requestBody(invocation, {

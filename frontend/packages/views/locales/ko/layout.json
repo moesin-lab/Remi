@@ -15,7 +15,9 @@
     "plugins": "플러그인",
     "skills": "스킬",
     "settings": "설정",
-    "chat": "채팅"
+    "chat": "채팅",
+    "execution_groups": "실행 기능 그룹",
+    "magpie": "Magpie"
   },
   "help": {
     "trigger": "도움말",
@@ -41,6 +43,8 @@
     "pinned_label": "고정됨",
     "workspace_group": "워크스페이스",
     "configure_group": "설정",
-    "unread_overflow": "99+"
+    "unread_overflow": "99+",
+    "collapse": "사이드바 접기",
+    "expand": "사이드바 펼치기"
   }
 }

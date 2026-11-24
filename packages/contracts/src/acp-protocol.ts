@@ -69,13 +69,27 @@ export interface InitializeParams {
 export interface ClientCapabilities {
   fs?: { readTextFile?: boolean; writeTextFile?: boolean };
   terminal?: boolean;
+  /**
+   * `ClientSessionCapabilities` (@agentclientprotocol/sdk 1.8.0
+   * dist/schema/zod.gen.js:2345-2350): each present entry opts into an ACP
+   * session report. Both are records; the bridges require an object.
+   */
+  session?: { compaction?: Record<string, unknown>; notices?: Record<string, unknown>; _meta?: Record<string, unknown> };
   elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
+  /**
+   * Native child sessions (PR 5): the bridge announces each subagent with
+   * `subagent_spawned` and sends its frames on the child's own session. Codex
+   * also needs the AIR `nativeSubagentSessions` capability.
+   */
+  subagents?: Record<string, unknown>;
   _meta?: Record<string, unknown>;
 }
 
 /** `InitializeResponse` — sdk/dist/schema/zod.gen.js:1186-1219. */
 export interface InitializeResult {
   protocolVersion: number;
+  /** Authentication methods advertised by agents that require an explicit handshake. */
+  authMethods?: Array<{ id: string; name: string; description?: string }>;
   agentCapabilities?: AgentCapabilities;
   agentInfo?: Implementation;
   _meta?: Record<string, unknown>;
@@ -101,6 +115,11 @@ export interface SessionCapabilities {
   fork?: SessionCapabilityMarker;
   resume?: SessionCapabilityMarker;
   close?: SessionCapabilityMarker;
+  /**
+   * Native child sessions (PR 5). Both pinned bridges always advertise it
+   * (claude-agent-acp 0.90, codex-acp 2.2.2), whether or not the client asked.
+   */
+  subagents?: SessionCapabilityMarker;
 }
 
 export interface SessionCapabilityMarker {
@@ -141,6 +160,10 @@ export interface NewSessionMeta {
    * `developer_instructions`, hardcoded to `null` (dist/index.js:26263).
    */
   systemPrompt?: string | { append?: string; [key: string]: unknown };
+  /** Grok Build extension: approve tool use without an interactive permission round-trip. */
+  yoloMode?: boolean;
+  /** Antigravity ACP server options (`_meta.antigravity`, read on new, load and resume). */
+  antigravity?: { systemPrompt?: { append: string } };
 }
 
 export interface SdkMessageFilter {
@@ -190,7 +213,22 @@ export interface SessionModeState {
 
 export interface SessionModelState {
   currentModelId: string;
-  availableModels: Array<{ modelId: string; name: string; description?: string }>;
+  availableModels: Array<{
+    modelId: string;
+    name: string;
+    description?: string;
+    _meta?: {
+      supportsReasoningEffort?: boolean;
+      reasoningEfforts?: Array<{
+        value: string;
+        label?: string;
+        name?: string;
+        description?: string;
+        default?: boolean;
+      }>;
+      [key: string]: unknown;
+    };
+  }>;
 }
 
 /**
@@ -254,6 +292,7 @@ export interface PromptResult {
     cachedWriteTokens?: number | null;
     totalTokens?: number | null;
   } | null;
+  _meta?: Record<string, unknown>;
 }
 
 export type StopReason = "end_turn" | "tool_deferred" | "cancelled" | "interrupted" | "max_turns";
@@ -276,7 +315,135 @@ export type SessionUpdate =
   | UsageUpdate
   | ConfigOptionUpdate
   | SessionInfoUpdate
-  | AvailableCommandsUpdate;
+  | AvailableCommandsUpdate
+  | CompactionUpdate
+  | CompactionSummaryChunkUpdate
+  | NoticeUpdate
+  | SubagentSpawnedUpdate
+  | SubagentStateUpdate
+  | AsyncTaskSpawnedUpdate
+  | AsyncTaskProgressUpdate
+  | AsyncTaskStateUpdate;
+
+/**
+ * Background work past the call that started it (PR 6, AIR `asyncTasks`; sent
+ * only once the client lists `"asyncTasks"` in `_meta.jetbrains.air`). Both
+ * pinned bridges send it: claude-agent-acp 0.90 for backgrounded shells,
+ * workflows and MCP tasks (dist/async-tasks.js), codex-acp 2.2.2 for
+ * background terminals. A task started inside a native subagent arrives on
+ * that child's session; its stop still addresses the root session.
+ */
+export type AsyncTaskState = "running" | "paused" | "completed" | "failed" | "stopped";
+
+/** A task was announced (dist/acp-subagents.d.ts `AsyncTaskSpawnedUpdate`). */
+export interface AsyncTaskSpawnedUpdate {
+  sessionUpdate: "async_task_spawned";
+  asyncTaskId: string;
+  /** Claude: the workflow name, else the description (a shell's is its command); Codex: the command title, else the command. */
+  name: string;
+  /** `"shell"` | `"workflow"` | `"monitor"`; other raw types pass through. */
+  taskType: string;
+  description: string;
+  showInTranscript: boolean;
+  canStop: boolean;
+  /** Claude: absolute path ending in `tasks/<asyncTaskId>.output`. */
+  outputFilePath?: string;
+  /** The call that started it; a Claude spawn waits for it unless the task ends or the prompt resolves first. */
+  toolCallId?: string;
+  _meta?: Record<string, unknown> | null;
+}
+
+/** Changed fields only (Claude; Codex sends none). */
+export interface AsyncTaskProgressUpdate {
+  sessionUpdate: "async_task_progress";
+  asyncTaskId: string;
+  description?: string;
+  summary?: string;
+  lastToolName?: string;
+  usage?: { totalTokens: number; toolUses: number; durationMs: number };
+  outputFilePath?: string;
+  toolCallId?: string;
+  _meta?: Record<string, unknown> | null;
+}
+
+/**
+ * A state change. Claude may close a task whose end edge was lost as `stopped`
+ * and later correct it once to `completed` or `failed`.
+ */
+export interface AsyncTaskStateUpdate {
+  sessionUpdate: "async_task_state_update";
+  asyncTaskId: string;
+  state: AsyncTaskState;
+  summary?: string;
+  outputFilePath?: string;
+  toolCallId?: string;
+  _meta?: Record<string, unknown> | null;
+}
+
+/** Params of `_session/async_task/stop` (both pinned bridges); `sessionId` is the root session. */
+export interface AsyncTaskStopParams {
+  sessionId: string;
+  asyncTaskId: string;
+}
+
+/** `{stopped: false}` when the task was never announced, has ended, or is already stopping. */
+export interface AsyncTaskStopResult {
+  stopped: boolean;
+}
+
+/**
+ * A native child session started (PR 5; sent once the client advertises
+ * `subagents`). It arrives on the session that spawned the child: the root, or
+ * the parent child for a nested one. A resumed agent is announced again as
+ * `<id>:generation:N` (Claude), with the resuming message as `prompt`.
+ */
+export interface SubagentSpawnedUpdate {
+  sessionUpdate: "subagent_spawned";
+  subagentSessionId: string;
+  name?: string;
+  task?: string;
+  prompt?: string;
+  capabilities?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
+}
+
+/** A native child session ended (PR 5); later frames may still route to it. */
+export interface SubagentStateUpdate {
+  sessionUpdate: "subagent_state_update";
+  subagentSessionId: string;
+  state: "completed" | "failed" | "cancelled" | "disconnected";
+  _meta?: Record<string, unknown>;
+}
+
+/**
+ * ACP context compaction lifecycle (sdk 1.8.0 schema; sent once the client
+ * advertises `session.compaction`). `summary` comes with the terminal update
+ * unless it streamed as `compaction_summary_chunk`s.
+ */
+export interface CompactionUpdate {
+  sessionUpdate: "compaction_update";
+  compactionId: string;
+  status: "in_progress" | "completed" | "failed" | "cancelled";
+  summary?: ContentBlock[];
+  error?: string;
+  _meta?: Record<string, unknown>;
+}
+
+export interface CompactionSummaryChunkUpdate {
+  sessionUpdate: "compaction_summary_chunk";
+  compactionId: string;
+  content: ContentBlock;
+  _meta?: Record<string, unknown>;
+}
+
+/** A session notice (sent once the client advertises `session.notices`). */
+export interface NoticeUpdate {
+  sessionUpdate: "notice";
+  severity: "info" | "warning" | "error";
+  title: string;
+  description?: string;
+  _meta?: Record<string, unknown>;
+}
 
 export interface ContentChunkUpdate {
   sessionUpdate: "agent_message_chunk" | "user_message_chunk";
@@ -340,6 +507,12 @@ export interface ToolCallMeta {
   terminal_info?: { terminal_id: string };
   terminal_output?: { terminal_id: string; data: string };
   terminal_exit?: { terminal_id: string; exit_code: number; signal: string | null };
+  /**
+   * AIR extensions (`_meta.jetbrains.air`). PR 6: a call whose work went to
+   * the background carries `asyncTasks: { backgrounded: true }` on its result
+   * update (claude-agent-acp dist/tool-calls/background.js, codex-acp).
+   */
+  jetbrains?: { air?: { asyncTasks?: { backgrounded?: boolean }; [key: string]: unknown }; [key: string]: unknown };
 }
 
 // ── Permission requests ─────────────────────────────────────────
@@ -384,6 +557,8 @@ export interface ElicitationCreateParams {
   requestedSchema?: ElicitationSchema;
   url?: string;
   elicitationId?: string;
+  /** Agent-specific extension data; codex-acp puts `codex.autoResolutionMs` here. */
+  _meta?: Record<string, unknown>;
 }
 
 export interface ElicitationSchema {
@@ -395,7 +570,7 @@ export interface ElicitationSchema {
 export interface ElicitationEnumEntry {
   const: string;
   title?: string;
-  /** codex-acp carries the option's help text here (dist/index.js:25133-25137). */
+  /** codex-acp carries the option's help text here (1.13.1 dist/index.js:32076-32079). */
   description?: string;
 }
 
@@ -406,7 +581,12 @@ export interface ElicitationPropertySchema {
   oneOf?: ElicitationEnumEntry[];
   enum?: string[];
   items?: { anyOf?: ElicitationEnumEntry[]; enum?: string[] };
-  /** codex-acp tags its `<questionId>__other` companion fields here. */
+  /**
+   * codex-acp tags its question and companion fields here: 1.11 used
+   * `{ questionId, isOtherAnswer }` for `<questionId>__other` companions,
+   * >= 1.12 uses `{ isOther, isSecret }` on questions and
+   * `{ questionId, role: "user_note", isSecret }` on `<questionId>_note`.
+   */
   _meta?: Record<string, unknown>;
 }
 
@@ -466,11 +646,28 @@ export interface ConfigOptionUpdate {
 export interface SessionInfoUpdate {
   sessionUpdate: "session_info_update";
   title?: string;
+  _meta?: Record<string, unknown>;
 }
 
+/**
+ * One entry of `available_commands_update`. claude-agent-acp 0.93 builds them
+ * in `getAvailableSlashCommands` (dist/acp-agent.js 9718-9752), codex-acp 2.2.2
+ * in `buildAvailableCommands` (dist/index.js 38765-38862; skills are named
+ * `$<skill>`). `_meta.jetbrains.air` carries a skill's `kind` and `skillPath`
+ * for an AIR client such as Remi (ADR 0025).
+ */
+export interface AvailableCommand {
+  name: string;
+  description: string;
+  /** A free-text hint for the arguments; null or absent when the command takes none. */
+  input?: { hint: string } | null;
+  _meta?: Record<string, unknown>;
+}
+
+/** The full command list of a session; each update replaces the one before. */
 export interface AvailableCommandsUpdate {
   sessionUpdate: "available_commands_update";
-  commands: Array<{ name: string; description?: string }>;
+  availableCommands: AvailableCommand[];
 }
 
 // ── Session control ─────────────────────────────────────────────
@@ -478,6 +675,18 @@ export interface AvailableCommandsUpdate {
 export interface SetSessionModeParams {
   sessionId: string;
   modeId: string;
+}
+
+export interface AuthenticateParams {
+  methodId: string;
+  _meta?: Record<string, unknown>;
+}
+
+/** Grok Build extension for switching model and optional reasoning effort. */
+export interface SetSessionModelParams {
+  sessionId: string;
+  modelId: string;
+  _meta?: Record<string, unknown>;
 }
 
 /**
@@ -527,6 +736,7 @@ export interface LoadSessionParams {
   cwd: string;
   mcpServers: McpServerConfig[];
   additionalDirectories?: string[];
+  _meta?: NewSessionMeta;
 }
 
 export interface CloseSessionParams {
@@ -536,6 +746,17 @@ export interface CloseSessionParams {
 // ── Agent adapter interfaces (moved from acp/adapters/base.ts in Phase 1 — L0 contract) ──
 
 export type PromptUsageSettleScope = "turn" | "last-request";
+
+export interface AgentAuthenticationRequest {
+  methodId: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface AgentPromptResultMetadata {
+  usage?: PromptResult["usage"];
+  model?: string | null;
+  costUsd?: number | null;
+}
 
 export interface AgentAdapter {
   readonly agentType: string;
@@ -566,11 +787,115 @@ export interface AgentAdapter {
    */
   mapPermissionMode?(mode: string): string[];
 
+  /** Wrap user-supplied agent arguments in the executable's ACP launch command. */
+  buildLaunchArgs?(args: string[]): string[];
+
+  /** Agent-specific metadata sent during initialize. */
+  buildInitializeMeta?(options: AgentSessionOptions): Record<string, unknown> | undefined;
+
+  /** Select a non-interactive authentication method after initialize. */
+  selectAuthentication?(
+    result: InitializeResult,
+    env: Readonly<Record<string, string | undefined>>,
+  ): AgentAuthenticationRequest | null;
+
+  /** Existing-session method; standard bridges use resume, Grok uses load. */
+  readonly sessionRestoreMethod?: "resume" | "load";
+
+  /** Permission is fixed in session metadata instead of changed with session/set_mode. */
+  readonly sessionPermissionModeMethod?: "set-mode" | "session-meta";
+
+  /** Fallback for Grok versions that do not advertise standard config options. */
+  readonly modelSelectionMethod?: "config-option" | "set-model";
+
+  /** Normalize agent-specific prompt settlement metadata. */
+  normalizePromptResult?(result: PromptResult): AgentPromptResultMetadata;
+
   /** Build agent-specific _meta for session/new. */
   buildSessionMeta(options: AgentSessionOptions): NewSessionMeta | undefined;
 
+  /**
+   * Native steering (ADR 0020): the bridge's request method, and whether it
+   * accepts the `promptRequired` idle opt-in (`_meta.steering.idleBehavior`).
+   * Absent when the agent cannot steer. The switch point for ACP `session/inject`.
+   */
+  readonly steering?: AgentSteering;
+
+  /**
+   * Native child sessions (PR 5): the bridge can send each subagent's frames on
+   * its own session once the client advertises `subagents`. Absent when it
+   * cannot; the client then never advertises them for this agent.
+   */
+  readonly nativeSubagents?: AgentNativeSubagents;
+
+  /**
+   * Autonomous rounds (PR 5): after a prompt resolves, the bridge may start a
+   * turn of its own (a background subagent's notification) whose result ends
+   * with a `usage_update` carrying `_meta["_claude/origin"]`. Absent when the
+   * bridge never does.
+   */
+  readonly autonomousRounds?: AgentAutonomousRounds;
+
+  /**
+   * Background tasks (PR 6): the bridge publishes `async_task_*` once the
+   * client lists `"asyncTasks"` in its AIR capabilities, and stops one through
+   * `_session/async_task/stop`. Absent when it cannot; the client then never
+   * declares the capability for this agent and nothing parks.
+   */
+  readonly asyncTasks?: AgentAsyncTasks;
+
   /** Default executable name for this agent type. */
   defaultExecutable(): string;
+}
+
+export interface AgentAsyncTasks {
+  /**
+   * A task that ends while no prompt runs makes the model start a turn of its
+   * own (Claude's task-notification cycle), so a parked lane rings the
+   * doorbell. Codex: false; its tasks wait for the next turn.
+   */
+  wakesModel: boolean;
+}
+
+export interface AgentNativeSubagents {
+  /** Also append `"nativeSubagentSessions"` to the AIR capability list (Codex). */
+  airCapability: boolean;
+}
+
+export interface AgentAutonomousRounds {
+  /** `_meta["_claude/origin"].kind` values that mark the end of an autonomous round's result. */
+  resultOrigins: readonly string[];
+}
+
+export interface AgentSteering {
+  /** JSON-RPC request method, e.g. `_session/steering`. */
+  method: string;
+  /**
+   * Send `_meta.steering.idleBehavior: "promptRequired"`, so an idle session
+   * answers `promptRequired` instead of starting a detached turn.
+   */
+  idleOptIn: boolean;
+  /**
+   * Hold the steer until no top-level tool call of the prompt is running. A
+   * bridge that moves a running call to the background to deliver a steer
+   * (claude-agent-acp 0.90) would otherwise end the prompt before the call's
+   * result and the reply to it arrive.
+   */
+  waitForToolCalls: boolean;
+}
+
+/** Params of the `_session/steering` request (both pinned bridges). */
+export interface SteerParams {
+  sessionId: string;
+  prompt: PromptContent[];
+  _meta?: { steering?: { idleBehavior?: "promptRequired" } } & Record<string, unknown>;
+}
+
+/** Result of the `_session/steering` request; unknown outcomes are treated as `failed`. */
+export interface SteerResponse {
+  outcome?: string;
+  reason?: string;
+  _meta?: Record<string, unknown>;
 }
 
 export interface AskUserQuestionData {
@@ -583,8 +908,8 @@ export interface AskUserQuestionData {
 }
 
 /**
- * Inputs for the agent-specific `session/new` `_meta`. Permission mode is
- * deliberately absent: the claude bridge overwrites
+ * Inputs for agent-specific initialize and `session/new` metadata. Claude
+ * ignores permissionMode because its bridge overwrites
  * `_meta.claudeCode.options.permissionMode` with its own settings-derived value
  * (dist/acp-agent.js:4433 spread, then an explicit `permissionMode` key at
  * :4454), so `session/set_mode` is the only working lever for both agents.
@@ -592,6 +917,7 @@ export interface AskUserQuestionData {
 export interface AgentSessionOptions {
   model?: string | null;
   allowedTools?: string[];
+  permissionMode?: string | null;
   /** Appended to the agent's own system prompt where the agent supports it. */
   systemPrompt?: string | null;
   [key: string]: unknown;

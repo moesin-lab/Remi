@@ -17,20 +17,52 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 调查速度、吞吐或卡顿 | [性能](performance.md) | 静态事实、待测假设、事务约束与采样方法 |
 | 判断能力是否存在 | [能力定位](../MULTIREMI_PARITY_MATRIX.md) | 当前实现和验证入口；不从旧完成标记推断 |
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
+| 查询 PR 的 CI 状态 | [SCM 实时检查查询](scm-checks.md) | 任务凭据、分页与 head 稳定性；观测不授权合并 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
-| 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、云友与模型、集成、权限和运行维护 |
+| 改用量采集、统计报表或模型价格 | [统一用量与价格](../usage-accounting.md)、[公开参考价格导入](../usage-reference-prices.md) | actual/context/unknown、run 幂等、执行归属、双时轴和受控历史迁移 |
+| 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、Agent 与模型、集成、权限和运行维护 |
+| 改能力组、连接 Profile 或配置下发 | [执行配置](execution-configuration.md) | 集中配置、成员关系、版本确认与旧数据兼容 |
 | 改 Runtime 工作区、执行目录或本地上下文 | [Runtime 持久化工作区](runtime-workspaces.md) | daemon 归属、绑定、目录和上下文保留、调度约束 |
-| 改 Chat 页面、私聊或消息队列 | [Chat 契约](../chat.md) | 会话管理、工作位置、队列串行和私聊权限 |
+| 判断 Topic、Chat、Session、Task 或成果的边界 | [对话与工作会话模型](../conversation-model.md) | 名词、身份、生命周期、关联与飞书映射 |
+| 改 Chat 页面、外部 Codex 会话、私聊或消息队列 | [Chat 契约](../chat.md)、[ADR 0020](../adr/0020-chat-follow-up-queue-and-native-steering.md) | 原生来源与只读 Project、同线程续聊、Chat 管理、工作位置、引导与跟进队列、暂停和权限 |
 | 改 Agent 并行调度与执行目录 | [并行执行](../parallel-agent-execution.md) | Agent/Session 执行隔离、共享代码和 daemon 协议升级 |
-| 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 身份来源、资源 guard 和生产启动约束 |
-| 修改 ACP 后端或 token-sync | [Codex 接入](../design/acp-codex-via-codex-acp.md)、[Claude Code 接入](../design/acp-claude-via-claude-agent-acp.md)、[认证插件与同步](../design/1passport-bytedance-sso.md) | 实际启动、认证、会话和凭据隔离边界 |
-| 修改 Antigravity / agy 执行 | [Antigravity Runtime](../antigravity.md) | 原生 CLI 发现、事件流、续接、旧版恢复和能力边界 |
-| 修改云友模板或 Skill | [Agent 配置规范](../agent-config-spec.md) | 提示词结构、字段和元信息检查 |
+| 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 登录账号与共享操作者、资源 guard 和生产启动约束 |
+| 修改 ACP 后端或 token-sync | [Codex 接入](../design/acp-codex-via-codex-acp.md)、[Claude Code 接入](../design/acp-claude-via-claude-agent-acp.md)、[Grok 接入](../design/acp-grok-via-native-cli.md)、[认证插件与同步](../design/1passport-bytedance-sso.md) | 实际启动、认证、会话和凭据隔离边界 |
+| 改原生子代理、子会话路由、Claude 迟到回答（自主轮）或子代理呈现 | [ADR 0021](../adr/0021-subagent-sessions-and-autonomous-rounds.md)、[Chat 契约](../chat.md#子代理)、[前端](frontend.md) | 子会话登记与帧隔离、权限路由、`owesAutonomousRound` 与 60 s 等待、桥补丁 `claude-subagents-v1`、`late_subagents` / `running_subagents`、两个开关 |
+| 改 agent 每轮收到的内容、会话设定（`AGENTS.md`）、Skill 加载或工作区/Project 提示词 | [ADR 0023](../adr/0023-turn-input-and-provider-agents-md.md)、[daemon 协议](../daemon-protocol-v2.md)、[Runtime 工作区](runtime-workspaces.md) | 两部分的划分、指令文件位置与刷新、标签与未读说明、Skill 原生目录与同步、提示词合并迁移、实际发出内容的记录 |
+| 改后台任务、驻留进程、门铃或后台任务呈现 | [ADR 0022](../adr/0022-background-tasks-keep-alive-on-demand.md)、[Chat 契约](../chat.md#后台任务)、[daemon 协议](../daemon-protocol-v2.md)、[前端](frontend.md) | 驻留条件与资源交接、接手与释放（一个会话一个进程）、门铃与 attach、任务上下文文件、上限与崩溃清扫、共享本地文件夹锁、`lane.background` 能力位与下行、三个开关 |
+| 改 Chat 斜杠命令（拦截、`/compact` 轮、技能命令名、命令目录的带回与接口、「/」菜单） | [ADR 0025](../adr/0025-chat-slash-commands.md)、[Chat 契约](../chat.md#斜杠命令)、[daemon 协议](../daemon-protocol-v2.md) | 桥怎么认开头的命令、按 provider 的拦截与隐藏名单和说明行、`/compact` 轮的完成条件、`SKILL.md` 的 `name`、`available_commands` 终态字段、会话线目录与 `GET /api/chat/slash-commands`、菜单的分组匹配与插入（[slash-menu.ts](../../frontend/packages/core/chat/slash-menu.ts)、[slash-command-suggestion.tsx](../../frontend/packages/views/editor/extensions/slash-command-suggestion.tsx)） |
+| 实现侧边聊天（设计已接受，尚未实现） | [ADR 0024](../adr/0024-chat-side-chat-fork.md)、[Chat 契约](../chat.md#侧边聊天尚未实现) | 独立 Chat 会话加父链接、两个桥的原生分叉与原生历史复制（Codex 引用链）、`AGENTS.md` 边界说明、客人目录（不排锁、不驻留）、摘录退路与冷启动、多个标签与每个主对话 10 个上限、跟着主对话归档/恢复/删除、`chat.side` 能力位与 `task.side_fork` |
+| 改 turn 失败检测、备用模型恢复或能力排队切换 | [ADR 0010](../adr/0010-turn-failure-from-bridge-typed-session-failure.md) | AIR 失败 metadata、失败分类、单次切换、5 分钟能力等待与提交后事件 |
+| 修改 Antigravity 执行 | [Antigravity Runtime](../antigravity.md) | 按机器安装与条款同意、接入配置（环境、网关垫片、用量）、能力边界 |
+| 修改 Agent 模板或 Skill | [Agent 配置规范](../agent-config-spec.md) | 提示词结构、字段和元信息检查 |
 | 改工作台与通知 | [工作台/收件箱边界](../inbox-workbench-boundary.md) | 通知的触发条件与状态归属 |
 | 改 daemon 轮询节奏、心跳 ack 或插件 desired 协议 | [ADR 0001](../adr/0001-daemon-poll-cadence-and-desired-revision.md) | 已定的取舍、被否决的替代方案和回到源码的位置 |
+| 改父 issue 状态推导、子 issue 结束通知或 `force` | [ADR 0003](../adr/0003-parent-status-derived-from-children.md) | 守卫 A/B、再推导和排一轮合并的取舍；关单规则由 ADR 0017 修订 |
+| 改执行负责人、问题上交或关单（`done`）规则 | [Issue 执行与上交](issue-responsibility.md)、[ADR 0017](../adr/0017-issue-execution-and-escalation.md) | 统一 resolver、上交链与人工阶段、done 规则、等待答案时的状态与退役接口 |
+| 改系统收件箱、平台待处理轮或唤醒事务 | [统一收件箱 Store](inbox-store.md)、[Message HTTP 接口](message-api.md)、[ADR 0016](../adr/0016-unified-message-inbox-and-turn.md) | 唯一入口、叫醒降级、合并/插话/补铃、member 游标与页面接口 |
+| 改提问卡片答复鉴权、令牌轮换或宿主重启恢复 | [ADR 0011](../adr/0011-question-card-one-time-token.md) | 服务端一次性令牌、收件人绑定与成员映射的边界 |
+| 改 AUQ 上交路由、同 Q 总结、答复或续接 | [统一问题](questions.md) | 原会话、上交链与人工阶段、自动重新路由、路由/改答版本、provider 等待与实际消费边界 |
+| 改 issue 依赖、`blocked_by` 语义、依赖闸门或自动开工 | [ADR 0004](../adr/0004-issue-dependency-semantics.md) | 单向存储、满足判定、闸门位置、自动开工与失败报告的取舍 |
+| 改 agent 派活、来回上限、委派回叫或 `wake_source` | [ADR 0014](../adr/0014-every-agent-dispatch-is-a-delegation.md)、[ADR 0005](../adr/0005-cross-issue-delegation-return.md) | 通用派活入口、来源会话、谱系计数降级、D4 去重和回程血缘 |
+| 改任务结果、门铃正文、未读输入或 Wiki 下载 | [ADR 0013](../adr/0013-deliverable-is-comment-wakeup-is-doorbell.md)、[daemon 协议](../daemon-protocol-v2.md) | 最后顶层消息、事务内结论评论、完整范围读取、Wiki 缓存与派单预算 |
+| 改 schema level、expand/contract 或启动兼容守卫 | [Schema 迁移纪律](schema-migrations.md) | 兼容区间、版本化步骤、显式维护与历史 DDL 例外 |
+| 改消息头、轮/尝试存储、统一 lane 或启动迁移 | [ADR 0016](../adr/0016-unified-message-inbox-and-turn.md)、[切换手册](../deploy/unified-model-cutover.md) | 存储投影、三项启动预检、lane 迁移、消息状态机、只读对账与删表边界；传输和用户接口由消费者集成 |
+| 改会话日志表、轮次卡或 trace 归属 | [ADR 0006](../adr/0006-conversation-log-and-daemon-owned-traces.md)（决策 1–4） | 契约类型、被否决的替代方案和回到源码的位置；归档相关决策已被 ADR 0018 取代，trace 格式已被 ADR 0019 取代 |
+| 改执行 trace 的条目模型、读取视图、最终回复规则或轮卡 trace 摘要 | [ADR 0019](../adr/0019-turn-and-item-traces.md)、[daemon 协议 v2](../daemon-protocol-v2.md) §5–6 | 唯一 fold、`view=turn` / `view=events`、`settle()`、计费不进 trace、`context_usage` / `worked_ms` / `process_item_count` 与版本门槛 |
+| 改 daemon 磁盘布局、工作区回收与恢复、保留策略或存储报告 | [存储与保留](storage-retention.md)、[ADR 0018](../adr/0018-local-records-and-recyclable-workspaces.md) | 主体与四类数据、回收规则、快照与恢复、`settings.storage`、预演与立即回收、升级清扫 |
+| 改 daemon 与服务端之间的传输协议、派活方式或 trace 流 | [daemon 协议 v2](../daemon-protocol-v2.md)、[ADR 0012](../adr/0012-daemon-protocol-v2-single-socket-and-db-derived-downlink.md) | 进程级 socket、升级等待与 offer；pending/配置和任务输入走下行帧及 RPC，跨进程触发依赖实时扇出；outbox 与 trace 归 v2-A |
+| 改浏览器实时订阅、Live Hub 或前端本地副本 | [浏览器实时 v2](realtime-v2.md)、[ADR 0007](../adr/0007-live-hub-and-browser-replica.md) | 两条流的端点与归属、订阅鉴权、续传与退避、resync 广播；C1 已落核心、按角色锁与 health 字段 |
+| 对接 Hub 的 trace 订阅（A-6、飞书 CoT） | [Live Hub 对接说明](live-hub-a6-integration.md) | 调用方式、gap 由谁补读、背压恢复与 `closed` 终态 |
+| 改详情页首屏定位、贴底或 `data-perf-state` 契约 | [ADR 0008](../adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) | 先隐藏后一次定位、贴底状态机与预算口径 |
 | 改项目 Memory/Wiki | [项目知识契约](../project-wiki-memory-spec.md) | 查询、提案、发布、物化与权限 |
+| 改 IM 平台导航或管理页面 | [IM 平台管理](im-platforms.md) | 平台目录、机器人/采集连接、能力页面、共享操作者和旧地址迁移 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
+| 运行 Phase A 并发发版/坏版本验收 | [候选验收 runbook](../operations/phase-a-acceptance.md) | 隔离环境、真实 provider lane、两侧 HTTP 失败、attempt 与浏览器补读；明确 supervisor 直接切换和完整 updater 的验证边界 |
+| 改 edge 代理、hold 或后端摘流 | [Edge L7 proxy](edge.md) | 独立监听、进程内/Unix 控制、流式转发与本地验收 |
+| 改 API standby/active 切换、角色锁或优雅停机 | [API slot 生命周期](api-slots.md) | 回环控制鉴权、排空预算、重新激活与 A3 fence 接口 |
+| 改版本管理或安全更新 | [更新部署契约](../../deploy/README.md#internal-compose-updater)、[Drain 与 Outbox](../design/mul-74-platform-drain-and-daemon-outbox.md) | 容器内部应用/运行时更新、Web/CLI 更新源、跨平台驱动、备份、兼容检查、切换恢复 |
 | 更新这些开发依据 | [维护方法](context-maintenance.md) | 归属、源码核对和可执行检查 |
 
 文档中的源码链接提供定位依据，测试链接提供验证入口。它们不等于本次测试已通过；性能基线是否已采集以[性能页](performance.md)为准。

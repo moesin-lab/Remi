@@ -1,7 +1,9 @@
-// Chat session persistence/resume plus the creator-scoped HTTP surfaces.
+import { createResponsibleTestIssue } from './helpers.js';
+import { requestMessageBody, turnApiPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
+// Chat session persistence/resume plus shared human HTTP surfaces.
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -26,7 +28,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
 
     // Preserve insertion order even when the database timestamp cannot break ties.
     (store as any).db.run(
-      "UPDATE multiremi_chat_messages SET created_at = ? WHERE chat_session_id = ?",
+      "UPDATE multiremi_conversation_log SET created_at = ? WHERE session_id = ? AND kind='message'",
       ["2026-09-05T00:00:00.000Z", session.id],
     );
 
@@ -61,7 +63,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
   it("keeps Chat tasks independent from Issue ownership", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Private chat", provider: "codex" });
-    const issue = store.createIssue({ title: "Separate work", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Separate work", workspaceId: "local" });
     const session = store.createChatSession({ agentId: agent.id });
     const sent = store.sendChatMessage(session.id, { body: "Continue chatting" });
 
@@ -80,28 +82,29 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Chat", provider: "codex" });
     const runtime = store.registerRuntime({ name: "Local", provider: "codex" });
-    const issue = store.createIssue({ title: "Former accidental binding" });
+    const issue = createResponsibleTestIssue(store, { title: "Former accidental binding" });
     const chat = store.createChatSession({ agentId: agent.id });
     const sent = store.sendChatMessage(chat.id, { body: "Continue" });
     store.claimTask(runtime.id);
     store.startTask(sent.task.id);
     // An in-flight pre-upgrade task keeps its audit association after migration.
-    db!.run("UPDATE multiremi_tasks SET issue_id = ? WHERE id = ?", [issue.id, sent.task.id]);
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET issue_id = ? WHERE id = ?", [issue.id, sent.task.id]);
     store.failTask(sent.task.id, {
       error: "Timed out during upgrade", failureReason: "timeout",
       sessionId: "legacy-issue-provider", workDir: "/tmp/private-chat",
     });
-    const retry = store.listTasks().find((task) => task.parentTaskId === sent.task.id)!;
+    const retry = store.getTask(store.getTurnForAttempt(sent.task.id)!.current_attempt_id!)!;
     expect(retry).toMatchObject({ chatSessionId: chat.id, issueId: null, issueSessionId: null, sessionId: null });
     const claimed = store.claimTask(runtime.id)!;
     expect(claimed.id).toBe(retry.id);
     expect(claimed.sessionId).toBeNull();
     expect(claimed.issue).toBeNull();
     expect(store.buildTaskSessionProjection(claimed.id)?.mode).toBe("bootstrap");
-    expect(store.getTask(sent.task.id)?.issueId).toBe(issue.id);
+    // #3: both attempts project the stable turn's detached Issue association.
+    expect(store.getTask(sent.task.id)?.issueId).toBeNull();
   });
 
-  it("scopes chat session HTTP routes to the current creator", async () => {
+  it("shares Chat routes and read state across human accounts while preserving deleted-session boundaries", async () => {
     const store = createStore();
     const runtime = store.registerRuntime({ name: "Chat runtime", provider: "codex" });
     const agent = store.createAgent({ name: "Chat Codex", provider: "codex", visibility: "workspace", runtimeId: runtime.id });
@@ -129,8 +132,10 @@ describe("Multiremi store — chat sessions and private agent access", () => {
       "has_unread",
       "id",
       "last_message",
+      "origin",
       "pinned",
       "project_id",
+      "running_background_tasks",
       "runtime_workspace_id",
       "status",
       "title",
@@ -138,7 +143,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
       "updated_at",
       "workspace_id",
     ]);
-    expect(createdBody.creator_id).toBe("alice");
+    expect(createdBody.creator_id).toBe("local");
     expect(createdBody.agent_id).toBe(agent.id);
     expect(createdBody.project_id).toBeNull();
     expect(createdBody).not.toHaveProperty("issue_id");
@@ -148,9 +153,9 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     const aliceList = await app.request("/api/chat/sessions", { headers: aliceAuthHeaders });
     expect((await aliceList.json()).map((session: any) => session.id)).toEqual([createdBody.id]);
     const bobList = await app.request("/api/chat/sessions", { headers: bobAuthHeaders });
-    expect(await bobList.json()).toEqual([]);
+    expect((await bobList.json()).map((session: any) => session.id)).toEqual([createdBody.id]);
     const bobMultiremiList = await app.request("/api/multiremi/chats", { headers: bobAuthHeaders });
-    expect(await bobMultiremiList.json()).toMatchObject({ sessions: [], total: 0 });
+    expect(await bobMultiremiList.json()).toMatchObject({ sessions: [{ id: createdBody.id }], total: 1 });
 
     const attachment = store.createAttachment({
       chatSessionId: createdBody.id,
@@ -160,137 +165,111 @@ describe("Multiremi store — chat sessions and private agent access", () => {
       contentType: "text/plain",
       sizeBytes: 12,
     });
-    const sent = await app.request(`/api/chat/sessions/${createdBody.id}/messages`, {
+    const sent = await app.request(`/api/sessions/${createdBody.id}/messages`, {
       method: "POST",
       headers: aliceHeaders,
-      body: JSON.stringify({ content: "Use Go-compatible content", attachment_ids: [attachment.id] }),
+      body: JSON.stringify(requestMessageBody(store, { content: "Use Go-compatible content", attachment_ids: [attachment.id] }, { type: "agent", ref: store.getChatSession(createdBody.id)!.agentId })),
     });
-    expect(sent.status).toBe(201);
+    expect(sent.status).toBe(200);
     const sentBody = await sent.json();
-    expect(Object.keys(sentBody).sort()).toEqual(["created_at", "message_id", "queued", "supports_queue", "task_id"]);
-    expect(store.getTask(sentBody.task_id)?.chatSessionId).toBe(createdBody.id);
-    const messages = await app.request(`/api/chat/sessions/${createdBody.id}/messages`, { headers: aliceAuthHeaders });
-    const messagesBody = await messages.json();
-    expect(Object.keys(messagesBody[0]).sort()).toEqual([
-      "attachments",
-      "chat_session_id",
-      "content",
-      "created_at",
-      "elapsed_ms",
-      "failure_reason",
-      "id",
-      "role",
-      "task_id",
-    ]);
+    expect(Object.keys(sentBody).sort()).toEqual(["message", "turn_id", "wake_applied", "wake_reason"]);
+    expect(store.getTask(sentTask(store, sentBody).id)?.chatSessionId).toBe(createdBody.id);
+    const messagesBody = store.listChatMessagesFromLog(createdBody.id);
     expect(messagesBody[0]).toMatchObject({
-      chat_session_id: createdBody.id,
-      content: "Use Go-compatible content",
+      chatSessionId: createdBody.id,
+      body: "Use Go-compatible content",
       role: "user",
-      task_id: sentBody.task_id,
+      taskId: null,
     });
-    expect(messagesBody[0].attachments[0]).toMatchObject({
-      id: attachment.id,
-      chat_session_id: createdBody.id,
-      chat_message_id: messagesBody[0].id,
-      filename: "brief.txt",
-      content_type: "text/plain",
-      size_bytes: 12,
-      download_url: `/api/attachments/${attachment.id}/download`,
-    });
-    expect(Object.keys(messagesBody[0].attachments[0]).filter((key) => /[A-Z]/.test(key))).toEqual([]);
     expect(store.getAttachment(attachment.id)?.chatMessageId).toBe(messagesBody[0].id);
-    const invalidPageLimit = await app.request(`/api/chat/sessions/${createdBody.id}/messages/page?limit=101`, {
-      headers: aliceAuthHeaders,
-    });
-    expect(invalidPageLimit.status).toBe(400);
-    expect(await invalidPageLimit.json()).toEqual({ error: "invalid limit" });
+    const log = await (await app.request(`/api/sessions/${createdBody.id}/log?before=10`, { headers: aliceAuthHeaders })).json();
+    expect(log.entries.find((entry: { id: string }) => entry.id === messagesBody[0].id)?.metadata.attachments)
+      .toMatchObject([{ id: attachment.id, filename: "brief.txt" }]);
+    expect((await app.request(`/api/sessions/${createdBody.id}/messages`, { headers: aliceAuthHeaders })).status).toBe(200);
+    expect((await app.request(`/api/chat/sessions/${createdBody.id}/messages/page?limit=101`, { headers: aliceAuthHeaders })).status).toBe(404);
 
-    const pendingAlice = await app.request("/api/chat/pending-tasks", { headers: aliceAuthHeaders });
-    expect((await pendingAlice.json()).tasks.map((task: any) => task.chat_session_id)).toEqual([createdBody.id]);
-    const pendingBob = await app.request("/api/chat/pending-tasks", { headers: bobAuthHeaders });
-    expect(await pendingBob.json()).toEqual({ tasks: [] });
+    const pendingAlice = await app.request("/api/turns?status=pending", { headers: aliceAuthHeaders });
+    expect((await pendingAlice.json()).turns.map((task: any) => task.session_id)).toEqual([createdBody.id]);
+    const pendingBob = await app.request("/api/turns?status=pending", { headers: bobAuthHeaders });
+    expect((await pendingBob.json()).turns.map((task: any) => task.session_id)).toEqual([createdBody.id]);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(sentBody.task_id);
-    store.startTask(sentBody.task_id);
-    store.completeTask(sentBody.task_id, { output: "Done with chat", sessionId: "provider-chat-session" });
+    expect(store.claimTask(runtime.id)?.id).toBe(sentTask(store, sentBody).id);
+    store.startTask(sentTask(store, sentBody).id);
+    store.completeTask(sentTask(store, sentBody).id, { output: "Done with chat", sessionId: "provider-chat-session" });
     const unreadDetail = await app.request(`/api/chat/sessions/${createdBody.id}`, { headers: aliceAuthHeaders });
     expect((await unreadDetail.json()).has_unread).toBe(true);
-    const terminalMessages = await app.request(`/api/chat/sessions/${createdBody.id}/messages`, { headers: aliceAuthHeaders });
-    const terminalMessagesBody = await terminalMessages.json();
+    const terminalMessagesBody = store.listChatMessagesFromLog(createdBody.id);
     expect(terminalMessagesBody[1]).toMatchObject({
       role: "assistant",
-      content: "Done with chat",
-      failure_reason: null,
-      task_id: sentBody.task_id,
+      body: "Done with chat",
+      failureReason: null,
+      taskId: store.getTurnForAttempt(sentTask(store, sentBody).id)!.id,
     });
-    expect(terminalMessagesBody[1].elapsed_ms).toBeGreaterThanOrEqual(0);
-    expect((await app.request(`/api/chat/sessions/${createdBody.id}/read`, {
+    expect(terminalMessagesBody[1].elapsedMs).toBeGreaterThanOrEqual(0);
+    expect((await app.request("/api/inbox/read", {
       method: "POST",
       headers: aliceAuthHeaders,
-    })).status).toBe(204);
+    body: JSON.stringify({ session_id: createdBody.id }) })).status).toBe(200);
     const readDetail = await app.request(`/api/chat/sessions/${createdBody.id}`, { headers: aliceAuthHeaders });
     expect((await readDetail.json()).has_unread).toBe(false);
 
-    const bobForbiddenRequests: Array<[string, string, unknown?]> = [
+    const bobSharedRequests: Array<[string, string, unknown?]> = [
       ["GET", `/api/chat/sessions/${createdBody.id}`],
       ["PATCH", `/api/chat/sessions/${createdBody.id}`, { title: "Bob rename" }],
-      ["GET", `/api/chat/sessions/${createdBody.id}/messages`],
-      ["GET", `/api/chat/sessions/${createdBody.id}/messages/page?limit=1`],
-      ["POST", `/api/chat/sessions/${createdBody.id}/messages`, { content: "Bob should not send" }],
-      ["GET", `/api/chat/sessions/${createdBody.id}/pending-task`],
-      ["POST", `/api/chat/sessions/${createdBody.id}/read`],
-      ["DELETE", `/api/chat/sessions/${createdBody.id}`],
+      ["GET", `/api/sessions/${createdBody.id}/log`],
+      ["POST", `/api/sessions/${createdBody.id}/messages`, { body_md: "Bob shared input", to: { type: "none" } }],
+      ["GET", `/api/sessions/${createdBody.id}/messages?unread_by=${store.getChatSession(createdBody.id)!.agentId}`],
+      ["POST", "/api/inbox/read", { session_id: createdBody.id }],
       ["GET", `/api/multiremi/chats/${createdBody.id}`],
       ["PATCH", `/api/multiremi/chats/${createdBody.id}`, { title: "Bob Multiremi rename" }],
-      ["GET", `/api/multiremi/chats/${createdBody.id}/messages`],
-      ["POST", `/api/multiremi/chats/${createdBody.id}/messages`, { content: "Bob Multiremi send" }],
+      ["GET", `/api/sessions/${createdBody.id}/messages`],
+      ["POST", `/api/sessions/${createdBody.id}/messages`, { body_md: "Bob shared follow-up", to: { type: "none" } }],
     ];
-    for (const [method, path, body] of bobForbiddenRequests) {
+    for (const [method, path, body] of bobSharedRequests) {
       const response = await app.request(path, {
         method,
         headers: body ? bobHeaders : bobAuthHeaders,
         body: body ? JSON.stringify(body) : undefined,
       });
-      expect(response.status).toBe(403);
-      expect(await response.json()).toEqual({ error: "not your chat session" });
+      expect(response.status, `${method} ${path}`).toBe(200);
     }
 
-    const pendingBeforeDelete = await app.request(`/api/chat/sessions/${createdBody.id}/messages`, {
+    const pendingBeforeDelete = await app.request(`/api/sessions/${createdBody.id}/messages`, {
       method: "POST",
       headers: aliceHeaders,
-      body: JSON.stringify({ content: "Pending before delete" }),
+      body: JSON.stringify(requestMessageBody(store, { content: "Pending before delete" }, { type: "agent", ref: store.getChatSession(createdBody.id)!.agentId })),
     });
-    expect(pendingBeforeDelete.status).toBe(201);
+    expect(pendingBeforeDelete.status).toBe(200);
     const pendingBeforeDeleteBody = await pendingBeforeDelete.json();
-    expect(store.getTask(pendingBeforeDeleteBody.task_id)?.chatSessionId).toBe(createdBody.id);
+    expect(store.getTask(sentTask(store, pendingBeforeDeleteBody).id)?.chatSessionId).toBe(createdBody.id);
 
-    store.appendTaskMessages(sentBody.task_id, [{ type: "text", content: "private transcript" }]);
-    expect((await app.request(`/api/tasks/${sentBody.task_id}/messages`, { headers: bobAuthHeaders })).status).toBe(403);
+    store.appendTaskMessages(sentTask(store, sentBody).id, [{ type: "text", content: "private transcript" }]);
+    expect((await app.request(turnApiPath(store, sentTask(store, sentBody).id, "/trace"), { headers: bobAuthHeaders })).status).toBe(200);
     const aliceSession = await app.request(`/api/chat/sessions/${createdBody.id}`, { headers: aliceAuthHeaders });
     expect((await aliceSession.json()).id).toBe(createdBody.id);
     expect((await app.request(`/api/chat/sessions/${createdBody.id}`, {
       method: "DELETE",
-      headers: aliceAuthHeaders,
+      headers: bobAuthHeaders,
     })).status).toBe(204);
     expect(store.getChatSession(createdBody.id)).toBeNull();
-    expect(store.getTask(sentBody.task_id)?.status).toBe("completed");
-    expect(store.getTask(sentBody.task_id)?.chatSessionId).toBe(createdBody.id);
-    expect(store.getTask(pendingBeforeDeleteBody.task_id)?.status).toBe("cancelled");
-    expect(store.getTask(pendingBeforeDeleteBody.task_id)?.chatSessionId).toBe(createdBody.id);
+    expect(store.getTask(sentTask(store, sentBody).id)?.status).toBe("completed");
+    expect(store.getTask(sentTask(store, sentBody).id)?.chatSessionId).toBe(createdBody.id);
+    expect(store.getTask(sentTask(store, pendingBeforeDeleteBody).id)?.status).toBe("cancelled");
+    expect(store.getTask(sentTask(store, pendingBeforeDeleteBody).id)?.chatSessionId).toBe(createdBody.id);
     expect(store.getAttachment(attachment.id)).toBeNull();
     for (const headers of [aliceAuthHeaders, bobAuthHeaders]) {
-      expect((await app.request(`/api/tasks/${sentBody.task_id}/messages`, { headers })).status).toBe(403);
-      expect((await app.request(`/api/multiremi/tasks/${sentBody.task_id}/messages`, { headers })).status).toBe(403);
+      expect((await app.request(turnApiPath(store, sentTask(store, sentBody).id, "/trace"), { headers })).status).toBe(403);
+      expect((await app.request(turnApiPath(store, sentTask(store, sentBody).id, "/trace"), { headers })).status).toBe(403);
     }
     const recreated = await app.request("/api/chat/sessions", {
       method: "POST", headers: bobHeaders, body: JSON.stringify({ id: createdBody.id, agent_id: agent.id }),
     });
     expect(recreated.status).toBe(409);
     expect(store.getChatSession(createdBody.id)).toBeNull();
-    expect((await app.request(`/api/tasks/${sentBody.task_id}/messages`, { headers: bobAuthHeaders })).status).toBe(403);
+    expect((await app.request(turnApiPath(store, sentTask(store, sentBody).id, "/trace"), { headers: bobAuthHeaders })).status).toBe(403);
   });
 
-  it("rechecks private agent access across chat and agent HTTP surfaces", async () => {
+  it("shares historical private Agents and Runtime targets across human Chat surfaces", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "admin", userId: "admin", name: "Admin", role: "admin" });
     store.createWorkspaceMember({ workspaceId: "local", userId: "alice", name: "Alice", role: "member" });
@@ -325,7 +304,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     });
     expect(createdAgent.status).toBe(201);
     const agent = await createdAgent.json();
-    expect(agent.owner_id).toBe("alice");
+    expect(agent.owner_id).toBe("local");
     // A runtime selection preserves the private execution target.
     expect(agent.runtime_id).toBe(aliceRuntime.id);
     expect(agent.provider).toBe("codex");
@@ -336,18 +315,17 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     expect((await app.request(`/api/agents/${agent.id}`, { headers: aliceAuthHeaders })).status).toBe(200);
     expect((await app.request(`/api/agents/${agent.id}`, { headers: adminAuthHeaders })).status).toBe(200);
     const bobAgentList = await app.request("/api/agents", { headers: bobAuthHeaders });
-    expect((await bobAgentList.json()).map((item: any) => item.id)).not.toContain(agent.id);
+    expect((await bobAgentList.json()).map((item: any) => item.id)).toContain(agent.id);
     const bobAgentDetail = await app.request(`/api/agents/${agent.id}`, { headers: bobAuthHeaders });
-    expect(bobAgentDetail.status).toBe(403);
-    expect(await bobAgentDetail.json()).toEqual({ error: "you do not have access to this agent" });
+    expect(bobAgentDetail.status).toBe(200);
+    expect((await bobAgentDetail.json()).id).toBe(agent.id);
 
     const bobChatCreate = await app.request("/api/chat/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${bobToken.token}` },
       body: JSON.stringify({ agent_id: agent.id, title: "Bob should not start" }),
     });
-    expect(bobChatCreate.status).toBe(403);
-    expect(await bobChatCreate.json()).toEqual({ error: "you do not have access to this agent" });
+    expect(bobChatCreate.status).toBe(201);
 
     const aliceChatCreate = await app.request("/api/chat/sessions", {
       method: "POST",
@@ -363,22 +341,22 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     });
     expect(aliceCleanupChatCreate.status).toBe(201);
     const cleanupChat = await aliceCleanupChatCreate.json();
-    const sent = await app.request(`/api/chat/sessions/${chat.id}/messages`, {
+    const sent = await app.request(`/api/sessions/${chat.id}/messages`, {
       method: "POST",
       headers: aliceHeaders,
-      body: JSON.stringify({ content: "queued before access changes" }),
+      body: JSON.stringify(requestMessageBody(store, { content: "queued before access changes" }, { type: "agent", ref: store.getChatSession(chat.id)!.agentId })),
     });
-    expect(sent.status).toBe(201);
+    expect(sent.status).toBe(200);
 
-    // A new owner cannot inherit Alice's private Runtime target.
+    // Historical owner changes do not change shared human access.
     store.updateAgent(agent.id, { ownerId: "carol", runtimeId: null });
     const aliceHiddenList = await app.request("/api/chat/sessions", { headers: aliceAuthHeaders });
-    expect(await aliceHiddenList.json()).toEqual([]);
-    const aliceHiddenPending = await app.request("/api/chat/pending-tasks", { headers: aliceAuthHeaders });
-    expect(await aliceHiddenPending.json()).toEqual({ tasks: [] });
+    expect((await aliceHiddenList.json()).map((session: any) => session.id)).toContain(chat.id);
+    const aliceHiddenPending = await app.request("/api/turns?status=pending", { headers: aliceAuthHeaders });
+    expect((await aliceHiddenPending.json()).turns.map((turn: any) => turn.session_id)).toContain(chat.id);
     const aliceHiddenChat = await app.request(`/api/chat/sessions/${chat.id}`, { headers: aliceAuthHeaders });
-    expect(aliceHiddenChat.status).toBe(403);
-    expect(await aliceHiddenChat.json()).toEqual({ error: "you do not have access to this agent" });
+    expect(aliceHiddenChat.status).toBe(200);
+    expect((await aliceHiddenChat.json()).id).toBe(chat.id);
     const aliceHiddenDelete = await app.request(`/api/chat/sessions/${cleanupChat.id}`, {
       method: "DELETE",
       headers: aliceAuthHeaders,

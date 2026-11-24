@@ -74,6 +74,7 @@ interface RuntimeMachineDraft {
 
 const HEALTH_SEVERITY: Record<RuntimeHealth, number> = {
   online: 0,
+  degraded: 1,
   recently_lost: 1,
   offline: 2,
   about_to_gc: 3,
@@ -329,13 +330,17 @@ function runtimeDeviceName(runtime: AgentRuntime): string | null {
 
 export function machineTitle(
   runtimes: AgentRuntime[],
-  options: { isCurrent: boolean; localMachineName?: string | null },
+  options: {
+    isCurrent: boolean;
+    localMachineName?: string | null;
+    fallbackTitle?: string;
+  },
 ): string {
   const first = runtimes[0];
   if (!first) {
     return options.isCurrent && options.localMachineName
       ? options.localMachineName
-      : "Unknown machine";
+      : options.fallbackTitle ?? "Unknown machine";
   }
 
   const profileName = runtimes.find((runtime) => runtime.daemon_display_name?.trim())
@@ -355,7 +360,9 @@ export function machineTitle(
   if (first.runtime_mode === "cloud") {
     return `${capitalize(first.provider)} cloud`;
   }
-  return first.daemon_id ? shortDaemonId(first.daemon_id) : "Unknown machine";
+  return first.daemon_id
+    ? shortDaemonId(first.daemon_id)
+    : options.fallbackTitle ?? "Unknown machine";
 }
 
 function machineSubtitle({

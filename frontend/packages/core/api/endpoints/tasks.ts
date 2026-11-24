@@ -1,21 +1,14 @@
+import { MessagesEndpoints } from "./messages";
+import { turnToTask } from "../turn-task";
 import type {
   AgentActivityBucket,
   AgentRunCount,
   AgentTask,
   IssueUsageSummary,
-  TaskMessagePayload,
-  TaskPromptArtifact,
 } from "../../types";
-import { normalizeTaskMessages } from "../../chat/normalize-message";
 import type { HttpClient } from "../http";
-import { parseStrictResponse, parseWithFallback } from "../schema";
-import {
-  EMPTY_TASK_STEER_LIST,
-  TaskSteerListResponseSchema,
-  TaskSteerResponseSchema,
-  type TaskSteerListResponse,
-  type TaskSteerResponse,
-} from "../schemas/tasks";
+import { ApiContractError, parseStrictResponse } from "../schema";
+import { TraceTurnPageSchema, type TaskTraceRead } from "../schemas/tasks";
 
 export class TasksEndpoints {
   constructor(readonly http: HttpClient) {}
@@ -47,60 +40,38 @@ export class TasksEndpoints {
   }
 
   async getActiveTasksForIssue(issueId: string): Promise<{ tasks: AgentTask[] }> {
-    return this.http.fetch(`/api/issues/${issueId}/active-task`);
+    return { tasks: (await this.listTasksByIssue(issueId)).filter(task => ["queued", "running", "awaiting_human"].includes(task.status)) };
   }
 
-  async listTaskMessages(taskId: string): Promise<TaskMessagePayload[]> {
-    // GET returns the camelCase store object; the WS wire is snake_case. Funnel
-    // both through the one normalizer so the cache holds a single shape.
-    return normalizeTaskMessages(await this.http.fetch(`/api/tasks/${taskId}/messages`));
+  /**
+   * One `view=turn` page of an attempt's trace: the turn and its items from
+   * `itemCursor`. Page with `next_item_cursor` until it is null. With `turnId`
+   * the turn route reads the given attempt (`attempt_id`), otherwise `taskId`
+   * is the turn itself.
+   */
+  async getTaskTrace(taskId: string, options: { itemCursor?: number; turnId?: string } = {}): Promise<TaskTraceRead> {
+    const query = new URLSearchParams({ view: "turn", item_cursor: String(options.itemCursor ?? 0) });
+    if (options.turnId) query.set("attempt_id", taskId);
+    const raw = await this.http.fetch<unknown>(`/api/turns/${encodeURIComponent(options.turnId ?? taskId)}/trace?${query}`);
+    return parseStrictResponse(raw, TraceTurnPageSchema, { endpoint: "GET /api/turns/:id/trace" });
   }
 
-  async getTaskPrompt(taskId: string): Promise<TaskPromptArtifact> {
-    return this.http.fetch(`/api/tasks/${taskId}/prompt`);
-  }
-
-  async listTaskHumanRequests(taskId: string): Promise<unknown> {
-    return this.http.fetch(`/api/tasks/${taskId}/human-requests`);
-  }
-
-  async respondTaskHumanRequest(taskId: string, requestId: string, response: Record<string, unknown>): Promise<unknown> {
-    return this.http.fetch(`/api/tasks/${taskId}/human-requests/${requestId}/respond`, {
-      method: "POST",
-      body: JSON.stringify({ response }),
-    });
-  }
-
-  async steerTask(
-    taskId: string,
-    input: { content?: string; force_answer?: boolean },
-  ): Promise<TaskSteerResponse> {
-    const raw = await this.http.fetch<unknown>(
-      `/api/tasks/${encodeURIComponent(taskId)}/steer`,
-      {
-        method: "POST",
-        body: JSON.stringify(input),
-      },
-    );
-    return parseStrictResponse(raw, TaskSteerResponseSchema, {
-      endpoint: "POST /api/tasks/:id/steer",
-    });
-  }
-
-  async listTaskSteers(taskId: string): Promise<TaskSteerListResponse> {
-    const raw = await this.http.fetch<unknown>(
-      `/api/tasks/${encodeURIComponent(taskId)}/steer`,
-    );
-    return parseWithFallback(
-      raw,
-      TaskSteerListResponseSchema,
-      EMPTY_TASK_STEER_LIST,
-      { endpoint: "GET /api/tasks/:id/steer" },
-    );
+  async getTask(taskId: string, turnId = taskId): Promise<AgentTask> {
+    const detail = await new MessagesEndpoints(this.http).getTurn(turnId, true);
+    const attemptId = taskId === turnId ? detail.turn.current_attempt_id : taskId;
+    const attempt = detail.attempts?.find(candidate => candidate.id === attemptId);
+    if (detail.turn.id !== turnId || !attempt) {
+      throw new ApiContractError("GET /api/turns/:id", "Server returned a different turn or attempt");
+    }
+    return turnToTask(detail.turn, attempt);
   }
 
   async listTasksByIssue(issueId: string): Promise<AgentTask[]> {
-    return this.http.fetch(`/api/issues/${issueId}/task-runs`);
+    const messages = new MessagesEndpoints(this.http);
+    const tasks: AgentTask[] = [];
+    let cursor: string | undefined;
+    do { const page = await messages.listTurns({ issue: issueId, cursor, limit: 100 }); tasks.push(...page.turns.map(turn => turnToTask(turn))); cursor = page.next_cursor ?? undefined; } while (cursor);
+    return tasks;
   }
 
   async getIssueUsage(issueId: string): Promise<IssueUsageSummary> {
@@ -108,15 +79,20 @@ export class TasksEndpoints {
   }
 
   async cancelTask(issueId: string, taskId: string): Promise<AgentTask> {
-    return this.http.fetch(`/api/issues/${issueId}/tasks/${taskId}/cancel`, {
-      method: "POST",
-    });
+    const task = (await this.listTasksByIssue(issueId)).find(task => task.id === taskId || task.turn_id === taskId);
+    if (!task?.turn_id) throw new Error("Turn not found");
+    return turnToTask((await new MessagesEndpoints(this.http).controlTurn(task.turn_id, "cancel")).turn);
   }
 
   async rerunIssue(issueId: string, taskId?: string): Promise<AgentTask> {
-    return this.http.fetch(`/api/issues/${issueId}/rerun`, {
-      method: "POST",
-      body: JSON.stringify(taskId ? { task_id: taskId } : {}),
-    });
+    const tasks = await this.listTasksByIssue(issueId);
+    const task = taskId ? tasks.find(task => task.id === taskId || task.turn_id === taskId) : tasks[0];
+    if (!task?.turn_id) throw new Error("Turn not found");
+    const { turn } = await new MessagesEndpoints(this.http).retryTurn(task.turn_id);
+    if (turn.session_id !== task.issue_session_id || turn.agent_id !== task.agent_id
+      || !turn.current_attempt_id || turn.current_attempt_id === task.id || turn.status !== "pending") {
+      throw new ApiContractError("POST /api/turns/:id/retry", "Retry did not identify a new attempt for this turn");
+    }
+    return turnToTask(turn);
   }
 }

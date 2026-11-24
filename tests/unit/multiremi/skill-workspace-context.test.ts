@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createStore, jsonResponse, mockFetch, resetMultiremiTestEnv } from "./helpers.js";
@@ -38,7 +39,7 @@ describe("skill workspace request context", () => {
         const result = await created.json();
         const skill = result.skill ?? result;
         expect(skill.workspaceId ?? skill.workspace_id).toBe(workspace.id);
-        expect(skill.createdBy ?? skill.created_by).toBe(user.id);
+        expect(skill.createdBy ?? skill.created_by).toBe("local");
         const listed = await app.request(route, { headers: selected });
         expect(listed.status).toBe(200);
         const list = await listed.json();
@@ -50,23 +51,25 @@ describe("skill workspace request context", () => {
       });
     }
 
-    it(`does not expose other workspaces' skill summaries: ${route}`, async () => {
+    it(`keeps skill summaries scoped to the selected workspace: ${route}`, async () => {
       const { store, other, headers, app } = await fixture();
       store.createSkill({ workspaceId: "local", name: "Local secret", description: "Private summary" });
       store.createSkill({ workspaceId: other.id, name: "Other secret", description: "Foreign summary" });
       const inferred = await app.request(`${route}/search?q=secret`, { headers });
       expect(inferred.status).toBe(200);
       const inferredResult = await inferred.json();
-      expect(inferredResult.skills ?? inferredResult).toEqual([]);
+      expect((inferredResult.skills ?? inferredResult).map((item: { name: string }) => item.name)).toEqual(["Local secret"]);
       const contexts: Record<string, string>[] = [{ "X-Workspace-Slug": other.slug }, { "X-Workspace-ID": other.id }];
       for (const context of contexts) {
         const response = await app.request(`${route}/search?q=secret`, { headers: { ...headers, ...context } });
-        expect(response.status).toBe(404);
-        expect(await response.json()).toEqual({ error: "workspace not found" });
+        expect(response.status).toBe(200);
+        const selected = await response.json();
+        expect((selected.skills ?? selected).map((item: { name: string }) => item.name)).toEqual(["Other secret"]);
       }
       const explicit = await app.request(`${route}/search?q=secret&workspace_id=${other.id}`, { headers });
-      expect(explicit.status).toBe(404);
-      expect(await explicit.json()).toEqual({ error: "workspace not found" });
+      expect(explicit.status).toBe(200);
+      const selected = await explicit.json();
+      expect((selected.skills ?? selected).map((item: { name: string }) => item.name)).toEqual(["Other secret"]);
     });
 
     it(`authorizes existing skills from their resource workspace: ${route}`, async () => {
@@ -110,14 +113,19 @@ describe("skill workspace request context", () => {
         throw new Error(`unexpected import fetch: ${url}`);
       });
       const contexts: Record<string, string>[] = [{ "X-Workspace-Slug": workspace.slug }, { "X-Workspace-ID": workspace.id }];
+      let firstId: string | undefined;
       for (const context of contexts) {
         const name = "X-Workspace-Slug" in context ? "Imported slug" : "Imported ID";
         const response = await app.request(`${route}/import`, {
           method: "POST", headers: { ...headers, ...context },
           body: JSON.stringify({ url: "https://github.com/example/skills/tree/main/review-helper", name }),
         });
-        expect(response.status).toBe(201);
+        expect(response.status).toBe(firstId ? 200 : 201);
         const result = await response.json();
+        const skill = result.skill ?? result;
+        if (firstId) expect(skill.id).toBe(firstId);
+        firstId = skill.id;
+        expect(skill.name).toBe(name);
         expect((result.skill ?? result).workspaceId ?? result.workspace_id).toBe(workspace.id);
         expect((result.skill ?? result).content).toContain("# Review");
       }
@@ -167,7 +175,7 @@ describe("skill workspace request context", () => {
       const { store, workspace, other, user, headers, app } = await fixture();
       store.createWorkspaceMember({ workspaceId: other.id, userId: user.id, name: user.name, role: "member" });
       const agent = store.createAgent({ workspaceId: workspace.id, name: "Task agent", provider: "claude" });
-      const issue = store.createIssue({ workspaceId: workspace.id, title: "Task" });
+      const issue = createResponsibleTestIssue(store, { workspaceId: workspace.id, title: "Task" });
       const task = store.createTask({ workspaceId: workspace.id, agentId: agent.id, issueId: issue.id, prompt: "Work" });
       const taskToken = await store.createTaskAccessToken(task, user.id);
       const pat = await store.createAccessToken({ workspaceId: workspace.id, name: "Scoped PAT", type: "pat" });

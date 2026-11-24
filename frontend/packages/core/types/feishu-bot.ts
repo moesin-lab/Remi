@@ -66,6 +66,8 @@ export interface IssueTopicConfig {
 export interface IssueTopicConfigResponse {
   workspace_id: string;
   config: IssueTopicConfig;
+  /** Static validation details when the stored configuration is invalid. */
+  invalid?: { code: string; message: string } | null;
 }
 
 export interface UpdateIssueTopicConfigRequest {
@@ -77,6 +79,10 @@ export interface UpdateIssueTopicConfigRequest {
 }
 
 export interface FeishuBotConfig {
+  bot_id?: string;
+  name?: string;
+  /** Chat question handler: answers Agent questions from Feishu Chats without an Issue. */
+  responsible_member_id?: string | null;
   configured: boolean;
   workspace_id: string;
   agent_id: string | null;
@@ -137,6 +143,7 @@ export interface FeishuBotAgentCandidate {
 }
 
 export interface FeishuBotRuntimeCandidate {
+  assigned_bot_id?: string | null;
   id: string;
   name: string;
   provider: string;
@@ -263,6 +270,9 @@ export interface FeishuBotRegistrationSession {
 
 /** Request body for `PUT /api/workspaces/:id/feishu-bot`. */
 export interface UpsertFeishuBotRequest {
+  name?: string;
+  /** Chat question handler; `null` leaves such Chat questions without a handler. */
+  responsible_member_id?: string | null;
   agent_id: string;
   runtime_id: string;
   app_id: string;

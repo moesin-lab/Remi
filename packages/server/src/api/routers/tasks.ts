@@ -4,10 +4,13 @@ import {
   canCurrentUserAccessAgent,
   canCurrentUserAccessChatTask,
   canUserViewTaskMessages,
+  canTaskCoordinateSession,
   createTaskAuthMemo,
   currentTaskParentId,
   currentUserWorkspaceAccessAllowed,
   denyCurrentUserWorkspaceAccess,
+  denySessionAccess,
+  denySessionOwnerAccess,
   loadChatSessionForCurrentUser,
   organizerTaskInspection,
   parseOptionalTaskMessageSince,
@@ -16,20 +19,23 @@ import {
   supervisorTaskIdentity,
 } from "../helpers.js";
 import {
-  authenticatedRequestUserId,
+  currentRequestUserId,
   cleanString,
   currentTaskAccessToken,
   parseOptionalInt,
   taskCompatibilityResponse,
   taskListResponse,
   taskPublicResponse,
+  sessionTaskMetadataResponse,
 } from "../wire/index.js";
 import type { CreateTaskInput, MultiremiTask, MultiremiTaskStatus } from "@multiremi/contracts/types.js";
 import type { TaskListCandidate, TaskListCursor } from "@multiremi/store/repos/tasks-repo.js";
 import { createId } from "@multiremi/ids.js";
-import { ChatIssueTaskConflictError, TaskSteerConflictError } from "@multiremi/store/repos/tasks-repo.js";
+import { ChatIssueTaskConflictError, DelegationRoundTripLimitError, TaskSessionArchivedError, TaskSteerConflictError } from "@multiremi/store/repos/tasks-repo.js";
+import { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
 import { OrganizerActionError } from "../../organizer/settings.js";
 import type { RouterDeps } from "./deps.js";
+import { parseTraceWindow } from "../trace/request.js";
 
 /**
  * MUL-357: the global task list defaults to a bounded page. An unbounded call
@@ -48,6 +54,13 @@ function clampTaskListLimit(value: number | undefined): number {
 
 export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  const canCoordinateOwnedSessionTask = (c: Context, target: MultiremiTask): boolean => {
+    if (canCurrentUserAccessChatTask(c, store, target)) return true;
+    const session = target.issueSessionId ? store.getIssueSession(target.issueSessionId) : null;
+    return Boolean(session && session.workspaceId === target.workspaceId
+      && session.chatId === target.chatSessionId && session.issueId === target.issueId
+      && canTaskCoordinateSession(c, store, session));
+  };
   const denySideSessionDispatch = (c: Context): Response | null => {
     const sourceTaskId = currentTaskAccessToken(c)?.taskId;
     const sourceTask = sourceTaskId ? store.getTask(sourceTaskId) : null;
@@ -147,12 +160,22 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     // creator, the same rule the chat read/send routes enforce.
     const sessionId = cleanString(body.chatSessionId);
     if (sessionId) {
-      const loaded = loadChatSessionForCurrentUser(c, store, sessionId);
+      const loaded = loadChatSessionForCurrentUser(c, store, sessionId,
+        body.issueSessionId || body.issue_session_id ? { scope: "owner" } : {});
       if (loaded instanceof Response) return loaded;
     }
     // Execution snapshots are minted only by the server's claim/retry path.
     // Never trust these internal fields from a dashboard or PAT request: a
     // forged empty/ready snapshot would bypass the Agent's real Plugin gate.
+    //
+    // MUL-448 extends the same rule to the provenance and attribution of the
+    // task itself. `triggerCommentId`, `triggerSummary`, `requestingUserName`
+    // and `requestingUserProfileDescription` describe who asked for the work
+    // and what asked for it; `assignmentEventId` names the session event the
+    // assignment replaces, and `assignmentAuthorType` / `assignmentAuthorId`
+    // name its author. All of them are derived by the server, so every HTTP
+    // caller — member, PAT, task credential or master token — has them
+    // stripped here and cannot write another run's lineage into the task.
     const {
       provider: _provider,
       codexProfile: _codexProfile,
@@ -175,16 +198,73 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
       delegation_id: _delegationIdSnake,
       delegatedByAgentId: _delegatedByAgentId,
       delegated_by_agent_id: _delegatedByAgentIdSnake,
+      delegatedFromIssueSessionId: _delegatedFromIssueSessionId,
+      delegated_from_issue_session_id: _delegatedFromIssueSessionIdSnake,
+      delegationSkipReason: _delegationSkipReason,
+      delegation_skip_reason: _delegationSkipReasonSnake,
+      wakeSource: _wakeSource,
+      wake_source: _wakeSourceSnake,
       continueTaskId: _continueTaskId,
       continue_task_id: _continueTaskIdSnake,
       assignmentSourceEventId: _assignmentSourceEventId,
       assignment_source_event_id: _assignmentSourceEventIdSnake,
+      // MUL-400 E3 (QA round 2, blocker 1): the dependency gate treats these as
+      // structural exemptions, so they must never come from a request body — a
+      // caller that sets an arbitrary attempt number would
+      // otherwise start a waiting issue without the audited force. Both are set
+      // only by server paths (retry/redispatch and the E2 parent wake-up), and no
+      // HTTP caller sends them.
+      attempt: _attempt,
+      maxAttempts: _maxAttempts,
+      // MUL-409 fix round 4 (QA round 3, suggestion 1): the ADR claims both
+      // spellings of every exemption field are stripped, and the gate reads the
+      // camelCase form. `max_attempts` is not an exemption the gate consults
+      // today, but leaving it in the body hands a public caller a field the
+      // server owns — the next gate that reads it would inherit a hole. Strip it
+      // with its camelCase twin.
+      max_attempts: _maxAttemptsSnake,
+      dependencyForce: _dependencyForce,
+      dependency_force: _dependencyForceSnake,
+      assignmentEventId: _assignmentEventId,
+      assignment_event_id: _assignmentEventIdSnake,
+      assignmentAuthorType: _assignmentAuthorType,
+      assignment_author_type: _assignmentAuthorTypeSnake,
+      assignmentAuthorId: _assignmentAuthorId,
+      assignment_author_id: _assignmentAuthorIdSnake,
+      triggerCommentId: _triggerCommentId,
+      trigger_comment_id: _triggerCommentIdSnake,
+      triggerSummary: _triggerSummary,
+      trigger_summary: _triggerSummarySnake,
+      requestingUserName: _requestingUserName,
+      requesting_user_name: _requestingUserNameSnake,
+      requestingUserProfileDescription: _requestingUserProfileDescription,
+      requesting_user_profile_description: _requestingUserProfileDescriptionSnake,
       ...publicInput
     } = body;
     const issueId = cleanString(publicInput.issueId);
     const issue = issueId ? store.getIssue(issueId) : null;
+    if (issueId && (!issue || issue.workspaceId !== agent.workspaceId)) return c.json({ error: "issue not found" }, 404);
+    if (issue) {
+      const issueDenied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
+      if (issueDenied) return issueDenied;
+    }
     const requestedIssueSessionId = cleanString(publicInput.issueSessionId ?? publicInput.issue_session_id);
-    const inheritedIssueSessionId = requestedIssueSessionId ?? sourceTask?.issueSessionId ?? null;
+    const inheritedIssueSessionId = requestedIssueSessionId
+      ?? (issue?.id === sourceTask?.issueId ? sourceTask?.issueSessionId : null)
+      ?? null;
+    let coordinatingSession = false;
+    if (inheritedIssueSessionId) {
+      const session = store.getIssueSession(inheritedIssueSessionId);
+      if (!session || session.workspaceId !== agent.workspaceId
+        || (issue && session.issueId !== issue.id)) return c.json({ error: "session not found" }, 404);
+      coordinatingSession = canTaskCoordinateSession(c, store, session);
+      // Creating delegated Issue work does not grant access to another run's
+      // content. Private Chat Sessions retain their exact Session boundary.
+      const sessionDenied = coordinatingSession ? null : session.chatId
+        ? denySessionAccess(c, store, session)
+        : denySessionOwnerAccess(c, store, session);
+      if (sessionDenied) return sessionDenied;
+    }
     if (continuedTask) {
       if (!continuedTask.delegationId || !continuedTask.delegatedByAgentId
         || continuedTask.agentId === continuedTask.delegatedByAgentId) {
@@ -197,39 +277,44 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
         return c.json({ error: "continued task was delegated by another agent" }, 403);
       }
       if (!continuedTask.issueId || !continuedTask.issueSessionId) {
-        return c.json({ error: "continued task does not belong to an Issue Session" }, 400);
+        return c.json({ error: "continued task does not belong to a Session" }, 400);
       }
       if (sourceTask!.issueSessionId !== continuedTask.issueSessionId) {
-        return c.json({ error: "continued task belongs to another Issue Session" }, 400);
+        return c.json({ error: "continued task belongs to another Session" }, 400);
       }
       if (issueId && issueId !== continuedTask.issueId) {
         return c.json({ error: "requested issue does not match the continued task" }, 400);
       }
       if (requestedIssueSessionId && requestedIssueSessionId !== continuedTask.issueSessionId) {
-        return c.json({ error: "requested Issue Session does not match the continued task" }, 400);
+        return c.json({ error: "requested Session does not match the continued task" }, 400);
       }
     }
-    const leaderDelegation = Boolean(
-      !continuedTask
-      && taskToken
-      && sourceTask
-      && issue
-      && store.isSquadLeaderDelegation({
-        issue,
-        sourceTask,
-        authorAgentId: taskToken.agentId,
-        targetAgentId: agent.id,
-        issueSessionId: inheritedIssueSessionId,
-      })
-    );
+    const delegation=taskToken&&sourceTask?store.resolveAgentDelegation({targetIssue:continuedTask?store.getIssue(continuedTask.issueId!):issue,
+      sourceTask,authorAgentId:taskToken.agentId,targetAgentId:agent.id}):null;
     // Keep continuation ancestry on the current Leader turn. A same-agent,
     // same-delegation successor of the previous child is reserved for retry /
     // self-continuation and intentionally suppresses that child's return in
     // drainDelegationReturnsWithinWorkspaceLock. This is a new requested round,
     // so every completed child Task must remain independently returnable.
+    //
+    // MUL-448: the assignment author of the `task_assigned` session event (and
+    // of the ledger row it becomes) is derived from the credential, never from
+    // the body. A run must not be able to record itself as the member that
+    // asked for the work; a member must not be able to name another author.
+    const requestingUserId = currentRequestUserId(c);
+    const assignmentAuthor = taskToken?.agentId
+      ? { authorType: "agent", authorId: taskToken.agentId }
+      : requestingUserId
+      ? { authorType: "member", authorId: requestingUserId }
+      // Master token / auth-disabled carry no login identity, so the store's
+      // historical "system" default stays in charge there.
+      : null;
     const createInput: CreateTaskInput = {
       ...publicInput,
       parentTaskId: currentTaskParentId(c),
+      ...(assignmentAuthor
+        ? { assignmentAuthorType: assignmentAuthor.authorType, assignmentAuthorId: assignmentAuthor.authorId }
+        : {}),
       ...(continuedTask
         ? {
           issueId: continuedTask.issueId,
@@ -237,21 +322,35 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
           continuedFromTaskId: continuedTask.id,
           delegationId: continuedTask.delegationId,
           delegatedByAgentId: continuedTask.delegatedByAgentId,
+          delegatedFromIssueSessionId: continuedTask.delegatedFromIssueSessionId,
+          delegationSkipReason: continuedTask.delegationSkipReason,
+          wakeSource: continuedTask.wakeSource,
         }
-        : leaderDelegation
+        : delegation?.ok
         ? {
-          issueSessionId: inheritedIssueSessionId,
+          ...(inheritedIssueSessionId ? { issueSessionId: inheritedIssueSessionId } : {}),
           delegationId: createId("dlg"),
           delegatedByAgentId: sourceTask!.agentId,
+          delegatedFromIssueSessionId: delegation.delegatedFromIssueSessionId,
         }
-        : {}),
+        : delegation?.reason
+          ? { delegationSkipReason: delegation.reason }
+          : {}),
     };
     assertRuntimeWorkspaceAccess(c, store, createInput.runtimeWorkspaceId ?? createInput.runtime_workspace_id, agent.workspaceId);
     try {
       const task = store.createTask(createInput);
-      return c.json({ task: taskPublicResponse(task) }, 201);
+      return c.json({ task: coordinatingSession ? sessionTaskMetadataResponse(task) : taskPublicResponse(task) }, 201);
     } catch (error) {
-      if (error instanceof ChatIssueTaskConflictError) return c.json({ error: error.message }, 400);
+      if((error as any)?.message_result)return c.json({task:null,...(error as any).message_result},200);
+      if (error instanceof ChatIssueTaskConflictError || error instanceof TaskSessionArchivedError) {
+        return c.json({ error: error.message }, 400);
+      }
+      // MUL-400 E3 gate 3: this funnel refuses the first task of a waiting
+      // issue; the caller has to force-start it explicitly first.
+      if (error instanceof IssueDependencyError) {
+        return c.json({ error: error.message, code: error.code, unmet: error.details.unmet ?? [] }, 409);
+      }
       throw error;
     }
   });
@@ -260,7 +359,10 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCurrentUserAccessChatTask(c, store, task)) {
+      if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
+      return c.json({ task: sessionTaskMetadataResponse(task) });
+    }
     try {
       return c.json({ task: taskPublicResponse(store.getTaskWithAgent(task.id)!) });
     } catch (error) {
@@ -296,7 +398,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     const body = await readJson<{ content?: string; kind?: string; force_answer?: boolean; forceAnswer?: boolean; reason?: string }>(c);
     const forceAnswer = body?.kind === "force_answer" || body?.force_answer === true || body?.forceAnswer === true;
     const content = cleanString(body?.content)
@@ -315,7 +417,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
         kind: forceAnswer ? "force_answer" : "steer",
         content,
         authorType: currentTaskAccessToken(c) ? "agent" : "user",
-        authorId: authenticatedRequestUserId(c) ?? null,
+        authorId: currentRequestUserId(c) ?? null,
       });
       return c.json({ message }, 201);
     } catch (err) {
@@ -328,20 +430,23 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     return c.json({ messages: store.listTaskSteerMessages(task.id) });
   };
   app.post("/api/multiremi/tasks/:id/steer", steerTaskRoute);
   app.post("/api/tasks/:id/steer", steerTaskRoute);
   app.get("/api/multiremi/tasks/:id/steer", listTaskSteerRoute);
   app.get("/api/tasks/:id/steer", listTaskSteerRoute);
-  const inspectTaskRoute = (c: any) => {
+  const inspectTaskRoute = async (c: any) => {
     const task = taskFromParam(store, c, "id");
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    return c.json({ inspection: organizerTaskInspection(store, task) });
+    return c.json({ inspection: await organizerTaskInspection(store, task, {
+      readTrace: deps.traceReader,
+      getTurnStats: deps.getOrganizerTurnStats,
+    }) });
   };
   app.get("/api/multiremi/tasks/:id/inspection", inspectTaskRoute);
   app.get("/api/tasks/:id/inspection", inspectTaskRoute);
@@ -352,7 +457,9 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    // Issue Session recovery is authorized by the supervisor checks below.
+    // Ordinary Chat tasks retain their creator/task credential boundary.
+    if ((!task.issueId || !task.issueSessionId) && !canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
     const supervisor = supervisorTaskIdentity(c, store);
     if (!supervisor) {
       return c.json({ error: "supervisor task credential required", code: "organizer_supervisor_required" }, 403);
@@ -382,13 +489,24 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
   };
   app.post("/api/multiremi/tasks/:id/redispatch", redispatchTaskRoute);
   app.post("/api/tasks/:id/redispatch", redispatchTaskRoute);
+  app.get("/api/tasks/:id/trace", async (c) => {
+    const task = taskFromParam(store, c, "id");
+    if (!task || denyCurrentUserWorkspaceAccess(c, store, task.workspaceId)
+      || !canCurrentUserAccessChatTask(c, store, task)
+      || !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
+      return c.json({ error: "task not found" }, 404);
+    }
+    const window = parseTraceWindow(c);
+    if (!window) return c.json({ error: "invalid trace window" }, 400);
+    return c.json(await deps.traceReader.read(task.id, window));
+  });
   app.get("/api/multiremi/tasks/:id/messages", (c) => {
     const task = taskFromParam(store, c, "id");
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     return c.json({ messages: store.listTaskMessages(task.id) });
@@ -399,7 +517,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     return c.json({ requests: store.listTaskHumanRequests(task.id) });
@@ -410,7 +528,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     const requestId = c.req.param("requestId");
@@ -419,7 +537,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<{ response?: Record<string, unknown> }>(c);
     const responded = store.respondTaskHumanRequest(request.id, {
       response: body?.response ?? {},
-      respondedBy: authenticatedRequestUserId(c) ?? store.getCurrentUser()?.id ?? null,
+      respondedBy: currentRequestUserId(c) ?? store.getCurrentUser()?.id ?? null,
     });
     if (!responded) {
       return c.json({ error: "request already resolved", request: store.getTaskHumanRequest(request.id) }, 409);
@@ -436,7 +554,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     const since = parseOptionalTaskMessageSince(c.req.query("since_seq") ?? c.req.query("sinceSeq") ?? c.req.query("since"));
@@ -449,7 +567,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     const artifact = store.getTaskPrompt(task.id);

@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { createResponsibleTestIssue } from './helpers.js';
+import { taskOfferResponse, receiveTaskOffer } from "../../fixtures/task-offer.js";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { MultiremiDaemonClient } from "@multiremi/client.js";
+import { MultiremiDaemonClient, normalizeDaemonClaimTask } from "@multiremi/client.js";
 import { ProjectKnowledgeService } from "@multiremi/project-knowledge/service.js";
-import { createStore, db, mockFetch, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createSnapshotStore, db, mockFetch, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -10,7 +12,7 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 
 describe("Bun Multiremi project docs API", () => {
   it("lists, searches, and reads docs by id or slug", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Docs API" });
     const wiki = store.createProjectDoc(project.id, { kind: "wiki", title: "Build guide", body: "run bun test" });
@@ -70,7 +72,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("returns 503 for unreadable OpenViking content but allows cleanup", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const project = store.createProject({ title: "Unavailable knowledge" });
     const doc = store.createProjectDoc(project.id, { kind: "wiki", title: "Runbook", body: "SQL rollback copy" });
     const projectKnowledge = new ProjectKnowledgeService(store, {
@@ -88,11 +90,11 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("exposes migration status and dry-run to owner task credentials", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const project = store.createProject({ title: "Migration API" });
     store.createProjectDoc(project.id, { kind: "memory", title: "Fact", body: "legacy SQL" });
     const agent = store.createAgent({ name: "Migration agent", provider: "claude" });
-    const issue = store.createIssue({ title: "Migration task", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Migration task", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
     const taskToken = await store.createTaskAccessToken(task, "local");
     const app = createMultiremiApp({ store, authToken: "root-secret" });
@@ -122,7 +124,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("creates docs with member provenance and round-trips refs", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Refs" });
 
@@ -172,7 +174,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("rejects unsafe and duplicate project Wiki paths", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Path validation" });
 
@@ -200,11 +202,11 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("routes agent writes to Raw and backfills the issue behind the task", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const project = store.createProject({ title: "Agent writes" });
     const agent = store.createAgent({ name: "Scribe", provider: "claude" });
-    const issue = store.createIssue({ title: "Ship it", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Ship it", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "work" });
     const taskToken = await store.createTaskAccessToken(task, "local");
 
@@ -232,7 +234,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("ignores a caller-supplied id and mints its own", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Server-minted ids" });
 
@@ -249,11 +251,11 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("takes doc provenance from the task token, never from the body", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const project = store.createProject({ title: "Own project" });
     const agent = store.createAgent({ name: "Scribe", provider: "claude" });
-    const issue = store.createIssue({ title: "Own issue", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Own issue", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "work" });
     const taskToken = await store.createTaskAccessToken(task, "local");
 
@@ -262,7 +264,7 @@ describe("Bun Multiremi project docs API", () => {
     const foreignWorkspace = store.createWorkspace({ name: "Foreign", slug: "foreign" });
     const foreignAgent = store.createAgent({ name: "Stranger", provider: "claude", workspaceId: foreignWorkspace.id });
     const foreignProject = store.createProject({ title: "Foreign project", workspaceId: foreignWorkspace.id });
-    const foreignIssue = store.createIssue({ title: "Foreign issue", projectId: foreignProject.id, workspaceId: foreignWorkspace.id });
+    const foreignIssue = createResponsibleTestIssue(store, { title: "Foreign issue", projectId: foreignProject.id, workspaceId: foreignWorkspace.id });
     const foreignTask = store.createTask({
       agentId: foreignAgent.id,
       issueId: foreignIssue.id,
@@ -290,11 +292,11 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("keeps task reads workspace-wide but rejects knowledge writes outside the issue project", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const agent = store.createAgent({ name: "Scribe", provider: "claude" });
     const ownProject = store.createProject({ title: "Own project" });
-    const ownIssue = store.createIssue({ title: "Own issue", projectId: ownProject.id });
+    const ownIssue = createResponsibleTestIssue(store, { title: "Own issue", projectId: ownProject.id });
     const task = store.createTask({ agentId: agent.id, issueId: ownIssue.id, workspaceId: "local", prompt: "work" });
     const taskToken = await store.createTaskAccessToken(task, "local");
     const otherProject = store.createProject({ title: "Other project" });
@@ -329,11 +331,11 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("lets owner task tokens without a current project read workspace projects", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const agent = store.createAgent({ name: "Scribe", provider: "claude" });
     const project = store.createProject({ title: "Unreachable" });
-    const looseIssue = store.createIssue({ title: "No project" });
+    const looseIssue = createResponsibleTestIssue(store, { title: "No project" });
     const looseTask = store.createTask({ agentId: agent.id, issueId: looseIssue.id, workspaceId: "local", prompt: "work" });
     const looseToken = await store.createTaskAccessToken(looseTask, "local");
     const chatTask = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "no issue at all" });
@@ -348,7 +350,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("updates docs, bumps versions, and records revisions", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Updates" });
     store.createProjectDoc(project.id, { kind: "wiki", title: "Architecture", body: "v1 body" });
@@ -400,7 +402,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("deletes docs and reports them gone afterwards", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Deletes" });
     store.createProjectDoc(project.id, { kind: "wiki", title: "Temporary" });
@@ -416,7 +418,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("maps store validation failures onto status codes", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Errors" });
 
@@ -473,7 +475,7 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("broadcasts the project_doc created/updated/deleted trio", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Events" });
     const events: Array<{ type: string; workspaceId: string; payload: Record<string, unknown>; actorId?: string | null; actorType?: string }> = [];
@@ -515,24 +517,28 @@ describe("Bun Multiremi project docs API", () => {
     });
   });
 
-  it("hides docs from non-members of the project workspace", async () => {
-    const store = createStore();
+  it("shares project docs with human operators while workspace-bound credentials remain scoped", async () => {
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const workspace = store.createWorkspace({ name: "Private", slug: "private" });
     const project = store.createProject({ title: "Private docs", workspaceId: workspace.id });
-    store.createProjectDoc(project.id, { kind: "wiki", title: "Secret" });
+    const doc = store.createProjectDoc(project.id, { kind: "wiki", title: "Shared knowledge" });
     const outsider = store.getOrCreateUser({ externalId: "outsider", name: "Outsider" });
     const pat = await store.createAccessToken({ name: "outsider pat", type: "pat", userId: outsider.id });
 
     const listed = await app.request(`/api/projects/${project.id}/docs`, {
       headers: { Authorization: `Bearer ${pat.token}` },
     });
-    expect(listed.status).toBe(404);
-    expect(await listed.json()).toEqual({ error: "workspace not found" });
+    expect(listed.status).toBe(200);
+    expect((await listed.json()).docs).toEqual(expect.arrayContaining([expect.objectContaining({ id: doc.id })]));
+    const scoped = await store.createAccessToken({ name: "Legacy local scope", type: "pat", userId: "local", workspaceId: "local" });
+    const denied = await app.request(`/api/projects/${project.id}/docs`, { headers: { Authorization: `Bearer ${scoped.token}` } });
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toEqual({ error: "workspace not found" });
   });
 
   it("lists workspace-wide docs with project titles and passes filters through", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const alpha = store.createProject({ title: "Alpha" });
     const beta = store.createProject({ title: "Beta" });
@@ -567,28 +573,36 @@ describe("Bun Multiremi project docs API", () => {
     expect(await badKind.json()).toEqual({ error: "unknown kind: notes" });
   });
 
-  it("hides the workspace doc listing from non-members", async () => {
-    const store = createStore();
+  it("shares the selected workspace doc listing with humans while task tokens remain in their workspace", async () => {
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const workspace = store.createWorkspace({ name: "Private", slug: "private" });
     const project = store.createProject({ title: "Private docs", workspaceId: workspace.id });
-    store.createProjectDoc(project.id, { kind: "wiki", title: "Secret" });
+    const doc = store.createProjectDoc(project.id, { kind: "wiki", title: "Shared knowledge" });
     const outsider = store.getOrCreateUser({ externalId: "outsider", name: "Outsider" });
     const pat = await store.createAccessToken({ name: "outsider pat", type: "pat", userId: outsider.id });
 
     const listed = await app.request(`/api/project-docs?workspace_id=${workspace.id}`, {
       headers: { Authorization: `Bearer ${pat.token}` },
     });
-    expect(listed.status).toBe(404);
-    expect(await listed.json()).toEqual({ error: "workspace not found" });
+    expect(listed.status).toBe(200);
+    expect((await listed.json()).docs).toEqual(expect.arrayContaining([expect.objectContaining({ id: doc.id, project_id: project.id })]));
+    const agent = store.createAgent({ name: "Local knowledge reader", provider: "codex" });
+    const task = store.createTask({ agentId: agent.id, prompt: "Read local docs" });
+    const taskToken = await store.createTaskAccessToken(task, outsider.id);
+    for (const path of [`/api/project-docs?workspace_id=${workspace.id}`, `/api/projects/${project.id}/docs`]) {
+      const denied = await app.request(path, { headers: { Authorization: `Bearer ${taskToken.token}` } });
+      expect(denied.status).toBe(404);
+      expect(await denied.json()).toEqual({ error: "workspace not found" });
+    }
   });
 
   it("lets an owner task token list workspace project docs", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const agent = store.createAgent({ name: "Scribe", provider: "claude" });
     const project = store.createProject({ title: "Own project" });
-    const issue = store.createIssue({ title: "Own issue", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Own issue", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "work" });
     const taskToken = await store.createTaskAccessToken(task, "local");
     const other = store.createProject({ title: "Other project" });
@@ -604,45 +618,45 @@ describe("Bun Multiremi project docs API", () => {
   });
 
   it("keeps project knowledge out of the daemon claim so agents retrieve it on demand", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const project = store.createProject({ title: "Claim docs" });
     const runtime = store.registerRuntime({ name: "rt", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Claimer", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "Do work", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Do work", projectId: project.id });
     store.createProjectDoc(project.id, { kind: "memory", title: "Build needs bun 1.2", body: "install via curl" });
     store.createProjectDoc(project.id, { kind: "wiki", title: "Architecture", summary: "Hub and spoke" });
     store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "go" });
 
-    const claim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const claim = await taskOfferResponse(store, runtime.id);
     expect(claim.status).toBe(200);
     const claimed = (await claim.json()).task;
     expect(claimed.project_docs).toBeUndefined();
 
     // The daemon client keeps backward-compatible parsing for old servers, but
     // new claims do not transport a bulk knowledge index or document bodies.
-    store.completeTask(claimed.id, { output: "done" });
+    store.completeTask(claimed.attempt_id, { output: "done" });
     store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "go again" });
     mockFetch((url, init) => {
       const parsed = new URL(url);
       return app.request(`${parsed.pathname}${parsed.search}`, init);
     });
-    const normalized = await new MultiremiDaemonClient("https://remi.example").claimTask(runtime.id);
+    const normalized = normalizeDaemonClaimTask((await receiveTaskOffer(store, runtime.id))!);
     expect(normalized?.projectDocs).toBeNull();
   });
 
   it("starts a claimed task with an explicit warning when project knowledge cannot be hydrated", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ name: "Knowledge runtime", provider: "claude" });
     const agent = store.createAgent({ name: "Knowledge agent", provider: "claude", runtimeId: runtime.id });
     const project = store.createProject({ title: "Knowledge project" });
-    const issue = store.createIssue({ title: "Needs knowledge", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Needs knowledge", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work", maxAttempts: 2 });
     const projectKnowledge = new ProjectKnowledgeService(store, null, "sql");
     projectKnowledge.hydrateTaskKnowledge = async () => { throw new Error("planned OpenViking outage"); };
     const app = createMultiremiApp({ store, projectKnowledge });
 
-    const claim = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const claim = await taskOfferResponse(store, runtime.id, { projectKnowledge });
     expect(claim.status).toBe(200);
     const claimed = (await claim.json()).task;
     expect(claimed.knowledge_warnings[0]).toContain("Project Wiki loading failed");
@@ -650,3 +664,8 @@ describe("Bun Multiremi project docs API", () => {
     expect(store.listTasks()).toHaveLength(1);
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

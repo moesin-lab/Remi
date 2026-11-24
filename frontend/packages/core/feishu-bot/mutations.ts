@@ -15,8 +15,8 @@ import { feishuBotKeys } from "./queries";
  * them from disagreeing — a saved Runtime change with a stale status badge is
  * exactly the kind of drift that makes an admin redeploy a healthy bot.
  */
-function invalidateBot(queryClient: QueryClient, workspaceId: string): void {
-  void queryClient.invalidateQueries({ queryKey: feishuBotKeys.all(workspaceId) });
+function invalidateBot(queryClient: QueryClient, workspaceId: string): Promise<void> {
+  return queryClient.invalidateQueries({ queryKey: feishuBotKeys.all(workspaceId) });
 }
 
 /**
@@ -25,20 +25,20 @@ function invalidateBot(queryClient: QueryClient, workspaceId: string): void {
  * the revision, and the secret hint. Writing a guess into the cache would mean
  * inventing values only the server can compute.
  */
-export function useSaveFeishuBot(workspaceId: string) {
+export function useSaveFeishuBot(workspaceId: string, botId = "default") {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: UpsertFeishuBotRequest) => api.saveFeishuBot(workspaceId, input),
+    mutationFn: (input: UpsertFeishuBotRequest) => botId === "new" ? api.createFeishuBot(workspaceId, input) : api.saveFeishuBot(workspaceId, input, botId),
     onSettled: () => invalidateBot(queryClient, workspaceId),
   });
 }
 
-export function useSaveFeishuBotRoutes(workspaceId: string) {
+export function useSaveFeishuBotRoutes(workspaceId: string, botId = "default") {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: ReplaceFeishuBotAgentRoutesRequest) =>
-      api.saveFeishuBotRoutes(workspaceId, input),
-    onSuccess: (routes) => queryClient.setQueryData(feishuBotKeys.routes(workspaceId), routes),
+      api.saveFeishuBotRoutes(workspaceId, input, botId),
+    onSuccess: (routes) => queryClient.setQueryData(feishuBotKeys.routes(workspaceId, botId), routes),
     onSettled: () => invalidateBot(queryClient, workspaceId),
   });
 }
@@ -51,26 +51,26 @@ export function useSaveIssueTopicConfig(workspaceId: string) {
   });
 }
 
-export function useDeleteFeishuBot(workspaceId: string) {
+export function useDeleteFeishuBot(workspaceId: string, botId = "default") {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => api.deleteFeishuBot(workspaceId),
+    mutationFn: () => api.deleteFeishuBot(workspaceId, botId),
     onSettled: () => invalidateBot(queryClient, workspaceId),
   });
 }
 
-export function useDeployFeishuBot(workspaceId: string) {
+export function useDeployFeishuBot(workspaceId: string, botId = "default") {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => api.deployFeishuBot(workspaceId),
+    mutationFn: () => api.deployFeishuBot(workspaceId, botId),
     onSettled: () => invalidateBot(queryClient, workspaceId),
   });
 }
 
-export function useStopFeishuBot(workspaceId: string) {
+export function useStopFeishuBot(workspaceId: string, botId = "default") {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => api.stopFeishuBot(workspaceId),
+    mutationFn: () => api.stopFeishuBot(workspaceId, botId),
     onSettled: () => invalidateBot(queryClient, workspaceId),
   });
 }
@@ -79,10 +79,10 @@ export function useStopFeishuBot(workspaceId: string) {
  * Testing can record a result against the stored config (the server only does
  * so when the probed credentials match the saved ones), so it invalidates too.
  */
-export function useTestFeishuBot(workspaceId: string) {
+export function useTestFeishuBot(workspaceId: string, botId = "default") {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: FeishuBotTestRequest = {}) => api.testFeishuBot(workspaceId, input),
+    mutationFn: (input: FeishuBotTestRequest = {}) => api.testFeishuBot(workspaceId, input, botId === "new" ? "default" : botId),
     onSettled: () => invalidateBot(queryClient, workspaceId),
   });
 }
@@ -100,13 +100,13 @@ export function useCancelFeishuBotRegistration(workspaceId: string) {
   });
 }
 
-export function useUpdateFeishuBotSender(workspaceId: string) {
+export function useUpdateFeishuBotSender(workspaceId: string, botId = "default") {
   const queryClient = useQueryClient();
   return useMutation({
     // Keep an in-flight decision attached to its workspace after navigation.
-    mutationKey: [...feishuBotKeys.senders(workspaceId), "update"],
+    mutationKey: [...feishuBotKeys.senders(workspaceId, botId), "update"],
     mutationFn: ({ senderId, allowed }: { senderId: string; allowed: boolean }) =>
-      api.updateFeishuBotSender(workspaceId, senderId, { allowed }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: feishuBotKeys.senders(workspaceId) }),
+      api.updateFeishuBotSender(workspaceId, senderId, { allowed }, botId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: feishuBotKeys.senders(workspaceId, botId) }),
   });
 }

@@ -30,6 +30,7 @@ import { cn } from "@multiremi/ui/lib/utils";
 import { toast } from "sonner";
 import type { Project, UpdateProjectRequest } from "@multiremi/core/types";
 import { PageHeader } from "../../layout/page-header";
+import { useListPerfMarker } from "../../common/use-list-perf-marker";
 import { ProjectIcon } from "./project-icon";
 import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
@@ -148,7 +149,7 @@ function ProjectCard({
   );
 
   return (
-    <article className="group flex min-h-36 flex-col rounded-md border bg-card transition-colors hover:bg-accent/20">
+    <article data-perf-item="project" data-perf-key={project.id} className="group flex min-h-36 flex-col rounded-md border bg-card transition-colors hover:bg-accent/20">
       <div className="flex items-start gap-3 p-3">
         <ProjectIcon project={project} size="md" />
         <div className="min-w-0 flex-1">
@@ -207,7 +208,7 @@ function ProjectCompactRow({
   );
 
   return (
-    <div className={cn(COMPACT_GRID, "group min-h-12 items-center gap-3 border-b px-4 text-sm transition-colors hover:bg-accent/30", archived && "text-muted-foreground opacity-70 hover:opacity-100")}>
+    <div data-perf-item="project" data-perf-key={project.id} className={cn(COMPACT_GRID, "group min-h-12 items-center gap-3 border-b px-4 text-sm transition-colors hover:bg-accent/30", archived && "text-muted-foreground opacity-70 hover:opacity-100")}>
       <ProjectIcon project={project} size="sm" />
       <AppLink href={wsPaths.projectDetail(project.id)} className="min-w-0">
         <span className="block truncate text-left font-medium text-foreground">{project.title}</span>
@@ -252,7 +253,18 @@ export function ProjectsPage() {
   const wsId = useWorkspaceId();
   const viewMode = useProjectViewStore((state) => state.viewMode);
   const setViewMode = useProjectViewStore((state) => state.setViewMode);
-  const { data: projects = [], isLoading } = useQuery(projectListOptions(wsId));
+  const {
+    data: projects = [],
+    isLoading,
+    status: projectsStatus,
+    isPlaceholderData: projectsIsPlaceholderData,
+  } = useQuery(projectListOptions(wsId));
+  // MUL-472 item 5: mark the list container as this page's measured viewport and
+  // publish whether the rows came from this round's own response.
+  const perfMarker = useListPerfMarker({
+    status: projectsStatus,
+    isPlaceholderData: projectsIsPlaceholderData,
+  });
   const archiveProject = useArchiveProject();
   const restoreProject = useRestoreProject();
   const [scope, setScope] = useState<ProjectScope>("active");
@@ -285,7 +297,7 @@ export function ProjectsPage() {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col" {...perfMarker}>
       <PageHeader className="justify-between px-5">
         <div className="flex items-center gap-2">
           <FolderKanban className="size-4 text-muted-foreground" />

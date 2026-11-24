@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { readdirSync } from "node:fs";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -13,8 +14,8 @@ async function fixture() {
   const other = store.createWorkspace({ name: "Other", slug: "other-attachments" });
   const agent = store.createAgent({ workspaceId: workspace.id, ownerId: user.id, name: "Worker", provider: "claude" });
   const otherAgent = store.createAgent({ workspaceId: other.id, name: "Other worker", provider: "claude" });
-  const issue = store.createIssue({ workspaceId: workspace.id, title: "Allowed issue" });
-  const otherIssue = store.createIssue({ workspaceId: other.id, title: "Other issue" });
+  const issue = createResponsibleTestIssue(store, { workspaceId: workspace.id, title: "Allowed issue" });
+  const otherIssue = createResponsibleTestIssue(store, { workspaceId: other.id, title: "Other issue" });
   const otherComment = store.createIssueComment(otherIssue.id, { body: "Other comment" });
   const otherChat = store.createChatSession({ workspaceId: other.id, agentId: otherAgent.id, creatorId: "local" });
   const otherMessage = store.sendChatMessage(otherChat.id, { body: "Other message" }).message;
@@ -94,7 +95,15 @@ describe("native attachment workspace context", () => {
   });
 
   it("allows an attachment to the caller's chat in the authorized workspace", async () => {
-    const { app, headers, workspace, chat } = await fixture();
+    const { store, app, user, workspace, chat } = await fixture();
+    const sent = store.sendChatMessage(chat.id, { body: "Upload a file to this conversation" });
+    const turn = store.getTurnForAttempt(sent.task.id)!;
+    expect(turn).toMatchObject({ session_id: chat.id, trigger_message_id: sent.message.id });
+    expect(store.getMessage(sent.message.id)?.metadata.delivery_turn_id).toBe(turn.id);
+    expect(sent.message.taskId).toBeNull();
+    expect(store.getTaskChatExecutionKind(sent.task)).toBe("ordinary");
+    const token = await store.createTaskAccessToken(sent.task, user.id);
+    const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
     const response = await app.request("/api/multiremi/attachments", {
       method: "POST", headers,
       body: JSON.stringify({ ...file, workspaceId: workspace.id, chat_session_id: chat.id }),

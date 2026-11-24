@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { StorageAdapter } from "../types";
+import type { Attachment, StorageAdapter } from "../types";
+import type { QueuedMessageAttachment } from "../api/schemas/chat-queue";
 import { getCurrentSlug, registerForWorkspaceRehydration } from "../platform/workspace-storage";
 import { createLogger } from "../logger";
 
@@ -25,6 +26,52 @@ const CHAT_EXPANDED_KEY = "multimira:chat:expanded";
  * every subsequent reload.
  */
 const OPEN_KEY = "multimira:chat:isOpen";
+/** How a message sent during a run is delivered; one global preference. */
+const FOLLOW_UP_MODE_KEY = "multimira:chat:followUpMode";
+/** Queued-message edits in progress, with the composer draft they replaced. */
+const QUEUE_EDIT_KEY = "multimira:chat:queueEdit";
+/** Enqueues the server has not confirmed, per workspace. */
+const QUEUE_OUTBOX_KEY = "multimira:chat:queueOutbox";
+
+/**
+ * While a run is active, `steer` (引导) sends into the running turn and
+ * `queue` (排队) holds the message until the turn completes (ADR 0020).
+ */
+export type ChatFollowUpMode = "steer" | "queue";
+/** Like Codex, follow-ups queue unless the user chose otherwise. */
+export const DEFAULT_FOLLOW_UP_MODE: ChatFollowUpMode = "queue";
+
+/**
+ * Only `setFollowUpMode` writes the key, so a browser that never chose keeps
+ * following the default; a stored choice always wins.
+ */
+function readFollowUpMode(storage: StorageAdapter): ChatFollowUpMode {
+  const stored = storage.getItem(FOLLOW_UP_MODE_KEY);
+  return stored === "queue" || stored === "steer" ? stored : DEFAULT_FOLLOW_UP_MODE;
+}
+
+/** A queued message loaded into the composer for editing. */
+export interface ChatQueueEdit {
+  itemId: string;
+  /** Revision the edit started from; the save sends it as `expected_revision`. */
+  revision: number;
+  /** The composer draft the edit replaced, restored when the edit ends. */
+  stash: { draft: string; attachments: Record<string, string> };
+}
+
+/**
+ * An enqueue the server has not answered yet. `unconfirmed` means it failed
+ * after the bounded transport retries: the row may or may not exist. Manual
+ * retry keeps the same `client_id` and is idempotent.
+ */
+export interface ChatQueueOutboxItem {
+  client_id: string;
+  body_md: string;
+  attachment_ids?: string[];
+  attachments: QueuedMessageAttachment[];
+  created_at: string;
+  state: "sending" | "unconfirmed";
+}
 
 function readDrafts(storage: StorageAdapter, key: string): Record<string, string> {
   const raw = storage.getItem(key);
@@ -73,61 +120,201 @@ function writeDraftAttachments(storage: StorageAdapter, key: string, drafts: Rec
   else storage.removeItem(key);
 }
 
+function readJsonRecord(storage: StorageAdapter, key: string): Record<string, unknown> {
+  const raw = storage.getItem(key);
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeJsonRecord(storage: StorageAdapter, key: string, value: Record<string, unknown>): void {
+  if (Object.keys(value).length) storage.setItem(key, JSON.stringify(value));
+  else storage.removeItem(key);
+}
+
+const isStringRecord = (value: unknown): value is Record<string, string> =>
+  !!value && typeof value === "object" && !Array.isArray(value)
+  && Object.values(value).every((entry) => typeof entry === "string");
+
+function readQueueEdits(storage: StorageAdapter, key: string): Record<string, ChatQueueEdit> {
+  const edits: Record<string, ChatQueueEdit> = {};
+  for (const [sessionId, value] of Object.entries(readJsonRecord(storage, key))) {
+    const edit = value as Partial<ChatQueueEdit> | null;
+    if (!edit || typeof edit.itemId !== "string" || typeof edit.revision !== "number"
+      || !edit.stash || typeof edit.stash.draft !== "string" || !isStringRecord(edit.stash.attachments)) continue;
+    edits[sessionId] = { itemId: edit.itemId, revision: edit.revision, stash: edit.stash };
+  }
+  return edits;
+}
+
+function readQueueOutbox(storage: StorageAdapter, key: string): Record<string, ChatQueueOutboxItem[]> {
+  const outbox: Record<string, ChatQueueOutboxItem[]> = {};
+  for (const [sessionId, value] of Object.entries(readJsonRecord(storage, key))) {
+    if (!Array.isArray(value)) continue;
+    const items = value.filter((item): item is ChatQueueOutboxItem =>
+      !!item && typeof item.client_id === "string" && typeof item.body_md === "string"
+      && typeof item.created_at === "string" && Array.isArray(item.attachments))
+      // A reload cannot know whether an in-flight enqueue arrived.
+      .map((item) => ({ ...item, state: "unconfirmed" as const }));
+    if (items.length) outbox[sessionId] = items;
+  }
+  return outbox;
+}
+
+/** The right panel's two views (PR 6 §8.1): an attempt's subagents, or the chat's background tasks. */
+export type ChatPanelView = "subagents" | "tasks";
+
+/**
+ * A background task the panel's 后台任务 view shows in detail (PR 6 §8.2),
+ * by its registry identity: the bridge's `task_id` within the lane's provider
+ * session. A doorbell names its task this way before the rows are loaded.
+ */
+export interface BackgroundTaskRef {
+  task_id: string;
+  provider_session_id?: string | null;
+}
+
+/**
+ * What the right panel shows. The 子代理 view (PR 5) is one attempt of one
+ * chat, its overview (`path` empty) or a subagent's detail: `path` holds the
+ * subagent item ids from a top-level subagent down to the open one; back
+ * drops the last id. The 后台任务 view (PR 6) is the chat's, so it needs no
+ * attempt: its overview, or one task's detail (`task`). An attempt kept with
+ * it lets the 「子代理 | 后台任务」 switch go back to that attempt's subagents.
+ */
+export interface SubagentPanelTarget {
+  /** The chat the panel belongs to; another chat never shows it. */
+  sessionId: string | null;
+  /** Which view; absent means 子代理. */
+  view?: ChatPanelView;
+  /** The attempt whose trace holds the subagents; required for the 子代理 view. */
+  attemptId?: string | null;
+  /** The turn of that attempt, when known; reads go through the turn route. */
+  turnId?: string;
+  /** Follow the trace socket (the running turn). */
+  live: boolean;
+  path: string[];
+  /** The open background task in the 后台任务 view; absent or null for its overview. */
+  task?: BackgroundTaskRef | null;
+}
+
+/** A request to show a top-level subagent's row in the live steps fold. */
+export interface SubagentRevealRequest {
+  attemptId: string;
+  itemId: string;
+  /**
+   * Increases with every request for the life of the store, also across
+   * clears: a fold acts only on requests newer than the one it saw when it
+   * mounted, and revealing the same row twice still fires.
+   */
+  nonce: number;
+}
+
 export const CHAT_MIN_W = 360;
 export const CHAT_MIN_H = 480;
 export const CHAT_DEFAULT_W = 380;
 export const CHAT_DEFAULT_H = 600;
 
-/**
- * Kept as a public type because existing consumers (chat-message-list,
- * views/chat types) import it. Items themselves no longer live in the
- * store — they flow through the React Query cache keyed by task id.
- */
-export interface ChatTimelineItem {
-  seq: number;
-  type:
-    | "tool_use"
-    | "tool_result"
-    | "thinking"
-    | "text"
-    | "steer"
-    | "error"
-    | "permission_request"
-    | "permission_response"
-    | "question_request"
-    | "question_response";
-  tool?: string;
-  content?: string;
-  input?: Record<string, unknown>;
-  output?: string;
-}
-
 export interface ChatState {
   isOpen: boolean;
   activeSessionId: string | null;
   selectedAgentId: string | null;
-  /** Project selected for a new conversation; existing bindings live in Query. */
+  /**
+   * Where the unsaved new conversation will run: a Project or a local
+   * directory, never both. Existing bindings live in Query. Opening a real
+   * chat consumes the draft and leaving one starts the next draft unbound, so
+   * a new chat never inherits an earlier chat's location.
+   */
   draftProjectId: string | null;
+  /** Not persisted: a reload starts the new chat without a directory. */
+  draftRuntimeWorkspaceId: string | null;
   /** Drafts per session: sessionId (or DRAFT_NEW_SESSION) → markdown text. */
   inputDrafts: Record<string, string>;
   inputDraftAttachments: Record<string, Record<string, string>>;
+  /** Upload details shared between the panel and page until the server row arrives. */
+  localAttachmentDetails: Record<string, Attachment>;
   /** Raw user-chosen size — no clamp applied. UI layer clamps at render time. */
   chatWidth: number;
   chatHeight: number;
   isExpanded: boolean;
+  /** Default delivery for a message sent while a run is active. */
+  followUpMode: ChatFollowUpMode;
+  /** Queued-message edit in progress, by session. */
+  queueEdit: Record<string, ChatQueueEdit>;
+  /** Enqueues not yet confirmed by the server, by session. */
+  queueOutbox: Record<string, ChatQueueOutboxItem[]>;
+  /** The open subagent panel, or null. Not persisted. */
+  subagentPanel: SubagentPanelTarget | null;
+  /** The last reveal request for a subagent row. Not persisted. */
+  subagentReveal: SubagentRevealRequest | null;
+  /** Background-task end notices the reader closed (registry row ids, PR 6 §8.1). Not persisted. */
+  dismissedBackgroundNotices: readonly string[];
   setOpen: (open: boolean) => void;
   toggle: () => void;
   setActiveSession: (id: string | null) => void;
   setSelectedAgentId: (id: string) => void;
   setDraftProjectId: (id: string | null) => void;
+  /** Selecting a Project or a local directory replaces the other. */
+  setDraftLocation: (location: { projectId: string | null; runtimeWorkspaceId: string | null }) => void;
   /** sessionId accepts a real session UUID or DRAFT_NEW_SESSION. */
   setInputDraft: (sessionId: string, draft: string) => void;
   clearInputDraft: (sessionId: string) => void;
   setInputDraftAttachment: (draftKey: string, url: string, attachmentId: string) => void;
+  setLocalAttachmentDetail: (attachment: Attachment) => void;
   clearInputDraftAttachments: (draftKey: string) => void;
   /** Persist raw size and auto-exit expanded mode. */
   setChatSize: (width: number, height: number) => void;
   setExpanded: (expanded: boolean) => void;
+  setFollowUpMode: (mode: ChatFollowUpMode) => void;
+  /**
+   * Loads a queued message into the session's composer draft. The draft it
+   * replaces is stashed; switching to another queued message keeps the
+   * original stash.
+   */
+  startQueueEdit: (sessionId: string, edit: {
+    itemId: string; revision: number; body_md: string; attachments: Record<string, string>;
+  }) => void;
+  /**
+   * `restore` puts the stashed draft back (save or cancel). `keep` leaves the
+   * edited text as an ordinary draft, followed by the stashed one, when the
+   * row can no longer be saved. `keptText` is the text the user submitted;
+   * without it the (debounced) stored draft is kept.
+   */
+  finishQueueEdit: (sessionId: string, outcome: "restore" | "keep", keptText?: string) => void;
+  /** Adds or replaces the outbox item with the same `client_id`. */
+  putQueueOutboxItem: (sessionId: string, item: ChatQueueOutboxItem) => void;
+  /**
+   * `workspaceSlug` names the workspace the enqueue started in; when the user
+   * has switched since, the item is removed from that workspace's stored
+   * outbox instead of the current one.
+   */
+  removeQueueOutboxItem: (sessionId: string, clientId: string, workspaceSlug?: string | null) => void;
+  /** Drops the queued-message edit and outbox of a deleted session. */
+  clearQueueState: (sessionId: string) => void;
+  /**
+   * Appends text the queue could not keep to the session's draft, with its
+   * attachment bindings. During a queued-message edit it joins the stashed
+   * draft instead, so the edit being saved does not pick it up.
+   */
+  restoreToDraft: (sessionId: string, body: string, attachments: Record<string, string>) => void;
+  /** Opens (or retargets) the subagent panel. */
+  openSubagentPanel: (target: SubagentPanelTarget) => void;
+  /** Moves the open panel to another subagent, or to the overview with `[]`. */
+  setSubagentPath: (path: string[]) => void;
+  /** Closes the panel and drops any pending reveal request. */
+  closeSubagentPanel: () => void;
+  /** Asks the live steps fold to open and scroll to a top-level subagent's row. */
+  revealSubagent: (attemptId: string, itemId: string) => void;
+  /** Switches the open panel between 子代理 and 后台任务, at that view's overview. */
+  setPanelView: (view: ChatPanelView) => void;
+  /** Opens a background task's detail in the 后台任务 view, or its overview with null. */
+  setPanelTask: (task: BackgroundTaskRef | null) => void;
+  /** Closes a background-task end notice. */
+  dismissBackgroundNotice: (rowId: string) => void;
 }
 
 export interface ChatStoreOptions {
@@ -147,17 +334,27 @@ export function createChatStore(options: ChatStoreOptions) {
   // still honouring an explicit "I closed it" choice on every reload.
   const storedOpen = storage.getItem(OPEN_KEY);
   const initialIsOpen = storedOpen === null ? true : storedOpen === "true";
+  /** Reveal nonces never repeat, even after a request is cleared. */
+  let revealNonce = 0;
 
   const store = create<ChatState>((set, get) => ({
     isOpen: initialIsOpen,
     activeSessionId: storage.getItem(wsKey(SESSION_STORAGE_KEY)),
     selectedAgentId: storage.getItem(wsKey(AGENT_STORAGE_KEY)),
     draftProjectId: storage.getItem(wsKey(DRAFT_PROJECT_KEY)),
+    draftRuntimeWorkspaceId: null,
     inputDrafts: readDrafts(storage, wsKey(DRAFTS_KEY)),
     inputDraftAttachments: readDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY)),
+    localAttachmentDetails: {},
     chatWidth: Number(storage.getItem(CHAT_WIDTH_KEY)) || CHAT_DEFAULT_W,
     chatHeight: Number(storage.getItem(CHAT_HEIGHT_KEY)) || CHAT_DEFAULT_H,
     isExpanded: storage.getItem(wsKey(CHAT_EXPANDED_KEY)) === "true",
+    followUpMode: readFollowUpMode(storage),
+    queueEdit: readQueueEdits(storage, wsKey(QUEUE_EDIT_KEY)),
+    queueOutbox: readQueueOutbox(storage, wsKey(QUEUE_OUTBOX_KEY)),
+    subagentPanel: null,
+    subagentReveal: null,
+    dismissedBackgroundNotices: [],
     setOpen: (open) => {
       logger.debug("setOpen", { from: get().isOpen, to: open });
       storage.setItem(OPEN_KEY, String(open));
@@ -170,13 +367,22 @@ export function createChatStore(options: ChatStoreOptions) {
       set({ isOpen: next });
     },
     setActiveSession: (id) => {
-      logger.info("setActiveSession", { from: get().activeSessionId, to: id });
+      const previous = get().activeSessionId;
+      logger.info("setActiveSession", { from: previous, to: id });
       if (id) {
         storage.setItem(wsKey(SESSION_STORAGE_KEY), id);
       } else {
         storage.removeItem(wsKey(SESSION_STORAGE_KEY));
       }
-      set({ activeSessionId: id });
+      // The subagent panel and a reveal request belong to one chat.
+      const subagents = id !== previous ? { subagentPanel: null, subagentReveal: null } : {};
+      // A draft location belongs to one unsaved chat. Opening a real chat
+      // (just created, selected or navigated to) consumes it; leaving one
+      // (deleted, or a new chat started) begins the next draft unbound. Only
+      // draft to draft keeps it, so a caller binding the new chat sets it after.
+      const draft = id || previous ? { draftProjectId: null, draftRuntimeWorkspaceId: null } : {};
+      if (id || previous) storage.removeItem(wsKey(DRAFT_PROJECT_KEY));
+      set({ activeSessionId: id, ...subagents, ...draft });
     },
     setSelectedAgentId: (id) => {
       logger.info("setSelectedAgentId", { from: get().selectedAgentId, to: id });
@@ -188,10 +394,23 @@ export function createChatStore(options: ChatStoreOptions) {
       else storage.removeItem(wsKey(DRAFT_PROJECT_KEY));
       set({ draftProjectId: id });
     },
+    setDraftLocation: ({ projectId, runtimeWorkspaceId }) => {
+      const location = runtimeWorkspaceId
+        ? { draftProjectId: null, draftRuntimeWorkspaceId: runtimeWorkspaceId }
+        : { draftProjectId: projectId, draftRuntimeWorkspaceId: null };
+      if (location.draftProjectId) storage.setItem(wsKey(DRAFT_PROJECT_KEY), location.draftProjectId);
+      else storage.removeItem(wsKey(DRAFT_PROJECT_KEY));
+      set(location);
+    },
     setInputDraft: (sessionId, draft) => {
       // Debug level — onUpdate fires on every keystroke.
       logger.debug("setInputDraft", { sessionId, length: draft.length });
-      const next = { ...get().inputDrafts, [sessionId]: draft };
+      // An empty draft is no draft: its key goes, as in storage. Attachment
+      // bindings are left to their own setters.
+      if (!draft && !(sessionId in get().inputDrafts)) return;
+      const next = { ...get().inputDrafts };
+      if (draft) next[sessionId] = draft;
+      else delete next[sessionId];
       writeDrafts(storage, wsKey(DRAFTS_KEY), next);
       set({ inputDrafts: next });
     },
@@ -205,10 +424,12 @@ export function createChatStore(options: ChatStoreOptions) {
       const next = { ...current };
       delete next[sessionId];
       const nextAttachments = { ...get().inputDraftAttachments };
+      const nextDetails = { ...get().localAttachmentDetails };
+      for (const id of Object.values(nextAttachments[sessionId] ?? {})) delete nextDetails[id];
       delete nextAttachments[sessionId];
       writeDrafts(storage, wsKey(DRAFTS_KEY), next);
       writeDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY), nextAttachments);
-      set({ inputDrafts: next, inputDraftAttachments: nextAttachments });
+      set({ inputDrafts: next, inputDraftAttachments: nextAttachments, localAttachmentDetails: nextDetails });
     },
     setInputDraftAttachment: (draftKey, url, attachmentId) => {
       const current = get().inputDraftAttachments;
@@ -216,11 +437,16 @@ export function createChatStore(options: ChatStoreOptions) {
       writeDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY), next);
       set({ inputDraftAttachments: next });
     },
+    setLocalAttachmentDetail: (attachment) => set({ localAttachmentDetails: {
+      ...get().localAttachmentDetails, [attachment.id]: attachment,
+    } }),
     clearInputDraftAttachments: (draftKey) => {
       const next = { ...get().inputDraftAttachments };
+      const nextDetails = { ...get().localAttachmentDetails };
+      for (const id of Object.values(next[draftKey] ?? {})) delete nextDetails[id];
       delete next[draftKey];
       writeDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY), next);
-      set({ inputDraftAttachments: next });
+      set({ inputDraftAttachments: next, localAttachmentDetails: nextDetails });
     },
     setChatSize: (w, h) => {
       logger.debug("setChatSize", { w, h });
@@ -239,6 +465,129 @@ export function createChatStore(options: ChatStoreOptions) {
       }
       set({ isExpanded: expanded });
     },
+    setFollowUpMode: (mode) => {
+      storage.setItem(FOLLOW_UP_MODE_KEY, mode);
+      set({ followUpMode: mode });
+    },
+    startQueueEdit: (sessionId, edit) => {
+      const state = get();
+      const stash = state.queueEdit[sessionId]?.stash ?? {
+        draft: state.inputDrafts[sessionId] ?? "",
+        attachments: state.inputDraftAttachments[sessionId] ?? {},
+      };
+      const queueEdit = { ...state.queueEdit, [sessionId]: { itemId: edit.itemId, revision: edit.revision, stash } };
+      const inputDrafts = { ...state.inputDrafts, [sessionId]: edit.body_md };
+      const inputDraftAttachments = { ...state.inputDraftAttachments };
+      if (Object.keys(edit.attachments).length) inputDraftAttachments[sessionId] = edit.attachments;
+      else delete inputDraftAttachments[sessionId];
+      logger.info("startQueueEdit", { sessionId, itemId: edit.itemId });
+      writeJsonRecord(storage, wsKey(QUEUE_EDIT_KEY), queueEdit);
+      writeDrafts(storage, wsKey(DRAFTS_KEY), inputDrafts);
+      writeDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY), inputDraftAttachments);
+      set({ queueEdit, inputDrafts, inputDraftAttachments });
+    },
+    finishQueueEdit: (sessionId, outcome, keptText) => {
+      const state = get();
+      const edit = state.queueEdit[sessionId];
+      if (!edit) return;
+      const queueEdit = { ...state.queueEdit };
+      delete queueEdit[sessionId];
+      const { draft, attachments } = edit.stash;
+      const current = keptText ?? state.inputDrafts[sessionId] ?? "";
+      const nextDraft = outcome === "restore" ? draft
+        : [current.trim(), draft.trim()].filter(Boolean).join("\n\n");
+      const nextAttachments = outcome === "restore" ? attachments
+        : { ...attachments, ...state.inputDraftAttachments[sessionId] };
+      const inputDrafts = { ...state.inputDrafts, [sessionId]: nextDraft };
+      const inputDraftAttachments = { ...state.inputDraftAttachments };
+      if (Object.keys(nextAttachments).length) inputDraftAttachments[sessionId] = nextAttachments;
+      else delete inputDraftAttachments[sessionId];
+      logger.info("finishQueueEdit", { sessionId, itemId: edit.itemId, outcome });
+      writeJsonRecord(storage, wsKey(QUEUE_EDIT_KEY), queueEdit);
+      writeDrafts(storage, wsKey(DRAFTS_KEY), inputDrafts);
+      writeDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY), inputDraftAttachments);
+      set({ queueEdit, inputDrafts, inputDraftAttachments });
+    },
+    putQueueOutboxItem: (sessionId, item) => {
+      const current = get().queueOutbox;
+      const items = [...(current[sessionId] ?? []).filter((entry) => entry.client_id !== item.client_id), item]
+        .sort((a, b) => a.created_at.localeCompare(b.created_at));
+      const queueOutbox = { ...current, [sessionId]: items };
+      writeJsonRecord(storage, wsKey(QUEUE_OUTBOX_KEY), queueOutbox);
+      set({ queueOutbox });
+    },
+    removeQueueOutboxItem: (sessionId, clientId, workspaceSlug) => {
+      if (workspaceSlug !== undefined && workspaceSlug !== getCurrentSlug()) {
+        const key = workspaceSlug ? `${QUEUE_OUTBOX_KEY}:${workspaceSlug}` : QUEUE_OUTBOX_KEY;
+        const stored = readQueueOutbox(storage, key);
+        const items = (stored[sessionId] ?? []).filter((entry) => entry.client_id !== clientId);
+        if (items.length === (stored[sessionId]?.length ?? 0)) return;
+        if (items.length) stored[sessionId] = items;
+        else delete stored[sessionId];
+        writeJsonRecord(storage, key, stored);
+        return;
+      }
+      const current = get().queueOutbox;
+      if (!current[sessionId]?.some((entry) => entry.client_id === clientId)) return;
+      const items = current[sessionId]!.filter((entry) => entry.client_id !== clientId);
+      const queueOutbox = { ...current };
+      if (items.length) queueOutbox[sessionId] = items;
+      else delete queueOutbox[sessionId];
+      writeJsonRecord(storage, wsKey(QUEUE_OUTBOX_KEY), queueOutbox);
+      set({ queueOutbox });
+    },
+    restoreToDraft: (sessionId, body, attachments) => {
+      const state = get();
+      const join = (draft: string) => [draft.trim(), body].filter(Boolean).join("\n\n");
+      const edit = state.queueEdit[sessionId];
+      if (edit) {
+        const queueEdit = { ...state.queueEdit, [sessionId]: { ...edit, stash: {
+          draft: join(edit.stash.draft), attachments: { ...edit.stash.attachments, ...attachments },
+        } } };
+        writeJsonRecord(storage, wsKey(QUEUE_EDIT_KEY), queueEdit);
+        set({ queueEdit });
+        return;
+      }
+      const inputDrafts = { ...state.inputDrafts, [sessionId]: join(state.inputDrafts[sessionId] ?? "") };
+      const merged = { ...state.inputDraftAttachments[sessionId], ...attachments };
+      const inputDraftAttachments = { ...state.inputDraftAttachments };
+      if (Object.keys(merged).length) inputDraftAttachments[sessionId] = merged;
+      writeDrafts(storage, wsKey(DRAFTS_KEY), inputDrafts);
+      writeDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY), inputDraftAttachments);
+      set({ inputDrafts, inputDraftAttachments });
+    },
+    openSubagentPanel: (target) => set({ subagentPanel: { ...target, path: [...target.path], ...(target.task ? { task: { ...target.task } } : {}) } }),
+    setSubagentPath: (path) => {
+      const panel = get().subagentPanel;
+      if (panel) set({ subagentPanel: { ...panel, path: [...path] } });
+    },
+    closeSubagentPanel: () => {
+      if (get().subagentPanel || get().subagentReveal) set({ subagentPanel: null, subagentReveal: null });
+    },
+    revealSubagent: (attemptId, itemId) => set({ subagentReveal: { attemptId, itemId, nonce: ++revealNonce } }),
+    setPanelView: (view) => {
+      const panel = get().subagentPanel;
+      if (panel && (panel.view ?? "subagents") !== view) set({ subagentPanel: { ...panel, view, path: [], task: null } });
+    },
+    setPanelTask: (task) => {
+      const panel = get().subagentPanel;
+      if (panel) set({ subagentPanel: { ...panel, view: "tasks", path: [], task: task ? { ...task } : null } });
+    },
+    dismissBackgroundNotice: (rowId) => {
+      const dismissed = get().dismissedBackgroundNotices;
+      if (!dismissed.includes(rowId)) set({ dismissedBackgroundNotices: [...dismissed, rowId] });
+    },
+    clearQueueState: (sessionId) => {
+      const state = get();
+      if (!(sessionId in state.queueEdit) && !(sessionId in state.queueOutbox)) return;
+      const queueEdit = { ...state.queueEdit };
+      const queueOutbox = { ...state.queueOutbox };
+      delete queueEdit[sessionId];
+      delete queueOutbox[sessionId];
+      writeJsonRecord(storage, wsKey(QUEUE_EDIT_KEY), queueEdit);
+      writeJsonRecord(storage, wsKey(QUEUE_OUTBOX_KEY), queueOutbox);
+      set({ queueEdit, queueOutbox });
+    },
   }));
 
   registerForWorkspaceRehydration(() => {
@@ -256,8 +605,15 @@ export function createChatStore(options: ChatStoreOptions) {
       activeSessionId: nextSession,
       selectedAgentId: nextAgent,
       draftProjectId: storage.getItem(wsKey(DRAFT_PROJECT_KEY)),
+      draftRuntimeWorkspaceId: null,
       inputDrafts: nextDrafts,
       inputDraftAttachments: readDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY)),
+      localAttachmentDetails: {},
+      queueEdit: readQueueEdits(storage, wsKey(QUEUE_EDIT_KEY)),
+      queueOutbox: readQueueOutbox(storage, wsKey(QUEUE_OUTBOX_KEY)),
+      // Another workspace's chats never show this one's panel.
+      subagentPanel: null,
+      subagentReveal: null,
     });
   });
 

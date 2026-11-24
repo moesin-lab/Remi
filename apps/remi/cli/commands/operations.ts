@@ -1,8 +1,11 @@
+import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
 import {
   AsyncOperationController,
   CliError,
+  CliRenderer,
   ResourceResolver,
   sanitizeCliDetails,
+  isPublicUsageStatistic,
   type CliApiClient,
   type CliHttpMethod,
   type CliIdentity,
@@ -13,6 +16,9 @@ import {
   type CommandInvocation,
   type CommandSpec,
 } from "../core/index.js";
+import { formatRuntimeProtocol, type RuntimeProtocolStatus } from "@multiremi/contracts/runtime-protocol";
+import type { GcRunRequest, StoragePlanItem, StorageReport, WorkspaceStorageDaemonsResponse } from "@multiremi/contracts/storage.js";
+import type { UsageReport, UsageMetrics } from "@multiremi/contracts/usage-accounting";
 import {
   INPUT_OPTIONS,
   PAGE_OPTIONS,
@@ -33,12 +39,18 @@ import {
   stringOption,
   stringOptions,
 } from "./resource-common.js";
+import { taskTurnId } from "../core/task-context.js";
 import { PASSWORD_INPUT_OPTIONS, passwordAuthBody, passwordLoginCommandSpec, withValidatedPasswordInput } from "./password-auth.js";
 
 const HUMAN: readonly CliIdentity[] = ["human"];
 const HUMAN_TASK: readonly CliIdentity[] = ["human", "task"];
 const HUMAN_DAEMON: readonly CliIdentity[] = ["human", "daemon"];
 const DEPRECATED_SINCE = "0.3.0";
+const GC_RUN_WAIT_MS = 21 * 60_000;
+const ABANDON_ISSUE_WORKSPACES_OPTION: CliOptionSpec = {
+  name: "abandon-issue-workspaces", type: "boolean",
+  description: "Explicitly abandon active Issue workspaces and retain their local files",
+};
 
 type OperationPath = string | ((invocation: CommandInvocation, client: CliApiClient) => string | Promise<string>);
 
@@ -65,6 +77,7 @@ export function operationsCommandSpecs(): CommandSpec[] {
     ...runtimeSpecs(),
     ...daemonSpecs(),
     ...autopilotSpecs(),
+    ...automationSpecs(),
     ...scmSpecs(),
     ...messagingSpecs(),
     ...feishuSpecs(),
@@ -79,6 +92,26 @@ export function operationsCommandSpecs(): CommandSpec[] {
   ];
 }
 
+function executionConfigurationSpecs(): CommandSpec[] {
+  return ([
+    { resource: "profile", endpoint: "execution-profiles", collection: "profiles" },
+    { resource: "endpoint", endpoint: "execution-endpoints", collection: "endpoints" },
+    { resource: "group", endpoint: "execution-groups", collection: "groups" },
+  ] as const).flatMap(({ resource, endpoint, collection }) => {
+    const root = `/api/${endpoint}`;
+    const item = (i: CommandInvocation) => `${root}/${encodePath(positional(i, 0, resource))}`;
+    const scope = (i: CommandInvocation) => queryOptions(i, { workspace_id: requiredWorkspace(i) });
+
+    return [
+      ...(resource !== "group" ? [op({ id: `runtime.${resource}.list`, path: ["runtime", resource, "list"], description: resource === "endpoint" ? "List shared gateway endpoints and their API protocols" : "List legacy workspace connection profiles", method: "GET", apiPath: root, auth: HUMAN, query: scope, collections: [collection] })] : []),
+      op({ id: `runtime.${resource}.get`, path: ["runtime", resource, "get"], description: `Get a workspace execution ${resource}`, method: "GET", apiPath: item, auth: HUMAN, positionals: [ref(resource)], query: scope }),
+      op({ id: `runtime.${resource}.create`, path: ["runtime", resource, "create"], description: resource === "group" ? "Create a capability group, optionally configuring its provider and models with connection in the same JSON" : "Create a workspace execution profile from JSON", method: "POST", apiPath: root, mutation: "write", auth: HUMAN, options: resource === "group" ? [...INPUT_OPTIONS, { name: "blocked-model", type: "string", repeatable: true, valueName: "id", description: "Replace group blocked model IDs (repeatable); clear with model_policy.blocked_models: [] in JSON input" }] : INPUT_OPTIONS, query: scope, body: resource === "group" ? groupPolicyBody : withWorkspace }),
+      op({ id: `runtime.${resource}.update`, path: ["runtime", resource, "update"], description: resource === "group" ? "Save group description, membership and optional provider connection atomically from JSON" : "Replace a workspace execution profile configuration from JSON", method: "PUT", apiPath: item, mutation: "write", auth: HUMAN, positionals: [ref(resource)], options: resource === "group" ? [...INPUT_OPTIONS, { name: "blocked-model", type: "string", repeatable: true, valueName: "id", description: "Replace group blocked model IDs (repeatable); clear with model_policy.blocked_models: [] in JSON input" }] : INPUT_OPTIONS, query: scope, body: resource === "group" ? groupPolicyBody : withWorkspace }),
+      op({ id: `runtime.${resource}.delete`, path: ["runtime", resource, "delete"], description: `Delete an unused workspace execution ${resource}`, method: "DELETE", apiPath: item, mutation: "destructive", auth: HUMAN, positionals: [ref(resource)], query: scope }),
+    ];
+  });
+}
+
 function runtimeSpecs(): CommandSpec[] {
   const runtime = (suffix: string) => async (invocation: CommandInvocation, client: CliApiClient) => {
     const id = await resolveRuntimeId(client, invocation, positional(invocation, 0, "runtime"));
@@ -87,6 +120,9 @@ function runtimeSpecs(): CommandSpec[] {
   return [
     group("runtime", "Manage execution runtimes and cloud nodes"),
     op({ id: "runtime.group.list", path: ["runtime", "group", "list"], description: "List execution groups", method: "GET", apiPath: "/api/execution-groups", auth: HUMAN, query: (i) => queryOptions(i, { workspace_id: requiredWorkspace(i) }), collections: ["groups"] }),
+    ...executionConfigurationSpecs(),
+    op({ id: "runtime.endpoint.inspect", path: ["runtime", "endpoint", "inspect"], description: "Inspect a saved or draft endpoint from JSON: operation models, detect, or explicit single-model test (may incur cost)", method: "POST", apiPath: "/api/execution-endpoints/inspect", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
+    op({ id: "runtime.endpoint.catalog", path: ["runtime", "endpoint", "catalog"], description: "Read the last endpoint model inventory and refresh status", method: "GET", apiPath: i => `/api/execution-endpoints/${encodePath(positional(i, 0, "endpoint"))}/catalog`, auth: HUMAN, positionals: [ref("endpoint")], query: i => queryOptions(i, { workspace_id: requiredWorkspace(i) }), collections: ["catalogs"] }),
     op({ id: "runtime.codex-profile.get", path: ["runtime", "codex-profile", "get"], description: "Get a Runtime's custom Codex connection", method: "GET", apiPath: runtime("/codex-profile"), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
     op({ id: "runtime.codex-profile.set", path: ["runtime", "codex-profile", "set"], description: "Set a Codex connection with --file; profile: null restores the workspace gateway", method: "PUT", apiPath: runtime("/codex-profile"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.claude-profile.get", path: ["runtime", "claude-profile", "get"], description: "Get a Runtime's custom Claude Code connection", method: "GET", apiPath: runtime("/claude-profile"), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
@@ -118,15 +154,21 @@ function runtimeSpecs(): CommandSpec[] {
     op({ id: "runtime.get", path: ["runtime", "get"], description: "Get a runtime", method: "GET", apiPath: runtime(""), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
     op({ id: "runtime.create", path: ["runtime", "create"], description: "Register a runtime", method: "POST", apiPath: "/api/multiremi/runtimes", auth: HUMAN_DAEMON, options: INPUT_OPTIONS, body: withWorkspace }),
     op({ id: "runtime.update", path: ["runtime", "update"], description: "Update a runtime", method: "PATCH", apiPath: runtime(""), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: [...INPUT_OPTIONS, { name: "execution-group", type: "string", valueName: "group-id", description: "Assign this Runtime to an execution group" }], body: (i) => requestBody(i, { execution_group_id: stringOption(i, "execution-group") ?? undefined }) }),
-    op({ id: "runtime.delete", path: ["runtime", "delete"], description: "Delete a runtime after reporting active impact", method: "DELETE", apiPath: runtime(""), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], before: runtimeImpact }),
-    op({ id: "runtime.archive-agents-and-delete", path: ["runtime", "archive-agents-and-delete"], description: "Archive active agents and delete a runtime", method: "POST", apiPath: runtime("/archive-agents-and-delete"), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS, before: runtimeImpact }),
+    op({ id: "runtime.delete", path: ["runtime", "delete"], description: "Delete a runtime after reporting active impact", method: "DELETE", apiPath: runtime(""), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], before: runtimeImpact,
+      options: [ABANDON_ISSUE_WORKSPACES_OPTION],
+      query: i => ({ abandon_issue_workspaces: booleanOption(i, "abandon-issue-workspaces") ? true : undefined }) }),
+    op({ id: "runtime.archive-agents-and-delete", path: ["runtime", "archive-agents-and-delete"], description: "Archive active agents and delete a runtime", method: "POST", apiPath: runtime("/archive-agents-and-delete"), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], options: [...INPUT_OPTIONS, ABANDON_ISSUE_WORKSPACES_OPTION], before: runtimeImpact,
+      body: i => requestBody(i, { abandon_issue_workspaces: booleanOption(i, "abandon-issue-workspaces") ? true : undefined }) }),
     op({ id: "runtime.model.list", path: ["runtime", "model", "list"], description: "List runtime models", method: "GET", apiPath: runtime("/models"), auth: HUMAN_DAEMON, positionals: [ref("runtime")], collections: ["models"] }),
     op({ id: "runtime.model.set", path: ["runtime", "model", "set"], description: "Replace runtime model configuration", method: "PUT", apiPath: runtime("/models"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.model.refresh", path: ["runtime", "model", "refresh"], description: "Request a runtime model refresh", method: "POST", apiPath: runtime("/models"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.model.status", path: ["runtime", "model", "status"], description: "Get a model refresh request", method: "GET", apiPath: async (i, c) => `${await runtime("/models")(i, c)}/${encodePath(positional(i, 1, "request"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("request")] }),
-    op({ id: "runtime.release.start", path: ["runtime", "release", "start"], description: "Start a runtime update", method: "POST", apiPath: runtime("/update"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
-    op({ id: "runtime.release.status", path: ["runtime", "release", "status"], description: "Get a runtime update request", method: "GET", apiPath: async (i, c) => `${await runtime("/update")(i, c)}/${encodePath(positional(i, 1, "update"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("update")] }),
+    op({ id: "runtime.release.start", path: ["runtime", "release", "start"], description: "Upgrade the machine CLI (scope=cli), reinstall release-pinned ACP (scope=acp), or update Grok (scope=agent); Claude/Codex/Antigravity versions follow CLI releases", method: "POST", apiPath: runtime("/update"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
+    op({ id: "runtime.release.status", path: ["runtime", "release", "status"], description: "Get update status: pending, running, restarting, verifying, completed, rolled_back, failed or timeout", method: "GET", apiPath: async (i, c) => `${await runtime("/update")(i, c)}/${encodePath(positional(i, 1, "update"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("update")] }),
     runtimeCommandRunSpec(),
+    runtimeStorageSpec(),
+    runtimeGcSpec(),
+    runtimeGcStatusSpec(),
     op({ id: "runtime.skill.scan", path: ["runtime", "skill", "scan"], description: "Discover skills in a directory on the runtime machine", method: "POST", apiPath: runtime("/local-skills"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")],
       options: [...INPUT_OPTIONS, { name: "root", type: "string", valueName: "directory", description: "Absolute or ~/ directory on the runtime; defaults to the provider's skill directory" }],
       body: i => requestBody(i, { root: stringOption(i, "root") ?? undefined }) }),
@@ -234,8 +276,180 @@ function runtimeSpecs(): CommandSpec[] {
   }
 }
 
+function runtimeStorageSpec(): CommandSpec {
+  return {
+    id: "runtime.storage",
+    path: ["runtime", "storage"],
+    description: "Show the latest storage report of the daemon hosting a runtime",
+    capability: "runtime.storage",
+    auth: HUMAN,
+    mutation: "read",
+    outputs: ["table", "json", "jsonl"],
+    positionals: [ref("runtime")],
+    options: commandOptions(PAGE_OPTIONS),
+    run: async (invocation) => {
+      const client = await clientFor(invocation);
+      const runtimeId = await resolveRuntimeId(client, invocation, positional(invocation, 0, "runtime"));
+      const response = await client.request<WorkspaceStorageDaemonsResponse>({
+        method: "GET",
+        path: `/api/workspaces/${encodePath(requiredWorkspace(invocation))}/storage/daemons`,
+      });
+      const daemon = response.data.daemons.find((entry) => entry.runtime_ids.includes(runtimeId));
+      if (!daemon) throw new CliError("not_found", `no daemon reports storage for runtime ${runtimeId}`);
+      if (outputMode(invocation) !== "table") {
+        new CliRenderer().render(daemon, { mode: outputMode(invocation) });
+        return;
+      }
+      console.log(`Daemon: ${daemon.name} (${daemon.daemon_id}) ${daemon.online ? "online" : "offline"}`);
+      if (!daemon.report) {
+        console.log("No storage report yet.");
+        return;
+      }
+      console.log(`Reported: ${daemon.reported_at ?? "-"}`);
+      renderStorageReport(daemon.report);
+    },
+  };
+}
+
+function runtimeGcSpec(): CommandSpec {
+  return {
+    id: "runtime.gc",
+    path: ["runtime", "gc"],
+    description: "Run a storage reclaim round on the daemon hosting a runtime; --dry-run only reports the plan",
+    capability: "runtime.gc",
+    auth: HUMAN,
+    mutation: "write",
+    outputs: ["table", "json", "jsonl"],
+    positionals: [ref("runtime")],
+    options: commandOptions([
+      { name: "dry-run", type: "boolean", description: "Report what would be reclaimed without changing anything" },
+      { name: "wait", type: "boolean", description: "Wait for the round to finish and print its report" },
+    ], [YES_OPTION]),
+    run: async (invocation) => {
+      const dryRun = booleanOption(invocation, "dry-run") === true;
+      if (!dryRun && invocation.options.yes !== true) {
+        throw new CliError("usage", "runtime gc reclaims ended workspaces; pass --dry-run to preview or --yes to confirm");
+      }
+      const client = await clientFor(invocation);
+      const runtimeId = await resolveRuntimeId(client, invocation, positional(invocation, 0, "runtime"));
+      const base = `/api/runtimes/${encodePath(runtimeId)}/gc-runs`;
+      const created = (await client.request<{ request: GcRunRequest }>({
+        method: "POST",
+        path: base,
+        body: { mode: dryRun ? "dry_run" : "run" },
+      })).data.request;
+      if (booleanOption(invocation, "wait") !== true) {
+        renderGcRun(invocation, created);
+        return;
+      }
+      const controller = new AsyncOperationController<GcRunRequest>({
+        status: async (id) => (await client.request<{ request: GcRunRequest }>({
+          method: "GET",
+          path: `${base}/${encodePath(id)}`,
+        })).data.request,
+        cancel: async () => {
+          throw new CliError("usage", "storage GC runs cannot be cancelled from this CLI version");
+        },
+        state: (request) => request.status,
+        terminalStates: ["completed", "failed", "timeout"],
+        successStates: ["completed"],
+        failureDetails: (request) => request,
+      });
+      // The server times out a request after ten minutes pending plus ten minutes running; wait slightly longer to read that verdict.
+      renderGcRun(invocation, await controller.wait(created.id, { timeoutMs: GC_RUN_WAIT_MS, pollIntervalMs: 1_000 }));
+    },
+  };
+}
+
+function runtimeGcStatusSpec(): CommandSpec {
+  return {
+    id: "runtime.gc-status",
+    path: ["runtime", "gc-status"],
+    description: "Show a storage reclaim request created by runtime gc",
+    capability: "runtime.gc-status",
+    auth: HUMAN,
+    mutation: "read",
+    outputs: ["table", "json", "jsonl"],
+    positionals: [ref("runtime"), ref("request")],
+    options: commandOptions(PAGE_OPTIONS),
+    run: async (invocation) => {
+      const client = await clientFor(invocation);
+      const runtimeId = await resolveRuntimeId(client, invocation, positional(invocation, 0, "runtime"));
+      const response = await client.request<{ request: GcRunRequest }>({
+        method: "GET",
+        path: `/api/runtimes/${encodePath(runtimeId)}/gc-runs/${encodePath(positional(invocation, 1, "request"))}`,
+      });
+      renderGcRun(invocation, response.data.request);
+    },
+  };
+}
+
+function renderGcRun(invocation: CommandInvocation, request: GcRunRequest): void {
+  if (outputMode(invocation) !== "table") {
+    new CliRenderer().render(request, { mode: outputMode(invocation) });
+    return;
+  }
+  console.log(`GC run ${request.id}: ${request.mode} ${request.status}`);
+  if (request.report) renderStorageReport(request.report);
+}
+
+function renderStorageReport(report: StorageReport): void {
+  if (report.disk) console.log(`Disk: ${report.disk.level}; free ${report.disk.free_bytes}/${report.disk.total_bytes} bytes; claims ${report.disk.level === "critical" ? "paused" : "allowed"}; thresholds ${JSON.stringify(report.disk.thresholds ?? {})}`);
+  console.log(`Root: ${report.root}`);
+  console.log(`Round: ${report.mode} at ${report.generated_at}`);
+  const { bytes, subjects } = report;
+  console.log(bytes
+    ? `Disk: work ${formatBytes(bytes.work)}, env ${formatBytes(bytes.env)}, traces ${formatBytes(bytes.traces)}, shared ${formatBytes(bytes.shared)}, legacy ${formatBytes(bytes.legacy)} (measured ${report.bytes_measured_at ?? "at an unknown time"})`
+    : "Disk: not measured yet");
+  console.log(`Subjects: ${subjects.total} total, ${subjects.active} active, ${subjects.ended} ended, ${subjects.reclaimed} reclaimed`);
+  const retained = Object.entries(report.retained).map(([reason, count]) => `${reason} ${count}`).join(", ");
+  if (retained) console.log(`Retained: ${retained}`);
+  console.log(`This round: reclaimed ${report.reclaimed_this_round}, forgotten ${report.forgotten_this_round}, freed ${formatBytes(report.freed_bytes)}`);
+  for (const error of report.errors) console.log(`Error: ${error.subject_id ?? "-"}: ${error.message}`);
+  if (!report.plan.length) return;
+  console.log("");
+  new CliRenderer().render<StoragePlanItem>(report.plan, {
+    mode: "table",
+    columns: [
+      { header: "SUBJECT", value: (item) => item.subject.id, maxWidth: 40 },
+      { header: "KIND", value: (item) => item.subject.kind },
+      { header: "ACTION", value: (item) => item.action },
+      { header: "REASON", value: (item) => item.reason === "pressure" ? "Disk pressure" : item.reason },
+      { header: "SIZE", value: (item) => item.bytes === null ? null : formatBytes(item.bytes) },
+      { header: "UNSAVED", value: (item) => item.unsaved_work ? "yes" : "no" },
+    ],
+  });
+}
+
+function formatBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
+}
+
 function daemonSpecs(): CommandSpec[] {
+  const drainPath = (i: CommandInvocation) => {
+    const id = stringOption(i, "daemon-id") ?? process.env.MULTIREMI_DAEMON_ID;
+    if (!id) throw new CliError("usage", "Use --daemon-id <id> to select the daemon");
+    return `/api/daemons/${encodePath(id)}/drain`;
+  };
+  const daemonOption: CliOptionSpec = { name: "daemon-id", type: "string", description: "Daemon ID (or MULTIREMI_DAEMON_ID)" };
   return [
+    op({ id: "daemon.drain", path: ["daemon", "drain"], description: "Stop daemon task admission and drain (default deadline 5m)",
+      method: "POST", apiPath: drainPath, mutation: "write", auth: HUMAN,
+      query: i => ({ workspace_id: requiredWorkspace(i) }),
+      options: [daemonOption, { name: "deadline", type: "string", description: "Drain duration, e.g. 30s or 5m (up to 24h)" },
+        { name: "reason", type: "string", description: "manual, cli_update or deploy" }],
+      body: i => ({ deadline: stringOption(i, "deadline"), reason: stringOption(i, "reason") ?? "manual" }) }),
+    op({ id: "daemon.drain.status", path: ["daemon", "drain", "status"], description: "Show remaining tasks, start, deadline and runtime_recovery expiry action",
+      method: "GET", apiPath: drainPath, auth: HUMAN_TASK, options: [daemonOption], query: i => ({ workspace_id: requiredWorkspace(i) }) }),
+    op({ id: "daemon.undrain", path: ["daemon", "undrain"], description: "Resume task admission after a manual or deployment drain",
+      method: "DELETE", apiPath: drainPath, mutation: "write", auth: HUMAN, options: [daemonOption], query: i => ({ workspace_id: requiredWorkspace(i) }) }),
     group("daemon", "Manage local daemon lifecycle and machine retirement"),
     op({ id: "daemon.list", path: ["daemon", "list"], description: "List daemon machines", method: "GET", apiPath: "/api/multiremi/daemons", auth: HUMAN, query: (i) => ({ workspace_id: requiredWorkspace(i) }), collections: ["daemons"] }),
     op({ id: "daemon.get", path: ["daemon", "get"], description: "Get daemon routing settings", method: "GET", apiPath: (i) => `/api/daemons/${encodePath(positional(i, 0, "daemon"))}`, auth: HUMAN, positionals: [ref("daemon")], query: (i) => ({ workspace_id: requiredWorkspace(i) }) }),
@@ -260,6 +474,18 @@ function daemonSpecs(): CommandSpec[] {
       },
     }),
     op({ id: "daemon.retirement-plan", path: ["daemon", "retirement-plan"], description: "Review a daemon retirement plan", method: "GET", apiPath: (i) => `/api/multiremi/daemons/${encodePath(positional(i, 0, "daemon"))}/retirement-plan`, auth: HUMAN, positionals: [ref("daemon")], query: (i) => ({ workspace_id: requiredWorkspace(i) }) }),
+    op({ id: "workspace.magpie.get", path: ["workspace", "magpie", "get"], description: "Get the Magpie service address", method: "GET", apiPath: i => `/api/workspaces/${encodePath(requiredWorkspace(i))}/services/magpie`, auth: HUMAN }),
+    op({ id: "workspace.magpie.set", path: ["workspace", "magpie", "set"], description: "Set the Magpie service address", method: "PUT", apiPath: i => `/api/workspaces/${encodePath(requiredWorkspace(i))}/services/magpie`, auth: HUMAN, mutation: "write",
+      options: [
+        { name: "url", type: "string", description: "Magpie web service URL", conflictsWith: ["clear"] },
+        { name: "clear", type: "boolean", description: "Remove the service address", conflictsWith: ["url"] },
+      ],
+      body: i => {
+        if (i.options.clear === true) return { url: null };
+        if (typeof i.options.url !== "string" || !i.options.url) throw new CliError("usage", "Use --url or --clear");
+        return { url: i.options.url };
+      },
+    }),
     daemonRetireSpec(),
     ...["start", "stop", "restart", "status", "logs", "service"].map(localDaemonSpec),
   ];
@@ -322,12 +548,13 @@ function autopilotSpecs(): CommandSpec[] {
     group("autopilot", "Manage scheduled and webhook automations"),
     op({ id: "autopilot.list", path: ["autopilot", "list"], description: "List autopilots", method: "GET", apiPath: "/api/autopilots", auth: HUMAN, query: (i) => queryOptions(i, { workspace_id: requiredWorkspace(i) }), collections: ["autopilots"] }),
     op({ id: "autopilot.get", path: ["autopilot", "get"], description: "Get an autopilot", method: "GET", apiPath: base, auth: HUMAN, positionals: [ref("autopilot")] }),
-    op({ id: "autopilot.create", path: ["autopilot", "create"], description: "Create an autopilot", method: "POST", apiPath: "/api/autopilots", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
-    op({ id: "autopilot.update", path: ["autopilot", "update"], description: "Update an autopilot", method: "PATCH", apiPath: base, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
+    op({ id: "autopilot.create", path: ["autopilot", "create"], description: "Create an autopilot; --data may set delivery_chat_session_id for server-delivered run_only reports", method: "POST", apiPath: "/api/autopilots", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
+    op({ id: "autopilot.update", path: ["autopilot", "update"], description: "Update an autopilot; delivery_chat_session_id binds a report Chat, null clears it (human only)", method: "PATCH", apiPath: base, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.delete", path: ["autopilot", "delete"], description: "Delete an autopilot", method: "DELETE", apiPath: base, mutation: "destructive", auth: HUMAN, positionals: [ref("autopilot")] }),
+    autopilotRunGuard(),
     op({ id: "autopilot.run.list", path: ["autopilot", "run", "list"], description: "List autopilot runs including queued schedule targets", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs`, auth: HUMAN, positionals: [ref("autopilot")], options: [{ name: "limit", type: "integer", description: "Page size (up to 200)" }, { name: "offset", type: "integer", description: "Number of runs to skip" }], query: (i) => ({ limit: integerOption(i, "limit"), offset: integerOption(i, "offset") }), collections: ["runs"] }),
     op({ id: "autopilot.run.get", path: ["autopilot", "run", "get"], description: "Get an autopilot run", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs/${encodePath(positional(i, 1, "run"))}`, auth: HUMAN, positionals: [ref("autopilot"), ref("run")] }),
-    op({ id: "autopilot.run", path: ["autopilot", "run"], description: "Run an autopilot", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/trigger`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
+    op({ id: "autopilot.run-now", path: ["autopilot", "run-now"], description: "Start one run now (same as Run now in the UI); --data '{\"trigger_id\":\"...\"}' selects a schedule trigger", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/trigger`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.delivery.list", path: ["autopilot", "delivery", "list"], description: "List autopilot webhook deliveries", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/deliveries`, auth: HUMAN, positionals: [ref("autopilot")], collections: ["deliveries"] }),
     op({ id: "autopilot.delivery.get", path: ["autopilot", "delivery", "get"], description: "Get an autopilot delivery", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/deliveries/${encodePath(positional(i, 1, "delivery"))}`, auth: HUMAN, positionals: [ref("autopilot"), ref("delivery")] }),
     op({ id: "autopilot.delivery.replay", path: ["autopilot", "delivery", "replay"], description: "Replay an autopilot delivery", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/deliveries/${encodePath(positional(i, 1, "delivery"))}/replay`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("delivery")], options: INPUT_OPTIONS }),
@@ -339,6 +566,59 @@ function autopilotSpecs(): CommandSpec[] {
     op({ id: "autopilot.trigger.set-secret", path: ["autopilot", "trigger", "set-secret"], description: "Set a webhook signing secret", method: "PUT", apiPath: async (i, c) => `${await base(i, c)}/triggers/${encodePath(positional(i, 1, "trigger"))}/signing-secret`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("trigger")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.scheduler", path: ["autopilot", "scheduler"], description: "Get scheduler state", method: "GET", apiPath: "/api/multiremi/scheduler", auth: HUMAN }),
   ];
+}
+
+function automationSpecs(): CommandSpec[] {
+  return [
+    group("automation", "Report the outcome of the automation run this task belongs to"),
+    op({
+      id: "automation.quiet",
+      path: ["automation", "quiet"],
+      description: "Mark this automation run quiet when it has nothing worth reporting; its Chat is archived once the run completes",
+      method: "POST",
+      apiPath: (i) => `/api/turns/${encodePath(quietTurnId(i))}/automation/quiet`,
+      mutation: "write",
+      auth: HUMAN_TASK,
+      options: [{ name: "turn", type: "string", valueName: "turn", description: "Turn of the automation run; defaults to MULTIREMI_TURN_ID" }],
+    }),
+  ];
+}
+
+function quietTurnId(invocation: CommandInvocation): string {
+  const turn = stringOption(invocation, "turn") ?? taskTurnId() ?? undefined;
+  if (!turn) throw new CliError("usage", "automation quiet needs MULTIREMI_TURN_ID (set inside a task run) or --turn <turn>");
+  return turn;
+}
+
+/**
+ * MUL-468: `remi autopilot run <autopilot>` used to POST the trigger endpoint and
+ * start a run, while sharing its prefix with the read-only `run list` / `run get`
+ * queries. Two people read it as a query and launched runs they did not want, so
+ * the path is now a guard: it explains the three correct commands and, crucially,
+ * issues no HTTP request at all — not even resolving the autopilot name.
+ */
+function autopilotRunGuard(): CommandSpec {
+  return {
+    id: "autopilot.run.group",
+    path: ["autopilot", "run"],
+    description: "List or inspect autopilot runs (run list | run get); start one with autopilot run-now",
+    auth: HUMAN,
+    mutation: "read",
+    outputs: ["table", "json", "jsonl"],
+    // This retired positional has its own actionable refusal; do not let the
+    // namespace dispatcher replace it with generic unknown-subcommand help.
+    positionals: [{ name: "autopilot", required: false }],
+    parse: "passthrough",
+    run: async () => {
+      throw new CliError(
+        "usage",
+        "remi autopilot run no longer starts a run; use one of: "
+          + "remi autopilot run list <autopilot>, "
+          + "remi autopilot run get <autopilot> <run>, "
+          + "remi autopilot run-now <autopilot>",
+      );
+    },
+  };
 }
 
 function scmSpecs(): CommandSpec[] {
@@ -359,6 +639,7 @@ function scmSpecs(): CommandSpec[] {
     op({ id: "scm.repository.unbind", path: ["scm", "repository", "unbind"], description: "Unbind a repository from an SCM connection", method: "DELETE", apiPath: async (i, c) => `${await connection(i, c)}/repositories/${encodePath(positional(i, 1, "repository"))}`, mutation: "destructive", auth: HUMAN, positionals: [ref("connection"), ref("repository")] }),
     op({ id: "scm.event.list", path: ["scm", "event", "list"], description: "List normalized SCM events", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/events`, auth: HUMAN, collections: ["events"] }),
     op({ id: "scm.event.get", path: ["scm", "event", "get"], description: "Get an SCM event and evidence", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/events/${encodePath(positional(i, 0, "event"))}`, auth: HUMAN, positionals: [ref("event")] }),
+    op({ id: "scm.change-request.checks", path: ["scm", "change-request", "checks"], description: "Read live head checks by repository ID, owner/name or Git URL; observations do not authorize merge", method: "GET", apiPath: i => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/repositories/${encodePath(positional(i, 0, "repository"))}/change-requests/${encodePath(positional(i, 1, "number"))}/checks`, auth: HUMAN_TASK, positionals: [{ ...ref("repository"), description: "Repository ID, owner/name, or Git URL (HTTPS/SSH)" }, ref("number")] }),
     op({ id: "scm.change-request.list", path: ["scm", "change-request", "list"], description: "List change requests linked to an issue", method: "GET", apiPath: (i) => `/api/issues/${encodePath(positional(i, 0, "issue"))}/change-requests`, auth: HUMAN_TASK, positionals: [ref("issue")], collections: ["changeRequests"] }),
     op({ id: "scm.change-request.link", path: ["scm", "change-request", "link"], description: "Link a change request to an issue", method: "PUT", apiPath: changeRequestPath, mutation: "write", auth: HUMAN_TASK, positionals: [ref("issue"), ref("change-request")] }),
     op({ id: "scm.change-request.unlink", path: ["scm", "change-request", "unlink"], description: "Unlink a change request from an issue", method: "DELETE", apiPath: changeRequestPath, mutation: "destructive", auth: HUMAN_TASK, positionals: [ref("issue"), ref("change-request")] }),
@@ -710,7 +991,8 @@ function feishuSpecs(): CommandSpec[] {
       path: ["feishu", "route", "list"],
       description: "List Feishu concierge Agent routes",
       method: "GET",
-      apiPath: (i) => `${botBase(i)}/routes`,
+      apiPath: (i) => feishuBotPath(`${botBase(i)}/routes`, i),
+      options: [FEISHU_BOT_OPTION],
       auth: HUMAN,
       collections: ["routes"],
     }),
@@ -721,7 +1003,8 @@ function feishuSpecs(): CommandSpec[] {
       path: ["feishu", "chat", "list"],
       description: "List groups joined by the Feishu concierge bot",
       method: "GET",
-      apiPath: (i) => `${botBase(i)}/chats`,
+      apiPath: (i) => feishuBotPath(`${botBase(i)}/chats`, i),
+      options: [FEISHU_BOT_OPTION],
       auth: HUMAN,
       collections: ["chats"],
     }),
@@ -912,7 +1195,7 @@ function feishuSpecs(): CommandSpec[] {
       mutation: "write",
       outputs: ["table", "json", "jsonl"],
       positionals: [ref("scope")],
-      options: commandOptions([], [
+      options: commandOptions([FEISHU_BOT_OPTION], [], [
         ...(set ? [{
           name: "agent",
           type: "string" as const,
@@ -933,7 +1216,7 @@ function feishuSpecs(): CommandSpec[] {
         if (scope !== "chat" && chatId) throw new CliError("usage", "--chat is only valid for scope=chat");
 
         const client = await clientFor(invocation);
-        const path = `${botBase(invocation)}/routes`;
+        const path = feishuBotPath(`${botBase(invocation)}/routes`, invocation);
         const current = await client.request({ method: "GET", path });
         const routes = extractRecords(current.data, ["routes"]).map(routeWriteView);
         const target = (route: Record<string, unknown>) => route.scope === scope
@@ -1039,8 +1322,53 @@ function pinSpecs(): CommandSpec[] {
 }
 
 function dashboardSpecs(): CommandSpec[] {
+  const reportOptions: CliOptionSpec[] = [
+    { name: "days", type: "string", valueName: "n|all", description: "Calendar days in the viewer timezone; all reads full history" },
+    { name: "since", type: "string", valueName: "ISO", description: "Inclusive range start" },
+    { name: "until", type: "string", valueName: "ISO", description: "Exclusive range end" },
+    { name: "tz", type: "string", valueName: "IANA", description: "Viewer timezone" },
+    { name: "project", type: "string", valueName: "id", description: "Filter by execution Project" },
+    { name: "runtime", type: "string", valueName: "id", description: "Filter by Runtime" },
+    { name: "include", type: "string", valueName: "day_model", description: "Include one page of consumption-date × model detail" },
+    { name: "detail-limit", type: "integer", valueName: "1..500", description: "Detail groups per page (default 200)" },
+    { name: "detail-cursor", type: "string", valueName: "cursor", description: "Opaque next_cursor from the same scope, window and price revision" },
+  ];
+  const reportQuery = (i: CommandInvocation) => ({ workspace_id: requiredWorkspace(i), days: stringOption(i, "days"),
+    since: stringOption(i, "since"), until: stringOption(i, "until"), tz: stringOption(i, "tz"), project_id: stringOption(i, "project"), runtime_id: stringOption(i, "runtime"),
+    include: stringOption(i, "include"), detail_limit: integerOption(i, "detail-limit"), detail_cursor: stringOption(i, "detail-cursor") });
   return [
     group("dashboard", "Read workspace activity and usage analytics"),
+    op({ id: "dashboard.usage.report", path: ["dashboard", "usage", "report"], description: "Read actual consumption, context diagnostics, known cost subtotals and coverage from one snapshot", method: "GET", apiPath: "/api/usage/report", auth: HUMAN_TASK, options: reportOptions, query: reportQuery }),
+    { id: "dashboard.usage.reconcile", path: ["dashboard", "usage", "reconcile"], description: "Verify additive consumption and currency subtotals across report views; task counts are distinct and not additive",
+      capability: "dashboard.usage.reconcile", auth: HUMAN_TASK, mutation: "read", outputs: ["table", "json", "jsonl"], options: commandOptions(PAGE_OPTIONS, reportOptions),
+      run: async invocation => {
+        const client = await clientFor(invocation);
+        const response = await client.request({ method: "GET", path: "/api/usage/report", query: reportQuery(invocation) });
+        const report = response.data as UsageReport;
+        if (!report?.summary || !Array.isArray(report.daily) || !Array.isArray(report.by_agent) || !Array.isArray(report.by_model) || !Array.isArray(report.by_runtime)) throw new CliError("server", "Invalid usage report response");
+        const fields = ["actual_input_tokens", "actual_output_tokens", "actual_cache_read_tokens", "actual_cache_write_tokens", "actual_unsplit_tokens", "actual_total_tokens", "priced_tokens", "unpriced_tokens"] as const;
+        const discrepancies: Array<{ view: string; metric: string; expected: number; observed: number }> = [];
+        for (const view of ["daily", "by_agent", "by_model", "by_runtime"] as const) {
+          const rows: UsageMetrics[] = report[view];
+          for (const field of fields) {
+            const expected = report.summary[field], observed = rows.reduce((sum, row) => sum + row[field], 0);
+            if (!Number.isFinite(expected) || !Number.isFinite(observed) || expected !== observed) discrepancies.push({ view, metric: field, expected, observed });
+          }
+          for (const bucket of ["known_cost_by_currency", "reference_cost_by_currency", "sdk_estimate_cost_by_currency"] as const) {
+            const currencies = new Set([...Object.keys(report.summary[bucket] ?? {}), ...rows.flatMap(row => Object.keys(row[bucket] ?? {}))]);
+            for (const currency of currencies) {
+              const expected = report.summary[bucket]?.[currency] ?? 0, observed = rows.reduce((sum, row) => sum + (row[bucket]?.[currency] ?? 0), 0);
+              if (Math.abs(expected - observed) > 1e-9 * Math.max(1, Math.abs(expected))) discrepancies.push({ view, metric: `${bucket}_${currency}`, expected, observed });
+            }
+          }
+        }
+        const result = { reconciled: discrepancies.length === 0, as_of: report.as_of, pricing_revision: report.pricing_revision, window: report.window, distinct_task_count: report.summary.task_count, discrepancies };
+        renderSafe(invocation, result);
+        if (discrepancies.length) throw new CliError("server", "Usage report views do not reconcile", { details: discrepancies });
+      } },
+    op({ id: "dashboard.usage.prices.list", path: ["dashboard", "usage", "prices", "list"], description: "List historical price versions for exact provider/model/connection keys", method: "GET", apiPath: "/api/usage/prices", auth: HUMAN_TASK, query: i => ({ workspace_id: requiredWorkspace(i) }), collections: ["prices"] }),
+    op({ id: "dashboard.usage.prices.set", path: ["dashboard", "usage", "prices", "set"], description: "Append a configured or published price version with --file; unknown rates are null, free rates are 0", method: "POST", apiPath: "/api/usage/prices", auth: HUMAN, options: INPUT_OPTIONS, query: i => ({ workspace_id: requiredWorkspace(i) }) }),
+    op({ id: "dashboard.usage.prices.close", path: ["dashboard", "usage", "prices", "close"], description: "Close a price version without deleting its historical rates", method: "PATCH", apiPath: i => `/api/usage/prices/${encodePath(positional(i, 0, "price"))}`, auth: HUMAN, positionals: [ref("price")], options: [{ name: "effective-to", type: "string", required: true, valueName: "ISO", description: "Exclusive version end" }], query: i => ({ workspace_id: requiredWorkspace(i) }), body: i => ({ effective_to: stringOption(i, "effective-to") }) }),
     ...[
       ["dashboard.usage.daily", ["dashboard", "usage", "daily"], "/api/dashboard/usage/daily", "Get daily usage"],
       ["dashboard.usage.by-agent", ["dashboard", "usage", "by-agent"], "/api/dashboard/usage/by-agent", "Get usage by agent"],
@@ -1062,14 +1390,14 @@ function platformSpecs(): CommandSpec[] {
       ["platform.ready", ["platform", "ready"], "/readyz", "Get platform readiness"],
       ["platform.realtime", ["platform", "realtime"], "/health/realtime", "Get realtime transport health"],
       ["platform.config", ["platform", "config"], "/api/multiremi/platform/config", "Get effective platform configuration and degradation status"],
-      ["platform.status", ["platform", "status"], "/api/multiremi/platform/status", "Get platform deployment status"],
+      ["platform.status", ["platform", "status"], "/api/multiremi/platform/status", "Get platform status, reported updateMode and preflight.source artifact availability by mode"],
       ["platform.operation.list", ["platform", "operation", "list"], "/api/multiremi/platform/operations", "List platform operations"],
       ["platform.feedback.list", ["platform", "feedback", "list"], "/api/multiremi/feedback", "List product feedback"],
       ["platform.release.version", ["platform", "release", "version"], "/api/remi/releases/latest/version", "Get the latest CLI release version"],
     ].map(([id, path, apiPath, description]) => op({ id: id as string, path: path as string[], description: description as string, method: "GET", apiPath: apiPath as string, auth: HUMAN })),
     op({ id: "platform.feedback.create", path: ["platform", "feedback", "create"], description: "Submit product feedback", method: "POST", apiPath: "/api/feedback", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS }),
-    op({ id: "platform.settings.update", path: ["platform", "settings", "update"], description: "Update platform settings", method: "PATCH", apiPath: "/api/multiremi/platform/settings", mutation: "destructive", auth: HUMAN, options: INPUT_OPTIONS }),
-    op({ id: "platform.operation.create", path: ["platform", "operation", "create"], description: "Queue a platform update, restart, rollback, or update check; updates and rollbacks wait for active tasks without a deadline by default", method: "POST", apiPath: "/api/multiremi/platform/operations", mutation: "destructive", auth: HUMAN, options: INPUT_OPTIONS }),
+    op({ id: "platform.settings.update", path: ["platform", "settings", "update"], description: "Update the platform schedule or HTTPS releaseFeedUrl (null restores the host default)", method: "PATCH", apiPath: "/api/multiremi/platform/settings", mutation: "destructive", auth: HUMAN, options: INPUT_OPTIONS }),
+    op({ id: "platform.operation.create", path: ["platform", "operation", "create"], description: "Queue an update, restart, rollback, or check_updates readiness check; service changes require preflight and wait for agents to finish without a deadline by default", method: "POST", apiPath: "/api/multiremi/platform/operations", mutation: "destructive", auth: HUMAN, options: INPUT_OPTIONS }),
     op({ id: "platform.operation.cancel", path: ["platform", "operation", "cancel"], description: "Cancel a queued or running platform operation", method: "POST", apiPath: (i) => `/api/multiremi/platform/operations/${encodePath(positional(i, 0, "operation"))}/cancel`, mutation: "destructive", auth: HUMAN, positionals: [ref("operation")] }),
     op({ id: "platform.release.latest", path: ["platform", "release", "latest"], description: "Get latest release metadata", method: "GET", apiPath: (i) => `/api/remi/releases/latest/${encodePath(positional(i, 0, "filename"))}`, auth: HUMAN, positionals: [ref("filename")] }),
     op({ id: "platform.release.get", path: ["platform", "release", "get"], description: "Get tagged release metadata", method: "GET", apiPath: (i) => `/api/remi/releases/download/${encodePath(positional(i, 0, "tag"))}/${encodePath(positional(i, 1, "filename"))}`, auth: HUMAN, positionals: [ref("tag"), ref("filename")] }),
@@ -1180,7 +1508,43 @@ function op(definition: OperationDefinition): CommandSpec {
         query: definition.query?.(invocation) ?? (mutation === "read" ? queryOptions(invocation) : undefined),
         body,
       });
-      renderSafe(invocation, response.data, definition.collections);
+      if (definition.id === "runtime.model.catalog") {
+        renderModelCatalog(invocation, response.data);
+      } else if (definition.id === "scm.change-request.checks") {
+        renderScmChecks(invocation, response.data);
+      } else if (definition.id === "runtime.list" && outputMode(invocation) === "table") {
+        const safe = omitSecretFields(sanitizeCliDetails(response.data));
+        const rows = extractRecords(safe, definition.collections ?? []);
+        new CliRenderer().render(safe, {
+          mode: "table", rows: () => rows,
+          columns: [
+            { header: "ID", value: row => row.id ?? "-", maxWidth: 28 },
+            { header: "NAME", value: row => row.name ?? "-", maxWidth: 48 },
+            { header: "STATUS", value: row => row.status ?? "-", maxWidth: 24 },
+            { header: "HEALTH", value: row => JSON.stringify((row.metadata as Record<string, unknown> | undefined)?.health ?? {}), maxWidth: 120 },
+            { header: "DETAIL", value: row => row.email ?? row.url ?? row.description ?? "-", maxWidth: 72 },
+            { header: "PROTOCOL", value: row => row.protocol ? formatRuntimeProtocol(row.protocol as RuntimeProtocolStatus) : "-" },
+          ],
+        });
+      } else {
+        const renderData = definition.id === "runtime.group.get" && outputMode(invocation) === "table"
+          && isRecord(response.data) && isRecord(response.data.group) ? response.data.group : response.data;
+        renderSafe(invocation, renderData, definition.collections);
+        if (definition.id === "runtime.group.get" && outputMode(invocation) === "table") {
+          const data = response.data as { group?: { model_policy?: Record<string, unknown> } };
+          console.log(`Default model: ${data.group?.model_policy?.model || "not configured"}`);
+          console.log(`Allowed models: ${JSON.stringify(data.group?.model_policy?.models ?? [])}`);
+          console.log(`Blocked models: ${JSON.stringify(data.group?.model_policy?.blocked_models ?? [])}`);
+        }
+        if (definition.id === "runtime.get" && outputMode(invocation) === "table") {
+          const data = response.data as { runtime?: { metadata?: Record<string, unknown> }; metadata?: Record<string, unknown> };
+          console.log(`Health: ${JSON.stringify((data.runtime ?? data).metadata?.health ?? {})}`);
+        }
+        if (definition.id === "platform.status" && outputMode(invocation) === "table") {
+          const summary = (response.data as { daemonProtocol?: { pending: number; failed: number } }).daemonProtocol;
+          if (summary) console.log(`待升级 ${summary.pending} 台 / 失败 ${summary.failed} 台`);
+        }
+      }
     },
   };
 }
@@ -1248,6 +1612,30 @@ function renderSafe(invocation: CommandInvocation, value: unknown, collections: 
   renderResource(invocation, omitSecretFields(sanitizeCliDetails(value)), collections);
 }
 
+function renderScmChecks(invocation: CommandInvocation, value: unknown): void {
+  const safe = omitSecretFields(sanitizeCliDetails(value));
+  if (outputMode(invocation) === "json") {
+    renderResource(invocation, safe);
+    return;
+  }
+  const summary = isRecord(safe) && isRecord(safe.summary) ? safe.summary : {};
+  if (outputMode(invocation) === "table") {
+    const cell = (value: unknown) => String(value ?? "-").replace(/\s+/g, " ");
+    console.log(`Head SHA: ${cell(summary.headSha)}  Conclusion: ${cell(summary.conclusion)}  Observed at: ${cell(summary.observedAt)}`);
+  }
+  new CliRenderer().render(summary, {
+    mode: outputMode(invocation),
+    rows: () => Array.isArray(summary.checks) ? summary.checks.filter(isRecord) : [],
+    columns: [
+      { header: "NAME", value: row => row.name },
+      { header: "STATUS", value: row => row.status },
+      { header: "CONCLUSION", value: row => row.conclusion },
+      { header: "LINK / ID", value: row => row.url || row.id },
+    ],
+    emptyMessage: "No checks observed.",
+  });
+}
+
 function renderRuntimeCommandResult(invocation: CommandInvocation, value: Record<string, unknown>): void {
   if (outputMode(invocation) !== "table") {
     renderSafe(invocation, value);
@@ -1265,7 +1653,7 @@ function omitSecretFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(omitSecretFields);
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !/(?:authorization|token|password|secret|api[-_]?key|credential|cookie)/i.test(key))
+    .filter(([key, entry]) => isPublicUsageStatistic(key, entry) || !/(?:authorization|token|password|secret|api[-_]?key|credential|cookie)/i.test(key))
     .map(([key, entry]) => [key, omitSecretFields(entry)]));
 }
 
@@ -1281,4 +1669,43 @@ function requiredStringOption(invocation: CommandInvocation, name: string): stri
   const value = stringOption(invocation, name);
   if (!value) throw new CliError("usage", `--${name} is required`);
   return value;
+}
+
+async function groupPolicyBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
+  const body = await withWorkspace(invocation);
+  const blocked = stringOptions(invocation, "blocked-model");
+  if (blocked.length) {
+    if (body.model_policy !== undefined && !isRecord(body.model_policy)) throw new CliError("usage", "model_policy must be an object");
+    body.model_policy = { ...(body.model_policy as Record<string, unknown> | undefined), blocked_models: blocked };
+  }
+  return body;
+}
+
+function renderModelCatalog(invocation: CommandInvocation, value: unknown): void {
+  const safe = omitSecretFields(sanitizeCliDetails(value));
+  if (outputMode(invocation) === "json") { renderResource(invocation, safe); return; }
+  const rows: Record<string, unknown>[] = extractRecords(safe, ["providers"]).flatMap(bucket => {
+    const models = extractRecords(bucket.models, []);
+    const blocked = Array.isArray(bucket.blocked_models) ? bucket.blocked_models : [];
+    const defaults = models.filter(model => model.default).map(model => model.id).join(", ");
+    return (models.length ? models : [{}]).map(model => ({ ...model,
+      provider: bucket.provider, catalog_status: bucket.model_catalog_status ?? "unspecified",
+      default_model: defaults || "none identified", blocked_models: blocked,
+    }));
+  });
+  new CliRenderer().render(safe, {
+    mode: outputMode(invocation), rows: () => rows,
+    emptyMessage: "No model catalogs found.",
+    columns: [
+      { header: "ENGINE", value: row => row.provider },
+      { header: "MODEL", value: row => row.id },
+      { header: "LABEL", value: row => row.label },
+      { header: "CATALOG", value: row => row.catalog_status },
+      { header: "EXECUTION", value: row => row.execution_status },
+      { header: "DEFAULT", value: row => row.default_model },
+      { header: "REASONING", value: row => isRecord(row.thinking) && Array.isArray(row.thinking.supported_levels)
+        ? row.thinking.supported_levels.filter(isRecord).map(level => level.value).join(", ") : "-" },
+      { header: "BLOCKED", value: row => row.blocked_models },
+    ],
+  });
 }

@@ -44,6 +44,9 @@ const dropHandlers = vi.hoisted(() => ({
 }));
 const editorProps = vi.hoisted(() => ({
   last: null as null | Record<string, unknown>,
+  setContent: vi.fn(),
+  /** Mimic ContentEditor's own defaultValue sync of a clean editor. */
+  syncDefault: false,
 }));
 const logger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -76,11 +79,20 @@ vi.mock("../../editor", () => ({
     const { defaultValue, onUpdate, placeholder, onUploadFile } = props;
     editorProps.last = props as unknown as Record<string, unknown>;
     const valueRef = useRef<string>(defaultValue ?? "");
+    const lastDefault = useRef<string>(defaultValue ?? "");
+    if (editorProps.syncDefault && (defaultValue ?? "") !== lastDefault.current) {
+      if (valueRef.current === lastDefault.current) valueRef.current = defaultValue ?? "";
+      lastDefault.current = defaultValue ?? "";
+    }
     const uploadingRef = useRef(0);
     useImperativeHandle(ref, () => ({
       getMarkdown: () => valueRef.current,
       clearContent: () => {
         valueRef.current = "";
+      },
+      setContent: (markdown: string) => {
+        editorProps.setContent(markdown);
+        valueRef.current = markdown;
       },
       blur: () => {},
       focus: () => {},
@@ -119,6 +131,15 @@ vi.mock("@multiremi/core/chat", () => {
     selectedAgentId: "agent-1",
     inputDrafts: {} as Record<string, string>,
     inputDraftAttachments: {} as Record<string, Record<string, string>>,
+    localAttachmentDetails: {} as Record<string, UploadResult>,
+    followUpMode: "queue" as "steer" | "queue",
+    queueEdit: {} as Record<string, { itemId: string; revision: number; stash: { draft: string; attachments: Record<string, string> } }>,
+    finishQueueEdit: vi.fn((key: string, outcome: "restore" | "keep") => {
+      const edit = state.queueEdit[key];
+      if (!edit) return;
+      delete state.queueEdit[key];
+      if (outcome === "restore") state.inputDrafts[key] = edit.stash.draft;
+    }),
     setInputDraft: vi.fn((key: string, content: string) => {
       state.inputDrafts[key] = content;
     }),
@@ -132,6 +153,13 @@ vi.mock("@multiremi/core/chat", () => {
         [url]: id,
       };
     }),
+    setLocalAttachmentDetail: vi.fn((attachment: UploadResult) => {
+      state.localAttachmentDetails[attachment.id] = attachment;
+    }),
+    restoreToDraft: vi.fn((key: string, body: string, attachments: Record<string, string>) => {
+      state.inputDrafts[key] = [state.inputDrafts[key]?.trim(), body].filter(Boolean).join("\n\n");
+      state.inputDraftAttachments[key] = { ...state.inputDraftAttachments[key], ...attachments };
+    }),
   };
   return {
     DRAFT_NEW_SESSION: "__draft_new__",
@@ -143,19 +171,31 @@ vi.mock("@multiremi/core/chat", () => {
   };
 });
 
-import { ChatInput } from "./chat-input";
+import { ChatInput, chatComposerAction, STOP_CONFIRM_MS } from "./chat-input";
 import { ApiError } from "@multiremi/core/api";
 import { useChatStore } from "@multiremi/core/chat";
 import { setCurrentWorkspace } from "@multiremi/core/platform";
+import { CHAT_COLUMN_CLASS } from "../lib/chat-column";
 beforeEach(() => {
   vi.clearAllMocks();
   setCurrentWorkspace("demo", "ws-1");
   const state = useChatStore.getState();
   state.inputDrafts = {};
   state.inputDraftAttachments = {};
+  state.localAttachmentDetails = {};
   state.activeSessionId = null;
   state.selectedAgentId = "agent-1";
+  // The store's default when nothing is stored.
+  state.followUpMode = "queue";
+  state.queueEdit = {};
+  editorProps.syncDefault = false;
 });
+
+/** The editor's Mod-Enter / Mod-Shift-Enter handler, as Tiptap calls it. */
+function pressSubmitShortcut(invert: boolean) {
+  const onSubmit = editorProps.last?.onSubmit as ((options: { invert: boolean }) => void) | undefined;
+  act(() => onSubmit?.({ invert }));
+}
 
 function renderInput(
   props: Partial<React.ComponentProps<typeof ChatInput>> = {},
@@ -177,6 +217,8 @@ function renderInput(
         onUploadFile={onUploadFile}
         agentName="Multiremi"
         {...props}
+        // The chat on screen; tests name it through the mocked store.
+        sessionId={props.sessionId !== undefined ? props.sessionId : useChatStore.getState().activeSessionId}
       />
     </I18nProvider>,
   );
@@ -248,8 +290,9 @@ describe("ChatInput attachment wiring", () => {
     fireEvent.click(sendButton!);
 
     expect(onSend).toHaveBeenCalledTimes(1);
-    const [, ids] = onSend.mock.calls[0]!;
+    const [, ids, localAttachments] = onSend.mock.calls[0]!;
     expect(ids).toEqual(["att-42"]);
+    expect(localAttachments).toMatchObject([{ id: "att-42", filename: "x.png" }]);
   });
 
   it("disables send while an upload is in flight, re-enables after it resolves", async () => {
@@ -317,6 +360,22 @@ describe("ChatInput attachment wiring", () => {
     // in this test (no leftAdornment passed). So a single button = submit.
     expect(buttons.length).toBe(1);
   });
+
+  it("lays the pickers and the actions out in one footer row", () => {
+    renderInput({ leftAdornment: <button type="button">Agent</button>, rightAdornment: <span>Ring</span> });
+    const footer = document.querySelector<HTMLElement>("[data-chat-composer-footer]")!;
+    const start = footer.querySelector<HTMLElement>("[data-chat-composer-footer-start]")!;
+    // The pickers shrink into what the actions leave instead of sliding under
+    // them, and their box is the container the location label collapses in.
+    expect(start).toContainElement(screen.getByRole("button", { name: "Agent" }));
+    expect(start.className).toMatch(/(^|\s)@container(\s|$)/);
+    expect(start.className).toContain("min-w-0");
+    expect(start.className).toContain("flex-1");
+    const actions = start.nextElementSibling as HTMLElement;
+    expect(actions.className).toContain("shrink-0");
+    expect(actions).toContainElement(screen.getByRole("button", { name: "Send" }));
+    expect(actions).toHaveTextContent("Ring");
+  });
 });
 
 describe("ChatInput sending and queue", () => {
@@ -333,7 +392,7 @@ describe("ChatInput sending and queue", () => {
     await screen.findByRole("alert");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
-    expect(onSend).toHaveBeenLastCalledWith("Please keep this", undefined);
+    expect(onSend).toHaveBeenLastCalledWith("Please keep this", undefined, [], "send");
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
@@ -374,7 +433,7 @@ describe("ChatInput sending and queue", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await screen.findByRole("alert");
-    expect(onSend).toHaveBeenCalledWith(content, ["att-failed"]);
+    expect(onSend).toHaveBeenCalledWith(content, ["att-failed"], [attachment], "send");
     expect(useChatStore.getState().inputDrafts["session-1"]).toBe(content);
     expect(useChatStore.getState().inputDraftAttachments["session-1"]).toEqual({
       "https://cdn.example/failed.png": "att-failed",
@@ -397,19 +456,27 @@ describe("ChatInput sending and queue", () => {
     expect(logged).not.toContain(sensitiveCause);
   });
 
-  it("allows queueing without removing the current stop control", async () => {
-    const onSend = vi.fn().mockResolvedValue(undefined);
-    const onStop = vi.fn();
-    renderInput({ onSend, onStop, isRunning: true, supportsQueue: true });
-    fireEvent.change(screen.getByTestId("editor"), {
-      target: { value: "Next instruction" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add to queue" }));
-    await waitFor(() =>
-      expect(onSend).toHaveBeenCalledWith("Next instruction", undefined),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-    expect(onStop).toHaveBeenCalledOnce();
+  it("keeps the draft of the chat on screen, not of the stored selection", () => {
+    // The page shows session-1 while the stored selection names a new chat.
+    useChatStore.getState().activeSessionId = null;
+    renderInput({ sessionId: "session-1" });
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "For the chat on screen" } });
+    expect(useChatStore.getState().inputDrafts).toEqual({ "session-1": "For the chat on screen" });
+  });
+
+  it("clears the composer on submit and keeps what is typed while the send is in flight", async () => {
+    useChatStore.getState().activeSessionId = "session-1";
+    let finish!: () => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    renderInput({ onSend });
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "Sent text" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(useChatStore.getState().inputDrafts["session-1"]).toBeUndefined();
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "Typed meanwhile" } });
+    await act(async () => { finish(); });
+    expect(useChatStore.getState().inputDrafts["session-1"]).toBe("Typed meanwhile");
+    // Only the submit emptied the editor (without an update); nothing wrote into it after.
+    expect(editorProps.setContent.mock.calls).toEqual([[""]]);
   });
 
   it("does not send from an archived session", () => {
@@ -449,7 +516,7 @@ it("retains uploaded attachment IDs when moving to another chat surface", async 
   await waitFor(() =>
     expect(onSend).toHaveBeenCalledWith("![](https://cdn.example/cross.png)", [
       "att-cross",
-    ]),
+    ], [uploaded], "send"),
   );
   await waitFor(() =>
     expect(
@@ -499,4 +566,540 @@ it("does not clear a new workspace draft when an earlier send completes", async 
   expect(state.inputDrafts["__draft_new__:agent-1"]).toBe(
     "New workspace draft",
   );
+});
+
+describe("ChatInput follow-up modes", () => {
+  const type = (value: string) =>
+    fireEvent.change(screen.getByTestId("editor"), { target: { value } });
+  /** Lets the previous send settle so the next one is not skipped as in flight. */
+  const settle = () => act(async () => {});
+
+  it("sends normally while idle, from the button and from either shortcut", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend });
+    expect(screen.queryByRole("button", { name: "Steer" })).toBeNull();
+    type("Idle message");
+    pressSubmitShortcut(true);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("Idle message", undefined, [], "send"));
+    await settle();
+    type("Second");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("Second", undefined, [], "send"));
+  });
+
+  it("queues by default while running; Mod-Shift-Enter steers this one message", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    const onStop = vi.fn();
+    renderInput({ onSend, onStop, isRunning: true });
+    type("After this run");
+    const button = screen.getByRole("button", { name: "Queue" });
+    expect(button).toHaveAttribute("title", "Queue · Ctrl+Enter\nSteer · Ctrl+Shift+Enter");
+    expect(button).toHaveAttribute("data-composer-action", "queue");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("After this run", undefined, [], "queue"));
+    await settle();
+    type("Right now");
+    pressSubmitShortcut(true);
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("Right now", undefined, [], "steer"));
+    await settle();
+    type("Click");
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("Click", undefined, [], "queue"));
+    await settle();
+    // The composer emptied: the same button now stops the run.
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it("steers when the preference says so; Mod-Shift-Enter queues", async () => {
+    useChatStore.getState().followUpMode = "steer";
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend, isRunning: true });
+    type("Use the staging database");
+    const button = screen.getByRole("button", { name: "Steer" });
+    expect(button).toHaveAttribute("title", "Steer · Ctrl+Enter\nQueue · Ctrl+Shift+Enter");
+    expect(button).toHaveAttribute("data-composer-action", "steer");
+    fireEvent.click(button);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("Use the staging database", undefined, [], "steer"));
+    await settle();
+    type("Then write the summary");
+    pressSubmitShortcut(true);
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("Then write the summary", undefined, [], "queue"));
+  });
+
+  it.each([
+    ["idle, empty", { editing: false, isRunning: false, isEmpty: true, isSending: false }, "queue", "send"],
+    ["idle, typed", { editing: false, isRunning: false, isEmpty: false, isSending: false }, "steer", "send"],
+    ["running, empty", { editing: false, isRunning: true, isEmpty: true, isSending: false }, "queue", "stop"],
+    ["running, empty, steer preference", { editing: false, isRunning: true, isEmpty: true, isSending: false }, "steer", "stop"],
+    ["running, typed", { editing: false, isRunning: true, isEmpty: false, isSending: false }, "queue", "queue"],
+    ["running, typed, steer preference", { editing: false, isRunning: true, isEmpty: false, isSending: false }, "steer", "steer"],
+    ["running, a send in flight", { editing: false, isRunning: true, isEmpty: true, isSending: true }, "queue", "queue"],
+    ["editing a queued message", { editing: true, isRunning: true, isEmpty: false, isSending: false }, "queue", "save"],
+    ["editing, emptied", { editing: true, isRunning: true, isEmpty: true, isSending: false }, "queue", "save"],
+  ] as const)("one primary button: %s", (_name, state, preference, action) => {
+    expect(chatComposerAction({ ...state, preference })).toBe(action);
+  });
+
+  it("shows one button per state: Send, Stop, the follow-up mode", async () => {
+    const onStop = vi.fn();
+    const view = renderInput({ onStop });
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    const rerender = (props: Partial<React.ComponentProps<typeof ChatInput>>) => view.rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId={null} onSend={vi.fn()} onStop={onStop} agentName="Multiremi" {...props} />
+      </I18nProvider>,
+    );
+    rerender({ isRunning: true, stopLabel: "Stop the reply (background tasks keep running)" });
+    const stop = screen.getByRole("button", { name: "Stop the reply (background tasks keep running)" });
+    expect(stop).toHaveAttribute("data-composer-action", "stop");
+    expect(stop).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Queue" })).toBeNull();
+    type("Typed");
+    expect(screen.queryByRole("button", { name: /Stop/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Queue" })).toBeEnabled();
+    // The same element changes, so focus stays on it.
+    expect(screen.getByRole("button", { name: "Queue" })).toBe(stop);
+    type("");
+    expect(screen.getByRole("button", { name: /^Stop/ })).toBe(stop);
+    rerender({ isRunning: false });
+    expect(screen.getByRole("button", { name: "Send" })).toBe(stop);
+  });
+
+  it("replaces Stop with the submit as soon as text is typed, before the editor's debounced update", () => {
+    renderInput({ onStop: vi.fn(), isRunning: true });
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    // An editing host the mock does not report through onUpdate.
+    const host = document.createElement("div");
+    host.textContent = "t";
+    document.querySelector("[data-chat-composer]")!.appendChild(host);
+    fireEvent.input(host);
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Queue" })).toBeInTheDocument();
+    expect(useChatStore.getState().setInputDraft).not.toHaveBeenCalled();
+  });
+
+  it("does not stop the run from the second click of a double click on submit", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    const onStop = vi.fn();
+    renderInput({ onSend, onStop, isRunning: true });
+    type("Queued once");
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }), { detail: 1 });
+    await settle();
+    const stop = screen.getByRole("button", { name: "Stop" });
+    fireEvent.click(stop, { detail: 2 });
+    expect(onStop).not.toHaveBeenCalled();
+    fireEvent.click(stop, { detail: 1 });
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the spinning submit, not Stop, while a send is in flight", async () => {
+    let finish!: () => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    renderInput({ onSend, onStop: vi.fn(), isRunning: true });
+    type("In flight");
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    expect(screen.getByRole("button", { name: "Queue" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    await act(async () => { finish(); });
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+  });
+
+  it("stops from Esc twice without clearing the typed draft", () => {
+    useChatStore.getState().activeSessionId = "session-1";
+    const onStop = vi.fn();
+    renderInput({ onStop, isRunning: true, stopLabel: "Stop the reply (background tasks keep running)" });
+    type("Half-written follow-up");
+    const editorKeydown = vi.fn();
+    screen.getByTestId("editor").addEventListener("keydown", editorKeydown);
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Escape" });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Press Esc again to confirm: Stop the reply (background tasks keep running)",
+    );
+    expect(onStop).not.toHaveBeenCalled();
+    // The editor's Escape-to-blur does not run, so the second Esc lands here.
+    expect(editorKeydown).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Escape" });
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(useChatStore.getState().inputDrafts["session-1"]).toBe("Half-written follow-up");
+  });
+
+  it("disarms the Esc stop on another key or after the confirm window", () => {
+    vi.useFakeTimers();
+    try {
+      const onStop = vi.fn();
+      renderInput({ onStop, isRunning: true });
+      const editor = screen.getByTestId("editor");
+      fireEvent.keyDown(editor, { key: "Escape" });
+      fireEvent.keyDown(editor, { key: "a" });
+      expect(screen.queryByRole("status")).toBeNull();
+      fireEvent.keyDown(editor, { key: "Escape" });
+      act(() => { vi.advanceTimersByTime(STOP_CONFIRM_MS); });
+      expect(screen.queryByRole("status")).toBeNull();
+      fireEvent.keyDown(editor, { key: "Escape" });
+      expect(onStop).not.toHaveBeenCalled();
+      // An IME composition keeps its Esc.
+      fireEvent.keyDown(editor, { key: "Escape", isComposing: true });
+      expect(onStop).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves Esc to the editor while idle", () => {
+    renderInput({ onStop: vi.fn() });
+    const editorKeydown = vi.fn();
+    screen.getByTestId("editor").addEventListener("keydown", editorKeydown);
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Escape" });
+    expect(editorKeydown).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("steers the first queued message from Mod-Shift-Enter on an empty composer while queueing", () => {
+    const onSend = vi.fn();
+    const onSteerFirstQueued = vi.fn();
+    renderInput({ onSend, onSteerFirstQueued, isRunning: true });
+    // Mod-Enter would queue, and there is nothing to queue.
+    pressSubmitShortcut(false);
+    expect(onSteerFirstQueued).not.toHaveBeenCalled();
+    pressSubmitShortcut(true);
+    expect(onSteerFirstQueued).toHaveBeenCalledOnce();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the steer preference", { followUpMode: "steer" as const, isRunning: true }],
+    ["an idle chat", { followUpMode: "queue" as const, isRunning: false }],
+  ])("does not steer a queued message from an empty composer with %s", (_name, { followUpMode, isRunning }) => {
+    useChatStore.getState().followUpMode = followUpMode;
+    const onSteerFirstQueued = vi.fn();
+    renderInput({ onSteerFirstQueued, isRunning });
+    pressSubmitShortcut(false);
+    pressSubmitShortcut(true);
+    expect(onSteerFirstQueued).not.toHaveBeenCalled();
+  });
+
+  it("never sends from bare Enter, so a composing IME candidate cannot submit", () => {
+    renderInput({ isRunning: true });
+    // Only the Mod shortcuts submit; the extension also ignores them while composing.
+    expect(editorProps.last?.submitOnEnter).toBeUndefined();
+    expect(typeof editorProps.last?.onSubmit).toBe("function");
+    // Chat opts in to Mod-Shift-Enter; other editors leave it unbound.
+    expect(editorProps.last?.invertibleSubmit).toBe(true);
+  });
+
+  it.each([
+    ["queue_full", "The queue is full (50 messages). Steer or delete queued messages first."],
+    ["chat_archived", "This chat is archived. Restore it to send queued messages."],
+  ])("explains a %s refusal and keeps the draft", async (code, copy) => {
+    const onSend = vi.fn().mockRejectedValue(new ApiError(code, code === "queue_full" ? 400 : 409, "x", { error: code, code }));
+    renderInput({ onSend, isRunning: true });
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "One more" } });
+    pressSubmitShortcut(false);
+    expect(await screen.findByRole("alert")).toHaveTextContent(copy);
+    expect(onSend).toHaveBeenCalledWith("One more", undefined, [], "queue");
+  });
+});
+
+describe("ChatInput queued-message edit", () => {
+  const edit = { itemId: "qmsg_1", revision: 2, stash: { draft: "my own draft", attachments: {} } };
+  function editing(onSaveQueueEdit = vi.fn().mockResolvedValue(undefined)) {
+    const state = useChatStore.getState();
+    state.activeSessionId = "session-1";
+    state.inputDrafts["session-1"] = "Queued text";
+    state.queueEdit["session-1"] = edit;
+    const onSend = vi.fn();
+    const view = renderInput({ onSend, onSaveQueueEdit, isRunning: true });
+    return { ...view, onSend, onSaveQueueEdit };
+  }
+
+  it("shows the edit strip and saves through the queue instead of sending", async () => {
+    const { onSend, onSaveQueueEdit } = editing();
+    expect(screen.getByText("Editing queued message")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Steer" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Queue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "Queued text, edited" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaveQueueEdit).toHaveBeenCalledWith("session-1", edit, "Queued text, edited", []));
+    expect(onSend).not.toHaveBeenCalled();
+    // The store settles the draft; the composer clears nothing itself.
+    expect(useChatStore.getState().clearInputDraft).not.toHaveBeenCalled();
+  });
+
+  it("saves from Mod-Enter and Mod-Shift-Enter alike", async () => {
+    const { onSaveQueueEdit } = editing();
+    pressSubmitShortcut(true);
+    await waitFor(() => expect(onSaveQueueEdit).toHaveBeenCalledWith("session-1", edit, "Queued text", []));
+  });
+
+  it("keeps Save, and steers nothing, when the edited text is emptied", () => {
+    const state = useChatStore.getState();
+    state.activeSessionId = "session-1";
+    state.inputDrafts["session-1"] = "Queued text";
+    state.queueEdit["session-1"] = edit;
+    const onSteerFirstQueued = vi.fn();
+    renderInput({ onSteerFirstQueued, onStop: vi.fn(), isRunning: true });
+    // The mock textarea starts blank, so change it before emptying it.
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "x" } });
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    pressSubmitShortcut(true);
+    expect(onSteerFirstQueued).not.toHaveBeenCalled();
+  });
+
+  it("cancels from the strip and from Esc, restoring the stashed draft into the editor", async () => {
+    editing();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(useChatStore.getState().finishQueueEdit).toHaveBeenCalledWith("session-1", "restore");
+    useChatStore.getState().queueEdit["session-1"] = edit;
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Escape" });
+    expect(useChatStore.getState().finishQueueEdit).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops Esc at the composer so the editor's blur shortcut does not run", () => {
+    editing();
+    const editorKeydown = vi.fn();
+    screen.getByTestId("editor").addEventListener("keydown", editorKeydown);
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Escape" });
+    expect(useChatStore.getState().finishQueueEdit).toHaveBeenCalledWith("session-1", "restore");
+    expect(editorKeydown).not.toHaveBeenCalled();
+  });
+
+  it("keeps Esc for an IME composition or an open suggestion", () => {
+    const { container } = editing();
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Escape", isComposing: true });
+    const suggestion = document.createElement("span");
+    suggestion.className = "suggestion";
+    container.querySelector("[aria-disabled], [data-testid='drop-zone']")?.appendChild(suggestion);
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Escape" });
+    expect(useChatStore.getState().finishQueueEdit).not.toHaveBeenCalled();
+  });
+
+  it("writes a draft changed outside the editor into it", async () => {
+    const state = useChatStore.getState();
+    state.activeSessionId = "session-1";
+    state.inputDrafts["session-1"] = "Before";
+    const view = renderInput({});
+    state.inputDrafts["session-1"] = "Loaded queued message";
+    view.rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId="session-1" onSend={vi.fn()} agentName="Multiremi" />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(editorProps.setContent).toHaveBeenCalledWith("Loaded queued message"));
+  });
+
+  it("does not treat the lazily created session of a first send as an outside edit", async () => {
+    let finish!: () => void;
+    const onSend = vi.fn(() => {
+      useChatStore.getState().activeSessionId = "session-new";
+      return new Promise<void>((resolve) => { finish = resolve; });
+    });
+    const view = renderInput({ onSend });
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "First message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    view.rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId="session-new" onSend={onSend} agentName="Multiremi" />
+      </I18nProvider>,
+    );
+    await act(async () => { finish(); });
+    // The submit's own emptying, not an outside draft written into the editor.
+    expect(editorProps.setContent.mock.calls).toEqual([[""]]);
+  });
+
+  it("enables the primary button when an outside change fills an empty draft", async () => {
+    editorProps.syncDefault = true;
+    const state = useChatStore.getState();
+    state.activeSessionId = "session-1";
+    const view = renderInput({});
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    state.inputDrafts["session-1"] = "Loaded queued message";
+    view.rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId="session-1" onSend={vi.fn()} agentName="Multiremi" />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled());
+  });
+
+  it("explains a failed save and stays in edit mode", async () => {
+    editing(vi.fn().mockRejectedValue(new Error("offline")));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not update the queue");
+    expect(screen.getByText("Editing queued message")).toBeInTheDocument();
+  });
+});
+
+describe("ChatInput slash commands (ADR 0025)", () => {
+  const type = (value: string) =>
+    fireEvent.change(screen.getByTestId("editor"), { target: { value } });
+  const settle = () => act(async () => {});
+  const menu = (provider: string | null) => ({ status: "ready" as const, catalogue: "session" as const, provider, items: [] });
+
+  it("gives the editor the agent's menu and says when it opens", () => {
+    const onSlashCommandsOpen = vi.fn();
+    const slashCommands = menu("claude");
+    renderInput({ slashCommands, onSlashCommandsOpen });
+    expect(editorProps.last?.slashCommands).toBe(slashCommands);
+    (editorProps.last?.onSlashMenuOpen as () => void)();
+    expect(onSlashCommandsOpen).toHaveBeenCalledOnce();
+  });
+
+  it("has no menu where none is given", () => {
+    renderInput({});
+    expect(editorProps.last?.slashCommands).toBeUndefined();
+  });
+
+  it("queues a command while the agent runs, whatever the preference or shortcut", async () => {
+    useChatStore.getState().followUpMode = "steer";
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend, isRunning: true });
+    type("/compact keep the plan");
+    // The button says what will happen, and offers no steer.
+    const button = screen.getByRole("button", { name: "Queue" });
+    expect(button).toHaveAttribute("data-composer-action", "queue");
+    expect(button).toHaveAttribute("title", "Queue · Ctrl+Enter\nA command runs after this turn ends");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("/compact keep the plan", undefined, [], "queue"));
+    await settle();
+    type("/review");
+    pressSubmitShortcut(true);
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("/review", undefined, [], "queue"));
+    await settle();
+    // Ordinary text still follows the preference.
+    type("Use the staging database");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("Use the staging database", undefined, [], "steer"));
+  });
+
+  it("sends a command normally while idle", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend });
+    type("/compact");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("/compact", undefined, [], "send"));
+  });
+
+  it("warns, without stopping the send, about a command Remi does not run for the agent's provider", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend, slashCommands: menu("claude") });
+    type("/model opus");
+    expect(screen.getByRole("status")).toHaveTextContent("Remi doesn't run /model in Chat. The agent gets it as plain text.");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("/model opus", undefined, [], "send"));
+    await waitFor(() => expect(document.querySelector("[data-chat-blocked-command]")).toBeNull());
+  });
+
+  it("does not warn about a command the provider does run, or before the provider is known", () => {
+    const first = renderInput({ slashCommands: menu("codex") });
+    type("/model");
+    expect(document.querySelector("[data-chat-blocked-command]")).toBeNull();
+    first.unmount();
+    renderInput({ slashCommands: menu(null) });
+    type("/clear");
+    expect(document.querySelector("[data-chat-blocked-command]")).toBeNull();
+  });
+});
+
+describe("ChatInput model chip", () => {
+  const opus = { modelId: "claude-opus-4-1-20250805", label: "Opus 4.1", effort: null, fallback: false };
+  const chip = () => document.querySelector<HTMLElement>("[data-chat-model]");
+
+  it("names the model read-only after the pickers in the footer's start slot", () => {
+    renderInput({ leftAdornment: <button type="button">Agent</button>, model: opus });
+    const start = document.querySelector<HTMLElement>("[data-chat-composer-footer-start]")!;
+    const shown = screen.getByRole("group", { name: "Model: Opus 4.1" });
+    expect(shown).toBe(chip());
+    expect(start).toContainElement(shown);
+    expect(screen.getByRole("button", { name: "Agent" }).compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(shown).toHaveTextContent(/^Opus 4\.1$/);
+    // Not a control: no button inside, no menu chevron, no hover background.
+    expect(shown.querySelector("button")).toBeNull();
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).not.toContain("Opus 4.1");
+    expect(shown.className).not.toMatch(/hover:/);
+    expect(shown).toHaveClass("cursor-default");
+    // The full id and where it is changed.
+    expect(shown.title).toBe("claude-opus-4-1-20250805\nSet in the agent's settings");
+  });
+
+  it("adds the effort level after the name", () => {
+    renderInput({ model: { ...opus, effort: "High" } });
+    expect(screen.getByRole("group", { name: "Model: Opus 4.1 · High" })).toHaveTextContent("Opus 4.1· High");
+    expect(chip()!.title).toBe("claude-opus-4-1-20250805\nReasoning effort: High\nSet in the agent's settings");
+  });
+
+  it("shows the raw id when the catalog has no name for it", () => {
+    renderInput({ model: { ...opus, label: null } });
+    expect(screen.getByRole("group", { name: "Model: claude-opus-4-1-20250805" })).toBeInTheDocument();
+  });
+
+  it("calls an unset model the default model", () => {
+    renderInput({ model: { modelId: null, label: null, effort: null, fallback: false } });
+    expect(screen.getByRole("group", { name: "Model: Default model" })).toHaveTextContent("Default model");
+    expect(chip()!.title).toBe("No model set: the runtime's default model runs\nSet in the agent's settings");
+  });
+
+  it("explains a running turn that switched to the fallback model", () => {
+    renderInput({ model: { modelId: "claude-sonnet-4-5", label: "Sonnet 4.5", effort: null, fallback: true } });
+    expect(screen.getByRole("group", { name: "Model: Sonnet 4.5" })).toBeInTheDocument();
+    expect(chip()!.title).toBe("claude-sonnet-4-5\nThis turn switched to the fallback model\nSet in the agent's settings");
+    expect(chip()!.querySelector("svg")).toHaveClass("text-warning");
+  });
+
+  it("takes only the room the pickers leave: the name truncates, then the effort and the chip hide", () => {
+    renderInput({ leftAdornment: <button type="button">Agent</button>, model: { ...opus, effort: "High" } });
+    const shown = chip()!;
+    // Its slot grows from zero into the free space (never squeezing a picker)
+    // and is the container its own narrow-width rules read.
+    const slot = shown.parentElement!;
+    expect(slot).toHaveAttribute("data-chat-model-slot");
+    expect(slot.className).toMatch(/(^|\s)@container\/model(\s|$)/);
+    expect(slot).toHaveClass("flex-1", "min-w-0", "max-w-64");
+    expect(slot.className).not.toMatch(/(^|\s)shrink-0(\s|$)/);
+    expect(shown).toHaveClass("min-w-0", "max-w-full", "@max-[4.5rem]/model:hidden");
+    expect(shown.querySelector("[data-chat-model-name]")).toHaveClass("min-w-0", "truncate");
+    expect(shown.lastElementChild).toHaveClass("shrink-0", "whitespace-nowrap", "@max-[8rem]/model:hidden");
+    // It sits in the start slot, which yields to the actions; the send button keeps its own box.
+    const start = document.querySelector<HTMLElement>("[data-chat-composer-footer-start]")!;
+    expect(start.lastElementChild).toBe(slot);
+    const actions = start.nextElementSibling as HTMLElement;
+    expect(actions).not.toContainElement(shown);
+    expect(actions).toContainElement(screen.getByRole("button", { name: "Send" }));
+  });
+
+  it("renders nothing while there is no agent or it is still loading", () => {
+    const { rerender } = renderInput({ leftAdornment: <button type="button">Agent</button> });
+    expect(chip()).toBeNull();
+    rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId={null} onSend={vi.fn()} model={null} />
+      </I18nProvider>,
+    );
+    expect(chip()).toBeNull();
+    // Arriving later adds only the chip: no placeholder was reserved for it.
+    const start = document.querySelector<HTMLElement>("[data-chat-composer-footer-start]")!;
+    expect(start.children).toHaveLength(0);
+    rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId={null} onSend={vi.fn()} model={opus} />
+      </I18nProvider>,
+    );
+    expect(start.children).toHaveLength(1);
+    expect(start.firstElementChild).toContainElement(chip());
+  });
+});
+
+describe("ChatInput Chat column", () => {
+  it("puts the composer's border on the shared Chat column's edges, like the message text", () => {
+    renderInput({});
+    const composer = document.querySelector<HTMLElement>("[data-chat-composer]")!;
+    expect(composer.parentElement).toHaveClass(...CHAT_COLUMN_CLASS.split(" "));
+    // The card fills the column: no width or inset of its own to drift from the list's.
+    expect(composer).toHaveClass("w-full");
+    expect(composer.className).not.toMatch(/(^|\s)(max-w-|mx-|px-)/);
+  });
 });

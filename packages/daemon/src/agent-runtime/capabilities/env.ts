@@ -14,9 +14,10 @@ export const envBlock: CapabilityBlock = {
       env: buildTaskEnv(task, {
         daemonPort: daemonOptions.daemonPort,
         serverUrl: daemonOptions.serverUrl,
-        workDir: ctx.workDir,
+        workDir: ctx.workspaceDir,
         providerHome: ctx.providerHome,
         providerEnv: ctx.providerEnv,
+        taskContextFile: ctx.taskContextFile,
       }),
     };
   },

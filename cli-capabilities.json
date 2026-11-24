@@ -4,7 +4,9 @@
   "max_planned_routes": 0,
   "domains": [
     "context",
+    "db",
     "workspace",
+    "account",
     "member",
     "invite",
     "token",
@@ -21,6 +23,8 @@
     "attachment",
     "chat",
     "task",
+    "message",
+    "turn",
     "agent",
     "squad",
     "skill",
@@ -28,6 +32,7 @@
     "runtime",
     "daemon",
     "autopilot",
+    "automation",
     "scm",
     "messaging",
     "feishu",
@@ -40,6 +45,42 @@
     "lark"
   ],
   "commands": {
+    "db.schema": {
+      "command": "remi db schema",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "db.prepare": {
+      "command": "remi db prepare",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "db.contract": {
+      "command": "remi db contract",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "context.get": {
       "command": "remi context",
       "aliases": [],
@@ -153,22 +194,6 @@
         "human"
       ],
       "capability": "workspace.delete",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "workspace.leave": {
-      "command": "remi workspace leave",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "workspace.leave",
       "mutation": "destructive",
       "output": [
         "table",
@@ -463,6 +488,40 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.system-model-endpoints.get": {
+      "command": "remi workspace system-model-endpoints get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-model-endpoints.set": {
+      "command": "remi workspace system-model-endpoints set",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.relay.discovery": {
       "command": "remi workspace relay discovery",
       "aliases": [],
@@ -564,6 +623,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.relay.context-window.update": {
+      "command": "remi workspace relay context-window update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.context-window.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.bot-menu.get": {
       "command": "remi workspace bot-menu get",
       "aliases": [],
@@ -621,6 +697,38 @@
       ],
       "capability": "workspace.bot-menu.publish-status",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.feishu-bot.list": {
+      "command": "remi workspace feishu-bot list",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.feishu-bot.create": {
+      "command": "remi workspace feishu-bot create",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.create",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -954,8 +1062,41 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "member": {
-      "command": "remi member",
+    "workspace.storage.get": {
+      "command": "remi workspace storage get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.storage.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.storage.set": {
+      "command": "remi workspace storage set",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.storage.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account": {
+      "command": "remi account",
       "aliases": [],
       "auth": [],
       "capability": null,
@@ -964,14 +1105,142 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "member.list": {
-      "command": "remi member list",
-      "aliases": [],
+    "workspace.operator": {
+      "command": "remi workspace operator",
+      "aliases": [
+        "remi member list"
+      ],
       "auth": [
         "human"
       ],
-      "capability": "member.list",
+      "capability": "workspace.operator",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.get": {
+      "command": "remi account get",
+      "aliases": [
+        "remi member get me"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.update": {
+      "command": "remi account update",
+      "aliases": [
+        "remi member update me"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.update": {
+      "command": "remi account onboarding update",
+      "aliases": [
+        "remi member onboarding update"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.complete": {
+      "command": "remi account onboarding complete",
+      "aliases": [
+        "remi member onboarding complete"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.complete",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.cloud-waitlist": {
+      "command": "remi account onboarding cloud-waitlist",
+      "aliases": [
+        "remi member onboarding cloud-waitlist"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.cloud-waitlist",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.runtime-bootstrap": {
+      "command": "remi account onboarding runtime-bootstrap",
+      "aliases": [
+        "remi member onboarding runtime-bootstrap"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.runtime-bootstrap",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.no-runtime-bootstrap": {
+      "command": "remi account onboarding no-runtime-bootstrap",
+      "aliases": [
+        "remi member onboarding no-runtime-bootstrap"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.no-runtime-bootstrap",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -993,23 +1262,7 @@
         "json",
         "jsonl"
       ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.create": {
-      "command": "remi member create",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.create",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
+      "hidden": true,
       "migration_status": "native"
     },
     "member.update": {
@@ -1018,216 +1271,10 @@
       "auth": [
         "human"
       ],
-      "capability": "member.update",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.delete": {
-      "command": "remi member delete",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.delete",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.update": {
-      "command": "remi member onboarding update",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.update",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.complete": {
-      "command": "remi member onboarding complete",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.complete",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.cloud-waitlist": {
-      "command": "remi member onboarding cloud-waitlist",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.cloud-waitlist",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.runtime-bootstrap": {
-      "command": "remi member onboarding runtime-bootstrap",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.runtime-bootstrap",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.no-runtime-bootstrap": {
-      "command": "remi member onboarding no-runtime-bootstrap",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.no-runtime-bootstrap",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite": {
-      "command": "remi invite",
-      "aliases": [],
-      "auth": [],
       "capability": null,
-      "mutation": "read",
+      "mutation": "write",
       "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.list": {
-      "command": "remi invite list",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.get": {
-      "command": "remi invite get",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.get",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.create": {
-      "command": "remi invite create",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.create",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.accept": {
-      "command": "remi invite accept",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.accept",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.decline": {
-      "command": "remi invite decline",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.decline",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.revoke": {
-      "command": "remi invite revoke",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.revoke",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
+      "hidden": true,
       "migration_status": "native"
     },
     "token": {
@@ -2755,23 +2802,6 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "issue.rerun": {
-      "command": "remi issue rerun",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.rerun",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
     "issue.retitle": {
       "command": "remi issue retitle",
       "aliases": [],
@@ -2781,249 +2811,6 @@
       ],
       "capability": "issue.retitle",
       "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "issue.cancel": {
-      "command": "remi issue cancel-task",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.cancel",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "issue.task-runs": {
-      "command": "remi issue runs",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.task-runs",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.messages": {
-      "command": "remi issue run-messages",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.messages",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment": {
-      "command": "remi comment",
-      "aliases": [],
-      "auth": [],
-      "capability": null,
-      "mutation": "read",
-      "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.list": {
-      "command": "remi comment list",
-      "aliases": [
-        "remi issue comment list"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.add": {
-      "command": "remi comment add",
-      "aliases": [
-        "remi issue comment add"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.add",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.update": {
-      "command": "remi comment update",
-      "aliases": [
-        "remi issue comment update"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.update",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.delete": {
-      "command": "remi comment delete",
-      "aliases": [
-        "remi issue comment delete"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.delete",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.resolve": {
-      "command": "remi comment resolve",
-      "aliases": [
-        "remi issue comment resolve"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.resolve",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.unresolve": {
-      "command": "remi comment unresolve",
-      "aliases": [
-        "remi issue comment unresolve"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.unresolve",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.reaction.list": {
-      "command": "remi comment reaction list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.reaction.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.reaction.add": {
-      "command": "remi comment reaction add",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.reaction.add",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.reaction.remove": {
-      "command": "remi comment reaction remove",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.reaction.remove",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "comment.attachment.list": {
-      "command": "remi comment attachment list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.attachment.list",
-      "mutation": "read",
       "output": [
         "table",
         "json",
@@ -3044,9 +2831,7 @@
     },
     "session.list": {
       "command": "remi session list",
-      "aliases": [
-        "remi issue session list"
-      ],
+      "aliases": [],
       "auth": [
         "human",
         "task"
@@ -3129,6 +2914,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "session.adopt": {
+      "command": "remi session adopt",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.adopt",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "session.update": {
       "command": "remi session update",
       "aliases": [],
@@ -3197,79 +2999,9 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "session.event.list": {
-      "command": "remi session event list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.event.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "session.message.create": {
-      "command": "remi session message create",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.message.create",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "session.task.list": {
-      "command": "remi session task list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.task.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "session.task.create": {
-      "command": "remi session task create",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.task.create",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
     "session.result.list": {
       "command": "remi session result list",
-      "aliases": [
-        "remi issue session result list"
-      ],
+      "aliases": [],
       "auth": [
         "human",
         "task"
@@ -3286,9 +3018,7 @@
     },
     "session.result.publish": {
       "command": "remi session result publish",
-      "aliases": [
-        "remi issue session result publish"
-      ],
+      "aliases": [],
       "auth": [
         "human",
         "task"
@@ -3303,90 +3033,14 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "session.archive.list": {
-      "command": "remi session archive list",
-      "aliases": [
-        "remi issue archive list"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "session.archive.status": {
-      "command": "remi session archive status",
-      "aliases": [
-        "remi issue archive status"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.status",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "session.archive.verify": {
-      "command": "remi session archive verify",
-      "aliases": [
-        "remi issue archive verify"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.verify",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "session.archive.retry": {
-      "command": "remi session archive retry",
-      "aliases": [
-        "remi issue archive retry"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.retry",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "session.config.get": {
-      "command": "remi session config get",
+    "issue.session.list": {
+      "command": "remi issue session list",
       "aliases": [],
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.config.get",
+      "capability": "issue.session.list",
       "mutation": "read",
       "output": [
         "table",
@@ -3396,15 +3050,151 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "session.config.update": {
-      "command": "remi session config update",
+    "issue.session.get": {
+      "command": "remi issue session get",
       "aliases": [],
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.config.update",
+      "capability": "issue.session.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.create": {
+      "command": "remi issue session create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.create",
       "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.update": {
+      "command": "remi issue session update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.participant.list": {
+      "command": "remi issue session participant list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.participant.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.participant.add": {
+      "command": "remi issue session participant add",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.participant.add",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.participant.remove": {
+      "command": "remi issue session participant remove",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.participant.remove",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.result.list": {
+      "command": "remi issue session result list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.result.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.result.publish": {
+      "command": "remi issue session result publish",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.result.publish",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.status-pages": {
+      "command": "remi issue status-pages",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.status-pages",
+      "mutation": "read",
       "output": [
         "table",
         "json",
@@ -3481,23 +3271,6 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "issue.active-task": {
-      "command": "remi issue active-task",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.active-task",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
     "issue.usage": {
       "command": "remi issue usage",
       "aliases": [],
@@ -3524,6 +3297,23 @@
       ],
       "capability": "issue.workspace",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.workspace.abandon": {
+      "command": "remi issue workspace abandon",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.workspace.abandon",
+      "mutation": "destructive",
       "output": [
         "table",
         "json",
@@ -4051,6 +3841,24 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "share.trace.read": {
+      "command": "remi share trace read",
+      "aliases": [],
+      "auth": [
+        "human",
+        "share",
+        "task"
+      ],
+      "capability": "share.trace.read",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "label": {
       "command": "remi label",
       "aliases": [],
@@ -4309,14 +4117,14 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.message.list": {
-      "command": "remi chat message list",
+    "chat.message.page": {
+      "command": "remi chat message page",
       "aliases": [],
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.message.list",
+      "capability": "chat.message.page",
       "mutation": "read",
       "output": [
         "table",
@@ -4326,14 +4134,65 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.message.create": {
-      "command": "remi chat message create",
+    "issue.responsibility": {
+      "command": "remi issue responsibility",
       "aliases": [],
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.message.create",
+      "capability": "issue.responsibility",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.question.list": {
+      "command": "remi issue question list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.question.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.question.get": {
+      "command": "remi message question get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.question.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.question.answer": {
+      "command": "remi message question answer",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.question.answer",
       "mutation": "write",
       "output": [
         "table",
@@ -4343,8 +4202,73 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.attachment": {
-      "command": "remi chat attachment",
+    "message.question.escalate": {
+      "command": "remi message question escalate",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "capability": "message.question.escalate",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.question.present": {
+      "command": "remi message question present",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "capability": "message.question.present",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.question.continue": {
+      "command": "remi message question continue",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "message.question.continue",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.question.close": {
+      "command": "remi message question close",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.question.close",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.external": {
+      "command": "remi chat external",
       "aliases": [],
       "auth": [],
       "capability": null,
@@ -4353,13 +4277,77 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.attachment.send": {
-      "command": "remi chat attachment send",
+    "chat.external.sources": {
+      "command": "remi chat external sources",
       "aliases": [],
       "auth": [
-        "task"
+        "human"
       ],
-      "capability": "chat.attachment.send",
+      "capability": "chat.external.sources",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.external.models": {
+      "command": "remi chat external models",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.models",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.external.list": {
+      "command": "remi chat external list",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.external.get": {
+      "command": "remi chat external get",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.external.send": {
+      "command": "remi chat external send",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.send",
       "mutation": "write",
       "output": [
         "table",
@@ -4369,14 +4357,13 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.pending": {
-      "command": "remi chat pending",
+    "chat.external.receipt": {
+      "command": "remi chat external receipt",
       "aliases": [],
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "chat.pending",
+      "capability": "chat.external.receipt",
       "mutation": "read",
       "output": [
         "table",
@@ -4386,41 +4373,13 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.queue": {
-      "command": "remi chat queue",
-      "aliases": [],
-      "auth": [],
-      "capability": null,
-      "mutation": "read",
-      "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.queue.list": {
-      "command": "remi chat queue list",
+    "chat.external.interrupt": {
+      "command": "remi chat external interrupt",
       "aliases": [],
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "chat.queue.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.queue.update": {
-      "command": "remi chat queue update",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.queue.update",
+      "capability": "chat.external.interrupt",
       "mutation": "write",
       "output": [
         "table",
@@ -4430,296 +4389,13 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.queue.remove": {
-      "command": "remi chat queue remove",
+    "chat.external.respond": {
+      "command": "remi chat external respond",
       "aliases": [],
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "chat.queue.remove",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.queue.clear": {
-      "command": "remi chat queue clear",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.queue.clear",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.queue.prioritize": {
-      "command": "remi chat queue prioritize",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.queue.prioritize",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.read": {
-      "command": "remi chat read",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.read",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task": {
-      "command": "remi task",
-      "aliases": [],
-      "auth": [],
-      "capability": null,
-      "mutation": "read",
-      "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.list": {
-      "command": "remi task list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.get": {
-      "command": "remi task get",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.get",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.create": {
-      "command": "remi task create",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.create",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.continue": {
-      "command": "remi task continue",
-      "aliases": [],
-      "auth": [
-        "task"
-      ],
-      "capability": "task.continue",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.cancel": {
-      "command": "remi task cancel",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.cancel",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.redispatch": {
-      "command": "remi task redispatch",
-      "aliases": [],
-      "auth": [
-        "task"
-      ],
-      "capability": "task.redispatch",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.steer": {
-      "command": "remi task steer",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.steer",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.steer.list": {
-      "command": "remi task steer list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.steer.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.message.list": {
-      "command": "remi task message list",
-      "aliases": [
-        "remi task messages"
-      ],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.message.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.inspect": {
-      "command": "remi task inspect",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.inspect",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.prompt": {
-      "command": "remi task prompt",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.prompt",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.request.list": {
-      "command": "remi task request list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.request.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "task.request.respond": {
-      "command": "remi task request respond",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.request.respond",
+      "capability": "chat.external.respond",
       "mutation": "write",
       "output": [
         "table",
@@ -5780,6 +5456,278 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "runtime.profile.list": {
+      "command": "remi runtime profile list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.get": {
+      "command": "remi runtime profile get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.create": {
+      "command": "remi runtime profile create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.update": {
+      "command": "remi runtime profile update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.delete": {
+      "command": "remi runtime profile delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.list": {
+      "command": "remi runtime endpoint list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.get": {
+      "command": "remi runtime endpoint get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.create": {
+      "command": "remi runtime endpoint create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.update": {
+      "command": "remi runtime endpoint update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.delete": {
+      "command": "remi runtime endpoint delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.get": {
+      "command": "remi runtime group get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.create": {
+      "command": "remi runtime group create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.update": {
+      "command": "remi runtime group update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.delete": {
+      "command": "remi runtime group delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.inspect": {
+      "command": "remi runtime endpoint inspect",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.inspect",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.catalog": {
+      "command": "remi runtime endpoint catalog",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.catalog",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "runtime.codex-profile.get": {
       "command": "remi runtime codex-profile get",
       "aliases": [],
@@ -6142,6 +6090,56 @@
       ],
       "capability": "runtime.command.run",
       "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.storage": {
+      "command": "remi runtime storage",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.storage",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.gc": {
+      "command": "remi runtime gc",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.gc",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.gc-status": {
+      "command": "remi runtime gc-status",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.gc-status",
+      "mutation": "read",
       "output": [
         "table",
         "json",
@@ -6538,6 +6536,55 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "daemon.drain": {
+      "command": "remi daemon drain",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.drain",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "daemon.drain.status": {
+      "command": "remi daemon drain status",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "daemon.drain.status",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "daemon.undrain": {
+      "command": "remi daemon undrain",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.undrain",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "daemon.group": {
       "command": "remi daemon",
       "aliases": [],
@@ -6608,6 +6655,40 @@
       ],
       "capability": "daemon.retirement-plan",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.magpie.get": {
+      "command": "remi workspace magpie get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.magpie.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.magpie.set": {
+      "command": "remi workspace magpie set",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.magpie.set",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -6847,6 +6928,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "autopilot.run.group": {
+      "command": "remi autopilot run",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": null,
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "autopilot.run.list": {
       "command": "remi autopilot run list",
       "aliases": [],
@@ -6881,14 +6979,14 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "autopilot.run": {
-      "command": "remi autopilot run",
+    "autopilot.run-now": {
+      "command": "remi autopilot run-now",
       "aliases": [],
       "auth": [
         "human",
         "task"
       ],
-      "capability": "autopilot.run",
+      "capability": "autopilot.run-now",
       "mutation": "write",
       "output": [
         "table",
@@ -7058,6 +7156,33 @@
       ],
       "capability": "autopilot.scheduler",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "automation.group": {
+      "command": "remi automation",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "automation.quiet": {
+      "command": "remi automation quiet",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "automation.quiet",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -7254,6 +7379,23 @@
         "task"
       ],
       "capability": "scm.event.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.checks": {
+      "command": "remi scm change-request checks",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.checks",
       "mutation": "read",
       "output": [
         "table",
@@ -8158,186 +8300,6 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "inbox.group": {
-      "command": "remi inbox",
-      "aliases": [],
-      "auth": [],
-      "capability": null,
-      "mutation": "read",
-      "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.list": {
-      "command": "remi inbox list",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.page": {
-      "command": "remi inbox page",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.page",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.summary": {
-      "command": "remi inbox summary",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.summary",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.unread-count": {
-      "command": "remi inbox unread-count",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.unread-count",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.read": {
-      "command": "remi inbox read",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.read",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.archive": {
-      "command": "remi inbox archive",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.mark-all-read": {
-      "command": "remi inbox mark-all-read",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.mark-all-read",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.archive-all": {
-      "command": "remi inbox archive-all",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive-all",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.archive-all-read": {
-      "command": "remi inbox archive-all-read",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive-all-read",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "inbox.archive-completed": {
-      "command": "remi inbox archive-completed",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive-completed",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
     "notification.group": {
       "command": "remi notification",
       "aliases": [],
@@ -8565,6 +8527,91 @@
       "capability": null,
       "mutation": "read",
       "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "dashboard.usage.report": {
+      "command": "remi dashboard usage report",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.report",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "dashboard.usage.reconcile": {
+      "command": "remi dashboard usage reconcile",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.reconcile",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "dashboard.usage.prices.list": {
+      "command": "remi dashboard usage prices list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.prices.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "dashboard.usage.prices.set": {
+      "command": "remi dashboard usage prices set",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.prices.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "dashboard.usage.prices.close": {
+      "command": "remi dashboard usage prices close",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.prices.close",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
       "hidden": false,
       "migration_status": "native"
     },
@@ -9343,6 +9390,1298 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "message.group": {
+      "command": "remi message",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "turn.group": {
+      "command": "remi turn",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.send": {
+      "command": "remi message send",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.send",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.list": {
+      "command": "remi message list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.get": {
+      "command": "remi message get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.edit": {
+      "command": "remi message edit",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.edit",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.delete": {
+      "command": "remi message delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.resolve": {
+      "command": "remi message resolve",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.resolve",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "message.react": {
+      "command": "remi message react",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.react",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "inbox": {
+      "command": "remi inbox",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "inbox.read": {
+      "command": "remi inbox read",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.read",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "inbox.read-all": {
+      "command": "remi inbox read-all",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.read-all",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "turn.list": {
+      "command": "remi turn list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "turn.get": {
+      "command": "remi turn get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "turn.cancel": {
+      "command": "remi turn cancel",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.cancel",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "turn.wrap-up": {
+      "command": "remi turn wrap-up",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.wrap-up",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "turn.retry": {
+      "command": "remi turn retry",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.retry",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "turn.trace.read": {
+      "command": "remi turn trace read",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.trace.read",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "retired.member.create": {
+      "command": "remi member create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.member.delete": {
+      "command": "remi member delete",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.workspace.leave": {
+      "command": "remi workspace leave",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite": {
+      "command": "remi invite",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.list": {
+      "command": "remi invite list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.get": {
+      "command": "remi invite get",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.create": {
+      "command": "remi invite create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.accept": {
+      "command": "remi invite accept",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.decline": {
+      "command": "remi invite decline",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.revoke": {
+      "command": "remi invite revoke",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.create": {
+      "command": "remi task create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.continue": {
+      "command": "remi task continue",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.task.create": {
+      "command": "remi session task create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.session.task.create": {
+      "command": "remi issue session task create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.rerun": {
+      "command": "remi issue rerun",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.steer": {
+      "command": "remi task steer",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.task.steer": {
+      "command": "remi issue task steer",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.steer.list": {
+      "command": "remi task steer list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.task.steers": {
+      "command": "remi issue task steers",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.add": {
+      "command": "remi comment add",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.comment.add": {
+      "command": "remi issue comment add",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.message.create": {
+      "command": "remi session message create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.session.message.create": {
+      "command": "remi issue session message create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.message.create": {
+      "command": "remi chat message create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.attachment.send": {
+      "command": "remi chat attachment send",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.decision.request": {
+      "command": "remi issue decision request",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.decision.answer": {
+      "command": "remi issue decision answer",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.decision.list": {
+      "command": "remi issue decision list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.decision.escalate": {
+      "command": "remi issue decision escalate",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.decision.withdraw": {
+      "command": "remi issue decision withdraw",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.request.list": {
+      "command": "remi task request list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.request.respond": {
+      "command": "remi task request respond",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.list": {
+      "command": "remi comment list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.update": {
+      "command": "remi comment update",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.delete": {
+      "command": "remi comment delete",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.resolve": {
+      "command": "remi comment resolve",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.unresolve": {
+      "command": "remi comment unresolve",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.reaction.list": {
+      "command": "remi comment reaction list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.reaction.add": {
+      "command": "remi comment reaction add",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.reaction.remove": {
+      "command": "remi comment reaction remove",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.comment.attachment.list": {
+      "command": "remi comment attachment list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.log.get": {
+      "command": "remi session log get",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.log.window": {
+      "command": "remi session log window",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.log.locate": {
+      "command": "remi session log locate",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.event.list": {
+      "command": "remi session event list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.session.event.list": {
+      "command": "remi issue session event list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.message.list": {
+      "command": "remi chat message list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.queue.list": {
+      "command": "remi chat queue list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.queue.update": {
+      "command": "remi chat queue update",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.queue.remove": {
+      "command": "remi chat queue remove",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.queue.clear": {
+      "command": "remi chat queue clear",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.queue.prioritize": {
+      "command": "remi chat queue prioritize",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.pending": {
+      "command": "remi chat pending",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.chat.read": {
+      "command": "remi chat read",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.list": {
+      "command": "remi inbox list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.page": {
+      "command": "remi inbox page",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.summary": {
+      "command": "remi inbox summary",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.unread-count": {
+      "command": "remi inbox unread-count",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.archive": {
+      "command": "remi inbox archive",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.mark-all-read": {
+      "command": "remi inbox mark-all-read",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.archive-all": {
+      "command": "remi inbox archive-all",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.archive-all-read": {
+      "command": "remi inbox archive-all-read",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.inbox.archive-completed": {
+      "command": "remi inbox archive-completed",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.list": {
+      "command": "remi task list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.get": {
+      "command": "remi task get",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.inspect": {
+      "command": "remi task inspect",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.cancel": {
+      "command": "remi task cancel",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.prompt": {
+      "command": "remi task prompt",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.redispatch": {
+      "command": "remi task redispatch",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.trace.read": {
+      "command": "remi task trace read",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.message.list": {
+      "command": "remi task message list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.task.messages": {
+      "command": "remi task messages",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.run-messages": {
+      "command": "remi issue run-messages",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.runs": {
+      "command": "remi issue runs",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.active-task": {
+      "command": "remi issue active-task",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.cancel-task": {
+      "command": "remi issue cancel-task",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.task.list": {
+      "command": "remi session task list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.session.task.list": {
+      "command": "remi issue session task list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.archive": {
+      "command": "remi session archive",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.archive": {
+      "command": "remi issue archive",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.session.config": {
+      "command": "remi session config",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.delivery.list": {
+      "command": "remi issue delivery list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.delivery.submit": {
+      "command": "remi issue delivery submit",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.delivery.accept": {
+      "command": "remi issue delivery accept",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.delivery.return": {
+      "command": "remi issue delivery return",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.delivery.authorize": {
+      "command": "remi issue delivery authorize",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.responsibility-unassigned.list": {
+      "command": "remi issue responsibility-unassigned list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.responsibility-unassigned.map": {
+      "command": "remi issue responsibility-unassigned map",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.responsible.set": {
+      "command": "remi issue responsible set",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.responsible.clear": {
+      "command": "remi issue responsible clear",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.autopilot.responsible.clear": {
+      "command": "remi autopilot responsible clear",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.autopilot.responsible.set": {
+      "command": "remi autopilot responsible set",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.done-grant.add": {
+      "command": "remi issue done-grant add",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.done-grant.remove": {
+      "command": "remi issue done-grant remove",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.message.question.transfer": {
+      "command": "remi message question transfer",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.comment.list": {
+      "command": "remi issue comment list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.comment.update": {
+      "command": "remi issue comment update",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.comment.delete": {
+      "command": "remi issue comment delete",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.comment.resolve": {
+      "command": "remi issue comment resolve",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.issue.comment.unresolve": {
+      "command": "remi issue comment unresolve",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
     "legacy.start": {
       "command": "remi start",
       "aliases": [],
@@ -9505,7 +10844,457 @@
       "internal": true
     }
   },
+  "retired": {
+    "remi member create": {
+      "command": "retired.member.create",
+      "replacement": "remi workspace operator (all operators share one identity)"
+    },
+    "remi member delete": {
+      "command": "retired.member.delete",
+      "replacement": "remi workspace operator (all operators share one identity)"
+    },
+    "remi workspace leave": {
+      "command": "retired.workspace.leave",
+      "replacement": "remi workspace list (workspaces are shared)"
+    },
+    "remi invite": {
+      "command": "retired.invite",
+      "replacement": "remi workspace list (workspace invitations are no longer needed)"
+    },
+    "remi invite list": {
+      "command": "retired.invite.list",
+      "replacement": "remi workspace list"
+    },
+    "remi invite get": {
+      "command": "retired.invite.get",
+      "replacement": "remi workspace list"
+    },
+    "remi invite create": {
+      "command": "retired.invite.create",
+      "replacement": "remi workspace list"
+    },
+    "remi invite accept": {
+      "command": "retired.invite.accept",
+      "replacement": "remi workspace list"
+    },
+    "remi invite decline": {
+      "command": "retired.invite.decline",
+      "replacement": "remi workspace list"
+    },
+    "remi invite revoke": {
+      "command": "retired.invite.revoke",
+      "replacement": "remi workspace list"
+    },
+    "remi task create": {
+      "command": "retired.task.create",
+      "replacement": "remi message send --to <agent> --kind request"
+    },
+    "remi task continue": {
+      "command": "retired.task.continue",
+      "replacement": "remi message send --to <agent> --kind request"
+    },
+    "remi session task create": {
+      "command": "retired.session.task.create",
+      "replacement": "remi message send <conversation> --to <agent> --kind request"
+    },
+    "remi issue session task create": {
+      "command": "retired.issue.session.task.create",
+      "replacement": "remi message send <conversation> --to <agent> --kind request"
+    },
+    "remi issue rerun": {
+      "command": "retired.issue.rerun",
+      "replacement": "remi message send <conversation> --to issue-owner --kind request --content <prompt>"
+    },
+    "remi task steer": {
+      "command": "retired.task.steer",
+      "replacement": "remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)"
+    },
+    "remi issue task steer": {
+      "command": "retired.issue.task.steer",
+      "replacement": "remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)"
+    },
+    "remi task steer list": {
+      "command": "retired.task.steer.list",
+      "replacement": "remi message list <conversation> --unread-by <agent>"
+    },
+    "remi issue task steers": {
+      "command": "retired.issue.task.steers",
+      "replacement": "remi message list <conversation> --unread-by <agent>"
+    },
+    "remi comment add": {
+      "command": "retired.comment.add",
+      "replacement": "remi message send <conversation>"
+    },
+    "remi issue comment add": {
+      "command": "retired.issue.comment.add",
+      "replacement": "remi message send <conversation>"
+    },
+    "remi session message create": {
+      "command": "retired.session.message.create",
+      "replacement": "remi message send <conversation>"
+    },
+    "remi issue session message create": {
+      "command": "retired.issue.session.message.create",
+      "replacement": "remi message send <conversation>"
+    },
+    "remi chat message create": {
+      "command": "retired.chat.message.create",
+      "replacement": "remi message send <conversation>"
+    },
+    "remi chat attachment send": {
+      "command": "retired.chat.attachment.send",
+      "replacement": "remi message send --attachment <path>"
+    },
+    "remi issue decision request": {
+      "command": "retired.issue.decision.request",
+      "replacement": "原生 AskUserQuestion；先用 remi issue responsibility <issue> 查看责任归属"
+    },
+    "remi issue decision answer": {
+      "command": "retired.issue.decision.answer",
+      "replacement": "remi message question answer <question> --revision <route_revision> --data <json>"
+    },
+    "remi issue decision list": {
+      "command": "retired.issue.decision.list",
+      "replacement": "remi issue question list <issue>"
+    },
+    "remi issue decision escalate": {
+      "command": "retired.issue.decision.escalate",
+      "replacement": "remi message question escalate <question> --revision <route_revision> --reason <reason>"
+    },
+    "remi issue decision withdraw": {
+      "command": "retired.issue.decision.withdraw",
+      "replacement": "remi message question close <question> --revision <route_revision> --reason <reason>"
+    },
+    "remi task request list": {
+      "command": "retired.task.request.list",
+      "replacement": "remi inbox"
+    },
+    "remi task request respond": {
+      "command": "retired.task.request.respond",
+      "replacement": "remi message question answer <question> --revision <route_revision> --data <json>"
+    },
+    "remi comment list": {
+      "command": "retired.comment.list",
+      "replacement": "remi message list <conversation>"
+    },
+    "remi comment update": {
+      "command": "retired.comment.update",
+      "replacement": "remi message edit <message>"
+    },
+    "remi comment delete": {
+      "command": "retired.comment.delete",
+      "replacement": "remi message delete <message>"
+    },
+    "remi comment resolve": {
+      "command": "retired.comment.resolve",
+      "replacement": "remi message resolve <message>"
+    },
+    "remi comment unresolve": {
+      "command": "retired.comment.unresolve",
+      "replacement": "remi message resolve <message> --no-resolved"
+    },
+    "remi comment reaction list": {
+      "command": "retired.comment.reaction.list",
+      "replacement": "remi message get <message>"
+    },
+    "remi comment reaction add": {
+      "command": "retired.comment.reaction.add",
+      "replacement": "remi message react <message> --emoji <emoji>"
+    },
+    "remi comment reaction remove": {
+      "command": "retired.comment.reaction.remove",
+      "replacement": "remi message react <message> --emoji <emoji> --remove"
+    },
+    "remi comment attachment list": {
+      "command": "retired.comment.attachment.list",
+      "replacement": "remi message get <message>"
+    },
+    "remi session log get": {
+      "command": "retired.session.log.get",
+      "replacement": "remi message get <message>"
+    },
+    "remi session log window": {
+      "command": "retired.session.log.window",
+      "replacement": "remi message list <conversation>"
+    },
+    "remi session log locate": {
+      "command": "retired.session.log.locate",
+      "replacement": "remi message get <message>"
+    },
+    "remi session event list": {
+      "command": "retired.session.event.list",
+      "replacement": "remi message list <conversation>"
+    },
+    "remi issue session event list": {
+      "command": "retired.issue.session.event.list",
+      "replacement": "remi message list <conversation>"
+    },
+    "remi chat message list": {
+      "command": "retired.chat.message.list",
+      "replacement": "remi message list <conversation>"
+    },
+    "remi chat queue list": {
+      "command": "retired.chat.queue.list",
+      "replacement": "remi message list <conversation> --unread-by <agent>"
+    },
+    "remi chat queue update": {
+      "command": "retired.chat.queue.update",
+      "replacement": "remi message edit <message>"
+    },
+    "remi chat queue remove": {
+      "command": "retired.chat.queue.remove",
+      "replacement": "remi message delete <message>"
+    },
+    "remi chat queue clear": {
+      "command": "retired.chat.queue.clear",
+      "replacement": "remi message list <conversation> --unread-by <agent> 后逐条 remi message delete <message>"
+    },
+    "remi chat queue prioritize": {
+      "command": "retired.chat.queue.prioritize",
+      "replacement": "remi message delete <message> 后重新 remi message send <conversation>（按消息顺序）"
+    },
+    "remi chat pending": {
+      "command": "retired.chat.pending",
+      "replacement": "remi message list <conversation> --unread-by <agent>"
+    },
+    "remi chat read": {
+      "command": "retired.chat.read",
+      "replacement": "remi inbox read <conversation>"
+    },
+    "remi inbox list": {
+      "command": "retired.inbox.list",
+      "replacement": "remi inbox"
+    },
+    "remi inbox page": {
+      "command": "retired.inbox.page",
+      "replacement": "remi inbox --limit <n> --cursor <cursor>"
+    },
+    "remi inbox summary": {
+      "command": "retired.inbox.summary",
+      "replacement": "remi inbox"
+    },
+    "remi inbox unread-count": {
+      "command": "retired.inbox.unread-count",
+      "replacement": "remi inbox"
+    },
+    "remi inbox archive": {
+      "command": "retired.inbox.archive",
+      "replacement": "remi inbox read <conversation>"
+    },
+    "remi inbox mark-all-read": {
+      "command": "retired.inbox.mark-all-read",
+      "replacement": "remi inbox read-all"
+    },
+    "remi inbox archive-all": {
+      "command": "retired.inbox.archive-all",
+      "replacement": "remi inbox read-all"
+    },
+    "remi inbox archive-all-read": {
+      "command": "retired.inbox.archive-all-read",
+      "replacement": "remi inbox read-all"
+    },
+    "remi inbox archive-completed": {
+      "command": "retired.inbox.archive-completed",
+      "replacement": "remi inbox read-all"
+    },
+    "remi task list": {
+      "command": "retired.task.list",
+      "replacement": "remi turn list"
+    },
+    "remi task get": {
+      "command": "retired.task.get",
+      "replacement": "remi turn get <turn>"
+    },
+    "remi task inspect": {
+      "command": "retired.task.inspect",
+      "replacement": "remi turn get <turn> --attempts"
+    },
+    "remi task cancel": {
+      "command": "retired.task.cancel",
+      "replacement": "remi turn cancel <turn>"
+    },
+    "remi task prompt": {
+      "command": "retired.task.prompt",
+      "replacement": "remi turn get <turn> --input"
+    },
+    "remi task redispatch": {
+      "command": "retired.task.redispatch",
+      "replacement": "remi turn retry <turn> --cold"
+    },
+    "remi task trace read": {
+      "command": "retired.task.trace.read",
+      "replacement": "remi turn trace read <turn>"
+    },
+    "remi task message list": {
+      "command": "retired.task.message.list",
+      "replacement": "remi turn trace read <turn>"
+    },
+    "remi task messages": {
+      "command": "retired.task.messages",
+      "replacement": "remi turn trace read <turn>"
+    },
+    "remi issue run-messages": {
+      "command": "retired.issue.run-messages",
+      "replacement": "remi turn trace read <turn>"
+    },
+    "remi issue runs": {
+      "command": "retired.issue.runs",
+      "replacement": "remi turn list --issue <issue>"
+    },
+    "remi issue active-task": {
+      "command": "retired.issue.active-task",
+      "replacement": "remi turn list --issue <issue>"
+    },
+    "remi issue cancel-task": {
+      "command": "retired.issue.cancel-task",
+      "replacement": "remi turn cancel <turn>"
+    },
+    "remi session task list": {
+      "command": "retired.session.task.list",
+      "replacement": "remi turn list --session <conversation>"
+    },
+    "remi issue session task list": {
+      "command": "retired.issue.session.task.list",
+      "replacement": "remi turn list --session <conversation>"
+    },
+    "remi session archive": {
+      "command": "retired.session.archive",
+      "replacement": "remi runtime storage <runtime>（Session 归档已取消，执行记录留在 daemon 本机）"
+    },
+    "remi issue archive": {
+      "command": "retired.issue.archive",
+      "replacement": "remi runtime storage <runtime>（Session 归档已取消，执行记录留在 daemon 本机）"
+    },
+    "remi session config": {
+      "command": "retired.session.config",
+      "replacement": "remi workspace storage get|set <workspace>（Session 归档设置已取消，存储策略见 workspace storage）"
+    },
+    "remi issue delivery list": {
+      "command": "retired.issue.delivery.list",
+      "replacement": "remi issue get <issue>（正式交付已移除；执行负责人这一轮的最后一条回复就是总结）"
+    },
+    "remi issue delivery submit": {
+      "command": "retired.issue.delivery.submit",
+      "replacement": "这一轮的最后一条回复就是总结；本轮结束后 Issue 自动进入 in_review"
+    },
+    "remi issue delivery accept": {
+      "command": "retired.issue.delivery.accept",
+      "replacement": "remi issue status <issue> done；有问题用 remi message send <conversation> --to issue-owner --kind request"
+    },
+    "remi issue delivery return": {
+      "command": "retired.issue.delivery.return",
+      "replacement": "remi issue status <issue> done；有问题用 remi message send <conversation> --to issue-owner --kind request"
+    },
+    "remi issue delivery authorize": {
+      "command": "retired.issue.delivery.authorize",
+      "replacement": "remi issue status <child> done（父单执行负责人直接关闭子单）"
+    },
+    "remi issue responsibility-unassigned list": {
+      "command": "retired.issue.responsibility-unassigned.list",
+      "replacement": "remi issue responsibility <issue>（Issue 不再配置指定人类）"
+    },
+    "remi issue responsibility-unassigned map": {
+      "command": "retired.issue.responsibility-unassigned.map",
+      "replacement": "remi issue assign <issue> --to <agent|squad>（配置执行负责人）"
+    },
+    "remi issue responsible set": {
+      "command": "retired.issue.responsible.set",
+      "replacement": "remi issue assign <issue> --to <agent|squad>（Issue 不再指定人类，只配置执行负责人）"
+    },
+    "remi issue responsible clear": {
+      "command": "retired.issue.responsible.clear",
+      "replacement": "remi issue responsibility <issue>（Issue 不再配置指定人类）"
+    },
+    "remi autopilot responsible clear": {
+      "command": "retired.autopilot.responsible.clear",
+      "replacement": "remi autopilot update <autopilot>（自动化建单不再需要指定人类）"
+    },
+    "remi autopilot responsible set": {
+      "command": "retired.autopilot.responsible.set",
+      "replacement": "remi autopilot update <autopilot>（自动化建单不再需要指定人类）"
+    },
+    "remi issue done-grant add": {
+      "command": "retired.issue.done-grant.add",
+      "replacement": "remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）"
+    },
+    "remi issue done-grant remove": {
+      "command": "retired.issue.done-grant.remove",
+      "replacement": "remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）"
+    },
+    "remi message question transfer": {
+      "command": "retired.message.question.transfer",
+      "replacement": "责任变更后问题自动重新路由；remi message question get <question> 查看当前处理者"
+    },
+    "remi issue comment list": {
+      "command": "retired.issue.comment.list",
+      "replacement": "remi message list <conversation>"
+    },
+    "remi issue comment update": {
+      "command": "retired.issue.comment.update",
+      "replacement": "remi message edit <message>"
+    },
+    "remi issue comment delete": {
+      "command": "retired.issue.comment.delete",
+      "replacement": "remi message delete <message>"
+    },
+    "remi issue comment resolve": {
+      "command": "retired.issue.comment.resolve",
+      "replacement": "remi message resolve <message>"
+    },
+    "remi issue comment unresolve": {
+      "command": "retired.issue.comment.unresolve",
+      "replacement": "remi message resolve <message> --no-resolved"
+    }
+  },
   "aliases": {
+    "remi member list": {
+      "command": "workspace.operator",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi workspace operator",
+      "hidden": true
+    },
+    "remi member get me": {
+      "command": "account.get",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account get",
+      "hidden": true
+    },
+    "remi member update me": {
+      "command": "account.update",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account update",
+      "hidden": true
+    },
+    "remi member onboarding update": {
+      "command": "account.onboarding.update",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding update",
+      "hidden": true
+    },
+    "remi member onboarding complete": {
+      "command": "account.onboarding.complete",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding complete",
+      "hidden": true
+    },
+    "remi member onboarding cloud-waitlist": {
+      "command": "account.onboarding.cloud-waitlist",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding cloud-waitlist",
+      "hidden": true
+    },
+    "remi member onboarding runtime-bootstrap": {
+      "command": "account.onboarding.runtime-bootstrap",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding runtime-bootstrap",
+      "hidden": true
+    },
+    "remi member onboarding no-runtime-bootstrap": {
+      "command": "account.onboarding.no-runtime-bootstrap",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding no-runtime-bootstrap",
+      "hidden": true
+    },
     "remi project delete": {
       "command": "project.archive",
       "deprecated_since": "0.3.0",
@@ -9590,94 +11379,10 @@
       "replacement": "remi wiki internal-lint",
       "hidden": true
     },
-    "remi issue comment list": {
-      "command": "comment.list",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi comment list",
-      "hidden": false
-    },
-    "remi issue comment add": {
-      "command": "comment.add",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi comment add",
-      "hidden": false
-    },
-    "remi issue comment update": {
-      "command": "comment.update",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi comment update",
-      "hidden": false
-    },
-    "remi issue comment delete": {
-      "command": "comment.delete",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi comment delete",
-      "hidden": false
-    },
-    "remi issue comment resolve": {
-      "command": "comment.resolve",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi comment resolve",
-      "hidden": false
-    },
-    "remi issue comment unresolve": {
-      "command": "comment.unresolve",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi comment unresolve",
-      "hidden": false
-    },
-    "remi issue session list": {
-      "command": "session.list",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session list",
-      "hidden": false
-    },
-    "remi issue session result list": {
-      "command": "session.result.list",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session result list",
-      "hidden": false
-    },
-    "remi issue session result publish": {
-      "command": "session.result.publish",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session result publish",
-      "hidden": false
-    },
-    "remi issue archive list": {
-      "command": "session.archive.list",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session archive list",
-      "hidden": false
-    },
-    "remi issue archive status": {
-      "command": "session.archive.status",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session archive status",
-      "hidden": false
-    },
-    "remi issue archive verify": {
-      "command": "session.archive.verify",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session archive verify",
-      "hidden": false
-    },
-    "remi issue archive retry": {
-      "command": "session.archive.retry",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session archive retry",
-      "hidden": false
-    },
     "remi issue attachment download": {
       "command": "issue.attachment.download",
       "deprecated_since": "0.3.0",
       "replacement": "remi attachment download",
-      "hidden": false
-    },
-    "remi task messages": {
-      "command": "task.message.list",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi task message list",
       "hidden": false
     },
     "remi multiremi agent list": {
@@ -9803,22 +11508,44 @@
       "command": "chat.delete"
     },
     "DELETE /api/chat/sessions/:sessionId/queue": {
-      "command": "chat.queue.clear"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation> --unread-by <agent> 后逐条 remi message delete <message>"
     },
     "DELETE /api/chat/sessions/:sessionId/queue/:taskId": {
-      "command": "chat.queue.remove"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message delete <message>"
     },
     "DELETE /api/cloud-runtime/nodes": {
       "command": "runtime.cloud.node.delete"
     },
     "DELETE /api/comments/:id": {
-      "command": "comment.delete"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message delete <message>"
     },
     "DELETE /api/comments/:id/reactions": {
-      "command": "comment.reaction.remove"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message react <message> --emoji <emoji> --remove"
     },
     "DELETE /api/comments/:id/resolve": {
-      "command": "comment.unresolve"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message resolve <message> --no-resolved"
+    },
+    "DELETE /api/daemons/:daemonId/drain": {
+      "command": "daemon.undrain"
+    },
+    "DELETE /api/execution-endpoints/:id": {
+      "command": "runtime.endpoint.delete"
+    },
+    "DELETE /api/execution-groups/:id": {
+      "command": "runtime.group.delete"
+    },
+    "DELETE /api/execution-profiles/:id": {
+      "command": "runtime.profile.delete"
     },
     "DELETE /api/issues/:id": {
       "command": "issue.delete"
@@ -9832,11 +11559,16 @@
     "DELETE /api/issues/:id/metadata/:key": {
       "command": "issue.metadata.delete"
     },
+    "DELETE /api/issues/:id/parent-done-grant": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）"
+    },
     "DELETE /api/issues/:id/reactions": {
       "command": "issue.reaction.remove"
     },
     "DELETE /api/issues/:id/sessions/:sessionId/participants/:participantType/:participantId": {
-      "command": "session.participant.remove"
+      "command": "issue.session.participant.remove"
     },
     "DELETE /api/issues/:id/share": {
       "command": "share.delete"
@@ -9846,6 +11578,9 @@
     },
     "DELETE /api/labels/:id": {
       "command": "label.delete"
+    },
+    "DELETE /api/messages/:id": {
+      "command": "message.delete"
     },
     "DELETE /api/multiremi/agent-plugins/:id": {
       "command": "plugin.archive"
@@ -9859,14 +11594,23 @@
     "DELETE /api/multiremi/autopilots/:id": {
       "command": "autopilot.delete"
     },
+    "DELETE /api/multiremi/chats/:id/sessions/:sessionId/participants/:participantType/:participantId": {
+      "command": "session.participant.remove"
+    },
     "DELETE /api/multiremi/comments/:id": {
-      "command": "comment.delete"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message delete <message>"
     },
     "DELETE /api/multiremi/comments/:id/reactions": {
-      "command": "comment.reaction.remove"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message react <message> --emoji <emoji> --remove"
     },
     "DELETE /api/multiremi/comments/:id/resolve": {
-      "command": "comment.unresolve"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message resolve <message> --no-resolved"
     },
     "DELETE /api/multiremi/issues/:id": {
       "command": "issue.delete"
@@ -9880,6 +11624,11 @@
     "DELETE /api/multiremi/issues/:id/metadata/:key": {
       "command": "issue.metadata.delete"
     },
+    "DELETE /api/multiremi/issues/:id/parent-done-grant": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）"
+    },
     "DELETE /api/multiremi/issues/:id/reactions": {
       "command": "issue.reaction.remove"
     },
@@ -9890,7 +11639,9 @@
       "command": "label.delete"
     },
     "DELETE /api/multiremi/members/:id": {
-      "command": "member.delete"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "DELETE /api/multiremi/notification-channels/:id": {
       "command": "notification.channel.delete"
@@ -9940,6 +11691,11 @@
     "DELETE /api/runtimes/:id": {
       "command": "runtime.delete"
     },
+    "DELETE /api/sessions/:sessionId/queue/:qid": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake."
+    },
     "DELETE /api/skills/:id": {
       "command": "skill.archive"
     },
@@ -9965,13 +11721,17 @@
       "command": "workspace.feishu-bot.register-cancel"
     },
     "DELETE /api/workspaces/:id/invitations/:invitationId": {
-      "command": "invite.revoke"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "DELETE /api/workspaces/:id/lark/installations/:installationId": {
       "command": "lark.installation.delete"
     },
     "DELETE /api/workspaces/:id/members/:memberId": {
-      "command": "member.delete"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "DELETE /api/workspaces/:id/repos/:repositoryId": {
       "command": "repo.delete"
@@ -10063,7 +11823,9 @@
       "command": "autopilot.run.get"
     },
     "GET /api/chat/pending-tasks": {
-      "command": "chat.pending"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation> --unread-by <agent>"
     },
     "GET /api/chat/sessions": {
       "command": "chat.list"
@@ -10071,14 +11833,20 @@
     "GET /api/chat/sessions/:sessionId": {
       "command": "chat.get"
     },
-    "GET /api/chat/sessions/:sessionId/messages": {
-      "command": "chat.message.list"
-    },
-    "GET /api/chat/sessions/:sessionId/messages/page": {
-      "command": "chat.message.list"
+    "GET /api/chat/sessions/:sessionId/background-tasks": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat background-task panel state and stop actions are exposed in the Web UI (ADR 0022)."
     },
     "GET /api/chat/sessions/:sessionId/pending-task": {
-      "command": "chat.pending"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation> --unread-by <agent>"
+    },
+    "GET /api/chat/slash-commands": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat composer slash-command menu (the agent's advertised commands and skills, ADR 0025); a CLI sender types the command into message.send."
     },
     "GET /api/cli/capabilities": {
       "command": "context.get"
@@ -10131,17 +11899,17 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "GET /api/daemon/autopilot-runs/:runId/gc-check": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "GET /api/daemon/chat-sessions/:sessionId/gc-check": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "GET /api/daemon/issues/:issueId/gc-check": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "GET /api/daemon/messages/:id": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -10156,32 +11924,27 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired": {
+    "GET /api/daemon/runtimes/:id/endpoint-key": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Read-only v1 daemon upgrade bridge for plugin desired state is machine-to-server traffic, not a user CLI command."
     },
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
+    "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/attachments/:attachmentId": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "GET /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/content": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "GET /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/status": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "GET /api/daemon/runtimes/:runtimeId/tasks/pending": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -10196,22 +11959,7 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "GET /api/daemon/tasks/:taskId/human-requests/:requestId": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "GET /api/daemon/tasks/:taskId/messages": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "GET /api/daemon/tasks/:taskId/status": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "GET /api/daemon/tasks/:taskId/steer": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -10229,6 +11977,9 @@
     "GET /api/daemons/:daemonId": {
       "command": "daemon.get"
     },
+    "GET /api/daemons/:daemonId/drain": {
+      "command": "daemon.drain.status"
+    },
     "GET /api/dashboard/agent-runtime": {
       "command": "dashboard.agent-runtime"
     },
@@ -10241,26 +11992,54 @@
     "GET /api/dashboard/usage/daily": {
       "command": "dashboard.usage.daily"
     },
+    "GET /api/execution-endpoints": {
+      "command": "runtime.endpoint.list"
+    },
+    "GET /api/execution-endpoints/:id": {
+      "command": "runtime.endpoint.get"
+    },
+    "GET /api/execution-endpoints/:id/catalog": {
+      "command": "runtime.endpoint.catalog"
+    },
     "GET /api/execution-groups": {
       "command": "runtime.group.list"
     },
+    "GET /api/execution-groups/:id": {
+      "command": "runtime.group.get"
+    },
+    "GET /api/execution-profiles": {
+      "command": "runtime.profile.list"
+    },
+    "GET /api/execution-profiles/:id": {
+      "command": "runtime.profile.get"
+    },
     "GET /api/inbox": {
-      "command": "inbox.list"
+      "command": "inbox"
     },
     "GET /api/inbox/page": {
-      "command": "inbox.page"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox --limit <n> --cursor <cursor>"
     },
     "GET /api/inbox/summary": {
-      "command": "inbox.summary"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox"
     },
     "GET /api/inbox/unread-count": {
-      "command": "inbox.unread-count"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox"
     },
     "GET /api/invitations": {
-      "command": "invite.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "GET /api/invitations/:id": {
-      "command": "invite.get"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "GET /api/issues": {
       "command": "issue.list"
@@ -10269,7 +12048,9 @@
       "command": "issue.get"
     },
     "GET /api/issues/:id/active-task": {
-      "command": "issue.active-task"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn list --issue <issue>"
     },
     "GET /api/issues/:id/attachments": {
       "command": "issue.attachment.list"
@@ -10281,7 +12062,19 @@
       "command": "issue.children"
     },
     "GET /api/issues/:id/comments": {
-      "command": "comment.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation>"
+    },
+    "GET /api/issues/:id/decisions": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue question list <issue>"
+    },
+    "GET /api/issues/:id/deliveries": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue get <issue>（正式交付已移除；执行负责人这一轮的最后一条回复就是总结）"
     },
     "GET /api/issues/:id/dependencies": {
       "command": "issue.dependency.list"
@@ -10295,26 +12088,36 @@
     "GET /api/issues/:id/metadata": {
       "command": "issue.metadata.list"
     },
+    "GET /api/issues/:id/questions": {
+      "command": "issue.question.list"
+    },
     "GET /api/issues/:id/reactions": {
       "command": "issue.reaction.list"
     },
+    "GET /api/issues/:id/responsibility": {
+      "command": "issue.responsibility"
+    },
     "GET /api/issues/:id/session-results": {
-      "command": "session.result.list"
+      "command": "issue.session.result.list"
     },
     "GET /api/issues/:id/sessions": {
-      "command": "session.list"
+      "command": "issue.session.list"
     },
     "GET /api/issues/:id/sessions/:sessionId": {
-      "command": "session.get"
+      "command": "issue.session.get"
     },
     "GET /api/issues/:id/sessions/:sessionId/events": {
-      "command": "session.event.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation>"
     },
     "GET /api/issues/:id/sessions/:sessionId/participants": {
-      "command": "session.participant.list"
+      "command": "issue.session.participant.list"
     },
     "GET /api/issues/:id/sessions/:sessionId/tasks": {
-      "command": "session.task.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn list --session <conversation>"
     },
     "GET /api/issues/:id/share": {
       "command": "share.get"
@@ -10323,7 +12126,9 @@
       "command": "issue.subscriber.list"
     },
     "GET /api/issues/:id/task-runs": {
-      "command": "issue.task-runs"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn list --issue <issue>"
     },
     "GET /api/issues/:id/timeline": {
       "command": "issue.timeline"
@@ -10333,9 +12138,6 @@
     },
     "GET /api/issues/:id/workspace": {
       "command": "issue.workspace"
-    },
-    "GET /api/issues/:issueId/session-archives": {
-      "command": "session.archive.list"
     },
     "GET /api/issues/child-progress": {
       "command": "issue.child-progress"
@@ -10348,6 +12150,9 @@
     },
     "GET /api/issues/search": {
       "command": "issue.search"
+    },
+    "GET /api/issues/status-pages": {
+      "command": "issue.status-pages"
     },
     "GET /api/knowledge/runs": {
       "command": "knowledge.runs"
@@ -10368,7 +12173,13 @@
       "command": "label.get"
     },
     "GET /api/me": {
-      "command": "member.get"
+      "command": "account.get"
+    },
+    "GET /api/messages/:id": {
+      "command": "message.get"
+    },
+    "GET /api/messages/:id/question": {
+      "command": "message.question.get"
     },
     "GET /api/models": {
       "command": "runtime.model.catalog"
@@ -10443,13 +12254,41 @@
       "command": "chat.get"
     },
     "GET /api/multiremi/chats/:id/messages": {
-      "command": "chat.message.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation>"
+    },
+    "GET /api/multiremi/chats/:id/sessions": {
+      "command": "session.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId": {
+      "command": "session.get"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/events": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation>"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/participants": {
+      "command": "session.participant.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/results": {
+      "command": "session.result.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/tasks": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn list --session <conversation>"
     },
     "GET /api/multiremi/comments/:id/attachments": {
-      "command": "comment.attachment.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message get <message>"
     },
     "GET /api/multiremi/comments/:id/reactions": {
-      "command": "comment.reaction.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message get <message>"
     },
     "GET /api/multiremi/daemons": {
       "command": "daemon.list"
@@ -10467,7 +12306,9 @@
       "command": "platform.health"
     },
     "GET /api/multiremi/inbox": {
-      "command": "inbox.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox"
     },
     "GET /api/multiremi/install/daemon": {
       "command": "lark.daemon.status"
@@ -10485,7 +12326,9 @@
       "command": "issue.children"
     },
     "GET /api/multiremi/issues/:id/comments": {
-      "command": "comment.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation>"
     },
     "GET /api/multiremi/issues/:id/dependencies": {
       "command": "issue.dependency.list"
@@ -10524,7 +12367,7 @@
       "command": "label.get"
     },
     "GET /api/multiremi/members": {
-      "command": "member.list"
+      "command": "workspace.operator"
     },
     "GET /api/multiremi/members/:id": {
       "command": "member.get"
@@ -10629,22 +12472,34 @@
       "command": "squad.member.list"
     },
     "GET /api/multiremi/tasks": {
-      "command": "task.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn list"
     },
     "GET /api/multiremi/tasks/:id": {
-      "command": "task.get"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn get <turn>"
     },
     "GET /api/multiremi/tasks/:id/human-requests": {
-      "command": "task.request.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox"
     },
     "GET /api/multiremi/tasks/:id/inspection": {
-      "command": "task.inspect"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn get <turn> --attempts"
     },
     "GET /api/multiremi/tasks/:id/messages": {
-      "command": "task.message.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn trace read <turn>"
     },
     "GET /api/multiremi/tasks/:id/steer": {
-      "command": "task.steer.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation> --unread-by <agent>"
     },
     "GET /api/multiremi/tokens": {
       "command": "token.list"
@@ -10732,6 +12587,24 @@
     "GET /api/runtimes/:id/directory-scans/:requestId": {
       "command": "runtime.directory.status"
     },
+    "GET /api/runtimes/:id/external-chats": {
+      "command": "chat.external.sources"
+    },
+    "GET /api/runtimes/:id/external-chats/:sourceId/models": {
+      "command": "chat.external.models"
+    },
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads": {
+      "command": "chat.external.list"
+    },
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId": {
+      "command": "chat.external.get"
+    },
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/receipts/:requestId": {
+      "command": "chat.external.receipt"
+    },
+    "GET /api/runtimes/:id/gc-runs/:requestId": {
+      "command": "runtime.gc-status"
+    },
     "GET /api/runtimes/:id/local-skills/:requestId": {
       "command": "runtime.skill.status"
     },
@@ -10771,11 +12644,37 @@
     "GET /api/sessions/:sessionId/inherited-context": {
       "command": "session.inherited-context"
     },
+    "GET /api/sessions/:sessionId/log": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Read-only SSR and replica display wire (head, turn cards, window and location); CLI reads use message.list/get."
+    },
+    "GET /api/sessions/:sessionId/log/entry": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Read-only SSR and replica display wire (head, turn cards, window and location); CLI reads use message.list/get."
+    },
+    "GET /api/sessions/:sessionId/log/locate": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Read-only SSR and replica display wire (head, turn cards, window and location); CLI reads use message.list/get."
+    },
+    "GET /api/sessions/:sessionId/messages": {
+      "command": "message.list"
+    },
+    "GET /api/sessions/:sessionId/queue": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake."
+    },
     "GET /api/shares/:token": {
       "command": "share.view"
     },
     "GET /api/shares/:token/attachments/:attachmentId/content": {
       "command": "share.view"
+    },
+    "GET /api/shares/:token/tasks/:task_id/trace": {
+      "command": "share.trace.read"
     },
     "GET /api/skills": {
       "command": "skill.list"
@@ -10802,22 +12701,57 @@
       "command": "squad.member.status"
     },
     "GET /api/tasks/:id/human-requests": {
-      "command": "task.request.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox"
     },
     "GET /api/tasks/:id/inspection": {
-      "command": "task.inspect"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn get <turn> --attempts"
     },
     "GET /api/tasks/:id/steer": {
-      "command": "task.steer.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message list <conversation> --unread-by <agent>"
+    },
+    "GET /api/tasks/:id/trace": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn trace read <turn>"
     },
     "GET /api/tasks/:taskId/messages": {
-      "command": "task.message.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn trace read <turn>"
     },
     "GET /api/tasks/:taskId/prompt": {
-      "command": "task.prompt"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn get <turn> --input"
     },
     "GET /api/tokens": {
       "command": "token.list"
+    },
+    "GET /api/trace/ws": {
+      "cli_exempt": true,
+      "category": "websocket_transport",
+      "reason": "Long-lived WebSocket transport is outside the CLI command surface."
+    },
+    "GET /api/turns": {
+      "command": "turn.list"
+    },
+    "GET /api/turns/:id": {
+      "command": "turn.get"
+    },
+    "GET /api/turns/:id/trace": {
+      "command": "turn.trace.read"
+    },
+    "GET /api/usage/prices": {
+      "command": "dashboard.usage.prices.list"
+    },
+    "GET /api/usage/report": {
+      "command": "dashboard.usage.report"
     },
     "GET /api/workspaces": {
       "command": "workspace.list"
@@ -10858,8 +12792,13 @@
     "GET /api/workspaces/:id/feishu-bot/status": {
       "command": "workspace.feishu-bot.status"
     },
+    "GET /api/workspaces/:id/feishu-bots": {
+      "command": "workspace.feishu-bot.list"
+    },
     "GET /api/workspaces/:id/invitations": {
-      "command": "invite.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "GET /api/workspaces/:id/issue-archive": {
       "command": "workspace.issue-archive.get"
@@ -10874,7 +12813,7 @@
       "command": "lark.installation.list"
     },
     "GET /api/workspaces/:id/members": {
-      "command": "member.list"
+      "command": "workspace.operator"
     },
     "GET /api/workspaces/:id/organizer": {
       "command": "workspace.organizer.get"
@@ -10918,11 +12857,17 @@
     "GET /api/workspaces/:id/runtime-provisions/:provisionId/states": {
       "command": "workspace.runtime-provision.states"
     },
-    "GET /api/workspaces/:id/session-archive": {
-      "command": "session.config.get"
+    "GET /api/workspaces/:id/services/magpie": {
+      "command": "workspace.magpie.get"
     },
     "GET /api/workspaces/:id/ssh-mesh": {
       "command": "workspace.ssh-mesh.get"
+    },
+    "GET /api/workspaces/:id/storage": {
+      "command": "workspace.storage.get"
+    },
+    "GET /api/workspaces/:id/storage/daemons": {
+      "command": "runtime.storage"
     },
     "GET /api/workspaces/:workspaceId/feishu/chats": {
       "command": "feishu.chats.list"
@@ -10947,6 +12892,11 @@
     },
     "GET /api/workspaces/:workspaceId/feishu/sources/:sourceId/status": {
       "command": "feishu.source.status"
+    },
+    "GET /api/workspaces/:workspaceId/issue-responsibility-migration": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue responsibility <issue>（Issue 不再配置指定人类）"
     },
     "GET /api/workspaces/:workspaceId/messaging/connections": {
       "command": "messaging.connection.list"
@@ -10996,6 +12946,12 @@
     "GET /api/workspaces/:workspaceId/scm/events/:eventId": {
       "command": "scm.event.get"
     },
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks": {
+      "command": "scm.change-request.checks"
+    },
+    "GET /api/workspaces/:workspaceId/system-model-endpoints": {
+      "command": "workspace.system-model-endpoints.get"
+    },
     "GET /auth/lark/url": {
       "command": "context.auth.lark"
     },
@@ -11012,6 +12968,16 @@
     },
     "GET /healthz": {
       "command": "platform.health"
+    },
+    "GET /internal/peer/health": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Cross-process API peer channel is machine-to-server traffic; it has no user-facing CLI workflow."
+    },
+    "GET /internal/slot/status": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
     },
     "GET /readyz": {
       "command": "platform.ready"
@@ -11031,7 +12997,9 @@
       "command": "chat.update"
     },
     "PATCH /api/chat/sessions/:sessionId/queue/:taskId": {
-      "command": "chat.queue.update"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message edit <message>"
     },
     "PATCH /api/daemons/:daemonId": {
       "command": "daemon.dedicated.set"
@@ -11040,13 +13008,16 @@
       "command": "issue.update"
     },
     "PATCH /api/issues/:id/sessions/:sessionId": {
-      "command": "session.update"
+      "command": "issue.session.update"
     },
     "PATCH /api/me": {
-      "command": "member.update"
+      "command": "account.update"
     },
     "PATCH /api/me/onboarding": {
-      "command": "member.onboarding.update"
+      "command": "account.onboarding.update"
+    },
+    "PATCH /api/messages/:id": {
+      "command": "message.edit"
     },
     "PATCH /api/multiremi/agent-plugins/:id": {
       "command": "plugin.update"
@@ -11063,8 +13034,13 @@
     "PATCH /api/multiremi/chats/:id": {
       "command": "chat.update"
     },
+    "PATCH /api/multiremi/chats/:id/sessions/:sessionId": {
+      "command": "session.update"
+    },
     "PATCH /api/multiremi/comments/:id": {
-      "command": "comment.update"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message edit <message>"
     },
     "PATCH /api/multiremi/issues/:id": {
       "command": "issue.update"
@@ -11073,7 +13049,9 @@
       "command": "label.update"
     },
     "PATCH /api/multiremi/members/:id": {
-      "command": "member.update"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "PATCH /api/multiremi/notification-channels/:id": {
       "command": "notification.channel.update"
@@ -11105,17 +13083,27 @@
     "PATCH /api/runtimes/:id": {
       "command": "runtime.update"
     },
+    "PATCH /api/sessions/:sessionId/queue/:qid": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake."
+    },
     "PATCH /api/skills/:id": {
       "command": "skill.update"
     },
     "PATCH /api/squads/:id/members/role": {
       "command": "squad.member.update"
     },
+    "PATCH /api/usage/prices/:id": {
+      "command": "dashboard.usage.prices.close"
+    },
     "PATCH /api/workspaces/:id": {
       "command": "workspace.update"
     },
     "PATCH /api/workspaces/:id/members/:memberId": {
-      "command": "member.update"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "PATCH /api/workspaces/:id/repos/:repositoryId": {
       "command": "repo.update"
@@ -11163,7 +13151,7 @@
       "command": "autopilot.delivery.replay"
     },
     "POST /api/autopilots/:id/trigger": {
-      "command": "autopilot.run"
+      "command": "autopilot.run-now"
     },
     "POST /api/autopilots/:id/triggers": {
       "command": "autopilot.trigger.create"
@@ -11172,19 +13160,32 @@
       "command": "autopilot.trigger.rotate-token"
     },
     "POST /api/chat/attachments/send": {
-      "command": "chat.attachment.send"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send --attachment <path>"
     },
     "POST /api/chat/sessions": {
       "command": "chat.create"
     },
+    "POST /api/chat/sessions/:sessionId/background-tasks/stop": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat background-task panel state and stop actions are exposed in the Web UI (ADR 0022)."
+    },
     "POST /api/chat/sessions/:sessionId/messages": {
-      "command": "chat.message.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation>"
     },
     "POST /api/chat/sessions/:sessionId/queue/:taskId/prioritize": {
-      "command": "chat.queue.prioritize"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message delete <message> 后重新 remi message send <conversation>（按消息顺序）"
     },
     "POST /api/chat/sessions/:sessionId/read": {
-      "command": "chat.read"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read <conversation>"
     },
     "POST /api/cli-token": {
       "command": "token.create"
@@ -11214,10 +13215,14 @@
       "command": "runtime.cloud.node.stop"
     },
     "POST /api/comments/:id/reactions": {
-      "command": "comment.reaction.add"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message react <message> --emoji <emoji>"
     },
     "POST /api/comments/:id/resolve": {
-      "command": "comment.resolve"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message resolve <message>"
     },
     "POST /api/contact-sales": {
       "cli_exempt": true,
@@ -11234,7 +13239,12 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "POST /api/daemon/issues/:issueId/workspace/cleaned": {
+    "POST /api/daemon/messages/:id/answer": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/messages/:id/card": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11244,27 +13254,7 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "POST /api/daemon/runtimes/:runtimeId/agent-plugins/:versionId/state": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/bot-menu/:requestId/result": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/commands/:requestId/result": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "POST /api/daemon/runtimes/:runtimeId/commands/claim": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/directory-scans/:requestId/result": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11284,11 +13274,6 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/result": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "POST /api/daemon/runtimes/:runtimeId/feishu-bot/session/cancel": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
@@ -11304,52 +13289,12 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/status": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/complete": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/failure": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/failure": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/init": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/local-skills/:requestId/result": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "POST /api/daemon/runtimes/:runtimeId/local-skills/claim": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "POST /api/daemon/runtimes/:runtimeId/local-skills/import/:requestId/result": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "POST /api/daemon/runtimes/:runtimeId/local-skills/import/claim": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/runtimes/:runtimeId/models/:requestId/result": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11384,67 +13329,7 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "POST /api/daemon/tasks/:taskId/complete": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/dispatch-lease": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/fail": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/human-requests": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/human-requests/:requestId/expire": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/human-requests/:requestId/respond": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/messages": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/progress": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/prompt": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/session": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "POST /api/daemon/tasks/:taskId/start": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/steer/consume": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
-    "POST /api/daemon/tasks/:taskId/usage": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11454,48 +13339,114 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
-    "POST /api/daemon/tasks/:taskId/workspace": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
-    },
     "POST /api/daemon/workspaces/:workspaceId/external-membership/check": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
+    "POST /api/daemons/:daemonId/drain": {
+      "command": "daemon.drain"
+    },
+    "POST /api/execution-endpoints": {
+      "command": "runtime.endpoint.create"
+    },
+    "POST /api/execution-endpoints/inspect": {
+      "command": "runtime.endpoint.inspect"
+    },
+    "POST /api/execution-groups": {
+      "command": "runtime.group.create"
+    },
+    "POST /api/execution-profiles": {
+      "command": "runtime.profile.create"
+    },
     "POST /api/feedback": {
       "command": "platform.feedback.create"
     },
     "POST /api/inbox/:id/archive": {
-      "command": "inbox.archive"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read <conversation>"
     },
     "POST /api/inbox/:id/read": {
-      "command": "inbox.read"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read <conversation>"
     },
     "POST /api/inbox/archive-all": {
-      "command": "inbox.archive-all"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read-all"
     },
     "POST /api/inbox/archive-all-read": {
-      "command": "inbox.archive-all-read"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read-all"
     },
     "POST /api/inbox/archive-completed": {
-      "command": "inbox.archive-completed"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read-all"
     },
     "POST /api/inbox/mark-all-read": {
-      "command": "inbox.mark-all-read"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read-all"
+    },
+    "POST /api/inbox/read": {
+      "command": "inbox.read"
     },
     "POST /api/invitations/:id/accept": {
-      "command": "invite.accept"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "POST /api/invitations/:id/decline": {
-      "command": "invite.decline"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "POST /api/issues": {
       "command": "issue.create"
     },
     "POST /api/issues/:id/comments": {
-      "command": "comment.add"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation>"
+    },
+    "POST /api/issues/:id/decisions": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 原生 AskUserQuestion；先用 remi issue responsibility <issue> 查看责任归属"
+    },
+    "POST /api/issues/:id/decisions/:decisionId/answer": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message question answer <question> --revision <route_revision> --data <json>"
+    },
+    "POST /api/issues/:id/decisions/:decisionId/escalate": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message question escalate <question> --revision <route_revision> --reason <reason>"
+    },
+    "POST /api/issues/:id/decisions/:decisionId/withdraw": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message question close <question> --revision <route_revision> --reason <reason>"
+    },
+    "POST /api/issues/:id/deliveries": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 这一轮的最后一条回复就是总结；本轮结束后 Issue 自动进入 in_review"
+    },
+    "POST /api/issues/:id/deliveries/:deliveryId/authorize": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue status <child> done（父单执行负责人直接关闭子单）"
+    },
+    "POST /api/issues/:id/deliveries/:deliveryId/respond": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue status <issue> done；有问题用 remi message send <conversation> --to issue-owner --kind request"
     },
     "POST /api/issues/:id/dependencies": {
       "command": "issue.dependency.add"
@@ -11503,29 +13454,40 @@
     "POST /api/issues/:id/labels": {
       "command": "issue.label.add"
     },
+    "POST /api/issues/:id/parent-done-grant": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）"
+    },
     "POST /api/issues/:id/reactions": {
       "command": "issue.reaction.add"
     },
     "POST /api/issues/:id/rerun": {
-      "command": "issue.rerun"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <issue> --to issue-owner --kind request"
     },
     "POST /api/issues/:id/restore": {
       "command": "issue.restore"
     },
     "POST /api/issues/:id/sessions": {
-      "command": "session.create"
+      "command": "issue.session.create"
     },
     "POST /api/issues/:id/sessions/:sessionId/messages": {
-      "command": "session.message.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation>"
     },
     "POST /api/issues/:id/sessions/:sessionId/participants": {
-      "command": "session.participant.add"
+      "command": "issue.session.participant.add"
     },
     "POST /api/issues/:id/sessions/:sessionId/results": {
-      "command": "session.result.publish"
+      "command": "issue.session.result.publish"
     },
     "POST /api/issues/:id/sessions/:sessionId/tasks": {
-      "command": "session.task.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation> --to <agent> --kind request"
     },
     "POST /api/issues/:id/share": {
       "command": "share.create"
@@ -11540,16 +13502,15 @@
       "command": "issue.subscriber.add"
     },
     "POST /api/issues/:id/tasks/:taskId/cancel": {
-      "command": "issue.cancel"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn cancel <turn>"
     },
     "POST /api/issues/:id/unsubscribe": {
       "command": "issue.subscriber.remove"
     },
-    "POST /api/issues/:issueId/session-archives/:archiveId/retry": {
-      "command": "session.archive.retry"
-    },
-    "POST /api/issues/:issueId/session-archives/:archiveId/verify": {
-      "command": "session.archive.verify"
+    "POST /api/issues/:id/workspace/abandon": {
+      "command": "issue.workspace.abandon"
     },
     "POST /api/issues/batch-delete": {
       "command": "issue.batch-delete"
@@ -11578,16 +13539,42 @@
       "command": "lark.binding.redeem"
     },
     "POST /api/me/onboarding/cloud-waitlist": {
-      "command": "member.onboarding.cloud-waitlist"
+      "command": "account.onboarding.cloud-waitlist"
     },
     "POST /api/me/onboarding/complete": {
-      "command": "member.onboarding.complete"
+      "command": "account.onboarding.complete"
     },
     "POST /api/me/onboarding/no-runtime-bootstrap": {
-      "command": "member.onboarding.no-runtime-bootstrap"
+      "command": "account.onboarding.no-runtime-bootstrap"
     },
     "POST /api/me/onboarding/runtime-bootstrap": {
-      "command": "member.onboarding.runtime-bootstrap"
+      "command": "account.onboarding.runtime-bootstrap"
+    },
+    "POST /api/messages/:id/question/answer": {
+      "command": "message.question.answer"
+    },
+    "POST /api/messages/:id/question/close": {
+      "command": "message.question.close"
+    },
+    "POST /api/messages/:id/question/continue": {
+      "command": "message.question.continue"
+    },
+    "POST /api/messages/:id/question/escalate": {
+      "command": "message.question.escalate"
+    },
+    "POST /api/messages/:id/question/present": {
+      "command": "message.question.present"
+    },
+    "POST /api/messages/:id/question/transfer": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 责任变更后问题自动重新路由；remi message question get <question> 查看当前处理者"
+    },
+    "POST /api/messages/:id/reactions": {
+      "command": "message.react"
+    },
+    "POST /api/messages/:id/resolve": {
+      "command": "message.resolve"
     },
     "POST /api/multiremi/agent-plugins/:id/activate": {
       "command": "plugin.activate"
@@ -11632,15 +13619,15 @@
       "command": "autopilot.delivery.replay"
     },
     "POST /api/multiremi/autopilots/:id/run": {
-      "command": "autopilot.run"
+      "command": "autopilot.run-now"
     },
     "POST /api/multiremi/autopilots/:id/run-scheduled": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
-      "reason": "Scheduler execution is machine-to-server traffic; users trigger an autopilot with remi autopilot run."
+      "reason": "Scheduler execution is machine-to-server traffic; users trigger an autopilot with remi autopilot run-now."
     },
     "POST /api/multiremi/autopilots/:id/trigger": {
-      "command": "autopilot.run"
+      "command": "autopilot.run-now"
     },
     "POST /api/multiremi/autopilots/:id/webhook": {
       "cli_exempt": true,
@@ -11651,13 +13638,41 @@
       "command": "chat.create"
     },
     "POST /api/multiremi/chats/:id/messages": {
-      "command": "chat.message.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation>"
+    },
+    "POST /api/multiremi/chats/:id/sessions": {
+      "command": "session.create"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/adopt": {
+      "command": "session.adopt"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/messages": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation>"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/participants": {
+      "command": "session.participant.add"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/results": {
+      "command": "session.result.publish"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/tasks": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation> --to <agent> --kind request"
     },
     "POST /api/multiremi/comments/:id/reactions": {
-      "command": "comment.reaction.add"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message react <message> --emoji <emoji>"
     },
     "POST /api/multiremi/comments/:id/resolve": {
-      "command": "comment.resolve"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message resolve <message>"
     },
     "POST /api/multiremi/daemons/:daemonId/retire": {
       "command": "daemon.retire"
@@ -11666,10 +13681,14 @@
       "command": "platform.feedback.create"
     },
     "POST /api/multiremi/inbox/:id/archive": {
-      "command": "inbox.archive"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read <conversation>"
     },
     "POST /api/multiremi/inbox/:id/read": {
-      "command": "inbox.read"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi inbox read <conversation>"
     },
     "POST /api/multiremi/install/daemon": {
       "command": "lark.daemon.install"
@@ -11684,13 +13703,20 @@
       "command": "issue.attachment.upload"
     },
     "POST /api/multiremi/issues/:id/comments": {
-      "command": "comment.add"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send <conversation>"
     },
     "POST /api/multiremi/issues/:id/dependencies": {
       "command": "issue.dependency.add"
     },
     "POST /api/multiremi/issues/:id/labels": {
       "command": "issue.label.add"
+    },
+    "POST /api/multiremi/issues/:id/parent-done-grant": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）"
     },
     "POST /api/multiremi/issues/:id/reactions": {
       "command": "issue.reaction.add"
@@ -11717,7 +13743,9 @@
       "command": "label.create"
     },
     "POST /api/multiremi/members": {
-      "command": "member.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "POST /api/multiremi/notification-channels": {
       "command": "notification.channel.create"
@@ -11782,19 +13810,29 @@
       "command": "squad.member.add"
     },
     "POST /api/multiremi/tasks": {
-      "command": "task.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send --to <agent> --kind request"
     },
     "POST /api/multiremi/tasks/:id/cancel": {
-      "command": "task.cancel"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn cancel <turn>"
     },
     "POST /api/multiremi/tasks/:id/human-requests/:requestId/respond": {
-      "command": "task.request.respond"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message question answer <question> --revision <route_revision> --data <json>"
     },
     "POST /api/multiremi/tasks/:id/redispatch": {
-      "command": "task.redispatch"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn retry <turn> --cold"
     },
     "POST /api/multiremi/tasks/:id/steer": {
-      "command": "task.steer"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)"
     },
     "POST /api/multiremi/tokens": {
       "command": "token.create"
@@ -11828,6 +13866,11 @@
       "reason": "Platform updater callback is an internal deployment control-plane protocol."
     },
     "POST /api/platform-updater/operations/claim": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Platform updater callback is an internal deployment control-plane protocol."
+    },
+    "POST /api/platform-updater/operations/reconcile": {
       "cli_exempt": true,
       "category": "platform_updater_internal",
       "reason": "Platform updater callback is an internal deployment control-plane protocol."
@@ -11868,6 +13911,18 @@
     "POST /api/runtimes/:id/directory-scans": {
       "command": "runtime.directory.scan"
     },
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/interrupt": {
+      "command": "chat.external.interrupt"
+    },
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/messages": {
+      "command": "chat.external.send"
+    },
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/requests/:requestId": {
+      "command": "chat.external.respond"
+    },
+    "POST /api/runtimes/:id/gc-runs": {
+      "command": "runtime.gc"
+    },
     "POST /api/runtimes/:id/local-skills": {
       "command": "runtime.skill.scan"
     },
@@ -11883,6 +13938,24 @@
     "POST /api/runtimes/:id/workspaces": {
       "command": "runtime.workspace.create"
     },
+    "POST /api/sessions/:sessionId/messages": {
+      "command": "message.send"
+    },
+    "POST /api/sessions/:sessionId/queue": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake."
+    },
+    "POST /api/sessions/:sessionId/queue/:qid/steer": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake."
+    },
+    "POST /api/sessions/:sessionId/queue/resume": {
+      "cli_exempt": true,
+      "category": "pure_ui",
+      "reason": "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake."
+    },
     "POST /api/skills": {
       "command": "skill.create"
     },
@@ -11896,16 +13969,24 @@
       "command": "squad.member.add"
     },
     "POST /api/tasks/:id/cancel": {
-      "command": "task.cancel"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn cancel <turn>"
     },
     "POST /api/tasks/:id/human-requests/:requestId/respond": {
-      "command": "task.request.respond"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message question answer <question> --revision <route_revision> --data <json>"
     },
     "POST /api/tasks/:id/redispatch": {
-      "command": "task.redispatch"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi turn retry <turn> --cold"
     },
     "POST /api/tasks/:id/steer": {
-      "command": "task.steer"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message send --to <agent> (收尾用 remi turn wrap-up <turn>)"
     },
     "POST /api/tokens": {
       "command": "token.create"
@@ -11913,8 +13994,23 @@
     "POST /api/tokens/current/renew": {
       "command": "token.renew"
     },
+    "POST /api/turns/:id/automation/quiet": {
+      "command": "automation.quiet"
+    },
+    "POST /api/turns/:id/cancel": {
+      "command": "turn.cancel"
+    },
+    "POST /api/turns/:id/retry": {
+      "command": "turn.retry"
+    },
+    "POST /api/turns/:id/wrap-up": {
+      "command": "turn.wrap-up"
+    },
     "POST /api/upload-file": {
       "command": "issue.attachment.upload"
+    },
+    "POST /api/usage/prices": {
+      "command": "dashboard.usage.prices.set"
     },
     "POST /api/webhooks/autopilots/:token": {
       "cli_exempt": true,
@@ -11949,14 +14045,21 @@
     "POST /api/workspaces/:id/feishu-bot/test": {
       "command": "workspace.feishu-bot.test"
     },
+    "POST /api/workspaces/:id/feishu-bots": {
+      "command": "workspace.feishu-bot.create"
+    },
     "POST /api/workspaces/:id/lark/install/begin": {
       "command": "lark.install.begin"
     },
     "POST /api/workspaces/:id/leave": {
-      "command": "workspace.leave"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "POST /api/workspaces/:id/members": {
-      "command": "invite.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "POST /api/workspaces/:id/relay-config/:engine/probe": {
       "command": "workspace.relay.probe"
@@ -12033,6 +14136,11 @@
     "POST /api/workspaces/:workspaceId/feishu/sources": {
       "command": "feishu.source.add"
     },
+    "POST /api/workspaces/:workspaceId/issue-responsibility-migration/map": {
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi issue assign <issue> --to <agent|squad>（配置执行负责人）"
+    },
     "POST /api/workspaces/:workspaceId/messaging/connections": {
       "command": "messaging.connection.add"
     },
@@ -12092,6 +14200,26 @@
     "POST /auth/verify-code": {
       "command": "context.auth.verify-code"
     },
+    "POST /internal/peer/events": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Cross-process API peer channel is machine-to-server traffic; it has no user-facing CLI workflow."
+    },
+    "POST /internal/slot/activate": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
+    },
+    "POST /internal/slot/exit": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
+    },
+    "POST /internal/slot/release": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
+    },
     "PUT /api/agents/:id": {
       "command": "agent.update"
     },
@@ -12111,17 +14239,18 @@
       "command": "autopilot.trigger.set-secret"
     },
     "PUT /api/comments/:id": {
-      "command": "comment.update"
-    },
-    "PUT /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/content": {
       "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message edit <message>"
     },
-    "PUT /api/daemon/runtimes/:runtimeId/models": {
-      "cli_exempt": true,
-      "category": "daemon_internal_protocol",
-      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    "PUT /api/execution-endpoints/:id": {
+      "command": "runtime.endpoint.update"
+    },
+    "PUT /api/execution-groups/:id": {
+      "command": "runtime.group.update"
+    },
+    "PUT /api/execution-profiles/:id": {
+      "command": "runtime.profile.update"
     },
     "PUT /api/issues/:id": {
       "command": "issue.update"
@@ -12139,7 +14268,9 @@
       "command": "agent.skill.set"
     },
     "PUT /api/multiremi/comments/:id": {
-      "command": "comment.update"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi message edit <message>"
     },
     "PUT /api/multiremi/issues/:id/metadata/:key": {
       "command": "issue.metadata.set"
@@ -12231,6 +14362,9 @@
     "PUT /api/workspaces/:id/relay-config/:engine": {
       "command": "workspace.relay.update"
     },
+    "PUT /api/workspaces/:id/relay-config/:engine/context-window": {
+      "command": "workspace.relay.context-window.update"
+    },
     "PUT /api/workspaces/:id/relay-config/:engine/reasoning-levels": {
       "command": "workspace.relay.reasoning-levels.update"
     },
@@ -12240,14 +14374,20 @@
     "PUT /api/workspaces/:id/repos/:repositoryId/wiki/:ref": {
       "command": "wiki.repository.update"
     },
-    "PUT /api/workspaces/:id/session-archive": {
-      "command": "session.config.update"
+    "PUT /api/workspaces/:id/services/magpie": {
+      "command": "workspace.magpie.set"
     },
     "PUT /api/workspaces/:id/ssh-mesh": {
       "command": "workspace.ssh-mesh.update"
     },
+    "PUT /api/workspaces/:id/storage": {
+      "command": "workspace.storage.set"
+    },
     "PUT /api/workspaces/:workspaceId/scm/connections/:connectionId/repositories/:repositoryId": {
       "command": "scm.repository.bind"
+    },
+    "PUT /api/workspaces/:workspaceId/system-model-endpoints": {
+      "command": "workspace.system-model-endpoints.set"
     }
   }
 }

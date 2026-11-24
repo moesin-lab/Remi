@@ -80,18 +80,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "workspace.leave": {
-      "command": "remi workspace leave",
-      "auth": [
-        "human"
-      ],
-      "capability": "workspace.leave",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "workspace.runtime-provision.list": {
       "command": "remi workspace runtime-provision list",
       "auth": [
@@ -309,6 +297,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.system-model-endpoints.get": {
+      "command": "remi workspace system-model-endpoints get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-model-endpoints.set": {
+      "command": "remi workspace system-model-endpoints set",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.relay.discovery": {
       "command": "remi workspace relay discovery",
       "auth": [
@@ -386,6 +400,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.relay.context-window.update": {
+      "command": "remi workspace relay context-window update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.context-window.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.bot-menu.get": {
       "command": "remi workspace bot-menu get",
       "auth": [
@@ -429,6 +456,30 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human"
       ],
       "capability": "workspace.bot-menu.publish-status",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.feishu-bot.list": {
+      "command": "remi workspace feishu-bot list",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.feishu-bot.create": {
+      "command": "remi workspace feishu-bot create",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.create",
       "output": [
         "table",
         "json",
@@ -680,12 +731,121 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "member.list": {
-      "command": "remi member list",
+    "workspace.storage.get": {
+      "command": "remi workspace storage get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.storage.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.storage.set": {
+      "command": "remi workspace storage set",
       "auth": [
         "human"
       ],
-      "capability": "member.list",
+      "capability": "workspace.storage.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.operator": {
+      "command": "remi workspace operator",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.operator",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.get": {
+      "command": "remi account get",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.update": {
+      "command": "remi account update",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.update": {
+      "command": "remi account onboarding update",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.complete": {
+      "command": "remi account onboarding complete",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.complete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.cloud-waitlist": {
+      "command": "remi account onboarding cloud-waitlist",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.cloud-waitlist",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.runtime-bootstrap": {
+      "command": "remi account onboarding runtime-bootstrap",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.runtime-bootstrap",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.no-runtime-bootstrap": {
+      "command": "remi account onboarding no-runtime-bootstrap",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.no-runtime-bootstrap",
       "output": [
         "table",
         "json",
@@ -698,174 +858,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human"
       ],
       "capability": "member.get",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.create": {
-      "command": "remi member create",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.create",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.update": {
-      "command": "remi member update",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.update",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.delete": {
-      "command": "remi member delete",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.delete",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.update": {
-      "command": "remi member onboarding update",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.update",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.complete": {
-      "command": "remi member onboarding complete",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.complete",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.cloud-waitlist": {
-      "command": "remi member onboarding cloud-waitlist",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.cloud-waitlist",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.runtime-bootstrap": {
-      "command": "remi member onboarding runtime-bootstrap",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.runtime-bootstrap",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.no-runtime-bootstrap": {
-      "command": "remi member onboarding no-runtime-bootstrap",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.no-runtime-bootstrap",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.list": {
-      "command": "remi invite list",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.get": {
-      "command": "remi invite get",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.get",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.create": {
-      "command": "remi invite create",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.create",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.accept": {
-      "command": "remi invite accept",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.accept",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.decline": {
-      "command": "remi invite decline",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.decline",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.revoke": {
-      "command": "remi invite revoke",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.revoke",
       "output": [
         "table",
         "json",
@@ -1970,19 +1962,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "issue.rerun": {
-      "command": "remi issue rerun",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.rerun",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "issue.retitle": {
       "command": "remi issue retitle",
       "auth": [
@@ -1990,175 +1969,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "issue.retitle",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.cancel": {
-      "command": "remi issue cancel-task",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.cancel",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.task-runs": {
-      "command": "remi issue runs",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.task-runs",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.messages": {
-      "command": "remi issue run-messages",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.messages",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.list": {
-      "command": "remi comment list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.add": {
-      "command": "remi comment add",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.add",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.update": {
-      "command": "remi comment update",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.update",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.delete": {
-      "command": "remi comment delete",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.delete",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.resolve": {
-      "command": "remi comment resolve",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.resolve",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.unresolve": {
-      "command": "remi comment unresolve",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.unresolve",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.reaction.list": {
-      "command": "remi comment reaction list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.reaction.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.reaction.add": {
-      "command": "remi comment reaction add",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.reaction.add",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.reaction.remove": {
-      "command": "remi comment reaction remove",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.reaction.remove",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "comment.attachment.list": {
-      "command": "remi comment attachment list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "comment.attachment.list",
       "output": [
         "table",
         "json",
@@ -2230,6 +2040,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "session.adopt": {
+      "command": "remi session adopt",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.adopt",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "session.update": {
       "command": "remi session update",
       "auth": [
@@ -2282,58 +2105,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "session.event.list": {
-      "command": "remi session event list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.event.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.message.create": {
-      "command": "remi session message create",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.message.create",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.task.list": {
-      "command": "remi session task list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.task.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.task.create": {
-      "command": "remi session task create",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.task.create",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "session.result.list": {
       "command": "remi session result list",
       "auth": [
@@ -2360,78 +2131,130 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "session.archive.list": {
-      "command": "remi session archive list",
+    "issue.session.list": {
+      "command": "remi issue session list",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.archive.list",
+      "capability": "issue.session.list",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "session.archive.status": {
-      "command": "remi session archive status",
+    "issue.session.get": {
+      "command": "remi issue session get",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.archive.status",
+      "capability": "issue.session.get",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "session.archive.verify": {
-      "command": "remi session archive verify",
+    "issue.session.create": {
+      "command": "remi issue session create",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.archive.verify",
+      "capability": "issue.session.create",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "session.archive.retry": {
-      "command": "remi session archive retry",
+    "issue.session.update": {
+      "command": "remi issue session update",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.archive.retry",
+      "capability": "issue.session.update",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "session.config.get": {
-      "command": "remi session config get",
+    "issue.session.participant.list": {
+      "command": "remi issue session participant list",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.config.get",
+      "capability": "issue.session.participant.list",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "session.config.update": {
-      "command": "remi session config update",
+    "issue.session.participant.add": {
+      "command": "remi issue session participant add",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "session.config.update",
+      "capability": "issue.session.participant.add",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "issue.session.participant.remove": {
+      "command": "remi issue session participant remove",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.participant.remove",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "issue.session.result.list": {
+      "command": "remi issue session result list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.result.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "issue.session.result.publish": {
+      "command": "remi issue session result publish",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.result.publish",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "issue.status-pages": {
+      "command": "remi issue status-pages",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.status-pages",
       "output": [
         "table",
         "json",
@@ -2490,19 +2313,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "issue.active-task": {
-      "command": "remi issue active-task",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.active-task",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "issue.usage": {
       "command": "remi issue usage",
       "auth": [
@@ -2523,6 +2333,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "issue.workspace",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "issue.workspace.abandon": {
+      "command": "remi issue workspace abandon",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.workspace.abandon",
       "output": [
         "table",
         "json",
@@ -2916,6 +2739,20 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "share.trace.read": {
+      "command": "remi share trace read",
+      "auth": [
+        "human",
+        "share",
+        "task"
+      ],
+      "capability": "share.trace.read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "label.list": {
       "command": "remi label list",
       "auth": [
@@ -3098,296 +2935,210 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "chat.message.list": {
-      "command": "remi chat message list",
+    "chat.message.page": {
+      "command": "remi chat message page",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.message.list",
+      "capability": "chat.message.page",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.message.create": {
-      "command": "remi chat message create",
+    "issue.responsibility": {
+      "command": "remi issue responsibility",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.message.create",
+      "capability": "issue.responsibility",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.attachment.send": {
-      "command": "remi chat attachment send",
-      "auth": [
-        "task"
-      ],
-      "capability": "chat.attachment.send",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "chat.pending": {
-      "command": "remi chat pending",
+    "issue.question.list": {
+      "command": "remi issue question list",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.pending",
+      "capability": "issue.question.list",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.queue.list": {
-      "command": "remi chat queue list",
+    "message.question.get": {
+      "command": "remi message question get",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.queue.list",
+      "capability": "message.question.get",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.queue.update": {
-      "command": "remi chat queue update",
+    "message.question.answer": {
+      "command": "remi message question answer",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.queue.update",
+      "capability": "message.question.answer",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.queue.remove": {
-      "command": "remi chat queue remove",
+    "message.question.escalate": {
+      "command": "remi message question escalate",
+      "auth": [
+        "task"
+      ],
+      "capability": "message.question.escalate",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.question.present": {
+      "command": "remi message question present",
+      "auth": [
+        "task"
+      ],
+      "capability": "message.question.present",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.question.continue": {
+      "command": "remi message question continue",
+      "auth": [
+        "human"
+      ],
+      "capability": "message.question.continue",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.question.close": {
+      "command": "remi message question close",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.queue.remove",
+      "capability": "message.question.close",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.queue.clear": {
-      "command": "remi chat queue clear",
+    "chat.external.sources": {
+      "command": "remi chat external sources",
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "chat.queue.clear",
+      "capability": "chat.external.sources",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.queue.prioritize": {
-      "command": "remi chat queue prioritize",
+    "chat.external.models": {
+      "command": "remi chat external models",
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "chat.queue.prioritize",
+      "capability": "chat.external.models",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "chat.read": {
-      "command": "remi chat read",
+    "chat.external.list": {
+      "command": "remi chat external list",
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "chat.read",
+      "capability": "chat.external.list",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "task.list": {
-      "command": "remi task list",
+    "chat.external.get": {
+      "command": "remi chat external get",
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "task.list",
+      "capability": "chat.external.get",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "task.get": {
-      "command": "remi task get",
+    "chat.external.send": {
+      "command": "remi chat external send",
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "task.get",
+      "capability": "chat.external.send",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "task.create": {
-      "command": "remi task create",
+    "chat.external.receipt": {
+      "command": "remi chat external receipt",
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "task.create",
+      "capability": "chat.external.receipt",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "task.continue": {
-      "command": "remi task continue",
+    "chat.external.interrupt": {
+      "command": "remi chat external interrupt",
       "auth": [
-        "task"
+        "human"
       ],
-      "capability": "task.continue",
+      "capability": "chat.external.interrupt",
       "output": [
         "table",
         "json",
         "jsonl"
       ]
     },
-    "task.cancel": {
-      "command": "remi task cancel",
+    "chat.external.respond": {
+      "command": "remi chat external respond",
       "auth": [
-        "human",
-        "task"
+        "human"
       ],
-      "capability": "task.cancel",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.redispatch": {
-      "command": "remi task redispatch",
-      "auth": [
-        "task"
-      ],
-      "capability": "task.redispatch",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.steer": {
-      "command": "remi task steer",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.steer",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.steer.list": {
-      "command": "remi task steer list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.steer.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.message.list": {
-      "command": "remi task message list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.message.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.inspect": {
-      "command": "remi task inspect",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.inspect",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.prompt": {
-      "command": "remi task prompt",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.prompt",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.request.list": {
-      "command": "remi task request list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.request.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "task.request.respond": {
-      "command": "remi task request respond",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.request.respond",
+      "capability": "chat.external.respond",
       "output": [
         "table",
         "json",
@@ -4146,6 +3897,214 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "runtime.profile.list": {
+      "command": "remi runtime profile list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.get": {
+      "command": "remi runtime profile get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.create": {
+      "command": "remi runtime profile create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.update": {
+      "command": "remi runtime profile update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.delete": {
+      "command": "remi runtime profile delete",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.list": {
+      "command": "remi runtime endpoint list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.get": {
+      "command": "remi runtime endpoint get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.create": {
+      "command": "remi runtime endpoint create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.update": {
+      "command": "remi runtime endpoint update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.delete": {
+      "command": "remi runtime endpoint delete",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.get": {
+      "command": "remi runtime group get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.create": {
+      "command": "remi runtime group create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.update": {
+      "command": "remi runtime group update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.delete": {
+      "command": "remi runtime group delete",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.inspect": {
+      "command": "remi runtime endpoint inspect",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.inspect",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.catalog": {
+      "command": "remi runtime endpoint catalog",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.catalog",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "runtime.codex-profile.get": {
       "command": "remi runtime codex-profile get",
       "auth": [
@@ -4422,6 +4381,44 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human"
       ],
       "capability": "runtime.command.run",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.storage": {
+      "command": "remi runtime storage",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.storage",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.gc": {
+      "command": "remi runtime gc",
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.gc",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.gc-status": {
+      "command": "remi runtime gc-status",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.gc-status",
       "output": [
         "table",
         "json",
@@ -4724,6 +4721,43 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "daemon.drain": {
+      "command": "remi daemon drain",
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.drain",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "daemon.drain.status": {
+      "command": "remi daemon drain status",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "daemon.drain.status",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "daemon.undrain": {
+      "command": "remi daemon undrain",
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.undrain",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "daemon.list": {
       "command": "remi daemon list",
       "auth": [
@@ -4770,6 +4804,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "daemon.retirement-plan",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.magpie.get": {
+      "command": "remi workspace magpie get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.magpie.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.magpie.set": {
+      "command": "remi workspace magpie set",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.magpie.set",
       "output": [
         "table",
         "json",
@@ -4879,13 +4939,13 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "autopilot.run": {
-      "command": "remi autopilot run",
+    "autopilot.run-now": {
+      "command": "remi autopilot run-now",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "autopilot.run",
+      "capability": "autopilot.run-now",
       "output": [
         "table",
         "json",
@@ -5014,6 +5074,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "autopilot.scheduler",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "automation.quiet": {
+      "command": "remi automation quiet",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "automation.quiet",
       "output": [
         "table",
         "json",
@@ -5157,6 +5230,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "scm.event.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.checks": {
+      "command": "remi scm change-request checks",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.checks",
       "output": [
         "table",
         "json",
@@ -5826,136 +5912,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "inbox.list": {
-      "command": "remi inbox list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.page": {
-      "command": "remi inbox page",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.page",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.summary": {
-      "command": "remi inbox summary",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.summary",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.unread-count": {
-      "command": "remi inbox unread-count",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.unread-count",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.read": {
-      "command": "remi inbox read",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.archive": {
-      "command": "remi inbox archive",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.mark-all-read": {
-      "command": "remi inbox mark-all-read",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.mark-all-read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.archive-all": {
-      "command": "remi inbox archive-all",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive-all",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.archive-all-read": {
-      "command": "remi inbox archive-all-read",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive-all-read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "inbox.archive-completed": {
-      "command": "remi inbox archive-completed",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "inbox.archive-completed",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "notification.get": {
       "command": "remi notification get",
       "auth": [
@@ -6102,6 +6058,71 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "pin.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "dashboard.usage.report": {
+      "command": "remi dashboard usage report",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.report",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "dashboard.usage.reconcile": {
+      "command": "remi dashboard usage reconcile",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.reconcile",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "dashboard.usage.prices.list": {
+      "command": "remi dashboard usage prices list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.prices.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "dashboard.usage.prices.set": {
+      "command": "remi dashboard usage prices set",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.prices.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "dashboard.usage.prices.close": {
+      "command": "remi dashboard usage prices close",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "dashboard.usage.prices.close",
       "output": [
         "table",
         "json",
@@ -6653,6 +6674,214 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human"
       ],
       "capability": "context.auth.logout",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.send": {
+      "command": "remi message send",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.send",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.list": {
+      "command": "remi message list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.get": {
+      "command": "remi message get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.edit": {
+      "command": "remi message edit",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.edit",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.delete": {
+      "command": "remi message delete",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.resolve": {
+      "command": "remi message resolve",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.resolve",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "message.react": {
+      "command": "remi message react",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "message.react",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "inbox": {
+      "command": "remi inbox",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "inbox.read": {
+      "command": "remi inbox read",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "inbox.read-all": {
+      "command": "remi inbox read-all",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.read-all",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "turn.list": {
+      "command": "remi turn list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "turn.get": {
+      "command": "remi turn get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "turn.cancel": {
+      "command": "remi turn cancel",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.cancel",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "turn.wrap-up": {
+      "command": "remi turn wrap-up",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.wrap-up",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "turn.retry": {
+      "command": "remi turn retry",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.retry",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "turn.trace.read": {
+      "command": "remi turn trace read",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "turn.trace.read",
       "output": [
         "table",
         "json",

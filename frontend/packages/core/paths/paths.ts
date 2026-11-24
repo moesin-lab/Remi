@@ -12,6 +12,8 @@
  *  - Zero runtime deps means this module is safe in Node (tests) and browsers
  */
 
+import type { ImPlatformId, ImSection } from "../im-platforms/catalog";
+
 const encode = (id: string) => encodeURIComponent(id);
 
 function workspaceScoped(slug: string) {
@@ -49,9 +51,19 @@ function workspaceScoped(slug: string) {
     squadDetail: (id: string) => `${ws}/squads/${encode(id)}`,
     inbox: () => `${ws}/inbox`,
     chat: (sessionId?: string, agentId?: string) => `${ws}/chat${sessionId ? `?session=${encode(sessionId)}` : agentId ? `?agent=${encode(agentId)}` : ""}`,
+    externalChat: (runtimeId?: string, sourceId?: string, threadId?: string, projectId?: string) => {
+      const query = new URLSearchParams({ kind: "external" });
+      if (runtimeId) query.set("external_runtime", runtimeId);
+      if (sourceId) query.set("external_source", sourceId);
+      if (threadId) query.set("external_thread", threadId);
+      if (projectId) query.set("external_project", projectId);
+      return `${ws}/chat?${query}`;
+    },
     myIssues: () => `${ws}/my-issues`,
     workbench: () => `${ws}/workbench`,
     runtimes: () => `${ws}/runtimes`,
+    magpie: () => `${ws}/magpie`,
+    executionGroups: () => `${ws}/execution-groups`,
     runtimeMachine: (id: string) => `${ws}/runtimes?machine=${encode(id)}`,
     runtimeDetail: (id: string) => `${ws}/runtimes/${encode(id)}`,
     plugins: () => `${ws}/plugins`,
@@ -59,6 +71,9 @@ function workspaceScoped(slug: string) {
     skills: () => `${ws}/skills`,
     skillDetail: (id: string) => `${ws}/skills/${encode(id)}`,
     settings: () => `${ws}/settings`,
+    imPlatforms: () => `${ws}/im`,
+    imPlatform: (platform: ImPlatformId, section: ImSection = "overview") =>
+      `${ws}/im/${encode(platform)}${section === "overview" ? "" : `/${encode(section)}`}`,
     attachmentPreview: (id: string) => `${ws}/attachments/${encode(id)}/preview`,
   };
 }

@@ -18,12 +18,21 @@ summary: 说明 daemon 进程配置、工作区 bot 的控制面分配、凭据�
 | `MULTIREMI_PROVIDER` | 可选，指定 provider；未指定时探测本机健康 provider。至少一个 provider 可执行且已认证，前台 daemon 才能启动。 |
 | `MULTIREMI_WORKSPACES_ROOT` | 工作目录根，默认 `~/.remi/multiremi/workspaces`；不要放在临时发版 checkout 中。 |
 | `MULTIREMI_DAEMON_PORT` | 本机 daemon 控制端口，默认 6131；多 provider 时分配相邻端口。 |
-| `MULTIREMI_GC_ENABLED` | 默认 true；是否运行周期性 workspace GC。 |
-| `MULTIREMI_GC_INTERVAL_MS` / `MULTIREMI_GC_TTL_MS` | 启动默认分别为 900000 / 259200000 ms。工作区 `settings.session_archive` 可覆盖有效间隔和 TTL，见[GC policy](../../packages/daemon/src/agent-runtime/workspace/gc-policy.ts)。 |
-| `MULTIREMI_HEARTBEAT_INTERVAL_MS` | 普通心跳间隔，默认 10000 ms。**只覆盖普通间隔**：被控制面分配到 Feishu concierge 的那台 daemon 固定用 3000 ms（`pending_feishu_outbound` 只通过 heartbeat ack 下发），不随此变量变大。是否属于「那台」按 supervisor 的实际状态判断，而不是「有没有挂 concierge host」——每台常驻 daemon 都会挂 host，否则所有机器都会停在 3 s。 |
+| `MULTIREMI_GC_ENABLED` | 默认 true；是否运行周期性存储回收。关闭后工作区和运行环境不再回收。 |
+| `MULTIREMI_GC_INTERVAL_MS` | 回收轮次间隔，默认 900000 ms（15 分钟）。 |
+| `MULTIREMI_GC_DRY_RUN` | 默认 false；为 true 时每轮只生成计划和报告，不删除任何内容。 |
+| `MULTIREMI_LEGACY_KEEP_DAYS` | 默认 7；升级清扫移入 `legacy-<日期>/` 的旧布局保留天数，到期由回收轮次删除；快照失败的旧 worktree 所在的 `retained/` 与 `retained.json` 不删，存储报告以 `legacy_retained` 计数，由运维核对后手工删除。 |
+| `MULTIREMI_GC_PRESSURE_FREE_PERCENT` / `MULTIREMI_GC_PRESSURE_FREE_BYTES` / `MULTIREMI_GC_CRITICAL_FREE_PERCENT` / `MULTIREMI_GC_CRITICAL_FREE_BYTES` | 单机磁盘水位覆盖，默认 15%、20 GiB、5%、5 GiB；0 关闭对应条件。每个 daemon 独立监测，critical 拒绝新领取，恢复自动解除磁盘暂停；不改变 online/offline。 |
+| `MULTIREMI_GC_TTL_MS` / `MULTIREMI_GC_AUTOMATION_TTL_MS` / `MULTIREMI_GC_MAX_RETAINED` / `MULTIREMI_GC_ORPHAN_TTL_MS` / `MULTIREMI_GC_SNAPSHOT_MAX_BYTES` | 单机覆盖。策略由工作区设置 `settings.storage` 统一管理并经 `workspace.settings` 下发，这些变量只在需要对某台机器单独覆盖时设置；默认值与范围见[存储与保留](../dev/storage-retention.md#策略)和[契约](../../packages/contracts/src/storage.ts)。 |
+| `MULTIREMI_HEARTBEAT_INTERVAL_MS` | v2 不再读取；进程级 `hb` 固定每 15000 ms，所有 provider 与 concierge 共用这条连接。 |
 | `MULTIREMI_CLAIM_IDLE_MAX_MS` | 空闲 claim 的退避上限，默认 30000 ms；退避从 3000 ms 起翻倍到该值。 |
-| `MULTIREMI_PLUGIN_DESIRED_REFRESH_MS` | 只在 server 未在 heartbeat ack 里返回 desired revision 时生效的兜底刷新间隔，默认 30000 ms。 |
+| `MULTIREMI_PLUGIN_DESIRED_REFRESH_MS` | A-2 过渡期的 Plugin desired HTTP 兜底刷新间隔，默认 30000 ms；由 MUL-419 后续接入 RPC 与 revision 推送。 |
 | `MULTIREMI_AUTHORITY_PROBE_MAX_MS` | terminal authority 之后 register 探测的间隔上限，默认 900000 ms（15 分钟）。 |
+| `REMI_ACP_NATIVE_SUBAGENTS` | 默认开；设为 `0` 时不向 Claude/Codex 桥请求原生子代理会话，恢复只收根会话的帧（Codex 子代理的工作随之不可见）。见 [ADR 0021](../adr/0021-subagent-sessions-and-autonomous-rounds.md)。 |
+| `REMI_ACP_AUTONOMOUS_ROUNDS` | 默认开；设为 `0` 时不捕获、也不等待 Claude 在 prompt 结束后自开的后续轮（后台子代理的迟到回答），恢复此前的完成时机。与上一项独立。 |
+| `REMI_ACP_ASYNC_TASKS` | 默认开；设为 `0` 时不向 Claude/Codex 桥声明 AIR `asyncTasks`，后台任务不再上报、也不保留进程，轮次结束时后台命令随进程结束。 |
+| `REMI_MAX_PARKED_LANES` | 一台机器同时为后台任务保留进程的 Chat 会话数，默认 4，满时淘汰最久没有活动的会话；`0` 关闭保留，后台任务在轮次结束时停止。 |
+| `REMI_BACKGROUND_KEEPALIVE_MS` | 保留进程的时长上限，从会话最近一轮结束算起，默认 7200000（2 小时）；低于 1000 的值不生效。 |
 
 bot 的 Agent、承载 Runtime、App ID、App Secret 和 domain 从控制面配置获取，不在本机环境文件中指定。共享配置层仍支持一些 Feishu/OAuth 相关环境变量，但当前 bot 启动的身份由 assignment 覆盖；设置本地应用凭据不会创建或启用工作区 bot。
 
@@ -47,51 +56,55 @@ The [daemon client](../../packages/server/src/worker/client.ts) applies a defaul
 30-second deadline to control-plane JSON requests, including connection setup,
 response headers, and body reads for both successful and error responses. This
 bounds heartbeat, plugin configuration, and task claim requests that would
-otherwise block subsequent polling. Archive content uploads retain their
-separate timeout budget.
+otherwise block subsequent polling.
 
 The running [poll loop](../../packages/server/src/worker/daemon.ts) logs transient
 failures and retries at the heartbeat interval. Timeout errors identify the
 method, path, and deadline. The same daemon resumes polling when the connection
 recovers; the HTTP client does not automatically replay writes.
 
-Heartbeat, desired-state refresh, and task claim run on separate timers:
+The v2 transport, desired-state fallback and task claim have separate schedules:
 
-- **Heartbeat**: 10 s by default. The Runtime the control plane actually
-  *assigned* the workspace Feishu concierge to runs 3 s, because its ack carries
-  proactive replies. Being able to host the bot is not the same thing: every
-  long-running daemon is offered the host so the bot can be handed to any of
-  them, and only `FeishuConciergeSupervisor.snapshot().state !== "stopped"`
-  (starting, online, failed) selects the fast lane. Assignment and handover
-  re-apply the cadence immediately, so a Runtime receiving the bot does not wait
-  out a pending 10 s interval, and one that hands it back returns to 10 s.
-  `MULTIREMI_HEARTBEAT_INTERVAL_MS` replaces the normal interval only; the
-  assigned Runtime keeps 3 s. `/health` reports `heartbeat_interval_ms`. Runtime
-  liveness tolerates this easily — the stale window is 5 minutes, see
-  [runtime-health](../../packages/contracts/src/runtime-health.ts).
-- **Desired Agent Plugins**: fetched when the heartbeat ack reports a revision
-  that differs from the cached one, forced every 10 minutes as a backstop, and
-  fetched at most every `MULTIREMI_PLUGIN_DESIRED_REFRESH_MS` against a server
-  that does not report a revision at all. A matching revision still re-runs the
-  local reconcile so retry deadlines and setup re-checks stay on schedule.
+- **Heartbeat**: one process-wide socket at `GET /api/daemon/ws?protocol=2`.
+  `hello` lists every provider runtime; `hb` runs every 15 seconds, including
+  while work handlers are busy. The main loop no longer sends HTTP heartbeats.
+  The old concierge-specific interval and `MULTIREMI_HEARTBEAT_INTERVAL_MS`
+  setting do not control the v2 heartbeat. Acknowledgements use an independent
+  timer, even while the uplink pump is paused for backpressure.
+- **Desired Agent Plugins**: during A-2's transition, the main loop retains the
+  `MULTIREMI_PLUGIN_DESIRED_REFRESH_MS` HTTP fallback. Revision-triggered pushes
+  are wired by the later v2 business-frame work.
 - **Task claim**: an empty claim doubles the wait from 3 s up to
   `MULTIREMI_CLAIM_IDLE_MAX_MS` (30 s). Claiming work, finishing a task, a drain
-  release, an update-pause release, and a `daemon:task_available` frame all reset
+  release and an update-pause release all reset
   it to 3 s.
 
-The daemon subscribes to `GET /api/daemon/ws?runtime_ids=<runtimeId>` only to
-receive `daemon:task_available`, which is what keeps the 30 s claim ceiling from
-becoming task-start latency. It is an accelerator, never a control channel: no
-liveness, heartbeat, or task state travels over it, and if the upgrade cannot be
-established the polling backoff alone still delivers work. `/health` reports
-`claim_wake_ws` with `state` (`connected` / `connecting` / `disconnected` /
-`disabled`), `connected_since`, `last_error`, `reconnect_attempts`,
-`next_reconnect_at`, and `suspended`, plus `claim_idle_next_at`. `connected` is
-set by the socket's `open` event, so a socket still completing its handshake
-reports `connecting` rather than a false `connected`. Reconnects back off
-exponentially (1 s to 30 s) with jitter, and a replaced Runtime id tears the old
-socket down without letting its late `close` corrupt the new one or schedule a
-second reconnect.
+The v1 wake-up socket and `daemon:task_available` are removed. Until MUL-419
+connects offers and pending work, claim uses backoff polling and `pending_*`
+delivery is temporarily unavailable. This boundary is intentional; there is no
+compatibility shim. `/health.protocol` reports `{ state, server_min, self,
+next_probe_at }`, and `claim_idle_next_at` still reports the polling deadline.
+Only a valid `welcome` completes the handshake. Reconnects use jittered backoff
+from 1 to 30 seconds. `runtime_gone` in `hb` replies triggers registration and
+orphan recovery, then a new socket and `hello` advertise the current IDs.
+
+Close 4426, HTTP 426 or a legacy `ready` frame enters `upgrade_wait`, pauses all
+lane claims, and probes the HTTP heartbeat upgrade channel every 60 seconds.
+Health then reports protocol state `rejected`. Only close 4401, 4403 and 4410
+stop reconnecting as authority failures. HTTP upgrade failures map only
+401/403/410 through the shared authority mapper; all other statuses, including
+421 from an incorrectly selected UI process and 5xx, retry with backoff.
+
+The HTTP heartbeat now automatically queues a CLI update for an older or
+unreadable stored CLI version, targeting the server's own release. It reuses
+the existing update queue and physical-daemon idle gate, keeps one active
+request per runtime, and retries a failed update at the next heartbeat.
+The runtime `protocol` display is derived from persisted hello/CLI version and
+CLI update requests, so a separate UI process can read it without accessing
+the runtime process's session registry. The [cutover checklist](daemon-v2-cutover.md)
+covers the placeholder minimum version, legacy source-version fallback and
+shared-outbox gate before rollback. This stage does not narrow heartbeat acks
+or remove additional v1 routes.
 
 Authority failures such as 401, 403, and 410 still enter terminal cleanup,
 including when their response headers arrive but the error body times out or is
@@ -102,8 +115,8 @@ retry cadence to the service manager's restart policy, which is what turned a
 revoked credential into a request every few seconds. The first failure is logged
 at ERROR, later probes at WARN with the next probe time, and `/health` exposes
 `authority_probe: { attempts, next_probe_at }`. A successful probe requests a
-process restart through the existing restart channel, and the wake-up socket
-also stops reconnecting while authority is revoked (`claim_wake_ws.suspended`)
+process restart through the existing restart channel, and the protocol socket
+also stops reconnecting while authority is revoked (`protocol.state = terminal`)
 so a refused credential does not produce a handshake attempt every 30 s. `--once`
 still surfaces request failures to its caller.
 
@@ -116,10 +129,11 @@ launch configuration, or synchronous event-loop blocking.
 
 The [client tests](../../tests/unit/multiremi/multiremi-daemon-client.test.ts),
 [poll cadence tests](../../tests/unit/daemon/poll-cadence.test.ts),
+[v2 injection tests](../../tests/integration/daemon-protocol-v2/connection.test.ts),
 [authority probe tests](../../tests/unit/daemon/authority-probe.test.ts), and
 [HTTP recovery tests](../../tests/integration/multiremi-daemon-heartbeat.test.ts)
 cover connection loss/reopening, stalled headers and bodies, stalled plugin
-queries and claims, 503 responses, the cadence and wake-up rules above, and
+queries and claims, 503 responses, the cadence and reconnect rules above, and
 shutdown cancellation using isolated databases and directories without
 contacting a production Runtime.
 
@@ -148,21 +162,23 @@ App Secret 在 API 侧通过 [AES-256-GCM](../../packages/server/src/feishu-bot/
 
 ## 实际分配、交接与消息执行
 
-[daemon 心跳路由](../../packages/server/src/api/routers/daemon.ts)中的 bot 配置指令发送 revision、desired_state、config_available。选中的 Runtime 再使用绑定的 daemon 身份访问 `GET /api/daemon/runtimes/:runtimeId/feishu-bot`，获取本次启动的凭据与 Agent；其他 Runtime 无法获取该 assignment。明文凭据用于内存中的 transport，不持久化到本机环境文件。
+[daemon 配置下发](../../packages/server/src/api/daemon-protocol/runtime-input-snapshot.ts)发送 revision、desired_state、config_available；同一连接内不变的 `feishu.directive` 只下发一次，心跳只确认存活而不重复下发。选中的 Runtime 使用绑定的 daemon 身份访问 `GET /api/daemon/runtimes/:runtimeId/feishu-bot`，获取本次启动的凭据与 Agent；其他 Runtime 无法获取该 assignment。明文凭据用于内存中的 transport，不持久化到本机环境文件。
 
-支持出站投递协议的 Runtime 还会从心跳响应的 `pending_feishu_outbound` 领取待发送结果；[daemon](../../packages/server/src/worker/daemon.ts)通过 concierge host 发送后，将投递结果和 claim token 上报到 `POST /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/result`。这条结果推送链路独立于 bot 配置指令，过期投递租约会被服务端拒绝。
+v2 Runtime 从 [配置快照](../../packages/server/src/api/daemon-protocol/runtime-input-snapshot.ts)接收 `feishu.outbound` 下行帧并确认领取带租约的投递。[daemon](../../packages/server/src/worker/daemon.ts)通过 concierge host 发送后，经 `feishu.outbound_result` 帧回报结果和 claim token；过期投递租约会被服务端拒绝。旧 HTTP 投递结果入口已停用，不能把心跳当成 v2 出站领取通道。
 
-[FeishuBotRepo.directiveForRuntime](../../packages/server/src/store/repos/feishu-bot-repo.ts)给未选中的 Runtime 下发 stopped；新 Runtime 等待其他 host 的 online/starting 状态消失或超过当前 90 秒新鲜度窗口后才得到配置。这是基于状态上报的交接门控，不能描述为具备独立到期停机保证的强租约。[Supervisor](../../packages/server/src/worker/feishu-concierge.ts)串行启动/停止、上报状态并退避重试；新 revision 会重新尝试。
+[FeishuBotRepo.directiveForRuntime](../../packages/server/src/store/repos/feishu-bot-repo.ts)给未选中的 Runtime 下发 stopped；新 Runtime 等待其他 host 的 online/starting 状态消失或超过当前 90 秒新鲜度窗口后才得到配置。这是基于状态上报的交接门控，不能描述为具备独立到期停机保证的强租约。[Supervisor](../../packages/server/src/worker/feishu-concierge.ts)串行启动/停止、上报状态并退避重试；新 revision 会重新尝试。新版 daemon 使用 `concierge.status_report` RPC 确认控制面已落库，并在心跳确认时独立补报当前状态和重试失败启动；丢失一次 `online` 不应再需要重启进程。旧 daemon 的 `concierge.status` 尽力而为上报仍可接入；新 daemon 遇到旧 API 的 `unknown_frame` 会暂时使用旧帧并定时补报，升级顺序仍应为先 API 后 daemon，以缩短无确认窗口。
+
+两个开关都只读 daemon 进程环境，改后需重启 daemon。Claude 桥另需子代理补丁：`remi runtime prepare` 安装 bundle 时把 `claude-subagents-v1` 与 usage 补丁一起打进 `dist/acp-agent.js`，daemon 只接受同时带 `const CLAUDE_USAGE_PATCH = "claude-usage-v4";` 与 `const REMI_SUBAGENT_PATCH = "claude-subagents-v1";` 的 bundle，可用 `grep -c 'REMI_SUBAGENT_PATCH' "${REMI_HOME:-$HOME/.remi}"/acp/bundles/claude-<bridge>-<sdk>-<executable>/node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js` 核对（三段版本取自 `runtime-versions.json` 的 `claude`）；关闭上面的开关不需要卸掉补丁。升级检查见[配套升级说明](../daemon-runtime-upgrades.md#claude-升级检查项)。
 
 单机工作目录另由[process-owner](../../packages/daemon/src/agent-runtime/workspace/process-owner.ts)的 supervisor lease 保护，以进程存活判断所有权。它与 bot 跨 Runtime 的状态交接是不同机制，不能因为一次心跳延迟就移除仍存活的本机 owner。
 
-[controlPlaneConciergeHost](../../apps/remi/cli/multiremi.ts)和[bootFeishuChannel](../../apps/remi/cli/agent.ts)只启动传输及卡片处理。消息提交到控制面 Chat/Task 链路：同事件去重，有活跃任务时 steer，否则创建关联 Chat Session 的 Task，执行仍走 Task → AgentSession → ACP。Agent instructions 使用该任务所选的 Agent row，不启动一份独立的人格运行时。
+[controlPlaneConciergeHost](../../apps/remi/cli/multiremi.ts)和[bootFeishuChannel](../../apps/remi/cli/agent.ts)只启动传输及卡片处理。消息提交到控制面 Chat/Task 链路：同事件去重，有活跃任务时 steer，否则创建关联 Chat 的 Task，执行仍走 Task → AgentSession → ACP。Agent instructions 使用该任务所选的 Agent row，不启动一份独立的人格运行时。
 
-机器人按应用范围的 `(app_id, open_id)` 记录发送者，默认 `sender_access_policy=agent`，无需绑定工作区成员或额外授权即可使用 Agent 已开放能力。工作区管理者可主动改为 `allowlist`，通过 `remi workspace feishu-bot sender list|allow|revoke` 管理机器人 Chat 及其任务来源链的 Issue 创建权限；未授权账号仍可普通对话，Agent 自身的提议审批策略继续生效。具体策略与命令见[机器人发送者白名单](../feishu-message-ingestion.md#机器人发送者白名单)。它与 Messaging Source 的会话采集 allowlist 相互独立。
+机器人按应用范围的 `(app_id, open_id)` 记录发送者，默认 `sender_access_policy=allowlist`：只有白名单账号可以使用机器人，未授权账号收到无权限提示，不创建 Chat。升级时已有机器人一次性切换为白名单且不预先授权任何账号。工作区管理者通过 `remi workspace feishu-bot sender list|allow|revoke` 或 Web「访问控制」管理授权，也可主动改为 `agent` 让任何人使用 Agent 已开放能力；Agent 自身的提议审批策略继续生效。具体策略与命令见[机器人发送者白名单](../feishu-message-ingestion.md#机器人发送者白名单)。它与 Messaging Source 的会话采集 allowlist 相互独立。
 
 ## 升级条件与检查
 
-仅当旧安装仍有本地 bot-menu 数据时，按[菜单迁移](../migrations/remi-bot-menu-to-workspace-settings.md)审阅并转换；不要把迁移步骤当作新部署启动前置条件。GC 间隔决定检查频率，不保证固定时间内完成归档或清理；检查有效工作区 policy、归档状态和 daemon 日志。
+仅当旧安装仍有本地 bot-menu 数据时，按[菜单迁移](../migrations/remi-bot-menu-to-workspace-settings.md)审阅并转换；不要把迁移步骤当作新部署启动前置条件。GC 间隔决定检查频率，不保证固定时间内完成清理；排查时检查工作区 `settings.storage`、`remi runtime storage <runtime>` 的最近报告和 daemon 日志。
 
 ```bash
 bun test tests/unit/multiremi/multiremi-feishu-bot-config.test.ts tests/unit/multiremi/multiremi-feishu-bot-daemon.test.ts
@@ -171,3 +187,28 @@ bun test tests/unit/multiremi/multiremi-feishu-bot-task-bridge.test.ts
 ```
 
 这些是当前验证入口；实际执行结果应记录在对应任务或 PR，并分别说明 Bun 测试、服务重启、凭据测试和真实飞书消息收发的验证范围。
+
+## CLI 更新来源与构建身份
+
+`remi update` 使用已配置的控制面地址（环境变量 `MULTIREMI_SERVER_URL` 或保存的
+`server_url`）及对应 token；daemon 使用自身连接地址与 daemon token。默认来源顺序
+是 `platform,github`，可用 `MULTIREMI_UPDATE_SOURCES=platform` 或 `github` 限定来源，
+也可改变顺序。平台未配置、返回 404 或网络不可达时才尝试下一个来源；401、400、5xx、
+清单错误、size/SHA-256 或二进制身份不一致均直接失败。下载阶段的 404/网络不可达也适用
+后备规则。日志及更新输出标明实际来源；GitHub 元数据请求可使用 daemon 自身环境中的
+`GITHUB_TOKEN`，不使用工作区 SCM 凭据。
+
+平台清单来自 `/api/remi/releases/daemon/current`，显式 `target_commit` 则使用
+`/api/remi/releases/daemon/<40位提交>`，且只允许 platform 来源。未指定提交时仍要求
+`target_version` 与清单版本完全相等，包含版本后缀。制品按 OS/arch 选择，下载、校验后
+继续使用原有快照与 launcher 原子替换、watchdog 回滚流程。此命令不重启正在运行的 daemon。
+
+`remi --build-info` 输出单行 `{version, commit}` JSON，`--version` 保持原有输出。
+`BUILD_COMMIT` 由编译期 `MULTIREMI_BUILD_COMMIT` 注入，未注入时读取同名进程环境变量；
+规范化后不是完整 40 位 hex 则为 null。平台制品必须通过暂存二进制 `--build-info` 的版本与
+提交校验；GitHub 旧制品仅要求 `--version`。daemon 在 runtime metadata 中报告 `cli_commit`，
+没有构建提交时省略。handoff journal 保存 `targetCommit`；存在时 PID 绑定与 completed 确认
+必须同时满足版本和提交一致，避免同版本不同提交误判。
+
+回归入口：`bun run test tests/unit/remi/cli-update-platform.test.ts tests/unit/daemon/cli-update-identity.test.ts`。清单类型与解析器见
+[daemon-artifact-manifest.ts](../../packages/shared/src/daemon-artifact-manifest.ts)。

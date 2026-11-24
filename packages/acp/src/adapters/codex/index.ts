@@ -26,6 +26,32 @@ const PERMISSION_MODE_ALIASES: Record<string, string[]> = {
 export class CodexAdapter implements AgentAdapter {
   readonly agentType = "codex";
   readonly promptUsageSettleScope = "last-request" as const;
+  /**
+   * codex-acp 2.2.2 `_session/steering` (dist/index.js:39759, routed at
+   * :42529-42530; advertised at :42474-42477). It drops `_meta`
+   * (:43989-43998), so there is no idle opt-in: an idle session always starts a
+   * turn once the previous prompt completes (`startedNewTurn`, :43906-43960).
+   * A steer during a command joins the turn without stopping it (app-server
+   * `turn/steer`, :43851-43890); the answer stays inside the prompt.
+   */
+  readonly steering = { method: "_session/steering", idleOptIn: false, waitForToolCalls: false } as const;
+  /**
+   * codex-acp 2.2.2 forwards child threads as ACP child sessions only for the
+   * AIR `nativeSubagentSessions` capability: its bundled ACP schema strips a
+   * top-level `subagents` (dist/index.js `clientSupportsSubagents`, 39967-39972).
+   * The root prompt waits up to 10 minutes for its children
+   * (`CodexSubagentEventRouter.DEFAULT_WAIT_TIMEOUT_MS`), so a child never
+   * outlives the prompt: no autonomous rounds.
+   */
+  readonly nativeSubagents = { airCapability: true } as const;
+  /**
+   * codex-acp 2.2.2 publishes unified-exec background terminals for the AIR
+   * `asyncTasks` capability (dist/index.js:42156-42234) and stops one through
+   * `_session/async_task/stop` (:42580-42592). A terminal that ends between
+   * turns starts no turn of its own (no self-start found, PR 6 §1.2): the next
+   * turn reads it.
+   */
+  readonly asyncTasks = { wakesModel: false } as const;
 
   resolveToolName(update: ToolCallUpdate | ToolCallProgressUpdate): string {
     // No `_meta` probe here: the only tool-call `_meta` keys codex-acp emits are

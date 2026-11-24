@@ -1,6 +1,9 @@
+import { normalizeDaemonTurnOffer } from "@multiremi/worker/daemon-offers.js";
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { MultiremiDaemonClient } from "@multiremi/client.js";
+import { normalizeDaemonClaimTask } from "@multiremi/client.js";
+import { receiveTaskOffer, taskOfferResponse } from "../../fixtures/task-offer.js";
 import { BinarySkillFilesUnsupportedError } from "@multiremi/store/repos/tasks-repo.js";
 import { createStore, db, mockFetch, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -65,7 +68,7 @@ describe("binary Skill daemon claim compatibility", () => {
     const { store, runtime, task } = createFixture();
     store.claimTask(runtime.id, { supportsBinarySkillFiles: true });
     const oldDispatchTime = "2000-01-01T00:00:00.000Z";
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ? WHERE id = ?", [oldDispatchTime, task.id]);
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", [oldDispatchTime, task.id]);
     const stale = store.getTask(task.id);
     expect(() => store.claimTask(runtime.id)).toThrow(BinarySkillFilesUnsupportedError);
     expect(store.getTask(task.id)).toEqual(stale);
@@ -78,56 +81,43 @@ describe("binary Skill daemon claim compatibility", () => {
     expect(store.getTask(task.id)?.dispatchedAt).not.toBe(oldDispatchTime);
   });
 
-  it("returns an explicit HTTP upgrade error for an old consumer without losing the queued task", async () => {
+  it("requeues a v2 offer rejected as binary_skill_files_unsupported without losing the task", async () => {
     const { store, runtime, task } = createFixture();
-    const app = createMultiremiApp({ store });
-    const path = `/api/daemon/runtimes/${runtime.id}/tasks/claim`;
-    for (const body of [undefined, "{}", '{"supports_binary_skill_files":false}']) {
-      const response = await app.request(path, { method: "POST", body });
-      expect(response.status).toBe(409);
-      expect(await response.json()).toMatchObject({
-        code: "binary_skill_files_unsupported", error: expect.stringContaining("Update the Remi daemon"),
-      });
-      expect(store.getTask(task.id)).toEqual(task);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const offer = await receiveTaskOffer(store, runtime.id, { reply: { ok: false, code: "binary_skill_files_unsupported" } });
+      expect(offer?.attempt_id).toBe(task.id);
+      expect(offer?.agent.skills[0].files[0]).toEqual(png);
+      expect(store.getTask(task.id)?.status).toBe("queued");
     }
-
-    const response = await app.request(path, {
-      method: "POST", body: JSON.stringify({ supports_binary_skill_files: true }),
-    });
+    const response = await taskOfferResponse(store, runtime.id);
     expect(response.status).toBe(200);
     expect((await response.json()).task.agent.skills[0].files[0]).toEqual(png);
   });
 
-  it("keeps empty-body HTTP claims working for text-only agents", async () => {
+  it("offers text-only tasks without an HTTP capability request", async () => {
     const store = createStore();
     const runtime = store.registerRuntime({ name: "Old runtime", provider: "claude" });
     const agent = store.createAgent({ name: "Text agent", provider: "claude", skills: [{ name: "Text", content: "# Text" }] });
     const task = store.createTask({ agentId: agent.id, prompt: "Use text" });
-    const response = await createMultiremiApp({ store }).request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    const response = await taskOfferResponse(store, runtime.id);
     expect(response.status).toBe(200);
-    expect((await response.json()).task.id).toBe(task.id);
+    expect((await response.json()).task.attempt_id).toBe(task.id);
   });
 
-  it("advertises the new client capability and preserves encoding through claim normalization", async () => {
+  it("preserves binary encoding through offer normalization", async () => {
     const { store, runtime, task } = createFixture("codex");
-    const app = createMultiremiApp({ store });
-    let requestBody: unknown;
-    mockFetch((url, init) => {
-      requestBody = JSON.parse(String(init?.body));
-      return app.request(new URL(url).pathname, init);
-    });
-    const claimed = await new MultiremiDaemonClient("https://remi.example").claimTask(runtime.id);
-    expect(requestBody).toEqual({ supports_binary_skill_files: true });
+    const claimed = normalizeDaemonTurnOffer((await receiveTaskOffer(store, runtime.id))!);
     expect(claimed?.id).toBe(task.id);
-    expect(claimed?.agent?.skills[0]?.files[0]).toEqual(png);
+    expect(claimed?.agent?.skills[0]?.files?.[0]).toEqual(png);
   });
 
-  it("rejects malformed claim capabilities without consuming a task", async () => {
+  it("keeps the HTTP claim stub inert with malformed capability bodies", async () => {
     const { store, runtime, task } = createFixture();
     const app = createMultiremiApp({ store });
     for (const body of ['{"supports_binary_skill_files":"true"}', "null", "[true]", "{"]) {
       const response = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST", body });
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ task: null });
       expect(store.getTask(task.id)).toEqual(task);
     }
   });

@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createStore, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -21,12 +22,15 @@ function fixture() {
   const leader = store.createAgent({ name: "Leader", provider: "codex" });
   const teammate = store.createAgent({ name: "Teammate", provider: "codex" });
   const squad = store.createSquad({ name: "Delivery", leaderId: leader.id, memberIds: [teammate.id] });
-  const issue = store.createIssue({
+  const issue = createResponsibleTestIssue(store, {
     title: "Repeated delegation",
     assigneeType: "squad",
     assigneeId: squad.id,
   });
-  const main = store.createTask({ agentId: leader.id, issueId: issue.id, prompt: "Coordinate." });
+  const session = store.createIssueSession(issue.id, { title: "Coordination" });
+  expect(session.ownerType).toBe("issue");
+  expect(session.chatId).toBeNull();
+  const main = store.createSessionTask(session.id, { agentId: leader.id, prompt: "Coordinate." });
   expect(main.issueSessionId).toBeTruthy();
   expect(store.claimTask(runtime.id)?.id).toBe(main.id);
   store.buildTaskSessionProjection(main.id);
@@ -46,6 +50,28 @@ function fixture() {
 }
 
 describe("rich mention continuation", () => {
+  it("does not publish a Chat-owned Session's private mention into the Issue", () => {
+    const f = fixture();
+    const chat = f.store.createChatSession({ agentId: f.leader.id });
+    const session = f.store.createIssueSession(f.issue.id, { chatId: chat.id, title: "Private coordination" });
+    const task = f.store.createSessionTask(session.id, { agentId: f.leader.id, prompt: "Private coordination." });
+    const privateBody = `PRIVATE_CHAT_MENTION [@Teammate](mention://agent/${f.teammate.id})`;
+    const before = f.store.listMessages(session.id);
+    expect(session.ownerType).toBe("chat");
+
+    expect(() => f.store.createIssueComment(f.issue.id, {
+      authorType: "agent",
+      authorId: f.leader.id,
+      taskId: task.id,
+      issueSessionId: session.id,
+      body: privateBody,
+    })).toThrow("Session is not currently linked to this Issue");
+    expect(f.store.listMessages(session.id)).toEqual(before);
+    expect(JSON.stringify(f.store.listIssueComments(f.issue.id))).not.toContain("PRIVATE_CHAT_MENTION");
+    expect(JSON.stringify(f.store.listIssueActivity(f.issue.id))).not.toContain("PRIVATE_CHAT_MENTION");
+    expect(f.delegated()).toEqual([]);
+  });
+
   it("bootstraps the first mention for a teammate with no lane yet", () => {
     const f = fixture();
     f.mention("Kick off the work.");
@@ -76,7 +102,7 @@ describe("rich mention continuation", () => {
       .toMatchObject({ providerSessionId: "provider_one" });
   });
 
-  it("queues the continuation behind a teammate that is still working", () => {
+  it("delivers another mention to the teammate already working in that delegation", () => {
     const f = fixture();
     f.mention("First pass.");
     const [first] = f.delegated();
@@ -84,10 +110,11 @@ describe("rich mention continuation", () => {
     f.store.buildTaskSessionProjection(first!.id);
     f.store.startTask(first!.id);
 
-    f.mention("One more thing while you are in there.");
-    const [second] = f.delegated().slice(1);
-    expect(second?.delegationId).toBe(first!.delegationId);
-    expect(f.store.getTaskQueueBlocker(second!.id)?.taskId).toBe(first!.id);
+    const comment=f.mention("One more thing while you are in there.");
+    expect(f.delegated().map(task=>task.id)).toEqual([first!.id]);
+    expect(f.store.getTask(first!.id)?.status).toBe('running');
+    expect(f.store.getMessage(comment.id)).toMatchObject({to_agent_id:f.teammate.id,wake_applied:'now',task_id:f.main.turn_id});
+    expect(f.store.listIssueActivity(f.issue.id).filter(row=>row.type==='message_delivered_running')).toHaveLength(1);
     expect(f.store.claimTask(f.runtime.id)).toBeNull();
   });
 });

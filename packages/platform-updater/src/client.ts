@@ -2,9 +2,11 @@ import type {
   MultiremiPlatformMaintenance,
   MultiremiPlatformOperation,
   MultiremiPlatformRelease,
+  MultiremiPlatformPreflight,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
 import type { PlatformInspection } from "./types.js";
+import type { PlatformOperationReceipt } from "./operation-outbox.js";
 
 export interface PlatformDrainStatusWire {
   generation: number;
@@ -32,14 +34,22 @@ export class PlatformUpdaterClient {
     private readonly updaterToken: string,
   ) {}
 
-  async heartbeat(inspection: PlatformInspection, latestRelease?: MultiremiPlatformRelease | null): Promise<void> {
-    await this.request("/api/platform-updater/heartbeat", {
+  /** Keep the updater online during downloads/drain without overwriting release projections. */
+  async keepAlive(driver: PlatformInspection['driver']): Promise<void> {
+    await this.request('/api/platform-updater/heartbeat', { driver });
+  }
+
+  async heartbeat(inspection: PlatformInspection, latestRelease?: MultiremiPlatformRelease | null, update?: { defaultReleaseFeedUrl?: string | null; releaseFeedUrl?: string | null; preflight?: MultiremiPlatformPreflight | null }): Promise<{ releaseFeedUrl: string | null }> {
+    const response = await this.request<{ state: { releaseFeedUrl: string | null } }>("/api/platform-updater/heartbeat", {
+      ...update,
       driver: inspection.driver,
+      updateMode: inspection.updateMode,
       currentRelease: inspection.currentRelease,
       latestRelease,
       recentReleases: inspection.recentReleases,
       services: inspection.services,
     });
+    return response.state;
   }
 
   async claim(): Promise<MultiremiPlatformOperation | null> {
@@ -48,6 +58,32 @@ export class PlatformUpdaterClient {
       {},
     );
     return response.operation ?? null;
+  }
+
+  async reconcile(receipts: PlatformOperationReceipt[]): Promise<void> {
+    let response: { reconciled: string[] };
+    try {
+      response = await this.request<{ reconciled: string[] }>("/api/platform-updater/operations/reconcile", { receipts });
+    } catch (error) {
+      if (!(error instanceof PlatformUpdaterHttpError) || error.status !== 404) throw error;
+      // Rollback can boot a previous API without the receipt endpoint. The
+      // host restores current control-plane tables alongside the old business
+      // DB, so exact operation IDs remain reportable through the old protocol.
+      // Missing rows still fail closed; never create a new update as a retry.
+      for (const receipt of receipts) {
+        const result = await this.request<{ operation: MultiremiPlatformOperation }>(
+          `/api/platform-updater/operations/${encodeURIComponent(receipt.operation.id)}/report`, receipt.report,
+        );
+        if (result.operation?.id !== receipt.operation.id || result.operation.status !== receipt.report.status
+          || (receipt.report.resultRelease?.ref && result.operation.resultRelease?.ref !== receipt.report.resultRelease.ref)) {
+          throw new Error("Restored API returned a conflicting host operation outcome");
+        }
+      }
+      return;
+    }
+    if (!Array.isArray(response.reconciled) || receipts.some(receipt => !response.reconciled.includes(receipt.operation.id))) {
+      throw new Error("API did not acknowledge every durable host receipt");
+    }
   }
 
   async report(id: string, input: ReportPlatformOperationInput): Promise<void> {

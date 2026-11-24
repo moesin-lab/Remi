@@ -20,7 +20,7 @@ const workspaceRef = vi.hoisted(() => ({
   },
 }));
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as "owner" | "admin" | "member" }],
+  current: [{ user_id: "local", role: "owner" as "owner" | "admin" | "member" }],
 }));
 
 vi.mock("@tanstack/react-query", () => ({
@@ -112,7 +112,7 @@ describe("WorkspaceTab — issue prefix editing", () => {
       issue_prefix: "TES",
       repos: [],
     };
-    membersRef.current = [{ user_id: "user-1", role: "owner" }];
+    membersRef.current = [{ user_id: "local", role: "owner" }];
     mockUpdateWorkspace.mockImplementation(
       async (
         _id: string,
@@ -230,8 +230,22 @@ describe("WorkspaceTab — issue prefix editing", () => {
   });
 
   it("disables the prefix input for non-admins", () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     render(<WorkspaceTab />, { wrapper: I18nWrapper });
     expect(screen.getByPlaceholderText("TES")).toBeDisabled();
+  });
+});
+
+describe("WorkspaceTab — issue responsibility", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    membersRef.current = [{ user_id: "user-1", role: "owner" }];
+  });
+
+  // Issues no longer designate a human, so there is no historical mapping to resolve.
+  it("shows admins no historical responsibility mapping", () => {
+    const view = render(<WorkspaceTab />, { wrapper: I18nWrapper });
+    expect(screen.getByPlaceholderText("TES")).toBeInTheDocument();
+    expect(view.container).not.toHaveTextContent(/historical responsibility|responsibility mapping|designated human/i);
   });
 });

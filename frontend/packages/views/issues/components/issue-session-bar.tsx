@@ -3,7 +3,8 @@
 import { useId, useState } from "react";
 import { FolderGit2, Loader2, MessagesSquare, Plus } from "lucide-react";
 import { useCreateIssueSession } from "@multiremi/core/issues";
-import type { IssueSession } from "@multiremi/core/types";
+import { useCreateChatWorkSession } from "@multiremi/core/chat/work-sessions";
+import type { CreateSessionRequest, IssueSession } from "@multiremi/core/types";
 import { Button } from "@multiremi/ui/components/ui/button";
 import {
   Dialog,
@@ -56,7 +57,9 @@ export function NewSessionButton({
 }
 
 interface NewSessionDialogProps {
-  issueId: string;
+  issueId?: string;
+  chatId?: string;
+  wsId?: string;
   sessions: IssueSession[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -65,7 +68,27 @@ interface NewSessionDialogProps {
 }
 
 export function NewSessionDialog({ open, ...props }: NewSessionDialogProps) {
+  return props.chatId
+    ? <ChatSessionDialog open={open} {...props} chatId={props.chatId} />
+    : <IssueSessionDialog open={open} {...props} issueId={props.issueId ?? ""} />;
+}
+
+function IssueSessionDialog(props: NewSessionDialogProps & { issueId: string }) {
   const createSession = useCreateIssueSession(props.issueId);
+  return <SessionDialog {...props} createSession={createSession} />;
+}
+
+function ChatSessionDialog(props: NewSessionDialogProps & { chatId: string }) {
+  const createSession = useCreateChatWorkSession(props.chatId, props.wsId);
+  return <SessionDialog {...props} createSession={createSession} />;
+}
+
+interface SessionCreationMutation {
+  isPending: boolean;
+  mutateAsync: (input: CreateSessionRequest) => Promise<IssueSession>;
+}
+
+function SessionDialog({ open, createSession, ...props }: NewSessionDialogProps & { createSession: SessionCreationMutation }) {
   return (
     <Dialog
       open={open}
@@ -80,16 +103,20 @@ export function NewSessionDialog({ open, ...props }: NewSessionDialogProps) {
 }
 
 function NewSessionForm({
+  issueId,
+  chatId,
   sessions,
   onOpenChange,
   onCreated,
   parentSessionId,
   createSession,
 }: Omit<NewSessionDialogProps, "open"> & {
-  createSession: ReturnType<typeof useCreateIssueSession>;
+  createSession: SessionCreationMutation;
 }) {
   const { t } = useT("issues");
-  const parentSessions = sessions.filter((session) => session.parent_session_id == null);
+  const parentSessions = sessions.filter((session) => session.parent_session_id == null
+    && (chatId ? session.owner_type === "chat" && session.owner_id === chatId
+      : session.owner_type === "issue" && session.owner_id === issueId));
   const discussionOnly = parentSessionId !== undefined;
   const [sessionTitle, setSessionTitle] = useState("");
   const [holdsWorkspace, setHoldsWorkspace] = useState(!discussionOnly);
@@ -126,7 +153,7 @@ function NewSessionForm({
       <DialogHeader>
         <DialogTitle>{t(($) => $.detail.new_session_title)}</DialogTitle>
         <DialogDescription>
-          {t(($) => $.detail.new_session_description)}
+          {chatId ? t(($) => $.detail.chat_new_session_description) : t(($) => $.detail.new_session_description)}
         </DialogDescription>
       </DialogHeader>
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto outline-none">
@@ -167,7 +194,7 @@ function NewSessionForm({
                 <span>{t(($) => $.detail.session_type_work)}</span>
               </span>
               <span id={workDescriptionId} className="text-xs leading-relaxed text-muted-foreground">
-                {t(($) => $.detail.session_type_working_description)}
+                {chatId ? t(($) => $.detail.chat_session_type_working_description) : t(($) => $.detail.session_type_working_description)}
               </span>
             </button>
             <button

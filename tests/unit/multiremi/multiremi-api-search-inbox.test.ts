@@ -1,15 +1,18 @@
+import { createResponsibleTestIssue, acceptTestIssueDelivery } from './helpers.js';
+import { issueMessagesPath, requestMessageBody } from "./unified-test-paths.js";
 // Pinned shortcuts, issue/project search, issue subscribers and the member inbox.
-import { afterEach, describe, expect, it } from "bun:test";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createLocalSnapshotStore as createSnapshotStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { seedHistoricalCommentNotification } from "./shared-operator-test-helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi API — pins, search, and inbox", () => {
   it("serves pinned item endpoints", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
-    const issue = store.createIssue({ title: "Pinned API issue", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Pinned API issue", workspaceId: "local" });
     const project = store.createProject({ title: "Pinned API project", workspaceId: "local" });
 
     const issuePin = await app.request("/api/multiremi/pins", {
@@ -75,14 +78,16 @@ describe("Multiremi API — pins, search, and inbox", () => {
   });
 
   it("serves issue and project search endpoints", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
+    store.createWorkspace({ id: "remote", name: "Remote search workspace" });
     const app = createMultiremiApp({ store });
-    const issue = store.createIssue({ title: "Searchable API issue", description: "Has api needle context", workspaceId: "local" });
-    const closedIssue = store.createIssue({ title: "Closed API issue", description: "closed needle", workspaceId: "local" });
-    store.updateIssue(closedIssue.id, { status: "done" });
-    const commentedIssue = store.createIssue({ title: "Comment API issue", description: "No matching body", workspaceId: "local", createdBy: "api-user" });
+    const issue = createResponsibleTestIssue(store, { title: "Searchable API issue", description: "Has api needle context", workspaceId: "local" });
+    const execution=store.createAgent({name:'Search fixture execution',provider:'codex'});
+    const closedIssue = createResponsibleTestIssue(store, { title: "Closed API issue", description: "closed needle", workspaceId: "local",assigneeType:'agent',assigneeId:execution.id });
+    acceptTestIssueDelivery(store, closedIssue.id);
+    const commentedIssue = createResponsibleTestIssue(store, { title: "Comment API issue", description: "No matching body", workspaceId: "local", createdBy: "api-user" });
     store.createIssueComment(commentedIssue.id, { authorType: "member", body: "Fresh comment needle context" });
-    const remoteIssue = store.createIssue({ title: "Remote Issue Needle", description: "Remote issue needle", workspaceId: "remote" });
+    const remoteIssue = createResponsibleTestIssue(store, { title: "Remote Issue Needle", description: "Remote issue needle", workspaceId: "remote" });
     store.createProject({ title: "Searchable API project", description: "No needle", workspaceId: "local" });
     store.createProject({ title: "Other project", description: "Project needle context", workspaceId: "local" });
     const closedProject = store.createProject({ title: "Closed Project", description: "Closed project needle", status: "cancelled", workspaceId: "local" });
@@ -156,13 +161,14 @@ describe("Multiremi API — pins, search, and inbox", () => {
   });
 
   it("serves issue subscribers and member inbox endpoints", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const events: Array<{ type: string; workspaceId: string; payload: Record<string, unknown>; actorType?: string; actorId?: string | null }> = [];
     store.onWorkspaceEvent((event) => events.push(event));
     const alice = store.createWorkspaceMember({ name: "Alice API" });
     const bob = store.createWorkspaceMember({ name: "Bob API" });
-    const issue = store.createIssue({ title: "Inbox API", createdBy: alice.id });
+    const issue = createResponsibleTestIssue(store, { title: "Inbox API", createdBy: alice.id });
+    const operator = store.getWorkspaceOperator("local")!;
 
     const subscribed = await app.request(`/api/multiremi/issues/${issue.id}/subscribers`, {
       method: "POST",
@@ -170,18 +176,16 @@ describe("Multiremi API — pins, search, and inbox", () => {
       body: JSON.stringify({ memberId: bob.id, reason: "manual" }),
     });
     expect(subscribed.status).toBe(201);
-    expect((await subscribed.json()).subscriber.memberId).toBe(bob.id);
+    expect((await subscribed.json()).subscriber.memberId).toBe(operator.id);
 
     const subscribers = await app.request(`/api/multiremi/issues/${issue.id}/subscribers`);
     expect((await subscribers.json()).subscribers.map((subscriber: any) => subscriber.memberId).sort()).toEqual([
-      alice.id,
-      bob.id,
+      operator.id,
     ].sort());
     const compatibilitySubscribers = await app.request(`/api/issues/${issue.id}/subscribers`);
     const compatibilitySubscribersBody = await compatibilitySubscribers.json();
     expect(compatibilitySubscribersBody.map((subscriber: any) => subscriber.user_id).sort()).toEqual([
-      alice.id,
-      bob.id,
+      operator.id,
     ].sort());
     expect(compatibilitySubscribersBody[0].memberId).toBeUndefined();
     expect(compatibilitySubscribersBody[0]).toMatchObject({
@@ -195,8 +199,8 @@ describe("Multiremi API — pins, search, and inbox", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId: charlie.id, userType: "member" }),
     });
-    expect(camelSubscribe.status).toBe(403);
-    expect(await camelSubscribe.json()).toEqual({ error: "target user is not a member of this workspace" });
+    expect(camelSubscribe.status).toBe(200);
+    expect(await camelSubscribe.json()).toEqual({ subscribed: true });
     const afterCamelSubscribe = await (await app.request(`/api/issues/${issue.id}/subscribers`)).json();
     expect(afterCamelSubscribe.some((subscriber: any) =>
       subscriber.user_id === charlie.id && subscriber.user_type === "member"
@@ -209,12 +213,12 @@ describe("Multiremi API — pins, search, and inbox", () => {
     });
     expect(await goSubscribe.json()).toEqual({ subscribed: true });
     const goSubscribers = await (await app.request(`/api/issues/${issue.id}/subscribers`)).json();
-    expect(goSubscribers.some((subscriber: any) => subscriber.user_id === charlie.id && subscriber.user_type === "member")).toBe(true);
+    expect(goSubscribers.some((subscriber: any) => subscriber.user_id === operator.id && subscriber.user_type === "member")).toBe(true);
     expect(events.some((event) =>
       event.type === "subscriber:added"
       && event.payload.issue_id === issue.id
       && event.payload.user_type === "member"
-      && event.payload.user_id === charlie.id
+      && event.payload.user_id === operator.id
     )).toBe(true);
 
     const runtime = store.registerRuntime({ id: "rt_subscriber_agent", provider: "codex", name: "Subscriber agent runtime" });
@@ -273,26 +277,25 @@ describe("Multiremi API — pins, search, and inbox", () => {
     });
     expect(await goUnsubscribe.json()).toEqual({ subscribed: false });
 
-    const commented = await app.request(`/api/multiremi/issues/${issue.id}/comments`, {
+    const commented = await app.request(issueMessagesPath(store, issue.id), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ authorType: "member", authorId: alice.id, body: "Can you check this?" }),
+      body: JSON.stringify(requestMessageBody(store, { authorType: "member", authorId: alice.id, body: "Can you check this?" }, { type: "member", ref: bob.id })),
     });
-    expect(commented.status).toBe(201);
+    expect(commented.status).toBe(200);
 
-    const inbox = await app.request(`/api/multiremi/inbox?memberId=${encodeURIComponent(bob.id)}`);
+    const inbox = await app.request("/api/inbox"+`?member_id=${encodeURIComponent(bob.id)}`);
     const inboxBody = await inbox.json();
-    expect(inboxBody.unread).toBe(1);
-    expect(inboxBody.items[0].issue.key).toBe(issue.key);
-
-    const read = await app.request(`/api/multiremi/inbox/${inboxBody.items[0].id}/read`, { method: "POST" });
-    expect((await read.json()).item.read).toBe(true);
-
-    const archived = await app.request(`/api/multiremi/inbox/${inboxBody.items[0].id}/archive`, { method: "POST" });
-    expect((await archived.json()).item.archived).toBe(true);
-
-    const afterArchive = await app.request(`/api/multiremi/inbox?memberId=${encodeURIComponent(bob.id)}`);
-    expect((await afterArchive.json()).items).toHaveLength(0);
+    expect(inboxBody.unread_count).toBe(1);
+    const message = inboxBody.items[0];
+    expect(message).toMatchObject({ session_id: store.getOrCreateDefaultIssueSession(issue.id).id, to_member_id: bob.id });
+    const readInput = { session_id: message.session_id, to_seq: message.seq };
+    const read = await app.request(`/api/inbox/read?member_id=${bob.id}`, { method: "POST", body: JSON.stringify(readInput) });
+    expect((await read.json()).cursor_seq).toBeGreaterThanOrEqual(message.seq);
+    const again = await app.request(`/api/inbox/read?member_id=${bob.id}`, { method: "POST", body: JSON.stringify(readInput) });
+    expect((await again.json()).cursor_seq).toBeGreaterThanOrEqual(message.seq);
+    const afterRead = await app.request(`/api/inbox?member_id=${bob.id}`);
+    expect((await afterRead.json()).unread_count).toBe(0);
   });
 
   // Regression (MUL-38): the web client authenticates as a USER id, but inbox
@@ -300,65 +303,172 @@ describe("Multiremi API — pins, search, and inbox", () => {
   // user id to the member id — querying with the raw user id used to return a
   // permanently empty inbox while notifications piled up.
   it("resolves a user id to the member id on the compat inbox routes", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const reviewer = store.createWorkspaceMember({ name: "Reviewer", userId: "user-rev" });
     const author = store.createWorkspaceMember({ name: "Author", userId: "user-author" });
-    const issue = store.createIssue({ title: "Inbox identity", createdBy: reviewer.id });
+    const issue = createResponsibleTestIssue(store, { title: "Inbox identity", createdBy: reviewer.id });
     store.createIssueComment(issue.id, { authorType: "member", authorId: author.id, body: "ping subscribers" });
+    seedHistoricalCommentNotification(store, issue.id, reviewer.id, "ping subscribers");
 
     // Sanity: the notification row exists under the member id.
     const byMemberId = await app.request(`/api/inbox?member_id=${encodeURIComponent(reviewer.id)}`);
-    expect(await byMemberId.json()).toHaveLength(1);
+    expect((await byMemberId.json()).items).toHaveLength(1);
 
     // A user id must find the same rows instead of silently matching nothing.
     const byUserId = await app.request("/api/inbox?member_id=user-rev");
-    const items = await byUserId.json();
+    const { items } = await byUserId.json();
     expect(items).toHaveLength(1);
-    expect(items[0].type).toBe("comment_created");
+    expect(items[0].metadata.inbox_item.type).toBe("comment_created");
 
-    const count = await app.request("/api/inbox/unread-count?member_id=user-rev");
-    expect((await count.json()).count).toBe(1);
+    const count = await app.request("/api/inbox"+`?member_id=user-rev`);
+    expect((await count.json()).unread_count).toBe(1);
 
-    const markAll = await app.request("/api/inbox/mark-all-read?member_id=user-rev", { method: "POST" });
-    expect((await markAll.json()).count).toBe(1);
-    const afterRead = await app.request("/api/inbox/unread-count?member_id=user-rev");
-    expect((await afterRead.json()).count).toBe(0);
+    const markAll = await app.request("/api/inbox/read?member_id=user-rev", { method: "POST" , body: JSON.stringify({ all: true }) });
+    expect((await markAll.json()).conversations_read).toBe(1);
+    const afterRead = await app.request("/api/inbox"+`?member_id=user-rev`);
+    expect((await afterRead.json()).unread_count).toBe(0);
   });
 
   it("paginates the compat inbox and returns grouped counts without loading every item", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const app = createMultiremiApp({ store });
     const reviewer = store.createWorkspaceMember({ name: "Paged Reviewer", userId: "user-page" });
     const author = store.createWorkspaceMember({ name: "Paged Author", userId: "user-page-author" });
     for (const title of ["First page issue", "Second page issue", "Third page issue"]) {
-      const issue = store.createIssue({ title, createdBy: reviewer.id });
+      const issue = createResponsibleTestIssue(store, { title, createdBy: reviewer.id });
       store.createIssueComment(issue.id, {
         authorType: "member",
         authorId: author.id,
         body: `Notification for ${title}`,
       });
+      seedHistoricalCommentNotification(store, issue.id, reviewer.id, `Notification for ${title}`);
     }
 
-    const firstResponse = await app.request("/api/inbox/page?member_id=user-page&limit=2");
+    const firstResponse = await app.request("/api/inbox"+`?member_id=user-page&limit=2`);
     expect(firstResponse.status).toBe(200);
     const first = await firstResponse.json();
     expect(first.items).toHaveLength(2);
-    expect(first.has_more).toBe(true);
+    expect((first.next_cursor !== null)).toBe(true);
     expect(first.next_cursor).toBeTruthy();
-    expect(first.items.every((item: any) => item.issue?.title)).toBe(true);
+    expect(first.items.every((item: any) => item.session_id.startsWith("ises_") && item.metadata.inbox_item.type === "comment_created")).toBe(true);
 
     const secondResponse = await app.request(
-      `/api/inbox/page?member_id=user-page&limit=2&cursor=${encodeURIComponent(first.next_cursor)}`,
+      "/api/inbox"+`?member_id=user-page&limit=2&cursor=${encodeURIComponent(first.next_cursor)}`,
     );
     const second = await secondResponse.json();
     expect(second.items).toHaveLength(1);
-    expect(second.has_more).toBe(false);
+    expect((second.next_cursor !== null)).toBe(false);
     expect(second.next_cursor).toBeNull();
     expect(new Set([...first.items, ...second.items].map((item: any) => item.id)).size).toBe(3);
 
-    const summaryResponse = await app.request("/api/inbox/summary?member_id=user-page&timezone_offset=-480");
+    const summaryResponse = await app.request("/api/inbox"+`?member_id=user-page&timezone_offset=-480`);
     expect(summaryResponse.status).toBe(200);
-    expect(await summaryResponse.json()).toEqual({ unread: 3, attention: 0 });
+    expect(await summaryResponse.json()).toMatchObject({ unread_count: 3, attention_count: 0 });
+  });
+
+  it("does not project or count a parent moved outside the notification workspace", async () => {
+    const store = createSnapshotStore();
+    const workspaceA = store.createWorkspace({ id: "ws_parent_scope_a", name: "Parent Scope A", slug: "parent-scope-a" });
+    const workspaceB = store.createWorkspace({ id: "ws_parent_scope_b", name: "Parent Scope B", slug: "parent-scope-b" });
+    const reviewer = store.createWorkspaceMember({
+      id: "mem_parent_scope_reviewer",
+      workspaceId: workspaceA.id,
+      userId: "usr_parent_scope_reviewer",
+      name: "Parent scope reviewer",
+      role: "owner",
+    });
+    const author = store.createWorkspaceMember({
+      id: "mem_parent_scope_author",
+      workspaceId: workspaceA.id,
+      userId: "usr_parent_scope_author",
+      name: "Parent scope author",
+      role: "member",
+    });
+    const parent = createResponsibleTestIssue(store, { title: "Private parent in B", workspaceId: workspaceA.id });
+    const child = createResponsibleTestIssue(store, {
+      title: "Child staying in A",
+      workspaceId: workspaceA.id,
+      parentIssueId: parent.id,
+      createdBy: reviewer.id,
+      status: "todo",
+    });
+    store.createIssueComment(child.id, {
+      authorType: "member",
+      authorId: author.id,
+      body: "Notify the reviewer before the parent moves",
+    });
+    seedHistoricalCommentNotification(store, child.id, reviewer.id, "Notify the reviewer before the parent moves");
+    const credential = await store.createAccessToken({
+      workspaceId: workspaceA.id,
+      userId: "usr_parent_scope_reviewer",
+      name: "Parent scope PAT",
+      type: "pat",
+      purpose: "session",
+    });
+    const headers = {
+      Authorization: `Bearer ${credential.token}`,
+      "Content-Type": "application/json",
+    };
+    const app = createMultiremiApp({ store, authToken: "root-secret" });
+
+    // MUL-476 refuses this move because the child makes it 409
+    // workspace_move_blocked, so the parent can
+    // only be in B as a legacy row from before that rule, which is not migrated.
+    const moved = await app.request(`/api/issues/${parent.id}?workspace_id=${workspaceA.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ workspace_id: workspaceB.id }),
+    });
+    expect(moved.status).toBe(409);
+    expect(store.getIssue(parent.id)?.workspaceId).toBe(workspaceA.id);
+    db!.run("UPDATE multiremi_issues SET workspace_id = ? WHERE id = ?", [workspaceB.id, parent.id]);
+    expect(store.getIssue(parent.id)?.workspaceId).toBe(workspaceB.id);
+    expect(store.getIssue(child.id)?.workspaceId).toBe(workspaceA.id);
+
+    const inboxResponse = await app.request("/api/inbox"+`?workspace_id=${workspaceA.id}`, { headers });
+    expect(inboxResponse.status).toBe(200);
+    const inbox = await inboxResponse.json();
+    const notification = inbox.items.find((item: any) => item.session_id === store.getOrCreateDefaultIssueSession(child.id).id);
+    expect(notification).toBeDefined();
+    expect(JSON.stringify(notification)).not.toContain(parent.title);
+    expect(notification.issue_parent_id).toBeUndefined();
+
+    const directParent = await app.request(`/api/issues/${parent.id}?workspace_id=${workspaceB.id}`, { headers });
+    expect(directParent.status).toBe(200);
+    expect(store.getChildIssueProgress(parent.id)).toMatchObject({ total: 0, active: 0 });
+    expect(store.listChildIssueProgress(workspaceA.id).some((progress) => progress.parentIssueId === parent.id)).toBe(false);
+    expect(store.listChildIssueProgress(workspaceB.id).some((progress) => progress.parentIssueId === parent.id)).toBe(false);
+    expect(store.listIssues({ workspaceId: workspaceA.id, topLevelOnly: true }).map((issue) => issue.id)).toContain(child.id);
+    expect(store.listIssues({ workspaceId: workspaceA.id, parentId: parent.id })).toHaveLength(0);
+  });
+
+  it("clears every projected parent field after the parent is deleted", async () => {
+    const store = createSnapshotStore();
+    const reviewer = store.createWorkspaceMember({ name: "Deleted parent reviewer", userId: "usr_deleted_parent" });
+    const author = store.createWorkspaceMember({ name: "Deleted parent author", userId: "usr_deleted_parent_author" });
+    const parent = createResponsibleTestIssue(store, { title: "Parent to delete" });
+    const child = createResponsibleTestIssue(store, { title: "Orphaned child", parentIssueId: parent.id, createdBy: reviewer.id });
+    store.createIssueComment(child.id, {
+      authorType: "member",
+      authorId: author.id,
+      body: "Notify before deletion",
+    });
+    seedHistoricalCommentNotification(store, child.id, reviewer.id, "Notify before deletion");
+    expect(store.deleteIssue(parent.id)).toBe(true);
+
+    const app = createMultiremiApp({ store });
+    const response = await app.request("/api/inbox"+`?member_id=${encodeURIComponent(reviewer.id)}`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    const message = body.items.find((item: any) => item.session_id === store.getOrCreateDefaultIssueSession(child.id).id);
+    expect(message).toBeDefined();
+    expect(message.issue_parent_id).toBeUndefined();
+    expect(JSON.stringify(message)).not.toContain(parent.title);
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

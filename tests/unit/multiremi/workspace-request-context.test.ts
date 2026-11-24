@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createStore, resetMultiremiTestEnv, useUploadDir } from "./helpers.js";
@@ -29,7 +30,7 @@ describe("web workspace request context", () => {
   it("keeps task and daemon credentials scoped despite explicit cross-workspace headers", async () => {
     const { app, store, user, workspace, other } = await fixture();
     const agent = store.createAgent({ workspaceId: workspace.id, name: "Worker", provider: "claude" });
-    const issue = store.createIssue({ workspaceId: workspace.id, title: "Task issue" });
+    const issue = createResponsibleTestIssue(store, { workspaceId: workspace.id, title: "Task issue" });
     const task = store.createTask({ workspaceId: workspace.id, agentId: agent.id, issueId: issue.id, prompt: "Work" });
     const taskToken = await store.createTaskAccessToken(task, user.id);
     const daemonToken = await store.createAccessToken({ workspaceId: workspace.id, type: "daemon", daemonId: "dmn_context", userId: user.id, name: "Daemon" });
@@ -67,10 +68,11 @@ describe("web workspace request context", () => {
   });
 
   for (const endpoint of reads) {
-    it(`${endpoint} uses the selected workspace and rejects stale or inaccessible context`, async () => {
+    it(`${endpoint} uses any selected workspace for humans and rejects stale context`, async () => {
       const { app, headers, workspace } = await fixture();
       expect((await app.request(endpoint, { headers })).status).toBe(200);
-      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "local" } })).status).toBe(404);
+      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "local" } })).status).toBe(200);
+      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "missing" } })).status).toBe(404);
       expect((await app.request(endpoint, { headers: { ...headers, Authorization: "Bearer root-secret", "X-Workspace-Slug": "missing" } })).status).toBe(404);
       const explicit = `${endpoint}${endpoint.includes("?") ? "&" : "?"}workspace_id=${workspace.id}`;
       expect((await app.request(explicit, { headers: { ...headers, "X-Workspace-Slug": "missing" } })).status).toBe(200);

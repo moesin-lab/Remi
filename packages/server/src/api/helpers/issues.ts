@@ -2,6 +2,7 @@
 // fold in the caller, and the cursor headers the comment pagination returns.
 import type { Context } from "hono";
 import { MultiremiStore } from "@multiremi/store/store.js";
+import { ChatIssueTaskConflictError } from "@multiremi/store/repos/tasks-repo.js";
 import {
   authenticatedRequestUserId,
   cleanString,
@@ -20,6 +21,7 @@ import type {
   ListIssuesInput,
   MultiremiIssue,
   MultiremiAgent,
+  MultiremiTask,
   MultiremiSubscriptionReason,
 } from "@multiremi/contracts/types.js";
 import { currentJwtUserId } from "./auth-guards.js";
@@ -59,20 +61,101 @@ export function currentTaskParentId(c: Context): string | null {
   return currentTaskAccessToken(c)?.taskId ?? null;
 }
 
+export function denySideSessionAgentDispatch(c: Context, store: MultiremiStore): Response | null {
+  const sourceTaskId = currentTaskAccessToken(c)?.taskId;
+  const sourceTask = sourceTaskId ? store.getTask(sourceTaskId) : null;
+  const sourceSession = sourceTask?.issueSessionId ? store.getIssueSession(sourceTask.issueSessionId) : null;
+  return sourceSession && sourceSession.inheritMode !== "none"
+    ? c.json({ error: "Agent delegation is not allowed from side sessions" }, 403)
+    : null;
+}
+
+/** Resolve the live product owner; retained Task audit columns do not grant source authority. */
+function taskIssueCreationSource(c: Context, store: MultiremiStore): {
+  task: MultiremiTask;
+  issueId: string | null;
+  chatId: string | null;
+} | null {
+  const token = currentTaskAccessToken(c);
+  const task = token?.taskId ? store.getTask(token.taskId) : null;
+  if (!token || !task || task.workspaceId !== token.workspaceId || task.agentId !== token.agentId) return null;
+
+  let issueId = task.issueId;
+  let chatId = task.chatSessionId;
+  if (task.issueSessionId) {
+    const scope = store.getIssueSessionWithOwnerScope(task.issueSessionId);
+    if (!scope || scope.session.workspaceId !== task.workspaceId || scope.ownerWorkspaceId !== task.workspaceId) return null;
+    chatId = scope.session.chatId;
+    issueId = chatId ? null : scope.session.issueId;
+    if (chatId && task.chatSessionId && task.chatSessionId !== chatId) return null;
+    if (!chatId && task.issueId && task.issueId !== issueId) return null;
+  }
+  if (task.chatSessionId && !chatId) {
+    try {
+      if (store.getTaskChatExecutionKind(task) !== "topic") return null;
+    } catch (error) {
+      if (error instanceof ChatIssueTaskConflictError) return null;
+      throw error;
+    }
+  } else if (!task.issueSessionId && chatId) {
+    try {
+      if (store.getTaskChatExecutionKind(task) === "topic") {
+        chatId = null;
+      } else {
+        issueId = null;
+      }
+    } catch (error) {
+      if (error instanceof ChatIssueTaskConflictError) return null;
+      throw error;
+    }
+  }
+
+  if (issueId && store.getIssue(issueId)?.workspaceId !== task.workspaceId) return null;
+  if (chatId && store.getChatSession(chatId)?.workspaceId !== task.workspaceId) return null;
+  return { task, issueId, chatId };
+}
+
+/** A human request is identified only from trusted request credentials. */
+export function humanRequestActor(c: Context): { memberId: string } | null {
+  if (currentTaskAccessToken(c)) return null;
+  if(currentAccessToken(c)?.type==='daemon')return null;
+  if (cleanString(c.req.header("X-Agent-ID"))) return null;
+  return { memberId: currentRequestUserId(c) };
+}
+
 export function denyRestrictedTaskIssueCreation(c: Context, store: MultiremiStore): Response | null {
+  // Source integrity is required for every task-created Issue.
+  if (currentTaskAccessToken(c) && !taskIssueCreationSource(c, store)) {
+    return c.json({
+      error: 'The Task source Session must match its current workspace and product owner',
+      code: 'issue_creation_source_invalid',
+    }, 403);
+  }
   const code = currentTaskIssueCreationRestrictionCode(c, store);
   if (!code) return null;
   return c.json({
     error: code === FEISHU_SENDER_APPROVAL_REQUIRED_CODE
-      ? "A Feishu account in this conversation needs approval. Ask the space owner to allow it in Settings > Integrations > Feishu account allowlist, then retry creating the Issue in this Chat."
+      ? "A Feishu account in this conversation needs approval. Ask the space owner to allow it in IM platforms > Feishu > Access control > Feishu account allowlist, then retry creating the Issue in this Chat."
       : "This agent must use `remi feishu messages propose-issue`; a human must approve before an Issue is created.",
     code,
   }, 403);
 }
 
+/**
+ * MUL-448 B1: who the request is acting as, in credential order.
+ *
+ * A task token speaks for its agent; a verified member identity speaks for that
+ * member; only the anonymous compatibility mode (master token or auth-disabled)
+ * may name an agent through `X-Agent-ID`. The route-level callers below turn
+ * this into subscriber rows, session-task `task_assigned` authors, session
+ * creators and published results, so reading the header first let any member
+ * PAT write another agent's id into those durable records.
+ */
 export function issueSubscriberCaller(c: Context): { actorType: "member" | "agent"; actorId: string } {
   const taskToken = currentTaskAccessToken(c);
   if (taskToken?.agentId) return { actorType: "agent", actorId: taskToken.agentId };
+  const userId = authenticatedRequestUserId(c);
+  if (userId) return { actorType: "member", actorId: currentRequestUserId(c) };
   const agentId = cleanString(c.req.header("X-Agent-ID"));
   if (agentId) return { actorType: "agent", actorId: agentId };
   return { actorType: "member", actorId: currentRequestUserId(c) };
@@ -102,18 +185,39 @@ export function issueCommentCreateInput(
       taskId: taskToken.taskId ?? null,
     };
   }
+  // MUL-448: no credential path below may name the run a comment belongs to.
+  // `comment.taskId` is read back as trusted lineage — the mention dispatcher
+  // uses it as the `sourceTask` for delegation returns and `createTask` inherits
+  // it as `parentTaskId` — so a member (or an anonymous caller) could otherwise
+  // borrow another run's lane by putting `task_id` in the body. Only the task
+  // token branch above sets it, and it takes it from the token.
+  const publicInput = stripCommentTaskLink(input);
   const userId = authenticatedRequestUserId(c);
-  if (userId) return { ...input, authorType: "member", authorId: userId };
-  if (cleanString(input.authorType) || cleanString(input.authorId)) return input;
+  if (userId) return { ...publicInput, authorType: "member", authorId: currentRequestUserId(c) };
+  // MUL-448 B1: everything below runs only for the anonymous compatibility mode
+  // (master token / auth disabled), which keeps its historical behaviour; a
+  // request with a credential never reaches the header or the body identity.
+  if (cleanString(publicInput.authorType) || cleanString(publicInput.authorId)) return publicInput;
   const agentId = cleanString(c.req.header("X-Agent-ID"));
-  if (agentId) return { ...input, authorType: "agent", authorId: agentId };
-  if (!currentAccessToken(c) && !currentJwtUserId(c)) return input;
-  return { ...input, authorType: "member", authorId: currentRequestUserId(c) };
+  if (agentId) return { ...publicInput, authorType: "agent", authorId: agentId };
+  if (!currentAccessToken(c) && !currentJwtUserId(c)) return publicInput;
+  return { ...publicInput, authorType: "member", authorId: currentRequestUserId(c) };
+}
+
+/** Drop both spellings of the run link from a comment body. */
+export function stripCommentTaskLink<T extends { taskId?: string | null; task_id?: string | null }>(
+  input: T,
+): Omit<T, "taskId" | "task_id"> {
+  const out = { ...input };
+  delete out.taskId;
+  delete out.task_id;
+  return out;
 }
 
 export function issueSubscriberTarget(
   c: Context,
   body: { member_id?: string; user_id?: string; user_type?: string },
+  operatorMemberId: string,
 ): { userType: "member" | "agent"; userId: string } | { error: string; status: 403 } {
   const caller = issueSubscriberCaller(c);
   const requestedUserType = cleanString(body.user_type);
@@ -124,7 +228,7 @@ export function issueSubscriberTarget(
   if (userType !== "member" && userType !== "agent") {
     return { error: "target user is not a member of this workspace", status: 403 };
   }
-  return { userType, userId };
+  return { userType, userId: userType === "member" ? operatorMemberId : userId };
 }
 
 export function withIssueCreateRequestContext(
@@ -136,7 +240,7 @@ export function withIssueCreateRequestContext(
     cleanString(c.req.query("workspace_id")) ??
     currentAccessToken(c)?.workspaceId ??
     "local";
-  const userId = currentRequestUserId(c);
+  const userId = currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : currentRequestUserId(c);
   const out: CreateIssueWithTaskInput = {
     title: input.title,
     workspace_id: workspaceId,
@@ -155,12 +259,17 @@ export function withIssueCreateRequestContext(
   if (hasRequestField(input, "due_date")) out.due_date = input.due_date ?? null;
   if (hasRequestField(input, "acceptance_criteria")) out.acceptance_criteria = input.acceptance_criteria ?? [];
   if (hasRequestField(input, "context_refs")) out.context_refs = input.context_refs ?? [];
+  // MUL-400 E3: prerequisites travel with the creation request so they land in
+  // the same transaction as the issue itself.
+  if (hasRequestField(input, "blocked_by")) out.blocked_by = input.blocked_by ?? [];
+  if (hasRequestField(input, "blockedBy")) out.blockedBy = input.blockedBy ?? [];
 
   const taskToken = currentTaskAccessToken(c);
   // Historical task rows remain an audit trail, not an implicit Issue binding
   // for a private Chat that was already detached by the upgrade.
-  const task = taskToken?.taskId && store ? store.getTaskWithAgent(taskToken.taskId) : null;
-  const sourceIssue = task?.issue ?? null;
+  const source = taskToken && store ? taskIssueCreationSource(c, store) : null;
+  const task = source?.task ?? null;
+  const sourceIssue = source?.issueId && store ? store.getIssue(source.issueId) : null;
   const isIntake = sourceIssue?.issueKind === "intake";
   if (sourceIssue) {
     // Any task-run creation (intake or follow-up) stays in the source issue's
@@ -210,7 +319,7 @@ function applyProjectDefaultAssignee(
   const projectId = cleanString(out.project_id);
   const project = projectId ? store.getProject(projectId) : null;
   if (!project || project.archivedAt) return;
-  if (project.defaultAssigneeType && project.defaultAssigneeId) {
+  if (project.defaultAssigneeType && project.defaultAssigneeType !== 'member' && project.defaultAssigneeId) {
     out.assignee_type = project.defaultAssigneeType;
     out.assignee_id = project.defaultAssigneeId;
   }
@@ -243,7 +352,7 @@ export function issueListQuery(
 ): ListIssuesInput {
   const compat = mode === "compat";
   const workspaceId = requestedWorkspaceId ?? (compat ? c.req.query("workspace_id") : c.req.query("workspaceId") ?? c.req.query("workspace_id")) ?? "local";
-  const assigneeTypes = splitQueryList(compat ? c.req.query("assignee_types") : c.req.query("assigneeTypes") ?? c.req.query("assignee_types")) as ListIssuesInput["assigneeTypes"];
+  const assigneeTypes = splitQueryList(compat ? c.req.query("assignee_types") ?? c.req.query("assignee_type") : c.req.query("assigneeTypes") ?? c.req.query("assignee_types")) as ListIssuesInput["assigneeTypes"];
   const assigneeId = resolveAssigneeFilterId(
     store,
     workspaceId,
@@ -260,6 +369,16 @@ export function issueListQuery(
       .map((ref) => resolveAssigneeFilterId(store, workspaceId, ref, assigneeTypes) ?? ref),
     projectId: (compat ? c.req.query("project_id") : c.req.query("projectId") ?? c.req.query("project_id")) ?? null,
     projectIds: splitQueryList(compat ? c.req.query("project_ids") : c.req.query("projectIds") ?? c.req.query("project_ids")),
+    // MUL-400 E3: hierarchy filters. `--parent` accepts a key or an id, and
+    // `top_level_only` is the "hide sub-issues" switch's server-side half.
+    parentId: store.getIssueByRef(
+      (compat ? c.req.query("parent_id") : c.req.query("parentId") ?? c.req.query("parent_id")) ?? "",
+      workspaceId,
+    )?.id
+      ?? (compat ? c.req.query("parent_id") : c.req.query("parentId") ?? c.req.query("parent_id")) ?? null,
+    topLevelOnly: compat
+      ? c.req.query("top_level_only") === "true"
+      : c.req.query("topLevelOnly") === "true" || c.req.query("top_level_only") === "true",
     metadata: parseIssueMetadataFilter(c.req.query("metadata")),
     includeNoAssignee: compat
       ? c.req.query("include_no_assignee") === "true"
@@ -361,7 +480,7 @@ export function issueMutationActor(
   const taskToken = currentTaskAccessToken(c);
   if (taskToken?.agentId) return { actorType: "agent", actorId: taskToken.agentId };
   const userId = authenticatedRequestUserId(c);
-  if (userId) return { actorType: "member", actorId: userId };
+  if (userId) return { actorType: "member", actorId: currentRequestUserId(c) };
   // Explicit actors are only trusted for the master token or auth-disabled mode.
   const agentId = cleanString(c.req.header("X-Agent-ID"));
   return {

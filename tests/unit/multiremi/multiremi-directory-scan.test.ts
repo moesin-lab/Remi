@@ -1,16 +1,18 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { receiveRuntimeInputs } from "../../fixtures/runtime-downlinks.js";
+import { reportFrame } from "../../fixtures/report-session.js";
+import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { browseRuntimeDirectory, scanRuntimeDirectories } from "@multiremi/daemon.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { snapshotStatsForFile, createSnapshotStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Bun Multiremi runtime directory scan", () => {
   it("runs the queue lifecycle create → claim → report", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_lifecycle", name: "Scan runtime", provider: "codex" });
 
     const request = store.createRuntimeDirectoryScanRequest(runtime.id, { root: "~/code", maxDepth: 2 });
@@ -48,7 +50,7 @@ describe("Bun Multiremi runtime directory scan", () => {
   });
 
   it("reports failure with the daemon-provided error", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_failure", name: "Scan runtime", provider: "codex" });
     const request = store.createRuntimeDirectoryScanRequest(runtime.id);
     store.claimRuntimeDirectoryScanRequest(runtime.id);
@@ -62,34 +64,34 @@ describe("Bun Multiremi runtime directory scan", () => {
   });
 
   it("refuses to enqueue a scan for an offline runtime", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_offline", name: "Offline runtime", provider: "codex", status: "offline" });
     expect(runtime.status).toBe("offline");
     expect(() => store.createRuntimeDirectoryScanRequest(runtime.id)).toThrow("runtime is offline");
   });
 
-  it("only claims a directory scan when the daemon advertises support", () => {
-    const store = createStore();
+  it("only claims a directory scan when the daemon advertises support", async () => {
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_capability", name: "Scan runtime", provider: "codex" });
     const request = store.createRuntimeDirectoryScanRequest(runtime.id, { root: "/srv/work", maxDepth: 4 });
 
     // A heartbeat without the capability must never claim the pending request.
     const withoutSupport = store.heartbeatRuntime(runtime.id, { supportsDirectoryScan: false });
-    expect(withoutSupport.pending_directory_scan).toBeUndefined();
+    expect(withoutSupport).not.toHaveProperty("pending_directory_scan");
     expect(store.getRuntimeDirectoryScanRequest(runtime.id, request.id)?.status).toBe("pending");
 
     // Default options also omit the capability.
-    expect(store.heartbeatRuntime(runtime.id).pending_directory_scan).toBeUndefined();
+    expect(store.heartbeatRuntime(runtime.id)).not.toHaveProperty("pending_directory_scan");
     expect(store.getRuntimeDirectoryScanRequest(runtime.id, request.id)?.status).toBe("pending");
 
     // Advertising support claims the request and embeds the params in the ack.
-    const withSupport = store.heartbeatRuntime(runtime.id, { supportsDirectoryScan: true });
+    const withSupport = (await receiveRuntimeInputs(store, runtime.id));
     expect(withSupport.pending_directory_scan).toEqual({ id: request.id, root: "/srv/work", max_depth: 4 });
     expect(store.getRuntimeDirectoryScanRequest(runtime.id, request.id)?.status).toBe("running");
   });
 
   it("times out a pending scan the daemon never picks up", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_pending_timeout", name: "Scan runtime", provider: "codex" });
     const request = store.createRuntimeDirectoryScanRequest(runtime.id);
 
@@ -109,7 +111,7 @@ describe("Bun Multiremi runtime directory scan", () => {
   });
 
   it("times out a running scan the daemon never finishes", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_running_timeout", name: "Scan runtime", provider: "codex" });
     const request = store.createRuntimeDirectoryScanRequest(runtime.id);
     store.claimRuntimeDirectoryScanRequest(runtime.id);
@@ -136,7 +138,7 @@ describe("Bun Multiremi runtime directory scan", () => {
   });
 
   it("keeps a terminal result idempotent under repeated reports", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_idempotent", name: "Scan runtime", provider: "codex" });
     const request = store.createRuntimeDirectoryScanRequest(runtime.id);
     store.claimRuntimeDirectoryScanRequest(runtime.id);
@@ -155,7 +157,7 @@ describe("Bun Multiremi runtime directory scan", () => {
   });
 
   it("serves the runtime directory scan HTTP flow across both URL variants", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_http", name: "Scan runtime", provider: "codex" });
     const app = createMultiremiApp({ store });
 
@@ -196,39 +198,25 @@ describe("Bun Multiremi runtime directory scan", () => {
     expect(claimBody.request.status).toBe("running");
 
     // A report for a missing request is a 404.
-    const missingReport = await app.request(`/api/daemon/runtimes/${runtime.id}/directory-scans/rds_missing/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "completed" }),
-    });
-    expect(missingReport.status).toBe(404);
-    expect(await missingReport.json()).toEqual({ error: "request not found" });
+    const missingReport = await reportFrame(store, "runtime.directory_scan_result", { runtime_id: runtime.id, request_id: "rds_missing", status: "completed" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(missingReport).toMatchObject({ ok: false, code: "task_not_found", retryable: false });
+    expect(missingReport).toEqual({ ok: false, code: "task_not_found", retryable: false });
 
     // Invalid JSON does not mutate the request (still running).
-    const invalidReport = await app.request(`/api/daemon/runtimes/${runtime.id}/directory-scans/${nativeBody.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{",
-    });
-    expect(invalidReport.status).toBe(400);
-    expect(await invalidReport.json()).toEqual({ error: "invalid request body" });
+    const invalidReport = await reportFrame(store, "runtime.directory_scan_result", { runtime_id: runtime.id, request_id: nativeBody.id,  }, { headers: { "Content-Type": "application/json" }, authToken: "", rawPayload: "{" });
+    expect(invalidReport).toEqual({ closed: 4002 });
+    expect(invalidReport).toEqual({ closed: 4002 });
     expect(store.getRuntimeDirectoryScanRequest(runtime.id, nativeBody.id)?.status).toBe("running");
 
     // Daemon reports candidates: one with a remote, one without.
-    const report = await app.request(`/api/daemon/runtimes/${runtime.id}/directory-scans/${nativeBody.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
+    const report = await reportFrame(store, "runtime.directory_scan_result", { runtime_id: runtime.id, request_id: nativeBody.id, status: "completed",
         supported: true,
         candidates: [
           { path: "/home/dev/code/app", name: "app", remoteUrl: "git@github.com:acme/app.git", currentBranch: "main", isDirty: null },
           { path: "/home/dev/code/notes", name: "notes", remoteUrl: null, currentBranch: null, isDirty: null },
-        ],
-      }),
-    });
-    expect(report.status).toBe(200);
-    expect(await report.json()).toEqual({ status: "ok" });
+        ], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(report.ok).toBe(true);
+    expect(report).toEqual({ ok: true });
 
     // Native detail exposes camelCase candidate fields.
     const nativeDetail = await app.request(`/api/multiremi/runtimes/${runtime.id}/directory-scans/${nativeBody.id}`);
@@ -252,18 +240,14 @@ describe("Bun Multiremi runtime directory scan", () => {
     ]);
 
     // A late report once terminal is a no-op that still returns ok.
-    const lateReport = await app.request(`/api/daemon/runtimes/${runtime.id}/directory-scans/${nativeBody.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "failed", error: "too late" }),
-    });
-    expect(lateReport.status).toBe(200);
-    expect(await lateReport.json()).toEqual({ status: "ok" });
+    const lateReport = await reportFrame(store, "runtime.directory_scan_result", { runtime_id: runtime.id, request_id: nativeBody.id, status: "failed", error: "too late" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    expect(lateReport.ok).toBe(true);
+    expect(lateReport).toEqual({ ok: true });
     expect(store.getRuntimeDirectoryScanRequest(runtime.id, nativeBody.id)?.status).toBe("completed");
   });
 
   it("rejects a directory scan for an offline runtime over HTTP with 503", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_http_offline", name: "Offline runtime", provider: "codex", status: "offline" });
     const app = createMultiremiApp({ store });
 
@@ -284,46 +268,47 @@ describe("Bun Multiremi runtime directory scan", () => {
     expect(await compatOffline.json()).toEqual({ error: "runtime is offline" });
   });
 
-  it("forbids initiating a directory scan on another owner's runtime", async () => {
-    const store = createStore();
+  it("shares directory scan initiation across historical runtime owners", async () => {
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_owned", name: "Owned runtime", provider: "codex", workspaceId: "local", ownerId: "someone-else" });
     const app = createMultiremiApp({ store });
 
-    const forbidden = await app.request(`/api/multiremi/runtimes/${runtime.id}/directory-scans`, {
+    const shared = await app.request(`/api/multiremi/runtimes/${runtime.id}/directory-scans`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    expect(forbidden.status).toBe(403);
-    expect(await forbidden.json()).toEqual({ error: "you can only access directory scans from your own runtimes" });
+    expect(shared.status).toBe(200);
+    expect(await shared.json()).toMatchObject({ runtimeId: runtime.id, status: "pending" });
 
-    const forbiddenCompat = await app.request(`/api/runtimes/${runtime.id}/directory-scans`, {
+    const sharedCompat = await app.request(`/api/runtimes/${runtime.id}/directory-scans`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    expect(forbiddenCompat.status).toBe(403);
+    expect(sharedCompat.status).toBe(200);
+    expect(await sharedCompat.json()).toMatchObject({ runtime_id: runtime.id, status: "pending" });
   });
 
-  it("embeds the browse mode in params and the heartbeat ack", () => {
-    const store = createStore();
+  it("embeds the browse mode in params and the heartbeat ack", async () => {
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_mode", name: "Scan runtime", provider: "codex" });
     const request = store.createRuntimeDirectoryScanRequest(runtime.id, { root: "~/code", mode: "browse" });
     expect(request.params).toEqual({ root: "~/code", mode: "browse" });
 
-    const ack = store.heartbeatRuntime(runtime.id, { supportsDirectoryScan: true });
+    const ack = (await receiveRuntimeInputs(store, runtime.id));
     expect(ack.pending_directory_scan).toEqual({ id: request.id, root: "~/code", mode: "browse" });
   });
 
   it("rejects an unknown scan mode", () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_bad_mode", name: "Scan runtime", provider: "codex" });
     expect(() => store.createRuntimeDirectoryScanRequest(runtime.id, { mode: "sideways" as "scan" | "browse" }))
       .toThrow('directory scan mode must be "scan" or "browse"');
   });
 
   it("rejects an unknown scan mode over HTTP with 400 on both URL variants", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_bad_mode_http", name: "Scan runtime", provider: "codex" });
     const app = createMultiremiApp({ store });
 
@@ -339,7 +324,7 @@ describe("Bun Multiremi runtime directory scan", () => {
   });
 
   it("passes browse mode through the compat rail and emits is_git_repo", async () => {
-    const store = createStore();
+    const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_browse_http", name: "Scan runtime", provider: "codex" });
     const app = createMultiremiApp({ store });
 
@@ -355,18 +340,12 @@ describe("Bun Multiremi runtime directory scan", () => {
     // Daemon claims then reports a git child and a plain child, echoing the
     // expanded absolute root it browsed.
     await app.request(`/api/daemon/runtimes/${runtime.id}/directory-scans/claim`, { method: "POST" });
-    await app.request(`/api/daemon/runtimes/${runtime.id}/directory-scans/${createdBody.id}/result`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status: "completed",
+    await reportFrame(store, "runtime.directory_scan_result", { runtime_id: runtime.id, request_id: createdBody.id, status: "completed",
         resolvedRoot: "/home/dev/code",
         candidates: [
           { path: "/home/dev/code/app", name: "app", remoteUrl: "git@github.com:acme/app.git", currentBranch: "main", isDirty: null, isGitRepo: true },
           { path: "/home/dev/code/scratch", name: "scratch", remoteUrl: null, currentBranch: null, isDirty: null, isGitRepo: false },
-        ],
-      }),
-    });
+        ], }, { headers: { "Content-Type": "application/json" }, authToken: "" });
 
     // Compat detail echoes mode + the resolved root and maps is_git_repo to snake_case.
     const compat = await app.request(`/api/runtimes/${runtime.id}/directory-scans/${createdBody.id}`);
@@ -461,3 +440,8 @@ describe("browseRuntimeDirectory", () => {
     await expect(browseRuntimeDirectory("/no/such/dir/remi-browse")).rejects.toThrow("directory does not exist:");
   });
 });
+
+// Register hooks in this file; shared modules only load once per test process.
+let reportSnapshotStats: (() => void) | undefined;
+beforeAll(() => { reportSnapshotStats = snapshotStatsForFile(import.meta.path); });
+afterAll(() => { reportSnapshotStats?.(); });

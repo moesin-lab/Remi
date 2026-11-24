@@ -23,7 +23,11 @@ import {
   EMPTY_TIMELINE_PAGE,
   EMPTY_USER,
   ListIssuesResponseSchema,
+  IssueDecisionListSchema,
+  IssueDecisionMutationResponseSchema,
+  IssueDetailSchema,
   IssueRetitleResponseSchema,
+  IssueStatusHeldErrorSchema,
   ListLarkInstallationsResponseSchema,
   ListProjectDocsResponseSchema,
   ListWorkspaceDocsResponseSchema,
@@ -112,6 +116,119 @@ describe("IssueSchema (via ListIssuesResponseSchema)", () => {
       total: 1,
     };
     expect(ListIssuesResponseSchema.safeParse(payload).success).toBe(false);
+  });
+
+  it("still parses rows from an older server that carries retired grant and human columns", () => {
+    const parsed = ListIssuesResponseSchema.parse({
+      issues: [{
+        ...baseIssue,
+        responsible_member_id: "member-1",
+        parent_done_grant_at: "2026-09-28T08:00:00.000Z",
+        parent_done_grant_by: "member-1",
+        parent_done_grant_agent_id: "agent-1",
+      }],
+      total: 1,
+    });
+    expect(parsed.issues[0]).toMatchObject({ id: baseIssue.id, assignee_type: baseIssue.assignee_type });
+  });
+});
+
+describe("Issue decision schemas", () => {
+  const answer = {
+    answererType: "agent",
+    answererId: "agent-1",
+    answer: "Merge",
+    reason: "All checks passed",
+    overturn: "Revert the merge",
+    answeredAt: "2026-09-28T08:00:00.000Z",
+  };
+  const entry = {
+    id: "decision-1",
+    bucket: "answered",
+    type: "decision",
+    kind: "merge",
+    title: "Merge the change",
+    body: "Checks passed.",
+    status: "answered",
+    issueId: "issue-1",
+    sourceIssueId: "issue-child",
+    sourceTaskId: "task-1",
+    options: ["Merge", "Wait"],
+    answer,
+    history: [answer],
+    createdAt: "2026-09-28T07:00:00.000Z",
+    updatedAt: "2026-09-28T08:00:00.000Z",
+  };
+  const decision = {
+    id: entry.id,
+    workspaceId: "ws-1",
+    issueId: entry.issueId,
+    sourceIssueId: entry.sourceIssueId,
+    sourceTaskId: entry.sourceTaskId,
+    kind: entry.kind,
+    title: entry.title,
+    body: entry.body,
+    options: entry.options,
+    status: entry.status,
+    answer,
+    answeredByMemberId: null,
+    answeredAt: answer.answeredAt,
+    history: [answer],
+    ownerAgentId: "agent-1",
+    createdByAgentId: "agent-child",
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+  };
+
+  it("parses the detail-only count of human-stage questions and requires it", () => {
+    expect(IssueDetailSchema.parse({ ...baseIssue, pending_decision_count: 2 })).toMatchObject({
+      pending_decision_count: 2,
+    });
+    expect(IssueDetailSchema.safeParse(baseIssue).success).toBe(false);
+    expect(IssueDetailSchema.safeParse({ ...baseIssue, pending_decision_count: -1 }).success).toBe(false);
+  });
+
+  it("parses decision history and a human request without history", () => {
+    const { history: _history, ...entryWithoutHistory } = entry;
+    const humanRequest = {
+      ...entryWithoutHistory,
+      id: "request-1",
+      bucket: "waiting_on_human",
+      type: "human_request",
+      kind: "question",
+      status: "pending",
+      answer: null,
+      options: null,
+      payload: { message: "Choose a region" },
+    };
+    const parsed = IssueDecisionListSchema.parse({
+      waiting_on_human: [humanRequest],
+      owner_and_answered: { pending: [], answered: [entry] },
+      count: 1,
+    });
+
+    expect(parsed.waiting_on_human[0]).not.toHaveProperty("history");
+    expect(parsed.owner_and_answered.answered[0]?.history).toEqual([answer]);
+    expect(IssueDecisionMutationResponseSchema.parse({ decision }).decision).toEqual(decision);
+  });
+});
+
+describe("IssueStatusHeldErrorSchema", () => {
+  it.each([
+    { code: "issue_status_held", reason: "children_open", open_children: 2 },
+    { code: "final_summary_missing", reason: "final_summary_missing", open_children: 0, data: { lastChildClosedAt: "2026-10-08T07:43:00.000Z" } },
+    { code: "issue_status_held", reason: "final_summary_missing", open_children: 0 },
+  ])("accepts the member override response $code / $reason", (body) => {
+    expect(IssueStatusHeldErrorSchema.parse(body)).toEqual(body);
+  });
+
+  it.each([
+    { code: "parent_done_requires_member", reason: "grant_missing", open_children: 0 },
+    { code: "final_summary_missing", reason: "final_summary_missing" },
+    { code: "final_summary_missing", reason: "final_summary_missing", open_children: "0" },
+    { code: "final_summary_missing", reason: "unknown", open_children: 0 },
+  ])("rejects an unsupported or malformed override response %#", (body) => {
+    expect(IssueStatusHeldErrorSchema.safeParse(body).success).toBe(false);
   });
 });
 
@@ -561,7 +678,7 @@ describe("IssueSessionListSchema", () => {
     const parsed = parseWithFallback([
       {
         id: "sess_1",
-        issue_id: "issue_1",
+        issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1",
         workspace_id: "ws_1",
         title: "Main",
         status: "active",
@@ -584,7 +701,7 @@ describe("IssueSessionListSchema", () => {
 
   it("preserves the code snapshot opt-in and its Runtime without making it a held workspace", () => {
     const parsed = parseWithFallback([{
-      id: "sess_code", issue_id: "issue_1", workspace_id: "ws_1", title: "Read code", status: "active",
+      id: "sess_code", issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1", workspace_id: "ws_1", title: "Read code", status: "active",
       holds_workspace: false, with_code: true, code_runtime_id: "rt_parent",
       parent_session_id: "sess_main", inherit_mode: "follow", inherit_cutoff_seq: 42,
       created_at: "2026-09-18T00:00:00Z", updated_at: "2026-09-18T00:00:00Z",
@@ -598,7 +715,7 @@ describe("IssueSessionListSchema", () => {
     const parsed = parseWithFallback([
       {
         id: "sess_side",
-        issue_id: "issue_1",
+        issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1",
         workspace_id: "ws_1",
         title: "Review",
         status: "active",
@@ -626,7 +743,7 @@ describe("IssueSessionListSchema", () => {
     const parsed = parseWithFallback([
       {
         id: "sess_side",
-        issue_id: "issue_1",
+        issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1",
         workspace_id: "ws_1",
         title: "Review",
         status: "active",

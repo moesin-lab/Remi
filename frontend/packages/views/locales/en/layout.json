@@ -15,7 +15,9 @@
     "plugins": "Plugins",
     "skills": "Skills",
     "settings": "Settings",
-    "chat": "Chat"
+    "chat": "Chat",
+    "execution_groups": "Capability groups",
+    "magpie": "Magpie"
   },
   "help": {
     "trigger": "Help",
@@ -41,6 +43,8 @@
     "pinned_label": "Pinned",
     "workspace_group": "Workspace",
     "configure_group": "Configure",
-    "unread_overflow": "99+"
+    "unread_overflow": "99+",
+    "collapse": "Collapse sidebar",
+    "expand": "Expand sidebar"
   }
 }

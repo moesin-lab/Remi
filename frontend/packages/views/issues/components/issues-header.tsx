@@ -65,6 +65,8 @@ import {
   type ActorFilterValue,
 } from "@multiremi/core/issues/stores/view-store";
 import { useViewStore, useViewStoreApi } from "@multiremi/core/issues/stores/view-store-context";
+import { useAfterFirstScreen } from "@multiremi/core/platform/use-after-first-screen";
+import { useNavigation } from "../../navigation";
 import type { SortField, IssueGrouping, SwimlaneGrouping, ViewMode } from "@multiremi/core/issues/stores/view-store";
 import {
   useIssuesScopeStore,
@@ -164,7 +166,7 @@ function useIssueCounts(allIssues: Issue[]) {
 // Scope config
 // ---------------------------------------------------------------------------
 
-const SCOPE_VALUES: IssuesScope[] = ["all", "members", "agents"];
+const SCOPE_VALUES: IssuesScope[] = ["all", "agents"];
 
 // ---------------------------------------------------------------------------
 // Actor sub-menu content (shared between Assignee and Creator)
@@ -193,8 +195,14 @@ function ActorSubContent({
   const [search, setSearch] = useState("");
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
-  const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  const { data: squads = [] } = useQuery(squadListOptions(wsId));
+  // MUL-472 b: the squad list only feeds the assignee picker, which is closed
+  // until the user opens it, so it waits for the page gate.
+  const { pathname } = useNavigation();
+  const afterFirstScreen = useAfterFirstScreen({ routeKey: pathname, scope: "page" });
+  const { data: agents = [] } = useQuery(agentListOptions(wsId, { enabled: afterFirstScreen }));
+  const { data: squads = [] } = useQuery(
+    squadListOptions(wsId, { enabled: afterFirstScreen }),
+  );
   const query = search.trim().toLowerCase();
   const filteredMembers = members.filter((m) =>
     m.name.toLowerCase().includes(query) || matchesPinyin(m.name, query),
@@ -240,35 +248,6 @@ function ActorSubContent({
               )}
             </DropdownMenuCheckboxItem>
           )}
-
-        {filteredMembers.length > 0 && (
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>{t(($) => $.filters.members_group)}</DropdownMenuLabel>
-            {filteredMembers.map((m) => {
-              const checked = isSelected("member", m.user_id);
-              const count = counts.get(`member:${m.user_id}`) ?? 0;
-              return (
-                <DropdownMenuCheckboxItem
-                  key={m.user_id}
-                  checked={checked}
-                  onCheckedChange={() =>
-                    onToggle({ type: "member", id: m.user_id })
-                  }
-                  className={FILTER_ITEM_CLASS}
-                >
-                  <HoverCheck checked={checked} />
-                  <ActorAvatar actorType="member" actorId={m.user_id} size={18} />
-                  <span className="truncate">{m.name}</span>
-                  {count > 0 && (
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {count}
-                    </span>
-                  )}
-                </DropdownMenuCheckboxItem>
-              );
-            })}
-          </DropdownMenuGroup>
-        )}
 
         {filteredAgents.length > 0 && (
           <DropdownMenuGroup>
@@ -506,7 +485,7 @@ export function IssuesHeader({
   allowGantt?: boolean;
 }) {
   const { t } = useT("issues");
-  const scope = useIssuesScopeStore((s) => s.scope);
+  const scope = useIssuesScopeStore((s) => s.scope === "members" ? "all" : s.scope);
   const setScope = useIssuesScopeStore((s) => s.setScope);
   // Bind the workspace agents-working chip to the active view store so
   // shared IssuesHeader consumers (/issues and project detail) toggle the
@@ -634,6 +613,7 @@ export function IssueDisplayControls({
   const grouping = useViewStore((s) => s.grouping);
   const swimlaneGrouping = useViewStore((s) => s.swimlaneGrouping);
   const cardProperties = useViewStore((s) => s.cardProperties);
+  const showSubIssues = useViewStore((s) => s.showSubIssues);
   const act = useViewStoreApi().getState();
 
   const counts = useIssueCounts(scopedIssues);
@@ -1037,6 +1017,13 @@ export function IssueDisplayControls({
                   </Button>
                 )}
               </div>
+            </div>
+
+            <div className="border-b px-3 py-2.5">
+              <label className="flex cursor-pointer items-center justify-between gap-3">
+                <span className="text-sm">{t(($) => $.display.show_sub_issues)}</span>
+                <Switch size="sm" checked={showSubIssues} onCheckedChange={() => act.toggleShowSubIssues()} />
+              </label>
             </div>
 
             <div className="px-3 py-2.5">

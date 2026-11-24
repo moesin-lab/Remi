@@ -2,7 +2,10 @@
 // Go-compat (`*Compatibility*`) and native shapers sit side by side on purpose:
 // the two route prefixes are intentionally divergent and must stay diffable.
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT } from "@multiremi/store/helpers.js";
-import { agentAtTaskTarget, taskExecutionScope } from "@multiremi/contracts/task-execution.js";
+import { RELAY_EXECUTION_SCOPE_PREFIX, agentAtTaskTarget, taskExecutionScope } from "@multiremi/contracts/task-execution.js";
+import { buildSessionProjection } from "@multiremi/store/session-projection.js";
+import { resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
+import type { TaskMessageFanoutSubject } from "@multiremi/store/context.js";
 import type {
   MultiremiChatMessage,
   MultiremiDaemonHeartbeatAck,
@@ -14,14 +17,22 @@ import type {
 } from "@multiremi/contracts/types.js";
 
 type InternalTaskField =
+  | "execution_scope"
   | "codexProfile"
   | "claudeProfile"
+  | "executionConnection"
   | "delegationId"
   | "delegation_id"
   | "delegatedByAgentId"
   | "delegated_by_agent_id"
   | "delegationReturnTaskId"
   | "delegation_return_task_id"
+  | "delegatedFromIssueSessionId"
+  | "delegated_from_issue_session_id"
+  | "delegationSkipReason"
+  | "delegation_skip_reason"
+  | "wakeSource"
+  | "wake_source"
   | "issueCreationRestricted"
   | "issue_creation_restricted";
 
@@ -43,14 +54,22 @@ type TaskListOmittedField =
 
 export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, InternalTaskField> {
   const {
+    execution_scope: _executionScope,
     codexProfile: _codexProfile,
     claudeProfile: _claudeProfile,
+    executionConnection: _executionConnection,
     delegationId: _delegationId,
     delegation_id: _delegationIdSnake,
     delegatedByAgentId: _delegatedByAgentId,
     delegated_by_agent_id: _delegatedByAgentIdSnake,
     delegationReturnTaskId: _delegationReturnTaskId,
     delegation_return_task_id: _delegationReturnTaskIdSnake,
+    delegatedFromIssueSessionId: _delegatedFromIssueSessionId,
+    delegated_from_issue_session_id: _delegatedFromIssueSessionIdSnake,
+    delegationSkipReason: _delegationSkipReason,
+    delegation_skip_reason: _delegationSkipReasonSnake,
+    wakeSource: _wakeSource,
+    wake_source: _wakeSourceSnake,
     issueCreationRestricted: _issueCreationRestricted,
     issue_creation_restricted: _issueCreationRestrictedSnake,
     ...publicTask
@@ -79,7 +98,7 @@ import type { MultiremiStore } from "@multiremi/store/store.js";
 import { workspaceDefaultBranchResolver } from "../helpers/repositories.js";
 import { autopilotRunSourceRevision } from "@multiremi/store/repos/autopilots-repo.js";
 import { createLogger } from "@shared/logger.js";
-import { readWorkspacePromptSettings } from "../../prompts/workspace-settings.js";
+import { DEFAULT_WORKSPACE_BOOTSTRAP_PROMPT, readWorkspacePromptSettings } from "../../prompts/workspace-settings.js";
 import { resolveRepositoryWikiAutomation } from "../../repository-wiki/automation.js";
 import { daemonClaimAgentResponse } from "./agents.js";
 import { issueCompatibilityResponse } from "./issues.js";
@@ -95,27 +114,20 @@ const log = createLogger("multiremi-api");
 export function daemonHeartbeatHttpResponse(ack: MultiremiDaemonHeartbeatAck): Record<string, unknown> {
   const response: Record<string, unknown> = { status: ack.status };
   if (ack.pending_update) response.pending_update = ack.pending_update;
-  if (ack.pending_model_list) response.pending_model_list = ack.pending_model_list;
-  if (ack.pending_local_skills) response.pending_local_skills = ack.pending_local_skills;
-  if (ack.pending_directory_scan) response.pending_directory_scan = ack.pending_directory_scan;
-  if (ack.pending_local_skill_import) response.pending_local_skill_import = ack.pending_local_skill_import;
-  if (ack.pending_local_skill_imports?.length) response.pending_local_skill_imports = ack.pending_local_skill_imports;
-  if (ack.pending_command) response.pending_command = ack.pending_command;
-  // Every `pending_*` the store can claim must be listed here. `heartbeatRuntime`
-  // marks the work as handed out before this runs, so a field missing from this
-  // allowlist is not a dropped field — it is a request consumed and destroyed,
-  // which the operator only sees minutes later as an unexplained timeout.
-  if (ack.pending_bot_menu) response.pending_bot_menu = ack.pending_bot_menu;
-  // Not a `pending_*`: the daemon only uses this to decide whether it can skip
-  // a desired-state GET, but dropping it here would silently restore the polling
-  // this field exists to remove.
-  if (ack.agent_plugins) response.agent_plugins = ack.agent_plugins;
-  if (ack.ssh_mesh) response.ssh_mesh = ack.ssh_mesh;
   if (ack.drain) response.drain = ack.drain;
+  if (ack.cancelled_tasks?.length) response.cancelled_tasks = ack.cancelled_tasks;
   return response;
 }
 
-export function taskMessageRealtimePayload(message: MultiremiTaskMessage, task: MultiremiTask): Record<string, unknown> {
+/**
+ * MUL-474: only routing/scope fields are read, so the builder takes the narrow
+ * fan-out subject instead of a whole Task — appending a message must not load
+ * the prompt.
+ */
+export function taskMessageRealtimePayload(
+  message: MultiremiTaskMessage,
+  task: TaskMessageFanoutSubject,
+): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     task_id: message.taskId,
     issue_id: task.issueId,
@@ -147,6 +159,7 @@ export function taskRealtimePayload(task: MultiremiTask): Record<string, unknown
     updated_at: task.updatedAt,
   };
   if (task.chatSessionId) payload.chat_session_id = task.chatSessionId;
+  if (task.issueSessionId) payload.issue_session_id = task.issueSessionId;
   if (task.autopilotRunId) payload.autopilot_run_id = task.autopilotRunId;
   if (task.waitReason) payload.wait_reason = task.waitReason;
   if (task.sessionId) payload.session_id = task.sessionId;
@@ -303,6 +316,7 @@ export function daemonTaskWireResponse(
 ): Record<string, unknown> {
   const response: Record<string, unknown> = {
     id: task.id,
+    turn_id: task.turn_id ?? null,
     agent_id: task.agentId,
     runtime_id: task.runtimeId ?? "",
     issue_id: task.issueId ?? "",
@@ -338,6 +352,7 @@ export function daemonTaskWireResponse(
   if (task.executionFingerprint || task.pluginSnapshot.length) response.plugin_snapshot = task.pluginSnapshot;
   response.codex_profile = task.codexProfile ?? null;
   response.claude_profile = task.claudeProfile ?? null;
+  if (task.executionConnection) response.execution_connection = task.executionConnection;
   if (task.executionFingerprint) response.execution_fingerprint = task.executionFingerprint;
   if (triggerMetadata?.triggerThreadId) response.trigger_thread_id = triggerMetadata.triggerThreadId;
   if (triggerMetadata?.triggerCommentContent) response.trigger_comment_content = triggerMetadata.triggerCommentContent;
@@ -374,7 +389,9 @@ export function daemonTaskClaimResponse(
   // Re-check the live destination even when the caller retained an earlier
   // hydrated claim. Stale or unavailable bindings must not retain Project or Issue context.
   const ordinaryChat = Boolean(task.chatSessionId && store.getTaskChatExecutionKind(task) === "ordinary");
-  if (ordinaryChat) {
+  // A run_only automation's Chat keeps the scope its run was started with (a scheduled
+  // Project, a Repository Wiki build); a person's Chat only keeps its own Project.
+  if (ordinaryChat && !task.autopilotRunId) {
     const chat = store.getChatSession(task.chatSessionId!);
     const currentProject = chat?.projectId ? store.getProject(chat.projectId) : null;
     // A claim payload may have been retained across a resource mutation. Read
@@ -415,7 +432,6 @@ export function daemonTaskClaimResponse(
   response.runtime_workspace = task.runtimeWorkspace ?? null;
   const defaultBranchFor = workspaceDefaultBranchResolver(store.getWorkspace(task.workspaceId)?.repos ?? []);
   if (task.knowledgeWarnings?.length) response.knowledge_warnings = task.knowledgeWarnings;
-  let projectionMode: "bootstrap" | "delta" | null = null;
   response.prompt = task.prompt;
   if (task.sessionId) {
     response.session_id = task.sessionId;
@@ -446,9 +462,14 @@ export function daemonTaskClaimResponse(
       .map(attachmentCompatibilityResponse);
   }
   if (task.issueSessionId || task.chatSessionId) {
-    const projection = store.buildTaskSessionProjection(task.id);
+    // ADR 0023: the offer's session input is the unread range record built at send time; no history is assembled.
+    const projection = store.buildTaskSessionProjection(task.id, { boundsOnly: true });
     if (projection) {
-      projectionMode = projection.mode === "delta" ? "delta" : "bootstrap";
+      try {
+        store.recordTaskInboxDelivery(task.id, projection.fromSeq, projection.toSeq);
+      } catch (error) {
+        log.warn(`inbox delivery receipt failed for ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       response.session_projection = {
         session_id: projection.sessionId,
         target_agent_id: projection.targetAgentId,
@@ -488,24 +509,7 @@ export function daemonTaskClaimResponse(
         if (lane) response.issue_session_generation = lane.generation;
       }
     }
-    if (task.issueId) {
-      const since = projectionMode === "delta"
-        ? latestRecordedPromptForLane(store, task)?.assembledAt ?? null
-        : null;
-      response.issue_session_results = store.listIssueSessionResults(task.issueId)
-        .filter((result) => result.sourceSessionId !== task.issueSessionId)
-        // Millisecond timestamps can tie. Re-sending one result is safer than
-        // dropping a result published at the exact prompt assembly instant.
-        .filter((result) => !since || result.createdAt >= since)
-        .map((result) => ({
-          id: result.id,
-          source_session_id: result.sourceSessionId,
-          title: result.title,
-          body: result.body,
-          metadata: result.metadata,
-          created_at: result.createdAt,
-        }));
-    }
+    // Published results from other Sessions are not inlined (ADR 0023): `remi session result list` reads them.
   }
   if (task.project) {
     response.project_id = task.project.id;
@@ -578,28 +582,6 @@ export function daemonTaskClaimResponse(
   return response;
 }
 
-function latestRecordedPromptForLane(
-  store: MultiremiStore,
-  task: MultiremiTaskWithAgent,
-) {
-  if (!task.issueId || !task.issueSessionId) return null;
-  let latest: ReturnType<MultiremiStore["getTaskPrompt"]> = null;
-  for (const candidate of store.listTasksForIssue(task.issueId)) {
-    if (
-      candidate.id === task.id
-      || candidate.agentId !== task.agentId
-      || candidate.issueSessionId !== task.issueSessionId
-      || taskExecutionScope(candidate) !== taskExecutionScope(task)
-    ) continue;
-    const artifact = store.getTaskPrompt(candidate.id);
-    if (artifact && (!latest || artifact.assembledAt > latest.assembledAt)) latest = artifact;
-  }
-  // Upgraded installations may have a resumable provider lane but no prompt
-  // audit row for its prior task. The caller then includes all published
-  // results once so an upgrade cannot silently lose collaboration context.
-  return latest;
-}
-
 function appendDaemonClaimSquadContext(
   store: MultiremiStore,
   task: MultiremiTaskWithAgent,
@@ -635,7 +617,7 @@ function appendDaemonClaimExecutionContext(
   appendDaemonClaimWorkspaceContext(store, task, response);
   appendDaemonClaimChatContext(store, task, response);
   appendDaemonClaimBoundIssue(store, task, response);
-  appendDaemonClaimBoundIssueUpdates(store, task, response);
+  appendDaemonClaimBoundIssueLog(store, task, response);
   appendDaemonClaimAutopilotContext(store, task, response);
 
   const quickCreatePrompt = daemonQuickCreatePrompt(task);
@@ -672,8 +654,10 @@ function appendDaemonClaimWorkspaceContext(store: MultiremiStore, task: Multirem
   if (workspace?.context?.trim()) response.workspace_context = workspace.context.trim();
   if (workspace) {
     const prompts = readWorkspacePromptSettings(workspace);
-    if (prompts.bootstrapPrompt.trim()) response.workspace_bootstrap_prompt = prompts.bootstrapPrompt.trim();
-    if (prompts.deltaPrompt.trim()) response.workspace_delta_prompt = prompts.deltaPrompt.trim();
+    // ADR 0023: the workspace's own text, always present so a daemon can tell this server from an older one.
+    response.workspace_prompt = prompts.prompt.trim();
+    // Daemons from before read Remi's rules from the bootstrap prompt, the way its default carried them.
+    response.workspace_bootstrap_prompt = [DEFAULT_WORKSPACE_BOOTSTRAP_PROMPT, prompts.prompt.trim()].filter(Boolean).join("\n\n");
   }
 
   // Read at claim time so a saved workspace env applies to the next dispatched
@@ -682,12 +666,18 @@ function appendDaemonClaimWorkspaceContext(store: MultiremiStore, task: Multirem
   const workspaceEnv = store.getWorkspaceEnv(task.workspaceId);
   if (Object.keys(workspaceEnv).length) response.workspace_env = workspaceEnv;
 
-  const runtime = task.runtimeId ? store.getRuntime(task.runtimeId) : null;
+  const runtime = task.runtimeId ? store.getRuntimeLite(task.runtimeId) : null;
   const owner = runtime?.ownerId ? store.getUser(runtime.ownerId) : null;
   const requestingUserName = task.requestingUserName?.trim() || owner?.name?.trim();
   const requestingUserProfile = task.requestingUserProfileDescription?.trim() || owner?.profileDescription?.trim();
   if (requestingUserName) response.requesting_user_name = requestingUserName;
   if (requestingUserProfile) response.requesting_user_profile_description = requestingUserProfile;
+  // ADR 0023: who the session belongs to holds for the session, so AGENTS.md can name it and stay unchanged
+  // when a Feishu group member who is not its owner sends a turn: a Chat's creator, else the runtime's owner.
+  const chat = task.chatSessionId ? store.getChatSession(task.chatSessionId) : null;
+  const sessionOwner = (chat?.creatorId ? store.getUser(chat.creatorId) : null) ?? owner;
+  if (sessionOwner?.name?.trim()) response.session_owner_name = sessionOwner.name.trim();
+  if (sessionOwner?.profileDescription?.trim()) response.session_owner_profile_description = sessionOwner.profileDescription.trim();
 }
 
 function appendDaemonClaimChatContext(store: MultiremiStore, task: MultiremiTaskWithAgent, response: Record<string, unknown>): void {
@@ -695,8 +685,7 @@ function appendDaemonClaimChatContext(store: MultiremiStore, task: MultiremiTask
   try {
     const allMessages = store.listChatMessages(task.chatSessionId);
     const messages = daemonUserMessagesForTask(store, task, allMessages);
-    const chatMessage = messages.map((message) => message.body.trim()).filter(Boolean).join("\n\n");
-    if (chatMessage) response.chat_message = chatMessage;
+    // The message bodies reach the daemon as the offer's input; only their attachments ride here.
     const attachments = store.listAttachmentsForChatMessages(messages.map(message => message.id));
     response.chat_message_attachments = messages.flatMap(message => attachments.get(message.id) ?? [])
       .map(attachmentCompatibilityResponse);
@@ -705,23 +694,72 @@ function appendDaemonClaimChatContext(store: MultiremiStore, task: MultiremiTask
   }
 }
 
-function appendDaemonClaimBoundIssueUpdates(
+function appendDaemonClaimBoundIssueLog(
   store: MultiremiStore,
   task: MultiremiTaskWithAgent,
   response: Record<string, unknown>,
 ): void {
-  if (!task.chatSessionId || !response.bound_issue) return;
+  if (!task.chatSessionId || !task.issueId || !response.bound_issue) return;
   try {
-    const pending = store.preparePendingAgentIssueUpdatesForTask(task.chatSessionId, task.id);
-    if (pending.messages.length) {
-      response.bound_issue_updates = pending.messages.map((message) => message.body);
+    const toSeq = store.getBoundIssueLogToSeq(task.id);
+    if (toSeq == null) return;
+    const session = store.getOrCreateDefaultIssueSession(task.issueId);
+    const lane = store.getSessionAgentLane(session.id, task.agentId, `${RELAY_EXECUTION_SCOPE_PREFIX}${task.chatSessionId}`);
+    const fromSeq = lane?.cursorSeq ?? 0;
+    const turn = store.getTurnForAttempt(task.id);
+    const actualSession = turn ? store.getIssueSession(turn.session_id) : null;
+    const chatOwned = actualSession ? Boolean(actualSession.chatId)
+      : Boolean(turn && store.getChatSession(turn.session_id) || task.chatSessionId);
+    if (chatOwned && turn?.session_id !== session.id) {
+      response.bound_issue_log = {
+        session_id: session.id, from_seq: fromSeq, to_seq: toSeq,
+        content_jsonl: "", next_seq: fromSeq, has_more: false,
+      };
+      return;
     }
-    if (pending.omittedCount > 0) {
-      response.bound_issue_updates_omitted_count = pending.omittedCount;
+    const shown = store.listConversationLogShown(session.id, { sinceSeq: fromSeq, toSeq, limit: 101 });
+    const entries = shown.slice(0, 100);
+    const projection = buildSessionProjection({
+      sessionId: session.id,
+      targetAgentId: task.agentId,
+      events: entries.map((entry) => ({
+        id: entry.id, sessionId: session.id, seq: entry.seq, kind: entry.kind,
+        authorType: entry.author_type, authorId: entry.author_id,
+        body: entry.body_md, taskId: entry.task_id, sourceCommentId: null,
+        metadata: entry.metadata, createdAt: entry.created_at,
+      })),
+      expandableSeqs: new Set(entries.map((entry) => entry.seq)),
+      cursorSeq: fromSeq, fromSeq, toSeq, providerSessionId: null,
+      perspectiveMode: "inherited",
+      tokenBudget: Math.min(12_000, Math.floor(resolveProjectionTokenBudget({
+        provider: task.agent?.provider, model: task.agent?.model,
+        degradeLevel: task.projectionDegradeLevel ?? 0,
+      }) / 4)),
+      // The offer replaces the log with an unread range record of the Issue Session.
+      boundsOnly: true,
+    });
+    response.bound_issue_log = {
+      session_id: session.id,
+      from_seq: fromSeq,
+      to_seq: toSeq,
+      content_jsonl: projection.jsonl,
+      next_seq: entries.at(-1)?.seq ?? fromSeq,
+      has_more: shown.length > 100,
+    };
+  } catch (error) {
+    log.warn(
+      `Failed to load bound Issue log for claimed task ${task.id}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+  try {
+    if (!store.markBoundIssueLogDelivered(task.id, (response.bound_issue_log as { to_seq: number }).to_seq)) {
+      log.warn(`Failed to mark bound Issue log delivered for claimed task ${task.id}: task or frozen window changed`);
     }
   } catch (error) {
-    log.debug(
-      `Failed to load bound Issue updates for claimed task ${task.id}: `
+    log.warn(
+      `Failed to mark bound Issue log delivered for claimed task ${task.id}: `
       + `${error instanceof Error ? error.message : String(error)}`,
     );
   }
@@ -735,7 +773,17 @@ function appendDaemonClaimAutopilotContext(store: MultiremiStore, task: Multirem
   response.autopilot_source = run.source;
   if (run.payload != null) response.autopilot_trigger_payload = run.payload;
   const autopilot = store.getAutopilot(run.autopilotId);
-  const repositoryWikiRun = resolveRepositoryWikiAutomation(store, task.workspaceId)?.id === run.autopilotId;
+  // Capability resolution reads roles and plugin bindings; the Agent's Skills cannot
+  // change the answer, so it reads the rows without them.
+  // Capability resolution reads roles and plugin bindings; the Agent's Skills cannot
+  // change the answer, so it reads the Agent rows without them.
+  const repositoryWikiRun = resolveRepositoryWikiAutomation({
+    listAgents: () => store.listAgentsLite(),
+    listAutopilots: (workspaceId) => store.listAutopilots(workspaceId),
+    listAgentPlugins: (workspaceId, options) => store.listAgentPlugins(workspaceId, options),
+    listAgentPluginBindings: (agentId) => store.listAgentPluginBindings(agentId),
+    listAutopilotTriggers: (autopilotId) => store.listAutopilotTriggers(autopilotId),
+  }, task.workspaceId)?.id === run.autopilotId;
   if (repositoryWikiRun && task.repositoryWikiContexts?.length) {
     const scmRevision = autopilotRunSourceRevision(run);
     if (scmRevision) response.scm_revision = scmRevision;
@@ -812,7 +860,10 @@ function taskResultWireValue(task: MultiremiTask): unknown | null {
   };
 }
 
-export function daemonTaskMessageWireResponse(message: MultiremiTaskMessage, task: MultiremiTask): Record<string, unknown> {
+export function daemonTaskMessageWireResponse(
+  message: MultiremiTaskMessage,
+  task: TaskMessageFanoutSubject,
+): Record<string, unknown> {
   const response: Record<string, unknown> = {
     task_id: message.taskId,
     seq: message.seq,
@@ -833,7 +884,9 @@ export function daemonTaskMessageWireResponse(message: MultiremiTaskMessage, tas
 function daemonTaskKind(
   task: MultiremiTask & { issue?: MultiremiTaskWithAgent["issue"] },
 ): "chat" | "autopilot" | "quick_create" | "comment" | "direct" {
-  if (task.chatSessionId) return "chat";
+  // Session Tasks also carry their owning Chat. Preserve their execution kind;
+  // only ordinary Chat turns use the Chat wire classification.
+  if (task.chatSessionId && !task.issueSessionId) return "chat";
   if (task.autopilotRunId) return "autopilot";
   if (task.taskKind === "quick_create" || !task.issueId || task.issue?.issueKind === "intake") return "quick_create";
   if (task.triggerCommentId) return "comment";

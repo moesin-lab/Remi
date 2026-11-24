@@ -5,15 +5,12 @@ import { useQuery } from "@tanstack/react-query";
 import { Clock, Loader2, LockKeyhole, XCircle } from "lucide-react";
 import { api } from "@multiremi/core/api";
 import { issueKeys } from "@multiremi/core/issues/queries";
-import { taskMessagesOptions } from "@multiremi/core/chat/queries";
 import type { AgentTask } from "@multiremi/core/types/agent";
-import type { TaskMessagePayload } from "@multiremi/core/types/events";
 import { useActorName } from "@multiremi/core/workspace/hooks";
 import { cn } from "@multiremi/ui/lib/utils";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { LIVE_TIMER, formatElapsedSince } from "../../common/format";
-import { AgentTranscriptDialog, buildTimeline } from "../../common/task-transcript";
-import { formatToolInputSummary, toolIcon } from "../../common/task-transcript/tool-summaries";
+import { TaskTraceDialog } from "../../common/task-transcript/task-trace-dialog";
 import { useT } from "../../i18n";
 
 const ACTIVE_STATUS = new Set(["queued", "dispatched", "waiting_local_directory", "running", "awaiting_human"]);
@@ -62,7 +59,10 @@ export function SessionAgentStreamRow({ issueId, issueSessionId }: { issueId: st
 
   if (rows.length === 0) return null;
   return (
-    <div className="space-y-1 pb-2">
+    // MUL-384 measurement contract: this row is the terminal element for a
+    // `detail-running` round. It only exists while a task row is rendered, so
+    // the probe's "agent-stream else latest-comment" rule needs no extra flag.
+    <div className="space-y-1 pb-2" data-perf-anchor="agent-stream">
       {rows.map((task) => (
         <AgentStreamRow key={task.id} task={task} />
       ))}
@@ -88,20 +88,7 @@ function AgentStreamRow({ task }: { task: AgentTask }) {
   const isParked = isQueued || isWaitingLocalDirectory || isAwaitingHuman || isWaitingToStart;
   const agentName = task.agent_id ? getActorName("agent", task.agent_id) : t(($) => $.agent_live.fallback_name);
 
-  const { data: messages } = useQuery(taskMessagesOptions(task.id));
-  const items = useMemo(
-    () => (messages ? buildTimeline(messages as TaskMessagePayload[]) : []),
-    [messages],
-  );
 
-  // The step the agent is on right now — the last tool call to start.
-  const currentStep = useMemo(() => {
-    for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i];
-      if (item?.type === "tool_use") return item;
-    }
-    return null;
-  }, [items]);
 
   useEffect(() => {
     if (ended) return;
@@ -118,8 +105,7 @@ function AgentStreamRow({ task }: { task: AgentTask }) {
     return () => clearInterval(interval);
   }, [ended, isParked, task.started_at, task.dispatched_at, task.created_at]);
 
-  const StepIcon = toolIcon(currentStep?.tool);
-  const stepSummary = currentStep ? formatToolInputSummary(currentStep.tool ?? "", currentStep.input) : "";
+  const stepSummary = task.progress_summary ?? "";
   const blocker = isQueued || isWaitingToStart ? task.queue_blocker : null;
 
   return (
@@ -184,20 +170,12 @@ function AgentStreamRow({ task }: { task: AgentTask }) {
           )}
           {!ended && !blocker && stepSummary && (
             <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
-              <StepIcon className="h-3 w-3 shrink-0" />
-              <span className="truncate font-mono">{stepSummary}</span>
+              <span className="truncate">{stepSummary}</span>
             </span>
           )}
         </span>
       </button>
-      <AgentTranscriptDialog
-        open={open}
-        onOpenChange={setOpen}
-        task={task}
-        items={items}
-        agentName={agentName}
-        isLive={task.status === "running"}
-      />
+      {open && <TaskTraceDialog task={task} agentName={agentName} onOpenChange={setOpen} />}
     </>
   );
 }

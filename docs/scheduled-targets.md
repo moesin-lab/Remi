@@ -29,7 +29,7 @@ CLI: `remi autopilot trigger create <autopilot> --file schedule.json`:
 
 Use `remi autopilot trigger update <autopilot> <trigger> --file schedule.json` to replace selections (omit `kind` on update). An empty selection is rejected; `schedule_targets: null` restores an untargeted schedule when compatible with the automation's execution mode. A targeted schedule cannot create Issues. It can coexist with `trigger_issue` system-event automations: the event still reuses its Issue, while the schedule creates standalone tasks.
 
-`remi autopilot run <autopilot> --data '{"trigger_id":"<schedule-trigger>"}'` starts the configured schedule manually. When no trigger is supplied, the first enabled targeted schedule is selected; pass an explicit trigger ID when a rule has multiple schedules. The same unfinished schedule batch is reused rather than expanded again.
+`remi autopilot run-now <autopilot> --data '{"trigger_id":"<schedule-trigger>"}'` starts the configured schedule manually. When no trigger is supplied, the first enabled targeted schedule is selected; pass an explicit trigger ID when a rule has multiple schedules. The same unfinished schedule batch is reused rather than expanded again.
 
 ## Execution and Scope
 
@@ -46,3 +46,5 @@ The existing run list shows target kind/name and queued/running/completed/failed
 Use `remi autopilot run list <autopilot> --limit 100 --offset 0 --output json` to page through runs. Responses include `schedule_target` and `schedule_batch_id`.
 
 The platform must be upgraded for new schedule configuration and durable queue processing. Existing daemon protocol fields carry the project/Wiki context and prompt; no new daemon release is required for this feature alone. No production automation is changed automatically by the migration.
+
+run-now 经统一发送入口往 `auto_*` 对话写 timer request 消息；run 账本引用 turn，重试仅新增 attempt。Issue 模式 request 落在 Issue 对话，自动化对话用 status 指向它。控制与证据用 `remi turn get <turn> --attempts`。

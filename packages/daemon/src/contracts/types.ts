@@ -19,6 +19,7 @@ import type {
   CreateSkillInput,
   ImportSkillInput,
   MultiremiBoundIssue,
+  MultiremiBoundIssueLog,
   MultiremiSkillFile,
   MultiremiSkillImportSource,
   RunAutopilotInput,
@@ -39,6 +40,8 @@ export interface AgentTaskAgent {
    */
   thinkingLevel?: string | null;
   instructions: string;
+  /** The Agent's one-line role, for its definition in `AGENTS.md`; absent from older servers. */
+  description?: string | null;
   skills: AgentTaskSkill[];
 
   // Spawn-context fields; workspace resolution owns the working directory.
@@ -59,6 +62,8 @@ export interface AgentTaskAgent {
 
 /** Skill materialized into the task workdir. */
 export interface AgentTaskSkill {
+  /** The platform skill's id (`daemonClaimSkillResponse`); absent on skills kept on the agent row itself. */
+  id?: string;
   name: string;
   description?: string;
   content: string;
@@ -98,14 +103,16 @@ export interface AgentTaskIssueSession {
   codeRuntimeId?: string | null;
   code_runtime_id?: string | null;
   id: string;
+  chatId?: string | null;
+  chat_id?: string | null;
   parentSessionId?: string | null;
   parent_session_id?: string | null;
   inheritMode?: "none" | "snapshot" | "follow";
   inherit_mode?: "none" | "snapshot" | "follow";
   inheritCutoffSeq?: number | null;
   inherit_cutoff_seq?: number | null;
-  issueId?: string;
-  issue_id?: string;
+  issueId?: string | null;
+  issue_id?: string | null;
   title: string;
   summary?: string | null;
 }
@@ -148,9 +155,9 @@ export interface AgentTaskProject {
   id: string;
   title: string;
   description: string | null;
-  /** Project-level rules injected only when bootstrapping a provider session. */
+  /** Project-level rules, in every session's `AGENTS.md` (ADR 0023). */
   instructions?: string;
-  /** Project-level rules injected on subsequent provider-session turns. */
+  /** Older servers: the former second half of the rules, merged into `instructions` since ADR 0023. */
   deltaInstructions?: string;
   delta_instructions?: string;
 }
@@ -198,6 +205,7 @@ export interface AgentTaskProjectDoc {
   title: string;
   summary: string | null;
   body: string;
+  content_sha256?: string | null;
   tags: string[];
   pinned: boolean;
   refs?: Array<{ type: string; value: string }>;
@@ -221,6 +229,7 @@ export interface AgentTaskRepositoryWikiDoc {
   title: string;
   summary: string | null;
   body: string;
+  content_sha256?: string | null;
   tags: string[];
   refs?: Array<{ type: string; value: string }>;
   sourceRevision?: string | null;
@@ -275,6 +284,11 @@ export interface AgentTaskRepo {
  * structurally assignable.
  */
 export interface AgentTask {
+  turn_id?: string | null;
+  attempt_id?: string;
+  input_from_seq?: number;
+  input_to_seq?: number;
+  input_messages?: import("@multiremi/contracts/unified-model.js").UnifiedMessage[];
   runtimeWorkspaceId?: string | null;
   runtimeWorkspace?: {
     id: string;
@@ -302,6 +316,7 @@ export interface AgentTask {
   holdsWorkspace?: boolean;
   holds_workspace?: boolean;
   chatSessionId: string | null;
+  chat_session_id?: string | null;
   /** Explicit Chat Project binding, independent of any historical Issue context. */
   chatProjectId?: string | null;
   chat_project_id?: string | null;
@@ -356,6 +371,10 @@ export interface AgentTask {
   // Claim-context fields (read via stringField/arrayField/unknownField).
   workspaceContext?: string | null;
   workspace_context?: string | null;
+  /** ADR 0023: the workspace's own prompt (custom text only); absent from servers before it. */
+  workspacePrompt?: string | null;
+  workspace_prompt?: string | null;
+  /** Older servers: the former two prompts, the bootstrap one led by Remi's then default. */
   workspaceBootstrapPrompt?: string | null;
   workspace_bootstrap_prompt?: string | null;
   workspaceDeltaPrompt?: string | null;
@@ -367,8 +386,19 @@ export interface AgentTask {
   requesting_user_name?: string | null;
   requestingUserProfileDescription?: string | null;
   requesting_user_profile_description?: string | null;
+  /**
+   * The person the session belongs to (a Chat's creator, else the runtime's
+   * owner). It holds for the session, so it is what `AGENTS.md` names; the
+   * requester fields above are this turn's sender (ADR 0023).
+   */
+  sessionOwnerName?: string | null;
+  session_owner_name?: string | null;
+  sessionOwnerProfileDescription?: string | null;
+  session_owner_profile_description?: string | null;
   chatMessage?: string | null;
   chat_message?: string | null;
+  boundIssueLog?: MultiremiBoundIssueLog;
+  bound_issue_log?: MultiremiBoundIssueLog;
   boundIssueUpdates?: string[];
   bound_issue_updates?: string[];
   boundIssueUpdatesOmittedCount?: number;

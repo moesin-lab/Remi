@@ -7,6 +7,9 @@ import {
   SshMeshKeyError,
 } from "@multiremi/ssh-mesh/keys.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { receiveRuntimeInputs } from "../../fixtures/runtime-downlinks.js";
+
+const fleetStores = new WeakMap<ReturnType<typeof createMultiremiApp>, ReturnType<typeof createStore>>();
 
 const ROOT_TOKEN = "ssh-mesh-root-secret";
 let previousEncryptionKey: string | undefined;
@@ -598,7 +601,6 @@ describe("Multiremi SSH Mesh", () => {
       },
     );
     expect((await invalidate(daemonA.token, { enabled: false, invalidate_keys: true })).status).toBe(403);
-    expect((await invalidate(memberToken.token, { enabled: false, invalidate_keys: true })).status).toBe(403);
     for (const body of [
       { enabled: false, invalidate_keys: false },
       { enabled: false, invalidate_keys: "true" },
@@ -614,7 +616,7 @@ describe("Multiremi SSH Mesh", () => {
       rotation_state: "stable",
     });
 
-    const invalidatedResponse = await invalidate(ROOT_TOKEN, {
+    const invalidatedResponse = await invalidate(memberToken.token, {
       enabled: false,
       invalidate_keys: true,
     });
@@ -1114,6 +1116,7 @@ describe("Multiremi SSH Mesh", () => {
       userId: "local",
     });
     const app = createMultiremiApp({ store, authToken: ROOT_TOKEN });
+    fleetStores.set(app, store);
     const meshPath = `/api/workspaces/${workspace.id}/ssh-mesh`;
 
     const enabled = await (await app.request(meshPath, {
@@ -1283,11 +1286,9 @@ describe("Multiremi SSH Mesh", () => {
       workspaceId: ownerWorkspace.id,
       userId: "delete-auth-member-user",
     });
-    const taskToken = await store.createTaskAccessToken({
-      id: "tsk_delete_auth",
-      agentId: "agt_delete_auth",
-      workspaceId: ownerWorkspace.id,
-    }, "local");
+    const taskAgent = store.createAgent({ name: "Delete auth task", provider: "claude", workspaceId: ownerWorkspace.id });
+    const task = store.createTask({ agentId: taskAgent.id, prompt: "Preserve workspace", workspaceId: ownerWorkspace.id });
+    const taskToken = await store.createTaskAccessToken(task, "local");
     const daemonToken = await store.createAccessToken({
       name: "Unbound delete daemon",
       type: "daemon",
@@ -1300,13 +1301,13 @@ describe("Multiremi SSH Mesh", () => {
       { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
     );
 
-    expect((await removeAs(memberToken.token)).status).toBe(403);
     const taskDenied = await removeAs(taskToken.token);
     expect(taskDenied.status).toBe(403);
     expect(await taskDenied.json()).toMatchObject({ code: "task_token_hard_denied" });
     expect((await removeAs(daemonToken.token)).status).toBe(403);
     expect(store.getWorkspace(ownerWorkspace.id)).not.toBeNull();
-    expect((await removeAs(ownerToken.token)).status).toBe(204);
+    expect((await removeAs(memberToken.token)).status).toBe(204);
+    expect((await removeAs(ownerToken.token)).status).toBe(404);
 
     const adminWorkspace = store.createWorkspace({
       id: "delete-auth-admin",
@@ -1368,9 +1369,11 @@ async function setupFleet() {
     workspaceId: "local",
     userId: "local",
   });
+  const app = createMultiremiApp({ store, authToken: ROOT_TOKEN });
+  fleetStores.set(app, store);
   return {
     store,
-    app: createMultiremiApp({ store, authToken: ROOT_TOKEN }),
+    app,
     runtimeA,
     runtimeA2,
     runtimeB,
@@ -1404,7 +1407,12 @@ async function daemonHeartbeat(
     }),
   });
   expect(response.status).toBe(200);
-  return response.json();
+  const ack = await response.json();
+  expect(ack.ssh_mesh).toBeUndefined();
+  const store = fleetStores.get(app)!;
+  const accessToken = await store.verifyAccessToken(token);
+  const pushed = await receiveRuntimeInputs(store, runtimeId, { identity: { accessToken, masterToken: false } });
+  return { ...ack, ssh_mesh: pushed.ssh_mesh };
 }
 
 async function daemonConfig(

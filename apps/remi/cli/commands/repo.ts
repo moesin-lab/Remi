@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 import { CliError, ResourceResolver, type CliOptionSpec, type CommandInvocation, type CommandSpec } from "../core/index.js";
 import { canonicalGitRemoteKey } from "@multiremi/api/helpers/repositories.js";
 import {
@@ -130,7 +131,7 @@ async function checkoutRepository(invocation: CommandInvocation): Promise<void> 
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
-    response = await fetch(`http://127.0.0.1:${daemonPort}/repo/checkout`, {
+    response = await proxyFetch(`http://127.0.0.1:${daemonPort}/repo/checkout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,

@@ -1,22 +1,23 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 /**
- * MUL-336 — the Agent's default fallback model.
+ * MUL-336 / MUL-478 — the Agent's default fallback model.
  *
- * When the primary model's gateway reports resource exhaustion the CURRENT task
+ * When the primary model's gateway reports resource exhaustion or unavailability the CURRENT task
  * must move to the Agent's fallback model and carry on, exactly once, without
- * touching the Agent's own configuration or any other task. Everything that is
- * not a resource failure must keep its previous behaviour — in particular it
- * must never spend the switch, because doing so would hide a real
- * misconfiguration behind a working model.
+ * touching the Agent's own configuration or any other task. MUL-478 includes
+ * model lookup and server failures while retaining auth/configuration exclusions.
  *
  * These tests drive the real store (claim -> fail -> retry -> claim) instead of
  * the policy helpers, because the contract is about what the recovery chain
  * does to the task, to the Agent and to the surrounding surfaces.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { daemonTaskClaimResponse, taskCompatibilityResponse } from "@multiremi/api/wire/tasks.js";
 import type { MultiremiRuntimeModel } from "@multiremi/contracts/types.js";
 import { classifyDaemonTaskFailure, TaskFailureReason } from "@multiremi/task-failure.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -67,7 +68,7 @@ function fixture(options: { fallback?: boolean } = {}) {
     model: PRIMARY, thinkingLevel: "high",
     ...(options.fallback === false ? {} : { fallbackModel: FALLBACK, fallbackThinkingLevel: "high" }),
   });
-  const issue = store.createIssue({
+  const issue = createResponsibleTestIssue(store, {
     title: "Gateway exhausted", assigneeType: "agent", assigneeId: agent.id,
   });
   return { store, runtime, agent, issue };
@@ -151,14 +152,14 @@ describe("MUL-336 model fallback recovery chain", () => {
 
     // An independent task still hands the engine the primary selection, with the
     // configured fallback available for its own future recovery.
-    const otherIssue = store.createIssue({
+    const otherIssue = createResponsibleTestIssue(store, {
       title: "Independent", assigneeType: "agent", assigneeId: agent.id,
     });
     const plain = store.createTask({ agentId: agent.id, issueId: otherIssue.id, prompt: "Primary again" });
     const plainClaim = store.claimTask(runtime.id)!;
     expect(plainClaim.id).toBe(plain.id);
     expect(daemonTaskClaimResponse(store, plainClaim).agent as Record<string, unknown>).toMatchObject({
-      model: PRIMARY, thinking_level: "high", fallback_model: FALLBACK, fallback_thinking_level: "high",
+      model: PRIMARY, thinking_level: "high", fallback_model: "", fallback_thinking_level: "",
     });
   });
 
@@ -168,7 +169,8 @@ describe("MUL-336 model fallback recovery chain", () => {
     failClaimed(store, runtime.id, first.id, NO_ACCOUNT_ERROR);
     expect(successor(store, first.id)!.executionModel).toBe(FALLBACK);
 
-    const independent = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Second" });
+    const independentIssue = createResponsibleTestIssue(store, { title: "Independent primary-model lane" });
+    const independent = store.createTask({ agentId: agent.id, issueId: independentIssue.id, prompt: "Second" });
     expect(independent.executionModel).toBeNull();
     expect(independent.fallbackSwitched).toBe(false);
     // The queued fallback retry is older, so it is claimed first — and it is the
@@ -189,7 +191,8 @@ describe("MUL-336 model fallback recovery chain", () => {
     // The gateway now only advertises the fallback model: this machine can no
     // longer execute the Agent's primary selection.
     store.updateRuntimeModels(runtime.id, [model(FALLBACK)]);
-    const next = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Primary only" });
+    const nextIssue = createResponsibleTestIssue(store, { title: "Independent capability probe" });
+    const next = store.createTask({ agentId: agent.id, issueId: nextIssue.id, prompt: "Primary only" });
     // The queued retry still runs, because the capability that matters is the
     // one the task will actually execute with (requirement 6) ...
     expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
@@ -229,13 +232,12 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(store.getTask(task.id)).toMatchObject({
       status: "failed",
       failureReason: TaskFailureReason.AgentProviderNoAvailableAccount,
-      executionModel: null,
+      executionModel: PRIMARY,
     });
   });
 
   it.each([
     ["an auth failure", "API Error: 401 Unauthorized", TaskFailureReason.AgentProviderAuthOrAccess],
-    ["a model access failure", "Error: model primary-gpt not found in this workspace", TaskFailureReason.AgentModelNotFoundOrUnavailable],
     ["a tool/business failure", "agent exit status 1", TaskFailureReason.AgentProcessFailure],
     ["a context overflow", "prompt is too long: maximum context length exceeded", TaskFailureReason.AgentContextOverflow],
   ])("never spends the switch on %s", (_label, error, reason) => {
@@ -249,8 +251,115 @@ describe("MUL-336 model fallback recovery chain", () => {
     // may smuggle in the fallback model.
     const retry = successor(store, task.id);
     if (retry) {
-      expect(retry).toMatchObject({ executionModel: null, fallbackSwitched: false, switchReason: null });
+      expect(retry).toMatchObject({ executionModel: PRIMARY, fallbackSwitched: false, switchReason: null });
     }
+  });
+
+  it.each([
+    ["Error: model primary-gpt not found in this workspace", TaskFailureReason.AgentModelNotFoundOrUnavailable],
+    ["Compacting failed: unexpected status 503", TaskFailureReason.AgentProviderServerError],
+  ])("switches once on unavailable model/server errors: %s", (error, reason) => {
+    const { store, runtime, agent, issue } = fixture();
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Recover availability" });
+    failClaimed(store, runtime.id, task.id, error);
+    expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: reason });
+    const retry = successor(store, task.id)!;
+    expect(retry).toMatchObject({ executionModel: FALLBACK, fallbackSwitched: true, sessionId: null });
+    expect(retry.switchReason).toBe(`gateway_resource:${reason};provider_session_reset`);
+    expect(store.getIssue(issue.id)?.status).toBe("in_progress");
+    failClaimed(store, runtime.id, retry.id, "HTTP 503");
+    expect(successor(store, retry.id)).toBeNull();
+    expect(store.getIssue(issue.id)?.status).toBe("blocked");
+  });
+
+  it.each([
+    "Error: model primary-gpt not found",
+    "unexpected status 503",
+  ])("blocks without a configured fallback: %s", (error) => {
+    const { store, runtime, agent, issue } = fixture({ fallback: false });
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Report failure" });
+    failClaimed(store, runtime.id, task.id, error);
+    expect(successor(store, task.id)).toBeNull();
+    expect(store.getIssue(issue.id)?.status).toBe("blocked");
+  });
+
+  it("switches capability-starved queued tasks at five minutes through the recovery chain", () => {
+    const { store, runtime, agent, issue } = fixture();
+    store.updateRuntimeModels(runtime.id, [model(FALLBACK)]);
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Queued availability" });
+    const created = Date.parse(task.createdAt);
+    store.refreshQueuedCapabilityWaitReasons(created + 4 * 60_000);
+    expect(store.getTask(task.id)?.status).toBe("queued");
+    expect(store.getTask(task.id)?.waitReason).toContain("等待模型能力恢复");
+    expect(successor(store, task.id)).toBeNull();
+    store.refreshQueuedCapabilityWaitReasons(created + 5 * 60_000);
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "failed", failureReason: TaskFailureReason.QueuedModelUnavailable, waitReason: null,
+    });
+    const retry = successor(store, task.id)!;
+    expect(retry).toMatchObject({ status: "queued", executionModel: FALLBACK, fallbackSwitched: true, attempt: 2 });
+    expect(retry.switchReason).toBe(`gateway_resource:${TaskFailureReason.QueuedModelUnavailable};provider_session_reset`);
+    expect(store.getIssue(issue.id)?.status).toBe("todo");
+    store.refreshQueuedCapabilityWaitReasons(created + 15 * 60_000);
+    expect(store.listTasks().filter((candidate) => candidate.parentTaskId === task.id)).toHaveLength(1);
+    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+  });
+
+  it("keeps queued fallback creation atomic and publishes events only after commit", () => {
+    const { store, runtime, agent, issue } = fixture();
+    store.updateRuntimeModels(runtime.id, [model(FALLBACK)]);
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Atomic queue switch" });
+    const events: string[] = [];
+    store.onTaskEnqueued((retry) => events.push(`queued:${retry.id}`));
+    store.onTaskEvent(({ type, task: updated }) => {
+      if (type !== "task:failed" || updated.id !== task.id) return;
+      expect(successor(store, task.id)?.status).toBe("queued");
+      events.push(`failed:${updated.id}`);
+    });
+    const repo = (store as any).tasks;
+    const insert = spyOn(repo, "createRetryAttemptWithinWorkspaceLock").mockImplementation(() => {
+      throw new Error("retry insert rejected");
+    });
+    const now = Date.parse(task.createdAt) + 5 * 60_000;
+    try {
+      expect(() => store.refreshQueuedCapabilityWaitReasons(now)).toThrow("retry insert rejected");
+    } finally {
+      insert.mockRestore();
+    }
+    expect(store.getTask(task.id)).toMatchObject({ status: "queued", failureReason: null, error: null });
+    expect(successor(store, task.id)).toBeNull();
+    expect(events).toEqual([]);
+    store.refreshQueuedCapabilityWaitReasons(now);
+    expect(events).toEqual([`queued:${successor(store, task.id)!.id}`, `failed:${task.id}`]);
+  });
+
+  it("switches on a pinned Runtime only when that same Runtime supports the fallback", () => {
+    const { store, runtime, agent, issue } = fixture();
+    store.updateRuntimeModels(runtime.id, [model(FALLBACK)]);
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, runtimeId: runtime.id, prompt: "Pinned availability" });
+    store.refreshQueuedCapabilityWaitReasons(Date.parse(task.createdAt) + 5 * 60_000);
+    expect(store.getTask(task.id)?.failureReason).toBe(TaskFailureReason.QueuedModelUnavailable);
+    const retry = successor(store, task.id)!;
+    expect(retry).toMatchObject({ executionModel: FALLBACK, fallbackSwitched: true });
+    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+  });
+
+  it.each(["no fallback", "already switched", "attempt limit", "pinned runtime"])("keeps capability waits when switching is ineligible: %s", (scenario) => {
+    const { store, runtime, agent, issue } = fixture({ fallback: scenario !== "no fallback" });
+    store.updateRuntimeModels(runtime.id, scenario === "pinned runtime" ? [model(PRIMARY, false)] : [model(FALLBACK)]);
+    if (scenario === "pinned runtime") {
+      store.registerRuntime({ name: "Other gateway", provider: "claude", models: [model(FALLBACK)] });
+    }
+    const task = store.createTask({
+      agentId: agent.id, issueId: issue.id, prompt: "Bounded queue policy",
+      ...(scenario === "already switched" ? { fallbackSwitched: true } : {}),
+      ...(scenario === "attempt limit" ? { attempt: 3, maxAttempts: 3 } : {}),
+      ...(scenario === "pinned runtime" ? { runtimeId: runtime.id } : {}),
+    });
+    const result = store.refreshQueuedCapabilityWaitReasons(Date.parse(task.createdAt) + 15 * 60_000);
+    expect(store.getTask(task.id)?.status).toBe("queued");
+    expect(successor(store, task.id)).toBeNull();
+    expect(result.alerted).toBe(1);
   });
 
   it("defers a throttled retry on the same model and honours Retry-After", () => {
@@ -263,7 +372,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(retry).toMatchObject({
       status: "queued",
       failureReason: null,
-      executionModel: null,
+      executionModel: PRIMARY,
       fallbackSwitched: false,
       attempt: 2,
     });
@@ -275,7 +384,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     // Deferred work must not be claimed early — that is the whole point of
     // honouring Retry-After instead of hammering a shared account pool.
     expect(store.claimTask(runtime.id)).toBeNull();
-    db!.run("UPDATE multiremi_tasks SET next_retry_at = ? WHERE id = ?", [
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET next_retry_at = ? WHERE id = ?", [
       new Date(Date.now() - 1_000).toISOString(), retry.id,
     ]);
     expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
@@ -283,7 +392,7 @@ describe("MUL-336 model fallback recovery chain", () => {
 
   it("isolates concurrent tasks of the same Agent", () => {
     const { store, runtime, agent, issue } = fixture();
-    const chatIssue = store.createIssue({
+    const chatIssue = createResponsibleTestIssue(store, {
       title: "Parallel work", assigneeType: "agent", assigneeId: agent.id,
     });
     const first = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "A" });
@@ -300,7 +409,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     const retry = successor(store, first.id)!;
     const claimed = [store.claimTask(runtime.id)?.id, store.claimTask(runtime.id)?.id].sort();
     expect(claimed).toEqual([retry.id, second.id].sort());
-    expect(store.getTask(second.id)?.executionModel).toBeNull();
+    expect(store.getTask(second.id)?.executionModel).toBe(PRIMARY);
     expect(store.getTask(retry.id)?.executionModel).toBe(FALLBACK);
   });
 
@@ -315,7 +424,7 @@ describe("MUL-336 model fallback recovery chain", () => {
       name: "Automation", provider: "claude", ownerId: owner.id, model: PRIMARY, thinkingLevel: "high",
       fallbackModel: FALLBACK, fallbackThinkingLevel: "high",
     });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Nightly sweep",
       assigneeId: agent.id,
       issueTitleTemplate: "Nightly sweep",
@@ -356,7 +465,7 @@ describe("MUL-336 model fallback recovery chain", () => {
       name: "Automation", provider: "claude", ownerId: owner.id, model: PRIMARY, thinkingLevel: "high",
       fallbackModel: FALLBACK, fallbackThinkingLevel: "high",
     });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Nightly sweep",
       assigneeId: agent.id,
       issueTitleTemplate: "Nightly sweep",
@@ -410,7 +519,7 @@ describe("MUL-336 model fallback recovery chain", () => {
       models: [model(PRIMARY), model(FALLBACK)],
     });
     const runtime = store.listRuntimes()[0]!;
-    const issue = store.createIssue({ title: "Delegated work", assigneeType: "agent", assigneeId: leader.id });
+    const issue = createResponsibleTestIssue(store, { title: "Delegated work", assigneeType: "agent", assigneeId: leader.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const child = store.createTask({
       agentId: teammate.id, issueId: issue.id, issueSessionId: session.id,
@@ -438,7 +547,8 @@ describe("MUL-336 model fallback recovery chain", () => {
     const returns = store.listTasksForIssue(issue.id)
       .filter((task) => task.agentId === leader.id && task.delegationId === "dlg_fallback");
     expect(returns).toHaveLength(1);
-    expect(returns[0]!.parentTaskId).toBe(retry.id);
+    expect(returns[0]!.parentTaskId).toBeNull();
+    expect(store.getMessage(returns[0]!.triggerCommentId!)?.task_id).toBe(store.getTurnForAttempt(retry.id)!.id);
   });
 
   it("runs a switched task on the fallback's own level when the Agent configured none", () => {
@@ -451,7 +561,7 @@ describe("MUL-336 model fallback recovery chain", () => {
       name: "Level mismatch", provider: "claude", maxConcurrentTasks: 4,
       model: PRIMARY, thinkingLevel: "high", fallbackModel: FALLBACK,
     });
-    const issue = store.createIssue({
+    const issue = createResponsibleTestIssue(store, {
       title: "Level mismatch", assigneeType: "agent", assigneeId: agent.id,
     });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Recover at another level" });

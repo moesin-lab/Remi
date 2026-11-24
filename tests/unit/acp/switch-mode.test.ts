@@ -13,6 +13,7 @@ describe("switch mode helpers", () => {
     expect(resolveSwitchProviderAlias("claude")).toBe("acp:claude");
     expect(resolveSwitchProviderAlias("acp:claude")).toBe("acp:claude");
     expect(resolveSwitchProviderAlias("codex")).toBe("acp:codex");
+    expect(resolveSwitchProviderAlias("grok")).toBe("acp:grok");
   });
 
   it("uses the last colon so ACP provider ids can include a colon", () => {
@@ -30,6 +31,16 @@ describe("switch mode helpers", () => {
     expect(defaultSwitchMode("acp:claude")).toBe("bypassPermissions");
     expect(buildSwitchTarget("claude")).toEqual({
       providerName: "acp:claude",
+      mode: "bypassPermissions",
+      storedMode: null,
+      modeLabel: "bypass",
+    });
+  });
+
+  it("defaults ACP Grok to bypassPermissions", () => {
+    expect(defaultSwitchMode("acp:grok")).toBe("bypassPermissions");
+    expect(buildSwitchTarget("grok")).toEqual({
+      providerName: "acp:grok",
       mode: "bypassPermissions",
       storedMode: null,
       modeLabel: "bypass",

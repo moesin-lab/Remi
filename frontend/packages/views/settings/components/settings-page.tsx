@@ -6,14 +6,11 @@ import {
   SlidersHorizontal,
   Key,
   Settings,
-  Users,
   FlaskConical,
   Bell,
-  Plug,
   Waypoints,
-  Archive,
+  HardDrive,
   GitBranch,
-  MessageSquare,
   ServerCog,
   FileText,
 } from "lucide-react";
@@ -26,14 +23,12 @@ import { AccountTab } from "./account-tab";
 import { PreferencesTab } from "./preferences-tab";
 import { TokensTab } from "./tokens-tab";
 import { WorkspaceTab } from "./workspace-tab";
-import { MembersTab } from "./members-tab";
 import { SourceControlTab } from "./source-control-tab";
-import { IntegrationsTab } from "./integrations-tab";
-import { FeishuMessagesTab } from "./feishu-messages-tab";
 import { ModelGatewayTab } from "./model-gateway-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
-import { StorageCleanupTab } from "./storage-cleanup-tab";
+import { ServicesTab } from "./services-tab";
+import { StorageTab } from "./storage-tab";
 import { PlatformTab } from "./platform-tab";
 import { PromptsTab } from "./prompts-tab";
 import { useT } from "../../i18n";
@@ -50,34 +45,28 @@ const WORKSPACE_TAB_KEYS = [
   "general",
   "prompts",
   "source_control",
-  "integrations",
-  "feishu_messages",
   "model_gateway",
-  "storage_cleanup",
+  "services",
+  "storage",
   "labs",
-  "members",
 ] as const;
 const WORKSPACE_TAB_VALUES = {
   general: "workspace",
   prompts: "prompts",
   source_control: "source-control",
-  integrations: "integrations",
-  feishu_messages: "feishu-messages",
   model_gateway: "model-gateway",
-  storage_cleanup: "storage-cleanup",
+  services: "services",
+  storage: "storage",
   labs: "labs",
-  members: "members",
 } as const;
 const WORKSPACE_TAB_ICONS = {
   general: Settings,
   prompts: FileText,
   source_control: GitBranch,
-  integrations: Plug,
-  feishu_messages: MessageSquare,
   model_gateway: Waypoints,
-  storage_cleanup: Archive,
+  services: ServerCog,
+  storage: HardDrive,
   labs: FlaskConical,
-  members: Users,
 } as const;
 
 const DEFAULT_TAB = "profile";
@@ -85,11 +74,10 @@ const TAB_QUERY_KEY = "tab";
 
 // Legacy `?tab=…` values that have been collapsed into another tab. Old
 // bookmarks still land on the correct surface without us preserving a
-// dead TabsContent entry. Lark used to be its own top-level workspace
-// tab; it now lives inside Integrations.
+// dead TabsContent entry. IM bookmarks are redirected at the route boundary.
 const LEGACY_WORKSPACE_TAB_REDIRECTS: Record<string, string> = {
-  lark: "integrations",
   repositories: "workspace",
+  members: "workspace",
 };
 
 export interface ExtraSettingsTab {
@@ -115,7 +103,8 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
   // (not `isSuccess && …`) keeps the tab visible when a background poll fails
   // while stale data is retained.
   const showPlatformTab =
-    platformStatus.isPending || platformStatus.data?.canManage === true;
+    platformStatus.isPending || platformStatus.data?.canManage === true
+    || (platformStatus.isError && ![401, 403].includes(Number((platformStatus.error as { status?: number } | null)?.status)));
 
   // Whitelist of valid tab values; unknown ?tab=… values silently fall back to
   // the default. Whitelisting also blocks junk like ?tab=<script> from
@@ -148,6 +137,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
 
   return (
     <Tabs
+      data-perf-scroll="list"
       value={activeTab}
       onValueChange={handleTabChange}
       orientation="vertical"
@@ -214,12 +204,10 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="workspace"><WorkspaceTab /></TabsContent>
           <TabsContent value="prompts"><PromptsTab /></TabsContent>
           <TabsContent value="source-control"><SourceControlTab /></TabsContent>
-          <TabsContent value="integrations"><IntegrationsTab /></TabsContent>
-          <TabsContent value="feishu-messages"><FeishuMessagesTab /></TabsContent>
           <TabsContent value="model-gateway"><ModelGatewayTab /></TabsContent>
-          <TabsContent value="storage-cleanup"><StorageCleanupTab /></TabsContent>
+          <TabsContent value="services"><ServicesTab /></TabsContent>
+          <TabsContent value="storage"><StorageTab /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
-          <TabsContent value="members"><MembersTab /></TabsContent>
           {showPlatformTab && <TabsContent value="platform"><PlatformTab /></TabsContent>}
           {extraAccountTabs?.map((tab) => (
             <TabsContent key={tab.value} value={tab.value}>{tab.content}</TabsContent>

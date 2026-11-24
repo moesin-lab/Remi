@@ -8,9 +8,11 @@
  * unchanged).
  */
 
+import { appendTaskNoProxy } from "@shared/no-proxy.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import type { IssueSessionProviderHome } from "../workspace/session-home.js";
 import { appendGitCredentialBrokerEnv } from "../repo/credential-broker.js";
+import { TASK_CONTEXT_FILE_ENV } from "@shared/task-context-file.js";
 import { hasReadOnlyCodeSnapshot, isSideConversation, SIDE_CONVERSATION_INSTRUCTIONS } from "../prompts/side-conversation.js";
 
 export interface BuildTaskEnvOptions {
@@ -18,12 +20,21 @@ export interface BuildTaskEnvOptions {
   daemonPort: number;
   /** Multiremi server URL forwarded to the agent. */
   serverUrl: string;
-  /** Resolved task workspace, independent of the agent's current repo cwd. */
+  /**
+   * The subject's workspace, exposed as `MULTIREMI_WORKSPACE_ROOT` (`remi wiki`
+   * reads and writes `wiki/` there), independent of the agent's own cwd.
+   */
   workDir?: string;
-  /** Issue Session-scoped provider config/history root. */
+  /** Session-scoped provider config/history root. */
   providerHome?: IssueSessionProviderHome;
   /** Daemon-resolved provider endpoint/auth; never persisted in the workspace. */
   providerEnv?: Record<string, string>;
+  /**
+   * PR 6 §2.4: the lane's task context file, as the agent sees it. A Chat lane
+   * whose process may outlive this attempt gets `MULTIREMI_TASK_CONTEXT_FILE`,
+   * so its `remi` CLI and git broker read the current attempt's token there.
+   */
+  taskContextFile?: string;
 }
 
 /**
@@ -49,7 +60,8 @@ export function buildTaskEnv(task: AgentTask, opts: BuildTaskEnvOptions): Record
     MULTIREMI_DAEMON_PORT: String(opts.daemonPort),
     MULTIREMI_WORKSPACE_ID: task.workspaceId,
     MULTIREMI_AGENT_NAME: agent?.name ?? "",
-    MULTIREMI_TASK_ID: task.id,
+    MULTIREMI_TURN_ID: task.turn_id ?? "",
+    MULTIREMI_ATTEMPT_ID: task.attempt_id ?? task.id,
     ...(task.runtimeWorkspaceId ? { MULTIREMI_RUNTIME_WORKSPACE_ID: task.runtimeWorkspaceId } : {}),
     ...(task.project?.id ? { MULTIREMI_PROJECT_ID: task.project.id } : {}),
     ...((task.issueId ?? task.issue_id) ? { MULTIREMI_ISSUE_ID: String(task.issueId ?? task.issue_id) } : {}),
@@ -63,24 +75,29 @@ export function buildTaskEnv(task: AgentTask, opts: BuildTaskEnvOptions): Record
       ? { CLAUDE_CONFIG_DIR: opts.providerHome.home }
       : opts.providerHome?.provider === "codex"
         ? { CODEX_HOME: opts.providerHome.home }
-        : opts.providerHome?.provider === "antigravity"
-          ? { MULTIREMI_ANTIGRAVITY_CONTEXT_DIR: opts.providerHome.home }
-          : {}),
+        // Antigravity: the provider's environment builder owns GEMINI_HOME.
+        : {}),
     ...(taskAuthToken ? { MULTIREMI_TOKEN: taskAuthToken } : {}),
+    ...(opts.taskContextFile ? { [TASK_CONTEXT_FILE_ENV]: opts.taskContextFile } : {}),
   };
   const brokerEnv = hasReadOnlyCodeSnapshot(task) ? readOnlyGitEnv(env) : appendGitCredentialBrokerEnv(env, {
     serverUrl: opts.serverUrl,
     token: taskAuthToken,
     workspaceId: task.workspaceId,
-    taskId: task.id,
+    turnId: task.turn_id,
+    attemptId: task.attempt_id ?? task.id,
     repositoryUrls: task.repos.map((repo) => repo.url),
   });
   // AcpProvider merges this overlay on top of the daemon process environment.
   // Keep an explicit tombstone so an inherited daemon token cannot reappear.
   if (!taskAuthToken) brokerEnv.MULTIREMI_TOKEN = "";
+  delete brokerEnv.MULTIREMI_TASK_ID;
+  // Only the daemon names a context file; one from the workspace or agent env would redirect the credential.
+  if (!opts.taskContextFile) delete brokerEnv[TASK_CONTEXT_FILE_ENV];
   if (agent?.provider === "codex" && isSideConversation(task)) {
     preserveSideCodexInstructions(brokerEnv);
   }
+  appendTaskNoProxy(brokerEnv, opts.serverUrl);
   return cleanProcessEnv(brokerEnv);
 }
 

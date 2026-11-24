@@ -2,6 +2,7 @@ import type { IssueStatus, IssuePriority, TimelineEntry } from "@multiremi/core/
 import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multiremi/core/issues/config";
 import { formatDateOnly } from "@multiremi/core/issues/date";
 import type { useT } from "../../i18n";
+import { issueActivityLayer } from "@multiremi/contracts/issue-activity";
 
 export type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 
@@ -19,6 +20,26 @@ function delegationReturnReason(reason: string | undefined, t: IssuesT): string 
       return t(($) => $.activity.delegation_return_reason_covered_by_queued_task);
     case "deferred_lane_busy":
       return t(($) => $.activity.delegation_return_reason_deferred_lane_busy);
+    case "source_not_issue_task":
+      return t(($) => $.activity.delegation_return_reason_source_not_issue_task);
+    case "target_not_issue_task":
+      return t(($) => $.activity.delegation_return_reason_target_not_issue_task);
+    case "source_side_session":
+      return t(($) => $.activity.delegation_return_reason_source_side_session);
+    case "source_not_squad_leader":
+      return t(($) => $.activity.delegation_return_reason_source_not_squad_leader);
+    case "target_not_squad_member":
+      return t(($) => $.activity.delegation_return_reason_target_not_squad_member);
+    case "cross_issue_no_lineage":
+      return t(($) => $.activity.delegation_return_reason_cross_issue_no_lineage);
+    case "self_dispatch":
+      return t(($) => $.activity.delegation_return_reason_self_dispatch);
+    case "covered_by_delegate_wakeup":
+      return t(($) => $.activity.delegation_return_reason_covered_by_delegate_wakeup);
+    case "delegator_issue_closed":
+      return t(($) => $.activity.delegation_return_reason_delegator_issue_closed);
+    case "delegator_session_missing":
+      return t(($) => $.activity.delegation_return_reason_delegator_session_missing);
     default:
       return reason?.trim() || t(($) => $.activity.reason_unknown);
   }
@@ -32,10 +53,24 @@ function childDoneParentReason(reason: string | undefined, t: IssuesT): string {
       return t(($) => $.activity.child_done_parent_reason_agent_unavailable);
     case "squad_leader_unavailable":
       return t(($) => $.activity.child_done_parent_reason_squad_leader_unavailable);
-    case "active_task_exists":
-      return t(($) => $.activity.child_done_parent_reason_active_task_exists);
     default:
       return reason?.trim() || t(($) => $.activity.reason_unknown);
+  }
+}
+
+/** MUL-400 E2: the four child endings, in the activity copy's vocabulary. */
+function childOutcomeLabel(outcome: string | undefined, t: IssuesT): string {
+  switch (outcome) {
+    case "done":
+      return t(($) => $.activity.child_outcome_done);
+    case "failed":
+      return t(($) => $.activity.child_outcome_failed);
+    case "blocked":
+      return t(($) => $.activity.child_outcome_blocked);
+    case "cancelled":
+      return t(($) => $.activity.child_outcome_cancelled);
+    default:
+      return outcome?.trim() || t(($) => $.activity.reason_unknown);
   }
 }
 
@@ -47,8 +82,13 @@ function commentMentionReason(reason: string | undefined, t: IssuesT): string {
       return t(($) => $.activity.comment_mention_reason_unsupported_direction);
     case "unlinked_agent_comment":
       return t(($) => $.activity.comment_mention_reason_unlinked_agent_comment);
+    case "pair_round_trip_limit":
+      return t(($) => $.activity.comment_mention_reason_pair_round_trip_limit);
     case "target_unavailable":
       return t(($) => $.activity.comment_mention_reason_target_unavailable);
+    case "dependencies_unmet":
+      // MUL-400 E3 gate 3: the mention landed but the issue is still waiting.
+      return t(($) => $.activity.dependency_gate_reason_dependencies_unmet);
     default:
       return reason?.trim() || t(($) => $.activity.reason_unknown);
   }
@@ -75,8 +115,33 @@ export function formatActivity(
 ): string {
   const details = (entry.details ?? {}) as Record<string, string>;
   switch (entry.action) {
+    case "issue_created":
     case "created":
       return t(($) => $.activity.created);
+    case "issue_field_changed": {
+      const to = typeof details.to === "string" ? details.to : "";
+      const from = typeof details.from === "string" ? details.from : "";
+      switch (details.field) {
+        case "status": return "from" in details ? t($ => $.activity.status_changed, { from: statusLabel(from || "?", t), to: statusLabel(to || "?", t) })
+          : t($ => $.activity.status_set, { status: statusLabel(to || "?", t) });
+        case "priority": return "from" in details ? t($ => $.activity.priority_changed, { from: priorityLabel(from || "?", t), to: priorityLabel(to || "?", t) })
+          : t($ => $.activity.priority_set, { priority: priorityLabel(to || "?", t) });
+        case "title": return "from" in details ? t($ => $.activity.title_renamed, { from, to }) : t($ => $.activity.title_set, { title: to });
+        case "description": return t($ => $.activity.description_updated);
+        case "project_id": return t($ => $.activity.project_changed);
+        case "parent_issue_id": return t($ => $.activity.parent_changed);
+        case "start_date": return to ? t($ => $.activity.start_date_set, { date: to }) : t($ => $.activity.start_date_removed);
+        case "due_date": return to ? t($ => $.activity.due_date_set, { date: to }) : t($ => $.activity.due_date_removed);
+      }
+      return t($ => $.activity.system_activity);
+    }
+    case "label_attached": return t($ => $.activity.label_attached, { name: details.body ?? details.name ?? "" });
+    case "label_detached": return t($ => $.activity.label_detached, { name: details.body ?? details.name ?? "" });
+    case "issue_unassigned": return t($ => $.activity.removed_assignee);
+    case "issue_assigned": return formatActivity({ ...entry, action: "assignee_changed", details: {
+      ...details, to_type: details.to_type ?? details.toType ?? details.assignee_type ?? details.assigneeType,
+      to_id: details.to_id ?? details.toId ?? details.assignee_id ?? details.assigneeId,
+    } }, t, resolveActorName);
     case "status_changed":
       return t(($) => $.activity.status_changed, {
         from: statusLabel(details.from ?? "?", t),
@@ -96,6 +161,15 @@ export function formatActivity(
       if (toName) return t(($) => $.activity.assigned_to, { name: toName });
       if (details.from_id && !details.to_id) return t(($) => $.activity.removed_assignee);
       return t(($) => $.activity.changed_assignee);
+    }
+    case "workspace_move_cleared": {
+      const name = details.name ?? "?";
+      switch (details.field) {
+        case "assignee": return t(($) => $.activity.workspace_move_cleared_assignee, { name });
+        case "project": return t(($) => $.activity.workspace_move_cleared_project, { name });
+        case "label": return t(($) => $.activity.workspace_move_cleared_label, { name });
+        default: return t(($) => $.activity.workspace_move_cleared);
+      }
     }
     case "start_date_changed": {
       if (!details.to) return t(($) => $.activity.start_date_removed);
@@ -120,13 +194,132 @@ export function formatActivity(
     case "task_failed":
       return t(($) => $.activity.task_failed, { count: entry.coalesced_count ?? 1 });
     case "delegation_return_triggered":
+      if (details.sourceIssueKey && details.sourceIssueId !== details.returnIssueId) {
+        return t(($) => $.activity.delegation_return_triggered_cross_issue, { key: details.sourceIssueKey });
+      }
       return t(($) => $.activity.delegation_return_triggered);
     case "delegation_return_skipped":
       return t(($) => $.activity.delegation_return_skipped, {
         reason: delegationReturnReason(details.reason, t),
       });
+    case "delegation_round_trip_limited":
+      return t(($) => $.activity.delegation_round_trip_limited, {
+        source: details.sourceAgentName ?? details.sourceAgentId ?? "?",
+        target: details.targetAgentName ?? details.targetAgentId ?? "?",
+        limit: details.limit ?? "?",
+      });
     case "child_done_parent_triggered":
       return t(($) => $.activity.child_done_parent_triggered);
+    case "child_status_parent_coalesced":
+      return t(($) => $.activity.child_status_parent_coalesced);
+    case "parent_status_held": {
+      // Only open children hold a status now; older rows also carry retired merge-hold reasons.
+      const reason = details.reason;
+      return t(($) => reason == null || reason === "children_open"
+        ? $.activity.parent_status_held
+        : reason === "grant_missing"
+          ? $.activity.parent_status_held_grant_missing
+          : reason === "final_summary_missing"
+            ? $.activity.parent_status_held_final_summary_missing
+            : reason === "issue_delivery_acceptance_required"
+              ? $.activity.parent_status_held_merge
+              : $.activity.parent_status_held_unchanged, {
+        status: statusLabel(details.requested ?? details.status ?? "?", t),
+      });
+    }
+    case "scm_merge_completed": {
+      // A merged change request is only recorded; the Issue status stays put.
+      const number = (entry.details as Record<string, unknown> | undefined)?.number;
+      return typeof number === "number" || (typeof number === "string" && number.trim())
+        ? t(($) => $.activity.scm_merge_completed, { number: String(number) })
+        : t(($) => $.activity.scm_merge_completed_unknown);
+    }
+    case "issue_responsibility_transferred":
+      return t(($) => $.activity.issue_responsibility_transferred);
+    case "parent_done_grant_created":
+      return t(($) => $.activity.parent_done_grant_created, {
+        agent: details.agentId && resolveActorName ? resolveActorName("agent", details.agentId) : details.agentId ?? "?",
+      });
+    case "parent_done_grant_revoked":
+      return t(($) => $.activity.parent_done_grant_revoked);
+    case "parent_done_grant_used":
+      return t(($) => $.activity.parent_done_grant_used, {
+        source: details.source === "scm_merge"
+          ? t(($) => $.activity.parent_done_grant_source_scm_merge)
+          : t(($) => $.activity.parent_done_grant_source_api),
+      });
+    case "parent_status_derived":
+      return t(($) => $.activity.parent_status_derived);
+    case "child_status_after_parent_closed":
+      return t(($) => $.activity.child_status_after_parent_closed, {
+        key: details.childIssueKey ?? details.child_issue_key ?? "?",
+        outcome: childOutcomeLabel(details.outcome, t),
+      });
+    case "issue_status_forced":
+      return t(($) => $.activity.issue_status_forced, {
+        status: statusLabel(details.status ?? "?", t),
+      });
+    case "decision_requested":
+      return t(($) => $.activity.decision_requested);
+    case "decision_answered":
+      return t(($) => $.activity.decision_answered);
+    case "decision_received":
+      return t(($) => $.activity.decision_received);
+    case "decision_escalated":
+      return t(($) => $.activity.decision_escalated);
+    case "decision_reminder":
+      return t(($) => $.activity.decision_reminder);
+    case "decision_card_skipped":
+      return t(($) => $.activity.decision_card_skipped);
+    case "decision_card_queued":
+      return t(($) => $.activity.decision_card_queued);
+    case "decision_card_reminder":
+      return t(($) => $.activity.decision_card_reminder);
+    case "decision_card_degraded":
+      return t(($) => $.activity.decision_card_degraded);
+    // MUL-400 E3: dependency gate and automatic start.
+    case "dependency_auto_started":
+      return t(($) => $.activity.dependency_auto_started, { key: details.satisfiedByKey ?? details.satisfied_by_key ?? "?" });
+    case "dependency_gate_exempted": {
+      const sourceLabels: Record<string, string> = {
+        redispatch: t(($) => $.activity.dependency_gate_exempted_redispatch),
+        retry: t(($) => $.activity.dependency_gate_exempted_retry),
+        continuation: t(($) => $.activity.dependency_gate_exempted_continuation),
+        delegation_return: t(($) => $.activity.dependency_gate_exempted_delegation_return),
+        parent_wakeup: t(($) => $.activity.dependency_gate_exempted_parent_wakeup),
+      };
+      return t(($) => $.activity.dependency_gate_exempted, {
+        source: sourceLabels[String(details.source)] ?? String(details.source ?? "?"),
+      });
+    }
+    case "dependency_satisfied":
+      return t(($) => $.activity.dependency_satisfied, { key: details.satisfiedByKey ?? details.satisfied_by_key ?? "?" });
+    case "dependency_auto_start_skipped":
+      return t(($) => $.activity.dependency_auto_start_skipped, { key: details.satisfiedByKey ?? details.satisfied_by_key ?? "?" });
+    case "dependency_prerequisite_failed":
+      return t(($) => $.activity.dependency_prerequisite_failed, {
+        key: details.prerequisiteKey ?? details.prerequisite_key ?? "?",
+      });
+    case "dependency_waiting":
+      return t(($) => $.activity.dependency_waiting);
+    case "dependency_force_started": {
+      if (details.source === "comment") {
+        return t(($) => $.activity.dependency_force_started_comment);
+      }
+      if (details.source === "mention") {
+        const agentId = details.agentId ?? details.agent_id;
+        const agent = agentId && resolveActorName
+          ? resolveActorName("agent", agentId)
+          : agentId ?? "?";
+        return t(($) => $.activity.dependency_force_started_mention, { agent });
+      }
+      if (details.source === "rerun") {
+        return t(($) => $.activity.dependency_force_started_rerun);
+      }
+      return t(($) => $.activity.dependency_force_started);
+    }
+    case "dependency_satisfied_coalesced":
+      return t(($) => $.activity.dependency_satisfied_coalesced);
     case "child_done_parent_skipped":
       return t(($) => $.activity.child_done_parent_skipped, {
         reason: childDoneParentReason(details.reason, t),
@@ -138,6 +331,17 @@ export function formatActivity(
     case "dispatch_skipped": {
       if (details.reason === "no_runnable_agent") {
         return t(($) => $.activity.dispatch_skipped_no_runnable_agent);
+      }
+      if (details.reason === "member_assignee") {
+        return t(($) => $.activity.dispatch_skipped_member_assignee);
+      }
+      if (details.reason === "no_assignee") {
+        return t(($) => $.activity.dispatch_skipped_no_assignee);
+      }
+      // MUL-400 E3: the dependency hold has its own copy instead of showing the
+      // raw reason string.
+      if (details.reason === "dependencies_unmet") {
+        return t(($) => $.activity.dependency_gate_reason_dependencies_unmet);
       }
       const error = details.error?.trim();
       return error
@@ -164,6 +368,6 @@ export function formatActivity(
       }
     }
     default:
-      return entry.action ?? "";
+      return issueActivityLayer(entry.action ?? "") === "system" ? t($ => $.activity.system_activity) : entry.action ?? "";
   }
 }

@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 /**
  * Multiremi CLI — `issue` command handlers (issues, comments, sessions,
  * metadata, subscribers).
@@ -5,12 +6,14 @@
  * Extracted verbatim from the former single-file `cli/multiremi.ts`.
  */
 
+import { assertNotRetired } from "../../core/retired-commands.js";
 import {
   type CliOptions,
   addQueryParam,
   hasOption,
   integerOption,
   rawStringOption,
+  stringListOption,
   stringOpt,
 } from "../options.js";
 import {
@@ -41,7 +44,7 @@ import {
 import {
   VALID_ISSUE_STATUSES,
   actorBodyFromOptions,
-  addAssigneeBodyFields,
+  addAssigneeBodyFields as addLegacyAssigneeBodyFields,
   addStringBodyField,
   citationRefsOption,
   metadataFilterFromOptions,
@@ -51,6 +54,11 @@ import {
   readOptionalTextBody,
   subscriberBodyFromOptions,
 } from "./fields.js";
+
+function addAssigneeBodyFields(body: Record<string, unknown>, options: CliOptions, idKey: string, typeKey: string, nameKey: string): void {
+  addLegacyAssigneeBodyFields(body, options, idKey, typeKey, nameKey);
+  if (body.assignee_type === "member") throw new Error("Execution assignee must be an Agent or Squad");
+}
 
 export interface CliIssueComment {
   id: string;
@@ -64,6 +72,7 @@ export interface CliIssueComment {
 export const SESSION_RESULT_KINDS = ["mr", "report", "deploy", "decision", "doc", "other"] as const;
 
 export async function issue(positional: string[], options: CliOptions): Promise<void> {
+  assertNotRetired(["issue", ...positional]);
   const action = positional[0] ?? "";
   if (action === "list") {
     const query = buildIssueListQuery(options);
@@ -90,24 +99,32 @@ export async function issue(positional: string[], options: CliOptions): Promise<
   }
   if (action === "update") {
     const issueId = positional[1]?.trim();
-    if (!issueId) throw new Error("usage: multiremi issue update <issue-id> [--title <title>] [--description <text>] [--status <status>] [--priority <priority>] [--assignee <id|name|email> --assignee-type <type>] [--project <id>] [--parent <id>] [--start-date <date>] [--due-date <date>]");
+    if (!issueId) throw new Error("usage: multiremi issue update <issue-id> [--title <title>] [--description <text>] [--status <status>] [--priority <priority>] [--assignee <id|name|email> --assignee-type <type>] [--project <id>] [--parent <id>] [--start-date <date>] [--due-date <date>] [--force]");
     await issueUpdate(issueId, options);
     return;
   }
   if (action === "assign") {
     const issueId = positional[1]?.trim();
-    if (!issueId) throw new Error("usage: multiremi issue assign <issue-id> (--to <id|name|email> [--to-type agent|member|squad] | --unassign); --unassign clears the assignee and cancels active tasks on this issue");
+    if (!issueId) throw new Error("usage: multiremi issue assign <issue-id> (--to <id|name> [--to-type agent|squad] | --unassign); --unassign clears the assignee and cancels active tasks on this issue");
     await issueAssign(issueId, options);
     return;
   }
   if (action === "status") {
     const issueId = positional[1]?.trim();
     const status = positional[2]?.trim();
-    if (!issueId || !status) throw new Error("usage: multiremi issue status <issue-id> <status> [--output json]");
+    if (!issueId || !status) throw new Error("usage: multiremi issue status <issue-id> <status> [--force] [--output json]");
     if (!VALID_ISSUE_STATUSES.includes(status)) {
       throw new Error(`invalid status ${JSON.stringify(status)}; valid values: ${VALID_ISSUE_STATUSES.join(", ")}`);
     }
-    const response = await multiremiApiRequest("PUT", `/api/issues/${encodeURIComponent(issueId)}`, { status }, options);
+    // MUL-400 E1/E3: `--force` is the member override for the parent-status and
+    // dependency guards; without it the command shows the 409 reason first.
+    const forceStatus = booleanFlag(options, "force");
+    const response = await multiremiApiRequest(
+      "PUT",
+      `/api/issues/${encodeURIComponent(issueId)}`,
+      forceStatus ? { status, force: true } : { status },
+      options,
+    );
     printJson(response);
     return;
   }
@@ -124,10 +141,6 @@ export async function issue(positional: string[], options: CliOptions): Promise<
   }
   if (action === "session") {
     await issueSession(positional.slice(1), options);
-    return;
-  }
-  if (action === "archive") {
-    await issueArchive(positional.slice(1), options);
     return;
   }
   if (action === "metadata") {
@@ -154,10 +167,13 @@ export async function issue(positional: string[], options: CliOptions): Promise<
   }
   if (action === "rerun") {
     const issueId = positional[1]?.trim();
-    if (!issueId) throw new Error("usage: multiremi issue rerun <issue-id> [--agent-id <id>] [--prompt <text>]");
+    if (!issueId) throw new Error("usage: remi issue rerun <issue-id> [--task-id <id>] [--agent-id <id>] [--prompt <text>]");
     const body: Record<string, unknown> = {};
+    const taskId = rawStringOption(options, "task-id");
     const agentId = rawStringOption(options, "agent-id", "agentId");
     const prompt = rawStringOption(options, "prompt");
+    if (taskId && (agentId || prompt)) throw new Error("--task-id cannot be combined with --agent-id or --prompt");
+    if (taskId) body.task_id = taskId;
     if (agentId) body.agent_id = agentId;
     if (prompt) body.prompt = prompt;
     printJson(await multiremiApiRequest("POST", `/api/issues/${encodeURIComponent(issueId)}/rerun`, body, options));
@@ -194,7 +210,7 @@ export async function issue(positional: string[], options: CliOptions): Promise<
     printIssueSearch(await multiremiApiRequest("GET", `/api/issues/search?${params.toString()}`, undefined, options), options);
     return;
   }
-  throw new Error("usage: multiremi issue list|get|create|bind-topic|update|assign|status|delete|search|runs|run-messages|rerun|retitle|cancel-task|task|comment|session|archive|subscriber|metadata ...");
+  throw new Error("usage: multiremi issue list|get|create|bind-topic|update|assign|status|delete|search|runs|run-messages|rerun|retitle|cancel-task|task|comment|session|subscriber|metadata ...");
 }
 
 /**
@@ -203,6 +219,7 @@ export async function issue(positional: string[], options: CliOptions): Promise<
  * the agent to stop exploring and deliver its conclusion now.
  */
 export async function issueTask(positional: string[], options: CliOptions): Promise<void> {
+  assertNotRetired(["issue", "task", ...positional]);
   const action = positional[0] ?? "";
   if (action === "steer") {
     const taskId = positional[1]?.trim();
@@ -229,75 +246,6 @@ export async function issueTask(positional: string[], options: CliOptions): Prom
     return;
   }
   throw new Error("usage: multiremi issue task steer|steers <task-id> ...");
-}
-
-export async function issueArchive(positional: string[], options: CliOptions): Promise<void> {
-  const action = positional[0] ?? "";
-  const issueId = positional[1]?.trim();
-  if (!issueId) {
-    throw new Error("usage: multiremi issue archive <status|list|verify|retry> <issue-id> [archive-id]");
-  }
-
-  const list = async () => multiremiApiRequest(
-    "GET",
-    `/api/issues/${encodeURIComponent(issueId)}/session-archives`,
-    undefined,
-    options,
-  );
-
-  if (action === "list") {
-    printJson(await list());
-    return;
-  }
-
-  if (action === "status") {
-    const response = await list();
-    const archives = extractList(response, "archives");
-    printJson({
-      issue_id: issueId,
-      total: archives.length,
-      ready: archives.filter((archive) => field(archive, "status") === "ready").length,
-      pending: archives.filter((archive) => field(archive, "status") === "pending").length,
-      uploading: archives.filter((archive) => field(archive, "status") === "uploading").length,
-      failed: archives.filter((archive) => field(archive, "status") === "failed").length,
-      superseded: archives.filter((archive) => field(archive, "status") === "superseded").length,
-      latest: isRecord(response) ? response.latest ?? null : null,
-      latest_ready: isRecord(response) ? response.latest_ready ?? null : null,
-    });
-    return;
-  }
-
-  if (action === "verify" || action === "retry") {
-    let archiveId = positional[2]?.trim() ?? "";
-    if (!archiveId) {
-      const response = await list();
-      if (action === "retry") {
-        const failed = extractList(response, "archives").find(
-          (archive) => field(archive, "status") === "failed",
-        );
-        archiveId = String(field(failed ?? {}, "id") ?? "");
-      } else if (isRecord(response)) {
-        const candidate = isRecord(response.latest_ready) ? response.latest_ready : null;
-        archiveId = candidate ? String(field(candidate, "id") ?? "") : "";
-      }
-    }
-    if (!archiveId) {
-      throw new Error(
-        action === "retry"
-          ? `no failed session archive found for ${issueId}`
-          : `no ready session archive found for ${issueId}`,
-      );
-    }
-    printJson(await multiremiApiRequest(
-      "POST",
-      `/api/issues/${encodeURIComponent(issueId)}/session-archives/${encodeURIComponent(archiveId)}/${action}`,
-      {},
-      options,
-    ));
-    return;
-  }
-
-  throw new Error("usage: multiremi issue archive <status|list|verify|retry> <issue-id> [archive-id]");
 }
 
 export async function issueSession(positional: string[], options: CliOptions): Promise<void> {
@@ -387,6 +335,7 @@ export function sessionResultMetadata(options: CliOptions): Record<string, unkno
 }
 
 export async function issueComment(positional: string[], options: CliOptions): Promise<void> {
+  assertNotRetired(["issue", "comment", ...positional]);
   const action = positional[0] ?? "";
   const issueId = positional[1]?.trim();
   if (action === "list") {
@@ -505,7 +454,7 @@ export async function issueMetadata(positional: string[], options: CliOptions): 
 
 export async function issueCreate(options: CliOptions): Promise<void> {
   const title = rawStringOption(options, "title");
-  if (!title?.trim()) throw new Error("usage: multiremi issue create --title <title> [--description <text>] [--status <status>] [--priority <priority>] [--project <id>] [--parent <id>] [--assignee <id|name|email> --assignee-type <type>] [--no-project-defaults] [--start-date <date>] [--due-date <date>] [--attachment <path>]... [--allow-duplicate]");
+  if (!title?.trim()) throw new Error("usage: multiremi issue create --title <title> [--description <text>] [--status <status>] [--priority <priority>] [--project <id>] [--parent <id>] [--blocked-by <issue>]... [--assignee <id|name|email> --assignee-type <type>] [--no-project-defaults] [--start-date <date>] [--due-date <date>] [--attachment <path>]... [--allow-duplicate]");
   const attachments = readAttachmentFiles(options);
   const body: Record<string, unknown> = { title };
   const description = await readOptionalTextBody(options, "description");
@@ -515,6 +464,10 @@ export async function issueCreate(options: CliOptions): Promise<void> {
   addStringBodyField(body, options, "project_id", "project", false, true);
   addStringBodyField(body, options, "runtime_workspace_id", "runtime-workspace", false, true);
   addStringBodyField(body, options, "parent_issue_id", "parent", false, true);
+  // MUL-400 E3: declare prerequisites at creation; the server writes them in
+  // the same transaction and parks the issue at backlog while they are unmet.
+  const blockedBy = stringListOption(options, "blocked-by", "blockedBy");
+  if (blockedBy.length) body.blocked_by = blockedBy;
   addStringBodyField(body, options, "start_date", "start-date", false, true);
   addStringBodyField(body, options, "due_date", "due-date", false, true);
   if (Boolean(options.allowDuplicate ?? options["allow-duplicate"])) body.allow_duplicate = true;
@@ -636,7 +589,7 @@ async function localDaemonBaseUrl(options: CliOptions): Promise<string | null> {
   const baseUrl = `http://127.0.0.1:${daemonPort}`;
   let health: Response;
   try {
-    health = await fetch(`${baseUrl}/health`);
+    health = await proxyFetch(`${baseUrl}/health`);
   } catch {
     // Ordinary CLI use does not require a daemon. A topic binding cannot exist
     // without the co-resident daemon which created it.
@@ -691,7 +644,7 @@ async function localTopicMigrationRequest(
   baseUrl: string,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(`${baseUrl}/topic/migrate`, {
+  const response = await proxyFetch(`${baseUrl}/topic/migrate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -782,6 +735,10 @@ export async function issueUpdate(issueId: string, options: CliOptions): Promise
   addStringBodyField(body, options, "start_date", "start-date", false, true);
   addStringBodyField(body, options, "due_date", "due-date", false, true);
   addAssigneeBodyFields(body, options, "assignee-id", "assignee-type", "assignee");
+  // MUL-400 E1: `--force` is the member override for the parent-status guard.
+  // The first attempt without it returns the 409 reason, which is the intended
+  // second confirmation; task identities are rejected by the server.
+  if (booleanFlag(options, "force")) body.force = true;
   if (Object.keys(body).length === 0) throw new Error("no fields to update; pass --title, --description, --status, --priority, --assignee, --project, --parent, --start-date, or --due-date");
   printJson(await multiremiApiRequest("PUT", `/api/issues/${encodeURIComponent(issueId)}`, body, options));
 }
@@ -795,9 +752,12 @@ export async function issueAssign(issueId: string, options: CliOptions): Promise
     body.assignee_type = null;
     body.assignee_id = null;
   } else {
-    if (!hasTarget) throw new Error("provide --to <id|name|email> [--to-type agent|member|squad] or --unassign");
+    if (!hasTarget) throw new Error("provide --to <id|name> [--to-type agent|squad] or --unassign");
     addAssigneeBodyFields(body, options, "to-id", "to-type", "to");
   }
+  // MUL-400 E3: to start a parked issue, use `issue update --status todo
+  // --force`. Assignment alone never moves an issue out of backlog, so an
+  // `--force` here would silently do nothing and is deliberately not offered.
   const response = await multiremiApiRequest<Record<string, unknown>>("PUT", `/api/issues/${encodeURIComponent(issueId)}`, body, options);
   printJson({ ...response, task_id: response.task_id ?? null, cancelled_tasks: response.cancelled_tasks ?? 0 });
 }
@@ -825,8 +785,11 @@ export function buildIssueListQuery(options: CliOptions): string {
   addQueryParam(params, "status", rawStringOption(options, "status"));
   addQueryParam(params, "priority", rawStringOption(options, "priority"));
   addQueryParam(params, "assignee_id", rawStringOption(options, "assignee-id", "assigneeId", "assignee"));
-  addQueryParam(params, "assignee_type", rawStringOption(options, "assignee-type", "assigneeType"));
+  addQueryParam(params, "assignee_types", rawStringOption(options, "assignee-type", "assigneeType"));
   addQueryParam(params, "project_id", rawStringOption(options, "project", "project-id"));
+  // MUL-400 E3: hierarchy filters. The server resolves a key to its id.
+  addQueryParam(params, "parent_id", rawStringOption(options, "parent", "parent-id"));
+  if (booleanFlag(options, "top-level-only", "topLevelOnly")) params.set("top_level_only", "true");
   const limit = integerOption(options, "limit");
   const offset = integerOption(options, "offset");
   if (limit !== null) params.set("limit", String(limit));

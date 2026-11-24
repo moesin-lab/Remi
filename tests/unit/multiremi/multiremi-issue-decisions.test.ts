@@ -1,0 +1,597 @@
+import { createResponsibleTestIssue } from './helpers.js';
+import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
+import { createMultiremiApp } from "@multiremi/api.js";
+import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
+import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import type { MultiremiIssueDecision } from '@multiremi/contracts/types.js';
+import { createLocalStore as createStore, resetMultiremiTestEnv } from "./helpers.js";
+
+// Bun's timeout rejects the test wait; it does not cancel the async exercise.
+// Observe rejection immediately and drain it before resetting/closing its DB.
+let activeExercise: Promise<void> | undefined;
+function runExercise(exercise: () => Promise<void>): Promise<void> {
+  activeExercise = exercise();
+  void activeExercise.catch(() => {});
+  return activeExercise;
+}
+afterEach(async () => {
+  try { await activeExercise; }
+  finally {
+    activeExercise = undefined;
+    resetMultiremiTestEnv();
+    setSystemTime();
+  }
+});
+
+// #1/#4: the decision itself addresses its first human recipient; additional
+// audiences receive canonical status messages rather than duplicate ledger rows.
+function decisionInbox(store:MultiremiStore,memberId:string){
+  return store.listMessageInbox(memberId,"local").items.filter(message=>
+    message.message_kind==='decision' || message.metadata.question_notification === true || (message.metadata.inbox_item as any)?.type==='decision_requested');
+}
+
+/** Real AUQ source lanes and current-revision notified handler lanes. */
+async function exerciseDecisions(store: MultiremiStore): Promise<void> {
+  store.ensureLocalWorkspace();
+  const member = store.getWorkspaceMember('mem_local_local')!;
+  const runtime = store.registerRuntime({ name: 'Question executor', provider: 'codex', daemonId: 'decision-acceptance', maxConcurrency: 16 });
+  const owner = store.createAgent({ name: 'Parent owner', provider: 'codex', runtimeId: runtime.id });
+  const sourceAgent = store.createAgent({ name: 'Source owner', provider: 'codex', runtimeId: runtime.id });
+  const unrelated = store.createAgent({ name: 'Unrelated agent', provider: 'codex', runtimeId: runtime.id });
+  const parent = store.createIssue({ title: 'Question parent', createdBy: member.userId, assigneeType: 'agent', assigneeId: owner.id });
+  const source = store.createIssue({ title: 'Question source', parentIssueId: parent.id, assigneeType: 'agent', assigneeId: sourceAgent.id });
+  const originalSession = store.createIssueSession(source.id, { title: 'Original private question', holdsWorkspace: false });
+  const sourceTask = store.createTask({ agentId: sourceAgent.id, issueId: source.id, issueSessionId: originalSession.id, prompt: 'Work child' });
+  expect(store.claimTask(runtime.id)?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
+  const sourceTurn = store.getTurnForAttempt(sourceTask.id)!;
+  const foreignSession = store.createIssueSession(parent.id, { title: 'Unrelated lane', holdsWorkspace: false });
+  const foreignTask = store.createTask({ agentId: unrelated.id, issueId: parent.id, issueSessionId: foreignSession.id, prompt: 'Unrelated work', priority: 100 });
+  expect(store.claimTask(runtime.id)?.id).toBe(foreignTask.id); store.startTask(foreignTask.id);
+  const app = createMultiremiApp({ store, authToken: 'test-master' });
+  const memberToken = await store.createAccessToken({ name: 'Workspace member', type: 'pat', userId: 'local', workspaceId: 'local' });
+  const [sourceToken, foreignToken] = await Promise.all([
+    store.createTaskAccessToken(store.getTask(sourceTask.id)!, 'local'),
+    store.createTaskAccessToken(store.getTask(foreignTask.id)!, 'local'),
+  ]);
+  const request = (id: string, token: string, body?: unknown, action = 'answer') => app.request(
+    `/api/messages/${id}/question${body === undefined ? '' : '/' + action}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  const events: string[] = [];
+  const off = store.onWorkspaceEvent(event => events.push(event.type));
+  const ask = (kind: string, title: string) => {
+    const created = store.getDaemonTurnBridge().rpc('turn.decision', {
+      turn_id: sourceTurn.id, attempt_id: sourceTask.id, body_md: title,
+      dedupe_key: title, wait_id: `wait:${title}`, timeout_ms: 60_000,
+      options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }],
+      metadata: { kind, message: title, questions: [{ question: title, options: [{ label: 'Yes' }, { label: 'No' }] }] },
+    }, { runtimeId: runtime.id, daemonId: runtime.daemonId!, workspaceId: 'local' });
+    expect(created.ok).toBe(true);
+    return store.getQuestion(String(created.message_id))!;
+  };
+  try {
+    const first = ask('question', 'Choose branch');
+    expect(first).toMatchObject({ source_issue_id: source.id, session_id: originalSession.id, stage: 'parent_owner',
+      current_handler: { type: 'agent', id: owner.id }, wait_status: 'waiting' });
+    const notification = store.listMessages(store.getOrCreateDefaultIssueSession(parent.id).id)
+      .find(message => message.metadata.root_question_id === first.id && message.to_agent_id === owner.id)!;
+    expect(notification.reply_to_id).toBeNull();
+    expect(notification.metadata.question_route_revision).toBe(1);
+    const handlerTask = store.claimTask(runtime.id)!;
+    expect(handlerTask.agentId).toBe(owner.id); store.startTask(handlerTask.id);
+    const handlerToken = await store.createTaskAccessToken(store.getTask(handlerTask.id)!, 'local');
+    const handlerTurn = store.getTurnForAttempt(handlerTask.id)!;
+    expect((await request(first.id, handlerToken.token)).status).toBe(200);
+    for (const token of [sourceToken.token, foreignToken.token]) {
+      const denied = await request(first.id, token, { expected_route_revision: 1, response: { answers: { 'Choose branch': 'spoofed' } },
+        answererType: 'member', answererId: member.id });
+      expect(denied.status).toBe(403);
+    }
+    expect((await request(first.id, handlerToken.token, { response: { answer: 'Yes' } })).status).toBe(400);
+    const answer = await request(first.id, handlerToken.token, { expected_route_revision: 1, response: { answers: { 'Choose branch': 'Yes' } }, body_md: 'Use branch A' });
+    expect(answer.status, await answer.clone().text()).toBe(200);
+    expect(store.getQuestion(first.id)).toMatchObject({ status: 'answered', answer_revision: 1,
+      answer: { actor: { type: 'agent', id: owner.id }, response: { answers: { 'Choose branch': 'Yes' } } } });
+    expect(store.getTurnForAttempt(sourceTask.id)).toMatchObject({ status: 'running', current_attempt_id: sourceTask.id, waiting_on_message_id: null });
+    const consumer = store.getDaemonTurnBridge().rpc('turn.decision.consume', { turn_id: sourceTurn.id,
+      attempt_id: sourceTask.id, message_id: first.id, wait_id: 'wait:Choose branch', reply_message_id: store.getQuestion(first.id)!.answer!.reply_message_id },
+    { runtimeId: runtime.id, daemonId: runtime.daemonId!, workspaceId: 'local' });
+    expect(consumer.ok).toBe(true);
+    expect(store.getQuestion(first.id)?.wait_status).toBe('consumed');
+    const repeat = await request(first.id, handlerToken.token, { expected_route_revision: 1, response: { answers: { 'Choose branch': 'No' } } });
+    expect(repeat.status).toBe(409);
+    // Revision belongs to the human stage: a member never rewrites what the Agent answered at its own stage.
+    const agentStageRevision = await request(first.id, memberToken.token, { expected_route_revision: 1,
+      expected_answer_revision: 1, revise: true, reason: 'Human review', response: { answers: { 'Choose branch': 'No' } }, body_md: 'Hold for QA' });
+    expect(agentStageRevision.status).toBe(403);
+    expect(store.getQuestion(first.id)?.answer_revision).toBe(1);
+
+    const second = ask('question', 'Escalate this choice');
+    const escalation = await request(second.id, handlerToken.token, { expected_route_revision: 1, reason: 'Needs human decision' }, 'escalate');
+    expect(escalation.status, await escalation.clone().text()).toBe(200);
+    // Past the root owner nobody is designated: any active member answers and revises.
+    expect(store.getQuestion(second.id)).toMatchObject({ stage: 'human', route_revision: 2, current_handler: null });
+    expect((await request(second.id, handlerToken.token, { expected_route_revision: 2, response: { answer: 'No' } })).status).toBe(403);
+    const humanAnswer = await request(second.id, memberToken.token, { expected_route_revision: 2, response: { answers: { 'Escalate this choice': 'No' } } });
+    expect(humanAnswer.status, await humanAnswer.clone().text()).toBe(200);
+    const revised = await request(second.id, memberToken.token, { expected_route_revision: 2,
+      expected_answer_revision: 1, revise: true, reason: 'Human review', response: { answers: { 'Escalate this choice': 'Yes' } }, body_md: 'Hold for QA' });
+    expect(revised.status, await revised.clone().text()).toBe(200);
+    expect(store.getQuestion(second.id)?.history.filter(event => event.type === 'answer' || event.type === 'revise').map(event => event.actor?.type)).toEqual(['member', 'member']);
+    expect(store.getQuestion(second.id)?.answer_revision).toBe(2);
+    for (const kind of ['permission', 'merge', 'production_change']) {
+      const sensitive = ask(kind, `Authorize ${kind}`);
+      // Permission-class requests climb the execution owners like any question.
+      expect(sensitive).toMatchObject({ stage: 'parent_owner', current_handler: { type: 'agent', id: owner.id } });
+      expect((await request(sensitive.id, memberToken.token, { expected_route_revision: 1, response: { answers: { [`Authorize ${kind}`]: 'Yes' } } })).status).toBe(403);
+      if (kind === 'production_change') {
+        const approval = await request(sensitive.id, handlerToken.token, { expected_route_revision: 1, response: { answers: { [`Authorize ${kind}`]: 'Yes' } } });
+        expect(approval.status, await approval.clone().text()).toBe(200);
+        expect(store.getQuestion(sensitive.id)?.answer?.actor).toEqual({ type: 'agent', id: owner.id });
+      }
+    }
+    const pending = ask('question', 'Close without losing history');
+    // At the Agent stage a member only reads; the routed owner closes the Q.
+    expect((await request(pending.id, memberToken.token, { expected_route_revision: 1, reason: 'Plan withdrawn explicitly' }, 'close')).status).toBe(403);
+    const closed = await request(pending.id, handlerToken.token, { expected_route_revision: 1, reason: 'Plan withdrawn explicitly' }, 'close');
+    expect(closed.status, await closed.clone().text()).toBe(200);
+    expect(store.getQuestion(pending.id)).toMatchObject({ status: 'closed', wait_status: 'detached' });
+    expect(store.getMessage(pending.id)?.body_md).toBe('Close without losing history');
+    const list = await app.request(`/api/issues/${parent.id}/questions`, { headers: { Authorization: `Bearer ${memberToken.token}` } });
+    expect(list.status).toBe(200);
+    expect((await list.json()).questions.map((q: { id: string }) => q.id)).toEqual(expect.arrayContaining([first.id, second.id, pending.id]));
+    // Only the Q that reached the human stage reminded the root creator.
+    const reminded = decisionInbox(store, member.id).filter(message => message.metadata.question_notification === true)
+      .map(message => message.metadata.root_question_id);
+    expect(reminded).toContain(second.id);
+    expect(reminded).not.toContain(first.id);
+    expect(reminded).not.toContain(pending.id);
+    expect(store.getTask(handlerTask.id)?.prompt).toBe(handlerTask.prompt);
+    expect(handlerTurn.session_id).toBe(notification.session_id);
+    expect(events).toContain('decision:created');
+    expect(events).toContain('decision:updated');
+  } finally { off(); }
+}
+
+/**
+ * Advance a mocked clock by one second per call. `nowIso()` reads Date.now(), so
+ * this makes created_at / answered_at deterministic for the window ordering.
+ */
+function steppedClock(startAt = Date.parse("2026-09-27T00:00:00.000Z")): () => string {
+  let tick = 0;
+  return () => {
+    tick += 1;
+    const at = new Date(startAt + tick * 1000);
+    setSystemTime(at);
+    return at.toISOString();
+  };
+}
+
+interface DecisionApi {
+  request: (path: string, token: string, body?: unknown) => Promise<Response>;
+  create: (issueId: string, token: string, input: { kind: string; title: string }) => Promise<MultiremiIssueDecision>;
+}
+
+function historicalDecisionApi(store: MultiremiStore): DecisionApi {
+  const app = createMultiremiApp({ store, authToken: "test-master" });
+  const db = (store as unknown as { db: import('@multiremi/store/db/postgres.js').SqlDatabase }).db;
+  let template: Record<string, unknown> | undefined;
+  let targetIssueId = "";
+  return {
+    async create(issueId, token, input) {
+      // One canonical send establishes the historical shape. Subsequent rows
+      // are read-window fixtures: sending each through Questions re-reads all
+      // preceding decisions and turns 52 seeds into quadratic SQL work.
+      if (!template) {
+        expect(await store.verifyAccessToken(token)).not.toBeNull();
+        const source = store.getIssue(issueId)!;
+        const target = source.parentIssueId ? store.getIssue(source.parentIssueId)! : source;
+        targetIssueId = target.id;
+        const session = store.getOrCreateDefaultIssueSession(target.id);
+        const result = store.sendMessage({ session_id: session.id, sender: { type: 'agent', id: source.assigneeId! },
+          to: { type: 'none' }, message_kind: 'decision', wake_requested: 'inbox_only', body_md: input.title,
+          metadata: { decision_record: { kind: input.kind, title: input.title, body: input.title,
+            source_issue_id: source.id, source_task_id: null, status: 'pending', owner_agent_id: target.assigneeId,
+            history: [] } } });
+        expect(store.getMessage(result.message.id)?.metadata.question).toBeUndefined();
+        expect(store.getQuestion(result.message.id)?.wait_status).toBe('none');
+        template = db.query('SELECT * FROM multiremi_conversation_log WHERE id=?').get(result.message.id);
+        return store.getIssueDecision(target.id, result.message.id)!;
+      }
+      const id = `cmt_window_${crypto.randomUUID()}`;
+      const at = new Date().toISOString();
+      const metadata = JSON.parse(String(template.metadata));
+      metadata.decision_record = { ...metadata.decision_record, kind: input.kind, title: input.title, body: input.title };
+      const nextSeq = Number(db.query("SELECT head_seq FROM multiremi_conversation_heads WHERE session_id=?").get(template.session_id).head_seq) + 1;
+      const row: Record<string, unknown> = { ...template, id, seq: nextSeq, body_md: input.title, metadata: JSON.stringify(metadata), created_at: at, updated_at: at };
+      const columns = Object.keys(row);
+      db.transaction(() => {
+        db.run(`INSERT INTO multiremi_conversation_log (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`,
+          columns.map(column => row[column]));
+        db.run('UPDATE multiremi_conversation_heads SET head_seq=?,log_version=log_version+1,updated_at=? WHERE session_id=?',
+          [nextSeq, at, template!.session_id]);
+      })();
+      return store.getIssueDecision(targetIssueId, id)!;
+    },
+    // `app.request` is overloaded and returns a bare Response when the init is
+    // passed as the second argument, so normalize it to a Promise here.
+    request: async (path, token, body) => await app.request(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }),
+  };
+}
+
+const KIND_ORDER = ["permission", "merge", "production_change", "question", "criteria", "other"] as const;
+
+function expectKindSorted(entries: Array<{ kind: string }>): void {
+  for (let index = 1; index < entries.length; index += 1) {
+    const previous = KIND_ORDER.indexOf(entries[index - 1]!.kind as (typeof KIND_ORDER)[number]);
+    const current = KIND_ORDER.indexOf(entries[index]!.kind as (typeof KIND_ORDER)[number]);
+    expect(previous, `kind order broke at index ${index}: ${entries[index - 1]!.kind} -> ${entries[index]!.kind}`)
+      .toBeLessThanOrEqual(current);
+  }
+}
+
+/**
+ * QA round 1 blocking 1: the "recently answered" window must follow answered_at,
+ * not created_at, and member revisions must refresh it. Also covers the answer
+ * history exposure added for MUL-414 and the exact-50 + kind-ordering contract.
+ */
+async function exerciseAnsweredWindow(store: MultiremiStore): Promise<void> {
+  const tick = steppedClock();
+  store.ensureLocalWorkspace();
+  const member = store.findWorkspaceMemberForUser("local", "local")!;
+  const owner = store.createAgent({ name: "Window owner", provider: "codex", ownerId: member.id });
+  const sourceAgent = store.createAgent({ name: "Window source", provider: "codex" });
+  const parent = createResponsibleTestIssue(store, { title: "Window parent", assigneeType: "agent", assigneeId: owner.id });
+  const source = createResponsibleTestIssue(store, { title: "Window source issue", parentIssueId: parent.id, assigneeType: "agent", assigneeId: sourceAgent.id });
+  const ownerTask = store.createTask({ agentId: owner.id, issueId: parent.id, prompt: "Parent round" });
+  const [ownerToken, memberToken] = await Promise.all([
+    store.createTaskAccessToken(ownerTask, "local"),
+    store.createAccessToken({ name: "Window member", type: "pat", workspaceId: "local", userId: "local" }),
+  ]);
+  const api = historicalDecisionApi(store);
+
+  // 52 merge decisions, answered 2..52 first and 1 last: the exact QA probe.
+  const decisions: Array<{ id: string }> = [];
+  for (let index = 1; index <= 52; index += 1) {
+    tick();
+    const response = await api.create(source.id, memberToken.token, {
+      kind: "merge", title: `Merge decision ${index}`,
+    });
+    decisions.push(response);
+  }
+  const answer = async (token: string, decision: { id: string }, text: string, reason: string, overturn?: string) => {
+    tick();
+    if (token === ownerToken.token) {
+      // Historical Agent answers existed before human-required authorization.
+      // Preserve their original author/time; do not authorize a new Agent merge.
+      const message = store.getMessage(decision.id)!;
+      const answer = { answererType: 'agent', answererId: owner.id, answer: text, reason, overturn: overturn ?? null, answeredAt: new Date().toISOString() };
+      const old = message.metadata.decision_record as Record<string, unknown>;
+      const db = (store as unknown as { db: import('@multiremi/store/db/postgres.js').SqlDatabase }).db;
+      db.run('UPDATE multiremi_conversation_log SET metadata=? WHERE id=?', [JSON.stringify({ ...message.metadata,
+        decision_record: { ...old, status: 'answered', answer, history: [answer], answered_at: answer.answeredAt } }), decision.id]);
+    } else {
+      const q = store.getQuestion(decision.id)!;
+      const response = await api.request(`/api/messages/${decision.id}/question/answer`, token, {
+        expected_route_revision: q.route_revision, expected_answer_revision: q.answer_revision, revise: true,
+        body_md: text, response: { answer: text }, reason,
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+    }
+  };
+  for (let index = 1; index < decisions.length; index += 1) {
+    await answer(ownerToken.token, decisions[index]!, `answer ${index + 1}`, "checked", "a member may overturn this");
+  }
+  await answer(ownerToken.token, decisions[0]!, "answer 1", "checked", "a member may overturn this");
+
+  const list = async () => {
+    const sessionId = store.getOrCreateDefaultIssueSession(parent.id).id;
+    const response = await api.request(`/api/sessions/${sessionId}/messages?message_kind=decision&limit=500`, memberToken.token);
+    expect(response.status).toBe(200);
+    const messages = (await response.json()).messages as Array<{ id: string; metadata: { decision_record: { history: unknown[] } } }>;
+    for (const message of messages) expect(message.metadata.decision_record.history)
+      .toEqual(store.getIssueDecision(parent.id, message.id)!.history);
+    return store.listIssueDecisions(parent.id);
+  };
+
+  const afterProbe = await list();
+  // 52 answers, a 50 window: the two oldest *answers* (#2 and #3) drop out and
+  // the last-answered #1 stays, even though it was the first one created.
+  expect(afterProbe.owner_and_answered.answered).toHaveLength(50);
+  expect(afterProbe.owner_and_answered.answered.map((entry) => entry.id)).toEqual([
+    decisions[0]!.id,
+    ...decisions.slice(3).map((decision) => decision.id),
+  ]);
+  expect(afterProbe.owner_and_answered.answered.some((entry) => entry.id === decisions[1]!.id)).toBe(false);
+  expect(afterProbe.owner_and_answered.answered.some((entry) => entry.id === decisions[2]!.id)).toBe(false);
+  expectKindSorted(afterProbe.owner_and_answered.answered);
+  // Answer history rides along and never hides the owner's original call.
+  expect(afterProbe.owner_and_answered.answered[0]!.history).toHaveLength(1);
+  expect(afterProbe.owner_and_answered.answered[0]!.history![0]).toMatchObject({ answererType: "agent", answer: "answer 1" });
+
+  // A member revision refreshes answered_at, so the revised row re-enters the
+  // window and the now-oldest answer (#4) is the one pushed out.
+  await answer(memberToken.token, decisions[1]!, "member revision", "human review");
+  const afterRevision = await list();
+  expect(afterRevision.owner_and_answered.answered).toHaveLength(50);
+  expect(afterRevision.owner_and_answered.answered.map((entry) => entry.id)).toEqual([
+    decisions[0]!.id,
+    decisions[1]!.id,
+    ...decisions.slice(4).map((decision) => decision.id),
+  ]);
+  const revised = await list().then((model) => model.owner_and_answered.answered.find((entry) => entry.id === decisions[1]!.id)!);
+  expect(revised.history!.map((entry) => (entry as { answererType: string }).answererType)).toEqual(["agent", "member"]);
+  const revisedStored = store.getIssueDecision(parent.id, decisions[1]!.id)!;
+  expect(revisedStored.answeredAt).toBe((revisedStored.history[1] as { answeredAt: string }).answeredAt);
+  expect(revisedStored.answeredAt).toBe(revised.answer!.answeredAt);
+  // A never-answered decision reports an empty trail, not a missing key.
+  const pending = await api.create(source.id, memberToken.token, {
+    kind: "criteria", title: "Still pending",
+  });
+  const pendingId = pending.id;
+  const withPending = await list();
+  expect(withPending.owner_and_answered.pending.find((entry) => entry.id === pendingId)!.history).toEqual([]);
+
+  // Mixed kinds still cap at 50 and sort by kind before creation time: the
+  // last-created permission must lead the group.
+  for (const kind of ["question", "criteria", "permission"] as const) {
+    tick();
+    const created = await api.create(source.id, memberToken.token, { kind, title: `${kind} decision` });
+    const id = created.id;
+    await answer(ownerToken.token, { id }, `${kind} answered`, "checked", "a member may overturn this");
+  }
+  const mixed = await list();
+  expect(mixed.owner_and_answered.answered).toHaveLength(50);
+  expectKindSorted(mixed.owner_and_answered.answered);
+  // 55 answers, a 50 window: the five oldest by answered_at fall away, leaving
+  // one of each new kind plus 47 merges. kind order then puts permission first
+  // and criteria last.
+  expect(mixed.owner_and_answered.answered[0]!.kind).toBe("permission");
+  expect(mixed.owner_and_answered.answered.at(-1)!.kind).toBe("criteria");
+  const byKind = new Map<string, number>();
+  for (const entry of mixed.owner_and_answered.answered) byKind.set(entry.kind, (byKind.get(entry.kind) ?? 0) + 1);
+  expect(Object.fromEntries([...byKind].sort())).toEqual({ criteria: 1, merge: 47, permission: 1, question: 1 });
+  const merges = mixed.owner_and_answered.answered.filter((entry) => entry.kind === "merge");
+  expect(merges).toHaveLength(47);
+  // answered_at order is now newest->oldest: permission, criteria, question,
+  // #2 (revised), #1, then #52..#8. The window keeps 50 rows, so the five
+  // oldest merges #7..#3 drop: #8 survives and #7 does not.
+  expect(merges.some((entry) => entry.id === decisions[7]!.id)).toBe(true);
+  expect(merges.some((entry) => entry.id === decisions[6]!.id)).toBe(false);
+  expect(merges.some((entry) => entry.id === decisions[1]!.id)).toBe(true);
+}
+
+/**
+ * Nobody is designated at the human stage: the root creator and the source Issue's
+ * member subscribers are reminded, and any active member acts.
+ */
+async function exerciseHumanStageReminders(store: MultiremiStore): Promise<void> {
+  store.ensureLocalWorkspace();
+  const workspaceOwner = store.getWorkspaceMember('mem_local_local')!;
+  const creator = store.createWorkspaceMember({ workspaceId: 'local', name: 'Creator', userId: 'explicit-creator', role: 'member' });
+  const subscriber = store.createWorkspaceMember({ workspaceId: 'local', name: 'Subscriber', userId: 'explicit-subscriber', role: 'member' });
+  const runtime = store.registerRuntime({ name: 'Human stage executor', provider: 'codex', daemonId: 'explicit-human', maxConcurrency: 16, visibility: 'public' });
+  const sourceAgent = store.createAgent({ name: 'Source with unrelated owner', provider: 'codex', runtimeId: runtime.id, ownerId: workspaceOwner.id, maxConcurrentTasks: 16 });
+  const agentless = store.createAgent({ name: 'Parent with missing ownerId', provider: 'codex', runtimeId: runtime.id, ownerId: 'ghost-user', maxConcurrentTasks: 16 });
+  let sequence = 0;
+  const ask = (issueId: string, kind: string) => {
+    const session = store.createIssueSession(issueId, { title: `Human stage Q ${++sequence}`, holdsWorkspace: false });
+    const task = store.createTask({ agentId: sourceAgent.id, issueId, issueSessionId: session.id,
+      prompt: 'Raise one Q', priority: 100 + sequence });
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    const turn = store.getTurnForAttempt(task.id)!;
+    const created = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id,
+      body_md: `Question ${sequence}`, wait_id: `wait-explicit:${sequence}`, dedupe_key: `explicit:${sequence}`,
+      options: [{ label: 'Yes', value: 'Yes' }], metadata: { kind, questions: [{ question: 'Approve?', options: [{ label: 'Yes' }] }] },
+    }, { runtimeId: runtime.id, daemonId: runtime.daemonId!, workspaceId: 'local' });
+    expect(created.ok).toBe(true);
+    return store.getQuestion(String(created.message_id))!;
+  };
+  const reminders = (id: string, memberId: string) => decisionInbox(store, memberId).filter(message =>
+    message.metadata.question_notification === true && message.metadata.root_question_id === id
+      && message.to_member_id === store.getWorkspaceOperator("local")!.id);
+  const approve = (id: string, memberId: string) => store.answerQuestion(id, { expected_route_revision: store.getQuestion(id)!.route_revision,
+    response: { answers: { 'Approve?': 'Yes' } } }, { type: 'member', id: memberId });
+  const eventTypes: string[] = [];
+  const off = store.onWorkspaceEvent(event => eventTypes.push(event.type));
+  try {
+    // The asker executes this root, so its Q waits at the human stage at once.
+    const probe = store.createIssue({ title: 'Creator and subscriber are reminded', createdBy: creator.id,
+      assigneeType: 'agent', assigneeId: sourceAgent.id });
+    store.addIssueSubscriber(probe.id, subscriber.id);
+    const humanQ = ask(probe.id, 'production_change');
+    expect(humanQ).toMatchObject({ stage: 'human', current_handler: null });
+    expect(reminders(humanQ.id, creator.id)).toHaveLength(1);
+    expect(reminders(humanQ.id, subscriber.id)).toHaveLength(1);
+    expect(reminders(humanQ.id, workspaceOwner.id)).toHaveLength(1);
+    expect(eventTypes).toContain('inbox:new');
+    // Shared reminders never limit which active human operator can answer.
+    expect(approve(humanQ.id, workspaceOwner.id).question.answer?.actor).toEqual({ type: 'member', id: workspaceOwner.id });
+
+    // An Agent-created root has no member creator to remind; members still act, archived ones do not.
+    const agentCreated = store.createIssue({ title: 'Agent creator', createdBy: agentless.id,
+      assigneeType: 'agent', assigneeId: sourceAgent.id });
+    const agentQ = ask(agentCreated.id, 'production_change');
+    expect(agentQ).toMatchObject({ stage: 'human', current_handler: null });
+    for (const member of [creator, subscriber, workspaceOwner]) expect(reminders(agentQ.id, member.id)).toHaveLength(0);
+    const leaving = store.createWorkspaceMember({ workspaceId: 'local', name: 'Leaving member', role: 'member' });
+    store.archiveWorkspaceMember(leaving.id);
+    expect(() => approve(agentQ.id, leaving.id)).toThrow('question_actor_workspace_mismatch');
+    expect(approve(agentQ.id, subscriber.id).question.status).toBe('answered');
+
+    // A child's Q climbs to the parent owner first. Only on escalation does it reach the
+    // human stage, reminding the root creator and the child's subscribers, not the parent's.
+    const parent = store.createIssue({ title: 'Ownerless parent', createdBy: subscriber.id,
+      assigneeType: 'agent', assigneeId: agentless.id });
+    store.addIssueSubscriber(parent.id, creator.id);
+    const child = store.createIssue({ title: 'Child asks parent', parentIssueId: parent.id, createdBy: agentless.id,
+      assigneeType: 'agent', assigneeId: sourceAgent.id });
+    store.addIssueSubscriber(child.id, workspaceOwner.id);
+    const pending = ask(child.id, 'question');
+    expect(pending).toMatchObject({ stage: 'parent_owner', current_handler: { type: 'agent', id: agentless.id } });
+    for (const member of [creator, subscriber, workspaceOwner]) expect(reminders(pending.id, member.id)).toHaveLength(0);
+    const notification = store.listMessages(store.getOrCreateDefaultIssueSession(parent.id).id)
+      .find(message => message.metadata.root_question_id === pending.id && message.to_agent_id === agentless.id)!;
+    const notifiedTurn = store.getTurn(String(notification.metadata.delivery_turn_id))!;
+    // Earlier root fixtures legitimately queue execution-owner work. Claim this
+    // Q's actual notification lane, rather than depending on database tie order.
+    const db = (store as unknown as { db: import('@multiremi/store/db/postgres.js').SqlDatabase }).db;
+    db.run('UPDATE multiremi_turns SET priority = 200 WHERE id = ?', [notifiedTurn.id]);
+    const handler = store.claimTask(runtime.id)!;
+    expect(handler.id).toBe(notifiedTurn.current_attempt_id!);
+    expect(handler.agentId).toBe(agentless.id); store.startTask(handler.id);
+    const turn = store.getTurnForAttempt(handler.id)!;
+    const escalated = store.escalateQuestion(pending.id, { expected_route_revision: 1, reason: 'Members decide this' },
+      { type: 'agent', id: agentless.id }, turn.id);
+    expect(escalated).toMatchObject({ stage: 'human', current_handler: null, route_revision: 2 });
+    expect(reminders(pending.id, subscriber.id)).toHaveLength(1);
+    expect(reminders(pending.id, workspaceOwner.id)).toHaveLength(1);
+    expect(reminders(pending.id, creator.id)).toHaveLength(1);
+    expect(approve(pending.id, creator.id).question.answer?.actor).toEqual({ type: 'member', id: creator.id });
+  } finally { off(); }
+}
+
+describe("MUL-400 S4 decisions on SQLite", () => {
+  it("covers parent ownership, identity, escalation, revision, read model, and events", async () => {
+    await runExercise(() => exerciseDecisions(createStore()));
+  });
+
+  it("windows recently answered decisions by answered_at and exposes history", async () => {
+    await runExercise(() => exerciseAnsweredWindow(createStore()));
+  });
+
+  it("reminds the root creator and source subscribers at the human stage while any active member acts", async () => {
+    await runExercise(() => exerciseHumanStageReminders(createStore()));
+  });
+});
+
+const pgAdminUrl = process.env.MULTIREMI_TEST_POSTGRES_URL;
+// An explicitly configured PG must connect successfully, never silently skip.
+describe.skipIf(!pgAdminUrl)("MUL-400 S4 decisions on PostgreSQL", () => {
+  const databaseName = `mul410_decisions_${process.pid}`;
+  let admin: Bun.SQL;
+  let database: PostgresSyncDatabase;
+  let store: MultiremiStore;
+  let maxDepth = 0;
+  let statementCount = 0;
+  const controls: { sql: string; invocationDepth: number; callbackDepth: number; inTransaction: boolean }[] = [];
+
+  beforeAll(async () => {
+    admin = new Bun.SQL(pgAdminUrl!, { max: 1 });
+    await admin.unsafe(`CREATE DATABASE ${databaseName}`);
+    const url = new URL(pgAdminUrl!);
+    url.pathname = `/${databaseName}`;
+    database = new PostgresSyncDatabase(url.toString());
+    const original = database.transaction.bind(database);
+    let depth = 0;
+    let callbackDepth = 0;
+    const target = database as unknown as { execute(sql: string, params: unknown[]): unknown };
+    const execute = target.execute.bind(database);
+    target.execute = (sql, params) => {
+      statementCount++;
+      const command = sql.trim().toUpperCase();
+      if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|START TRANSACTION|END|ABORT)\b/.test(command)) {
+        controls.push({ sql: command, invocationDepth: depth, callbackDepth, inTransaction: database.inTransaction });
+      }
+      return execute(sql, params);
+    };
+    (database as unknown as { transaction: unknown }).transaction = (fn: () => unknown) => {
+      const run = original(() => {
+        callbackDepth++;
+        try { return fn(); } finally { callbackDepth--; }
+      });
+      // Every frame counts, a nested SAVEPOINT included (ADR 0011).
+      return () => {
+        depth++;
+        maxDepth = Math.max(maxDepth, depth);
+        try { return run(); } finally { depth--; }
+      };
+    };
+    store = new MultiremiStore(database);
+  });
+
+  afterAll(async () => {
+    database?.close();
+    if (admin) {
+      await admin.unsafe(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
+      await admin.end();
+    }
+  });
+
+  it("runs the acceptance flow without nested transactions", async () => {
+    controls.length = 0;
+    await runExercise(() => exerciseDecisions(store));
+    expect(maxDepth).toBe(1);
+    let outerOpen = false;
+    const savepoints: string[] = [];
+    expect(controls.some((control) => control.sql === "BEGIN")).toBe(true);
+    for (const control of controls) {
+      const detail = `PG transaction control: ${control.sql}`;
+      if (control.sql === "BEGIN") {
+        expect(outerOpen, detail).toBe(false);
+        expect(control.inTransaction, detail).toBe(false);
+        expect(control.invocationDepth, detail).toBe(1);
+        expect(control.callbackDepth, detail).toBe(0);
+        outerOpen = true;
+      } else if (control.sql === "COMMIT" || control.sql === "ROLLBACK") {
+        expect(outerOpen, detail).toBe(true);
+        expect(control.inTransaction, detail).toBe(true);
+        expect(control.invocationDepth, detail).toBe(1);
+        expect(control.callbackDepth, detail).toBe(0);
+        expect(savepoints, detail).toHaveLength(0);
+        outerOpen = false;
+      } else {
+        expect(outerOpen, detail).toBe(true);
+        expect(control.inTransaction, detail).toBe(true);
+        expect(control.invocationDepth, detail).toBeGreaterThan(1);
+        expect(control.sql, detail).toMatch(/^(SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) \w+$/);
+        const name = control.sql.split(" ").at(-1)!;
+        if (control.sql.startsWith("SAVEPOINT ")) savepoints.push(name);
+        else {
+          // RELEASE or ROLLBACK TO ends the level; main's skeleton sends no RELEASE after a ROLLBACK TO.
+          expect(savepoints.at(-1), detail).toBe(name);
+          savepoints.pop();
+        }
+      }
+    }
+    expect(outerOpen).toBe(false);
+    expect(savepoints).toHaveLength(0);
+  }, 30_000);
+
+  // Keep the original bound; historical seeds avoid unrelated per-message wakeups.
+  it("windows recently answered decisions by answered_at and exposes history", async () => {
+    const before = statementCount;
+    await runExercise(() => exerciseAnsweredWindow(store));
+    // Includes setup, 56 historical decisions, real member revision and reads.
+    // The previous per-message business path required over 15,000 statements.
+    expect(statementCount - before).toBeLessThan(3_000);
+    console.info(`MUL204 answered-window SQL statements: ${statementCount - before}`);
+  }, 15_000);
+
+  it("reminds the root creator and source subscribers at the human stage while any active member acts", async () => {
+    await runExercise(() => exerciseHumanStageReminders(store));
+  });
+
+  it("returns a late token lookup failure to its caller after bridge close", async () => {
+    const url = new URL(pgAdminUrl!);
+    url.pathname = `/${databaseName}`;
+    const peer = new PostgresSyncDatabase(url.toString());
+    try {
+      const tokens = new AccessTokensRepo(peer);
+      // verifyAccessToken yields at SHA-256 before its first DB query. Closing
+      // here recreates the timeout/teardown race without waiting 60 seconds.
+      const pending = tokens.verifyAccessToken('late-token-lookup');
+      peer.close();
+      await expect(pending).rejects.toThrow('postgres bridge is closed');
+      expect(() => peer.query('SELECT 1').get()).toThrow('postgres bridge is closed');
+    } finally { peer.close(); }
+  });
+
+});

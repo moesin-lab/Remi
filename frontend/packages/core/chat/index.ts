@@ -1,8 +1,10 @@
-export { createChatStore, CHAT_MIN_W, CHAT_MIN_H, CHAT_DEFAULT_W, CHAT_DEFAULT_H, DRAFT_NEW_SESSION } from "./store";
-export type { ChatStoreOptions, ChatState, ChatTimelineItem } from "./store";
+export { createChatStore, CHAT_MIN_W, CHAT_MIN_H, CHAT_DEFAULT_W, CHAT_DEFAULT_H, DRAFT_NEW_SESSION, DEFAULT_FOLLOW_UP_MODE } from "./store";
+export type { ChatStoreOptions, ChatState, ChatFollowUpMode, ChatQueueEdit, ChatQueueOutboxItem, SubagentPanelTarget, SubagentRevealRequest, ChatPanelView, BackgroundTaskRef } from "./store";
 export { useRecentContextStore, selectRecentContexts } from "./recent-context-store";
 export type { RecentContextEntry, RecentContextType } from "./recent-context-store";
 export { reconcileSettledPendingChatTask } from "./pending-task-reconciliation";
+export { CHAT_SEND_TIMEOUT_MS, ChatSendTimeoutError, withChatSendTimeout } from "./send";
+export { CHAT_SESSION_ID_PATTERN, createChatSessionId } from "./session-id";
 export type { PendingChatTaskRef } from "./pending-task-reconciliation";
 
 import type { createChatStore as CreateChatStoreFn } from "./store";
@@ -40,3 +42,8 @@ export const useChatStore: ChatStoreInstance = new Proxy(
     },
   },
 );
+export * from "./external-chats";
+export * from "./external-chat-receipts";
+
+export { useOptimisticChatOutbox, setOptimisticChatRows } from "./optimistic-outbox";
+export type { OptimisticChatRow } from "./optimistic-outbox";

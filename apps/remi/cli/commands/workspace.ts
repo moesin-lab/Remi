@@ -1,3 +1,5 @@
+import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
+import { STORAGE_SETTINGS_DEFAULTS, STORAGE_SETTINGS_KEYS, type WorkspaceStorageResponse } from "@multiremi/contracts/storage.js";
 import {
   CliError,
   CliRenderer,
@@ -57,7 +59,10 @@ const RUNTIME_PROVISION_FIELDS: readonly CliOptionSpec[] = [
  * which is the only safe default for a partial update.
  */
 const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
-  { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Use Agent permissions (default) or require a sender allowlist" },
+  { name: "name", type: "string", valueName: "name", description: "Bot display name" },
+  { name: "responsible-member", type: "string", description: "Member who answers questions from Feishu Chats without an Issue", conflictsWith: ["clear-responsible"] },
+  { name: "clear-responsible", type: "boolean", description: "Clear it; such Chat questions then have no handler", conflictsWith: ["responsible-member"] },
+  { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Require a sender allowlist (default) or let anyone use Agent permissions" },
   { name: "agent", type: "string", valueName: "agent-id", description: "Agent that answers concierge messages" },
   { name: "runtime", type: "string", valueName: "runtime-id", description: "Runtime that hosts the connector" },
   { name: "app-id", type: "string", valueName: "cli_xxx", description: "Feishu App ID" },
@@ -67,8 +72,23 @@ const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
   { name: "disabled", type: "boolean", description: "Save without running; permits an offline Runtime or one without concierge support" },
 ];
 
+const STORAGE_FIELDS: readonly CliOptionSpec[] = [
+  { name: "pressure-free-percent", type: "integer", valueName: "n", description: "Pressure free space threshold (%); 0 disables this condition" },
+  { name: "pressure-free-bytes", type: "integer", valueName: "n", description: "Pressure free space threshold (bytes); 0 disables this condition" },
+  { name: "critical-free-percent", type: "integer", valueName: "n", description: "Critical free space threshold (%); 0 disables this condition" },
+  { name: "critical-free-bytes", type: "integer", valueName: "n", description: "Critical free space threshold (bytes); 0 disables this condition" },
+
+  { name: "ttl-ms", type: "integer", valueName: "ms", description: "Retention after an Issue or Chat ends before its workspace is reclaimed" },
+  { name: "automation-ttl-ms", type: "integer", valueName: "ms", description: "Same as --ttl-ms for Chats opened by automation runs" },
+  { name: "max-retained", type: "integer", valueName: "n", description: "Ended subjects allowed to keep a workspace; 0 means no cap" },
+  { name: "orphan-ttl-ms", type: "integer", valueName: "ms", description: "How long a daemon keeps data of a subject the server no longer knows" },
+  { name: "snapshot-max-bytes", type: "integer", valueName: "bytes", description: "Largest unsaved work a reclaim snapshot may capture" },
+  { name: "chat-idle-days", type: "integer", valueName: "days", description: "Days without activity before an active Chat is archived; 0 means never" },
+  { name: "reset", type: "string", valueName: "option", repeatable: true, description: "Reset an option to its default, for example --reset ttl-ms" },
+];
+
 export function workspaceCommandSpecs(): CommandSpec[] {
-  return [
+  const specs: CommandSpec[] = [
     groupSpec(),
     readSpec("workspace.list", ["workspace", "list"], "List workspaces", [], async (invocation) => {
       const client = await clientFor(invocation);
@@ -99,12 +119,6 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       const client = await clientFor(invocation);
       const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
       const response = await client.request({ method: "DELETE", path: `/api/workspaces/${encodePath(String(workspace.id))}` });
-      renderResource(invocation, response.data);
-    }),
-    destructiveSpec("workspace.leave", ["workspace", "leave"], "Leave a workspace", [refPositional("workspace")], async (invocation) => {
-      const client = await clientFor(invocation);
-      const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
-      const response = await client.request({ method: "POST", path: `/api/workspaces/${encodePath(String(workspace.id))}/leave`, body: {} });
       renderResource(invocation, response.data);
     }),
     readSpec("workspace.runtime-provision.list", ["workspace", "runtime-provision", "list"], "List Runtime provisions", [refPositional("workspace")], async (invocation) => {
@@ -160,6 +174,8 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       "PUT",
       [
         { name: "chat-id", type: "string", valueName: "chat-id", description: "Feishu group chat ID" },
+        { name: "responsible-member", type: "string", description: "Deprecated no-op: topic Issues no longer designate a human; the value is ignored" },
+        { name: "inherit-bot-responsible", type: "boolean", description: "Deprecated no-op: topic Issues no longer designate a human" },
         { name: "notify", type: "string", valueName: "group_owner|person|none", description: "Proactive report mention target (default: group_owner)" },
         { name: "notify-open-id", type: "string", valueName: "open-id", description: "Bot-scoped recipient open ID for --notify person" },
         { name: "project", type: "string", valueName: "project-id", repeatable: true, description: "Limit topics to a project" },
@@ -173,6 +189,8 @@ export function workspaceCommandSpecs(): CommandSpec[] {
     scopedWrite("workspace.ssh-mesh.rotate", ["workspace", "ssh-mesh", "rotate"], "Rotate SSH mesh key material", "/ssh-mesh/rotate", "POST"),
     scopedWrite("workspace.ssh-mesh.test", ["workspace", "ssh-mesh", "test"], "Test SSH mesh connectivity", "/ssh-mesh/test", "POST"),
     scopedRead("workspace.relay.get", ["workspace", "relay", "get"], "Read relay configuration", "/relay-config"),
+    scopedRead("workspace.system-model-endpoints.get", ["workspace", "system-model-endpoints", "get"], "Read endpoint references used by system AI features", "/system-model-endpoints"),
+    scopedWrite("workspace.system-model-endpoints.set", ["workspace", "system-model-endpoints", "set"], "Select existing endpoints for system AI protocols from JSON; does not change execution groups", "/system-model-endpoints", "PUT"),
     scopedWrite("workspace.relay.discovery", ["workspace", "relay", "discovery"], "Update relay discovery settings", "/relay-config/discovery", "PUT"),
     scopedWrite("workspace.relay.update", ["workspace", "relay", "update"], "Update a relay engine", "/relay-config/:engine", "PUT", [refPositional("engine")]),
     scopedWrite("workspace.relay.reveal", ["workspace", "relay", "reveal"], "Reveal a relay engine credential", "/relay-config/:engine/reveal", "POST", [refPositional("engine")]),
@@ -193,18 +211,31 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       ],
       reasoningLevelsBody,
     ),
-    scopedRead("workspace.bot-menu.get", ["workspace", "bot-menu", "get"], "Read the workspace Feishu bot menu", "/bot-menu"),
+    scopedWrite(
+      "workspace.relay.context-window.update",
+      ["workspace", "relay", "context-window", "update"],
+      "Enable or clear the 1M context declaration for a Claude gateway model",
+      "/relay-config/:engine/context-window", "PUT",
+      [
+        refPositional("engine"),
+        { name: "model", type: "string", valueName: "model-id", description: "Gateway model id" },
+        { name: "one-million", type: "boolean", description: "Enable 1M; confirm the model supports it" },
+        { name: "clear", type: "boolean", description: "Use the standard context window" },
+      ],
+      contextWindowBody,
+    ),
+    scopedRead("workspace.bot-menu.get", ["workspace", "bot-menu", "get"], "Read the selected Feishu bot menu", "/bot-menu"),
     scopedWrite(
       "workspace.bot-menu.update",
       ["workspace", "bot-menu", "update"],
-      "Replace the workspace Feishu bot menu",
+      "Replace the selected Feishu bot menu",
       "/bot-menu",
       "PUT",
     ),
     scopedWrite(
       "workspace.bot-menu.publish",
       ["workspace", "bot-menu", "publish"],
-      "Validate or publish the workspace Feishu bot menu",
+      "Validate or publish the selected Feishu bot menu",
       "/bot-menu/publish",
       "POST",
       [{ name: "live", type: "boolean", description: "Publish to Feishu instead of dry-run validation" }],
@@ -221,11 +252,13 @@ export function workspaceCommandSpecs(): CommandSpec[] {
         const requestId = positional(invocation, 1, "request");
         const response = await client.request({
           method: "GET",
-          path: `/api/workspaces/${encodePath(String(workspace.id))}/bot-menu/publish/${encodePath(requestId)}`,
+          path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/bot-menu/publish/${encodePath(requestId)}`, invocation),
         });
         renderResource(invocation, response.data);
       },
     ),
+    scopedRead("workspace.feishu-bot.list", ["workspace", "feishu-bot", "list"], "List all Feishu bots in a workspace", "/feishu-bots"),
+    scopedWrite("workspace.feishu-bot.create", ["workspace", "feishu-bot", "create"], "Create an additional Feishu bot with its own app and Runtime", "/feishu-bots", "POST", FEISHU_BOT_FIELDS, feishuBotBody),
     scopedRead("workspace.feishu-bot.get", ["workspace", "feishu-bot", "get"], "Read the workspace Feishu concierge configuration", "/feishu-bot"),
     scopedRead("workspace.feishu-bot.status", ["workspace", "feishu-bot", "status"], "Read Feishu concierge runtime status", "/feishu-bot/status"),
     scopedRead("workspace.feishu-bot.candidates", ["workspace", "feishu-bot", "candidates"], "List Agents and Runtimes the concierge can use", "/feishu-bot/candidates"),
@@ -240,7 +273,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
         const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
         const response = await client.request({
           method: "GET",
-          path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders`,
+          path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders`, invocation),
         });
         renderFeishuBotSenders(invocation, response.data);
       },
@@ -299,14 +332,15 @@ export function workspaceCommandSpecs(): CommandSpec[] {
     destructiveSpec("workspace.feishu-bot.delete", ["workspace", "feishu-bot", "delete"], "Delete the workspace Feishu concierge configuration", [refPositional("workspace")], async (invocation) => {
       const client = await clientFor(invocation);
       const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
-      const response = await client.request({ method: "DELETE", path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot` });
+      const response = await client.request({ method: "DELETE", path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot`, invocation) });
       renderResource(invocation, response.data);
     }),
-    scopedRead("workspace.prompt.get", ["workspace", "prompt", "get"], "Read workspace prompt appendices", "/prompts"),
+    scopedRead("workspace.prompt.get", ["workspace", "prompt", "get"], "Read the workspace prompt", "/prompts"),
     scopedRead("workspace.prompt.template", ["workspace", "prompt", "template"], "Read the platform prompt template", "/prompt-template"),
-    scopedWrite("workspace.prompt.update", ["workspace", "prompt", "update"], "Update workspace prompt appendices", "/prompts", "PUT", [
-      { name: "bootstrap-prompt", type: "string", valueName: "text", description: "Bootstrap prompt appendix" },
-      { name: "delta-prompt", type: "string", valueName: "text", description: "Delta prompt appendix" },
+    scopedWrite("workspace.prompt.update", ["workspace", "prompt", "update"], "Update the workspace prompt", "/prompts", "PUT", [
+      { name: "prompt", type: "string", valueName: "text", description: "Workspace prompt: the workspace's own instructions for every Agent session" },
+      { name: "bootstrap-prompt", type: "string", valueName: "text", description: "Deprecated: merged with --delta-prompt into the workspace prompt" },
+      { name: "delta-prompt", type: "string", valueName: "text", description: "Deprecated: see --bootstrap-prompt" },
       { name: "expected-revision", type: "integer", valueName: "n", description: "Expected prompt revision" },
     ], promptBody),
     scopedRead("workspace.issue-archive.get", ["workspace", "issue-archive", "get"], "Read issue archive retention settings", "/issue-archive"),
@@ -314,7 +348,22 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       { name: "ttl-ms", type: "integer", valueName: "ms", description: "Archive retention duration" },
       { name: "sweep-interval-ms", type: "integer", valueName: "ms", description: "Archive sweep interval" },
     ], issueArchiveBody),
+    readSpec("workspace.storage.get", ["workspace", "storage", "get"], "Read the daemon storage retention policy", [refPositional("workspace")], async (invocation) => {
+      const client = await clientFor(invocation);
+      const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
+      const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(String(workspace.id))}/storage` });
+      renderStorageSettings(invocation, response.data);
+    }),
+    writeSpec("workspace.storage.set", ["workspace", "storage", "set"], "Update the daemon storage retention policy", [refPositional("workspace")], STORAGE_FIELDS, async (invocation) => {
+      const client = await clientFor(invocation);
+      const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
+      const body = await storageBody(invocation);
+      const response = await client.request({ method: "PUT", path: `/api/workspaces/${encodePath(String(workspace.id))}/storage`, body });
+      renderStorageSettings(invocation, response.data);
+    }),
   ];
+  return specs.map(spec => (spec.path[1] === "bot-menu" || spec.path[1] === "feishu-bot" && !["list", "create", "register", "register-status", "register-cancel"].includes(spec.path[2] ?? ""))
+    ? { ...spec, options: [...(spec.options ?? []), FEISHU_BOT_OPTION] } : spec);
 }
 
 export async function resolveWorkspace(
@@ -430,7 +479,7 @@ function scopedRead(
     const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
     const engine = extra.length ? positional(invocation, 1, extra[0]!.name) : "";
     const scopedSuffix = suffix.replace(":engine", encodePath(engine));
-    const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}` });
+    const response = await client.request({ method: "GET", path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}`, invocation) });
     renderResource(invocation, response.data);
   });
 }
@@ -453,7 +502,7 @@ function feishuBotSenderAccessSpec(action: "allow" | "revoke", allowed: boolean)
       const senderId = positional(invocation, 1, "sender");
       const response = await client.request({
         method: "PUT",
-        path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders/${encodePath(senderId)}`,
+        path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders/${encodePath(senderId)}`, invocation),
         body: { allowed },
       });
       renderFeishuBotSenders(invocation, response.data);
@@ -503,7 +552,7 @@ function scopedWrite(
       const engine = positionalFields.length ? positional(invocation, 1, positionalFields[0]!.name) : "";
       const scopedSuffix = suffix.replace(":engine", encodePath(engine));
       const body = await bodyBuilder(invocation);
-      const response = await client.request({ method, path: `/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}`, body });
+      const response = await client.request({ method, path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}`, invocation), body });
       renderResource(invocation, response.data);
     },
   };
@@ -569,6 +618,15 @@ async function reasoningLevelsBody(invocation: CommandInvocation): Promise<Recor
   });
 }
 
+async function contextWindowBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
+  const model = stringOption(invocation, "model");
+  if (!model) throw new CliError("usage", "workspace relay context-window update requires --model");
+  const enabled = booleanOption(invocation, "one-million") === true;
+  const clear = booleanOption(invocation, "clear") === true;
+  if (enabled === clear) throw new CliError("usage", "choose exactly one of --one-million or --clear");
+  return requestBody(invocation, { model, one_million: enabled });
+}
+
 async function envBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
   const body = await requestBody(invocation);
   const pairs = stringOptions(invocation, "set");
@@ -594,7 +652,9 @@ function feishuBotRegistrationPath(workspaceId: string, sessionId: string): stri
 
 async function feishuBotBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
   const body = await requestBody(invocation, {
+    name: stringOption(invocation, "name") ?? undefined,
     sender_access_policy: stringOption(invocation, "sender-access-policy") ?? undefined,
+    responsible_member_id: booleanOption(invocation, "clear-responsible") === true ? null : stringOption(invocation, "responsible-member") ?? undefined,
     agent_id: stringOption(invocation, "agent") ?? undefined,
     runtime_id: stringOption(invocation, "runtime") ?? undefined,
     app_id: stringOption(invocation, "app-id") ?? undefined,
@@ -612,6 +672,7 @@ async function feishuBotBody(invocation: CommandInvocation): Promise<Record<stri
 
 async function promptBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
   return requestBody(invocation, {
+    prompt: rawStringOption(invocation, "prompt"),
     bootstrap_prompt: rawStringOption(invocation, "bootstrap-prompt"),
     delta_prompt: rawStringOption(invocation, "delta-prompt"),
     expected_revision: integerOption(invocation, "expected-revision") ?? undefined,
@@ -629,6 +690,47 @@ async function issueArchiveBody(invocation: CommandInvocation): Promise<Record<s
     throw new CliError("usage", "workspace issue-archive update requires --ttl-ms and --sweep-interval-ms or input JSON");
   }
   return body;
+}
+
+/** Every option name is its setting key with dashes; `--reset` sends null so the server falls back to the default. */
+async function storageBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
+  const explicit: Record<string, number | null> = {};
+  for (const key of STORAGE_SETTINGS_KEYS) {
+    const value = integerOption(invocation, key.replaceAll("_", "-"));
+    if (value !== null) explicit[key] = value;
+  }
+  for (const name of stringOptions(invocation, "reset")) {
+    const key = name.replaceAll("-", "_");
+    if (!(STORAGE_SETTINGS_KEYS as readonly string[]).includes(key)) {
+      throw new CliError("usage", `--reset expects one of ${STORAGE_SETTINGS_KEYS.map((entry) => entry.replaceAll("_", "-")).join(", ")}`);
+    }
+    if (key in explicit) throw new CliError("usage", `--${key.replaceAll("_", "-")} conflicts with --reset ${name}`);
+    explicit[key] = null;
+  }
+  const body = await requestBody(invocation, explicit);
+  if (!Object.keys(body).length) throw new CliError("usage", "workspace storage set requires an option, --reset or input JSON");
+  return body;
+}
+
+function renderStorageSettings(invocation: CommandInvocation, value: unknown): void {
+  new CliRenderer().render<{ key: string; value: number; source: string; default: number }>(value, {
+    mode: outputMode(invocation),
+    rows: (input) => {
+      const { settings, overrides } = input as WorkspaceStorageResponse;
+      return STORAGE_SETTINGS_KEYS.map((key) => ({
+        key,
+        value: settings[key],
+        source: key in overrides ? "workspace" : "default",
+        default: STORAGE_SETTINGS_DEFAULTS[key],
+      }));
+    },
+    columns: [
+      { header: "SETTING", value: (row) => row.key },
+      { header: "VALUE", value: (row) => row.value },
+      { header: "SOURCE", value: (row) => row.source },
+      { header: "DEFAULT", value: (row) => row.default },
+    ],
+  });
 }
 
 async function organizerBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {

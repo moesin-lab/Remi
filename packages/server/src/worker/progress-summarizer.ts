@@ -1,7 +1,7 @@
 // LLM progress summaries for running tasks (MUL-67). The daemon feeds every
-// reported task-message batch into a per-task TaskProgressSummarizer; when
-// enough new activity accumulates (≥N messages AND ≥T ms since the last
-// summary — MoA-style dual trigger) it makes one stateless small-model call
+// stored trace batch into a per-task TaskProgressSummarizer; when enough new
+// activity accumulates (≥N completed items AND ≥T ms since the last summary —
+// MoA-style dual trigger) it makes one stateless small-model call
 // and writes the result through `reportProgress`. A terminal summary is forced
 // when the run ends (completed / failed / cancelled) with `final: true`, which
 // bypasses the server's terminal-status progress guard.
@@ -9,7 +9,7 @@
 // Isolation contract: summarization is strictly fire-and-forget. Model or
 // network failures are logged and swallowed; they must never affect task
 // execution. At most one summary call is in flight per task.
-import type { TaskMessageInput } from "@multiremi/contracts/types.js";
+import type { TraceEvent, TraceItem } from "@multiremi/contracts/trace.js";
 import { createLogger } from "@shared/logger.js";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -17,12 +17,15 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkspaceProgressSummaryPolicy } from "@daemon/agent-runtime/workspace/progress-summary-policy.js";
 import { extractBaseUrl, type RelayEngine } from "@multiremi/relay/fragment.js";
+import { beginSummaryUsage, type SummaryUsageCallback } from "./progress-summary-usage.js";
 
 const log = createLogger("multiremi-progress");
 
 export type ProgressSummaryTransport = "auto" | "api" | "cli" | "openai";
 
 export interface OpenAiProgressSummaryConfig {
+  headers?: Record<string, string>;
+  exactBaseUrl?: boolean;
   baseUrl: string;
   model: string;
   apiKey: string;
@@ -30,7 +33,7 @@ export interface OpenAiProgressSummaryConfig {
 
 export interface ProgressSummaryConfig {
   enabled: boolean;
-  /** Trigger floor: new task messages since the last summary (N). */
+  /** Trigger floor: items completed since the last summary (N). */
   minNewMessages: number;
   /** Debounce floor: milliseconds since the last summary (T). */
   minIntervalMs: number;
@@ -68,7 +71,7 @@ function positiveInt(raw: string | undefined, fallback: number): number {
 /**
  * N/T and machine-level model overrides are env-tunable:
  *   MULTIREMI_PROGRESS_SUMMARY_DISABLED=1     turn the feature off
- *   MULTIREMI_PROGRESS_SUMMARY_MESSAGES=20    N — new messages per summary
+ *   MULTIREMI_PROGRESS_SUMMARY_MESSAGES=20    N — completed trace items per summary
  *   MULTIREMI_PROGRESS_SUMMARY_INTERVAL_MS=45000  T — debounce between summaries
  *   MULTIREMI_PROGRESS_SUMMARY_MODEL=...      summary model id
  *   MULTIREMI_PROGRESS_SUMMARY_TRANSPORT=auto API first, then CLI on HTTP errors
@@ -176,6 +179,7 @@ export async function resolveTaskProgressSummaryConfig(
 }
 
 export interface SummarizerCredentials {
+  headers?: Record<string, string>;
   baseUrl: string;
   /** Anthropic `x-api-key` style credential. */
   apiKey?: string;
@@ -205,34 +209,66 @@ export function resolveSummarizerCredentials(
   return null;
 }
 
-/** One compressed line per interesting message; null = not digest-worthy. */
-export function digestTaskMessage(message: TaskMessageInput): string | null {
+/** One compressed line per completed trace item; null = not digest-worthy. */
+export function digestTraceItem(item: TraceItem): string | null {
   const clip = (value: string, max: number): string => {
     const text = value.replace(/\s+/g, " ").trim();
     return text.length > max ? `${text.slice(0, max)}…` : text;
   };
-  if (message.type === "text" && message.content) return `assistant: ${clip(message.content, 300)}`;
-  if (message.type === "thinking" && message.content) return `thinking: ${clip(message.content, 160)}`;
-  if (message.type === "plan" && message.content) return `plan: ${clip(message.content, 120)}`;
-  if (message.type === "tool_use") {
-    const input = message.input ? clip(JSON.stringify(message.input), 200) : "";
-    return `tool ${message.tool ?? "?"}${input ? ` ${input}` : ""}`;
+  const failed = (tool: string, output: string | null): string =>
+    `tool ${tool} failed${output ? ` ${clip(output, 200)}` : ""}`;
+  switch (item.type) {
+    case "agent_message":
+      return item.text.trim() ? `assistant: ${clip(item.text, 300)}` : null;
+    case "reasoning":
+      return item.text.trim() ? `thinking: ${clip(item.text, 160)}` : null;
+    case "plan": {
+      const done = item.entries.filter((entry) => entry.status === "completed").length;
+      return `plan: ${done}/${item.entries.length} completed`;
+    }
+    case "command": {
+      if (item.status === "failed") return failed(item.tool, item.output);
+      const detail = item.command ?? item.actions.map((action) => action.type === "unknown" ? action.command
+        : action.type === "read" ? action.path : action.type === "search" ? action.query ?? action.path ?? "" : action.path ?? "")
+        .filter(Boolean).join(", ");
+      return `tool ${item.tool}${detail ? ` ${clip(detail, 200)}` : ""}`;
+    }
+    case "file_change": {
+      if (item.status === "failed") return failed(item.tool, item.output);
+      const paths = item.changes.map((change) => change.path).join(", ");
+      return `tool ${item.tool}${paths ? ` ${clip(paths, 200)}` : ""}`;
+    }
+    case "web_search": {
+      if (item.status === "failed") return failed(item.tool, item.output);
+      const detail = item.query ?? item.url ?? "";
+      return `tool ${item.tool}${detail ? ` ${clip(detail, 200)}` : ""}`;
+    }
+    case "tool": {
+      if (item.status === "failed") return failed(item.tool, item.output);
+      const input = item.input ? clip(JSON.stringify(item.input), 200) : "";
+      return `tool ${item.tool}${input ? ` ${input}` : ""}`;
+    }
+    case "subagent": {
+      if (item.status === "failed") return failed(item.tool, item.output);
+      const detail = item.title ?? item.prompt ?? "";
+      return `tool ${item.tool}${detail ? ` ${clip(detail, 200)}` : ""}`;
+    }
+    default:
+      // user/steer messages, permission/question traffic, compaction, notices: skip.
+      return null;
   }
-  if (message.type === "tool_result" && message.status === "failed") {
-    const output = message.output ? ` ${clip(message.output, 200)}` : "";
-    return `tool ${message.tool ?? "?"} failed${output}`;
-  }
-  // usage snapshots, successful tool_results (their tool_use already tells the
-  // story), permission/question traffic: skip.
-  return null;
 }
 
 /**
  * Pure trigger/accumulation state, unit-testable without any I/O. Counts every
- * reported message toward the N trigger but stores only digest-worthy lines,
- * keeping the newest ones within the character budget.
+ * completed trace item toward the N trigger but stores only digest-worthy lines,
+ * keeping the newest ones within the character budget. Other events (deltas,
+ * starts, turn updates) are progress within an item and count for nothing.
+ * An item counts once: a later `item.completed` for the same id (a phase
+ * change, a late hook, a decline) re-states it and is skipped.
  */
 export class TaskProgressTracker {
+  private readonly completed = new Set<string>();
   private pendingCount = 0;
   private pendingLines: string[] = [];
   private pendingChars = 0;
@@ -248,10 +284,12 @@ export class TaskProgressTracker {
     this.lastSummaryAtMs = nowMs;
   }
 
-  record(messages: TaskMessageInput[]): void {
-    for (const message of messages) {
+  record(events: readonly TraceEvent[]): void {
+    for (const event of events) {
+      if (event.type !== "item.completed" || this.completed.has(event.item.id)) continue;
+      this.completed.add(event.item.id);
       this.pendingCount++;
-      const line = digestTaskMessage(message);
+      const line = digestTraceItem(event.item);
       if (!line) continue;
       this.pendingLines.push(line);
       this.pendingChars += line.length;
@@ -382,13 +420,16 @@ async function callSummaryModel(
   prompt: string,
   timeoutMs: number,
   fetchImpl: FetchLike,
+  onUsage?: SummaryUsageCallback,
 ): Promise<ProgressSummaryResult> {
   const headers: Record<string, string> = {
+    ...credentials.headers,
     "content-type": "application/json",
     "anthropic-version": "2023-06-01",
   };
   if (credentials.apiKey) headers["x-api-key"] = credentials.apiKey;
   if (credentials.authToken) headers.authorization = `Bearer ${credentials.authToken}`;
+  const recordUsage = beginSummaryUsage("claude", model, onUsage);
   const response = await fetchImpl(`${credentials.baseUrl}/v1/messages`, {
     method: "POST",
     headers,
@@ -401,10 +442,11 @@ async function callSummaryModel(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
+    try { recordUsage(await response.json()); } catch { await response.body?.cancel().catch(() => undefined); }
     throw new SummaryModelHttpError(response.status);
   }
   const payload = await response.json() as { content?: Array<{ type?: string; text?: string }> };
+  recordUsage(payload);
   const text = (payload.content ?? [])
     .map((block) => (block?.type === "text" ? block.text ?? "" : ""))
     .join("")
@@ -418,11 +460,14 @@ async function callOpenAiSummaryModel(
   prompt: string,
   timeoutMs: number,
   fetchImpl: FetchLike,
+  onUsage?: SummaryUsageCallback,
 ): Promise<ProgressSummaryResult> {
-  const apiRoot = config.baseUrl.endsWith("/v1") ? config.baseUrl : `${config.baseUrl}/v1`;
+  const apiRoot = config.exactBaseUrl || config.baseUrl.endsWith("/v1") ? config.baseUrl : `${config.baseUrl}/v1`;
+  const recordUsage = beginSummaryUsage("openai", config.model, onUsage);
   const response = await fetchImpl(`${apiRoot}/chat/completions`, {
     method: "POST",
     headers: {
+      ...config.headers,
       "content-type": "application/json",
       authorization: `Bearer ${config.apiKey}`,
     },
@@ -437,12 +482,13 @@ async function callOpenAiSummaryModel(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
+    try { recordUsage(await response.json()); } catch { await response.body?.cancel().catch(() => undefined); }
     throw new SummaryModelHttpError(response.status);
   }
   const payload = await response.json() as {
     choices?: Array<{ message?: { content?: string } }>;
   };
+  recordUsage(payload);
   const text = payload.choices?.[0]?.message?.content?.trim() ?? "";
   if (!text) throw new Error("OpenAI-compatible summary model returned no text");
   return parseSummaryText(text);
@@ -508,17 +554,21 @@ async function callSummaryCli(input: {
   timeoutMs: number;
   providerEnv?: Record<string, string>;
   spawnImpl: SummaryCliSpawn;
+  onUsage?: SummaryUsageCallback;
+  beforeRequest?: () => void;
 }): Promise<ProgressSummaryResult> {
   const cwd = await mkdtemp(join(tmpdir(), "multiremi-progress-"));
   let processHandle: SummaryCliProcess | null = null;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
+    input.beforeRequest?.();
     const cliPrompt = `${SUMMARY_SYSTEM_PROMPT}\n\n${input.prompt}`;
+    const recordUsage = beginSummaryUsage("claude", input.model, input.onUsage);
     processHandle = input.spawnImpl(
       // `--tools ""` disables all built-in tools: the digest embeds raw task
       // messages, so the summary session must not be able to act on injected
       // instructions (read files, fetch URLs) — text in, text out only.
-      [input.executable, "-p", cliPrompt, "--model", input.model, "--tools", ""],
+      [input.executable, "-p", cliPrompt, "--model", input.model, "--tools", "", "--output-format", "json"],
       {
         cwd,
         env: { ...process.env, ...input.providerEnv },
@@ -540,10 +590,16 @@ async function callSummaryCli(input: {
     });
     const exitCode = await Promise.race([processHandle.exited, timeoutExit]);
     await stderrDrain;
-    if (exitCode !== 0) throw new Error(`summary CLI exited with code ${exitCode}`);
     const text = (await stdoutText).trim();
+    let resultText = text;
+    try {
+      const payload = JSON.parse(text);
+      recordUsage(payload, true);
+      if (typeof payload.result === "string") resultText = payload.result;
+    } catch { /* Older/custom CLI output remains text, with unknown usage. */ }
+    if (exitCode !== 0) throw new Error(`summary CLI exited with code ${exitCode}`);
     if (!text) throw new Error("summary CLI returned no text");
-    return parseSummaryText(text);
+    return parseSummaryText(resultText);
   } finally {
     if (timeout) clearTimeout(timeout);
     await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
@@ -586,10 +642,12 @@ export interface TaskProgressSummarizerOptions {
   spawnImpl?: SummaryCliSpawn;
   whichImpl?: (binary: string) => string | null;
   now?: () => number;
+  onUsage?: SummaryUsageCallback;
+  onClosed?: () => void;
 }
 
 /**
- * Per-task glue: trigger evaluation + single-flight summary calls. `onMessages`
+ * Per-task glue: trigger evaluation + single-flight summary calls. `onEvents`
  * is synchronous and cheap on the hot path; the model call runs detached from
  * the run loop. `finalize` produces the terminal summary and resolves once the
  * write finished (callers fire-and-forget it).
@@ -605,6 +663,8 @@ export class TaskProgressSummarizer {
   private inFlight: Promise<void> | null = null;
   private lastSummary: string | null = null;
   private finalized = false;
+  private closing: Promise<void> | null = null;
+  private suppressFinalSummary = false;
 
   constructor(private readonly options: TaskProgressSummarizerOptions) {
     this.now = options.now ?? Date.now;
@@ -628,9 +688,9 @@ export class TaskProgressSummarizer {
     );
   }
 
-  onMessages(messages: TaskMessageInput[]): void {
+  onEvents(events: readonly TraceEvent[]): void {
     if (this.finalized) return;
-    this.tracker.record(messages);
+    this.tracker.record(events);
     if (this.inFlight || !this.tracker.shouldTrigger(this.now())) return;
     const { digest } = this.tracker.drain(this.now());
     this.inFlight = this.summarizeAndReport(digest, undefined, undefined)
@@ -641,12 +701,29 @@ export class TaskProgressSummarizer {
    * Forced terminal summary. Waits for an in-flight periodic call first so the
    * final write always lands last, then summarizes regardless of thresholds.
    */
-  async finalize(outcome: ProgressRunOutcome, detail?: string): Promise<void> {
-    if (this.finalized) return;
+  finalize(outcome: ProgressRunOutcome, detail?: string): Promise<void> {
+    return this.close(outcome, detail);
+  }
+
+  /** Close unused startup scope without issuing another billable request. */
+  closeWithoutSummary(): Promise<void> {
+    this.suppressFinalSummary = true;
+    return this.close();
+  }
+
+  private close(outcome?: ProgressRunOutcome, detail?: string): Promise<void> {
+    if (this.closing) return this.closing;
     this.finalized = true;
-    if (this.inFlight) await this.inFlight.catch(() => undefined);
-    const { digest } = this.tracker.drain(this.now());
-    await this.summarizeAndReport(digest, outcome, detail);
+    this.closing = (async () => {
+      try {
+        if (this.inFlight) await this.inFlight.catch(() => undefined);
+        if (!this.suppressFinalSummary && outcome !== undefined) {
+          const { digest } = this.tracker.drain(this.now());
+          await this.summarizeAndReport(digest, outcome, detail);
+        }
+      } finally { this.options.onClosed?.(); }
+    })();
+    return this.closing;
   }
 
   private async summarizeAndReport(digest: string, outcome?: ProgressRunOutcome, detail?: string): Promise<void> {
@@ -669,6 +746,7 @@ export class TaskProgressSummarizer {
   }
 
   private async requestSummary(prompt: string): Promise<ProgressSummaryResult> {
+    this.assertRequestsAllowed();
     if (this.activeTransport === "cli") return this.requestSummaryWithCli(prompt);
     if (this.activeTransport === "openai") {
       try {
@@ -677,6 +755,7 @@ export class TaskProgressSummarizer {
           prompt,
           this.options.config.requestTimeoutMs,
           this.fetchImpl,
+          this.options.onUsage,
         );
       } catch (err) {
         const canFallback = this.options.config.transport === "auto"
@@ -698,6 +777,7 @@ export class TaskProgressSummarizer {
         prompt,
         this.options.config.requestTimeoutMs,
         this.fetchImpl,
+        this.options.onUsage,
       );
     } catch (err) {
       const autoFallback = this.options.config.transport === "auto"
@@ -725,6 +805,12 @@ export class TaskProgressSummarizer {
       timeoutMs: this.options.config.requestTimeoutMs,
       providerEnv: this.options.providerEnv,
       spawnImpl: this.spawnImpl,
+      onUsage: this.options.onUsage,
+      beforeRequest: () => this.assertRequestsAllowed(),
     });
+  }
+
+  private assertRequestsAllowed(): void {
+    if (this.suppressFinalSummary) throw new Error("Progress summary closed before provider startup");
   }
 }

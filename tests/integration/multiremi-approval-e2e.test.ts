@@ -1,16 +1,23 @@
+import { createResponsibleTestIssue } from "../unit/multiremi/helpers.js";
+import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { openHotspotDatabase } from "../fixtures/multiremi/first-screen-hotspots-database.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ElicitationCreateParams, PermissionOutcome, RequestPermissionParams } from "@shared/contracts/acp-protocol.js";
 import type { AgentResponse } from "@shared/contracts/provider-types.js";
-import { startMultiremiServer } from "@multiremi/api.js";
-import { MultiremiDaemon, type MultiremiDaemonProviderFactory } from "@multiremi/daemon.js";
+import { startMultiremiServer } from "../fixtures/daemon-protocol.js";
+import type { MultiremiDaemonProviderFactory } from "@multiremi/daemon.js";
+import { TestMultiremiDaemon as MultiremiDaemon } from "../fixtures/daemon-protocol.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { MultiremiTaskHumanRequest, MultiremiTaskStatus } from "@multiremi/contracts/types.js";
+import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
+import { traceItems } from "../helpers/turn-trace.js";
 
-let db: Database | null = null;
+let db: SqlDatabase | null = null;
+let database: Awaited<ReturnType<typeof openHotspotDatabase>> | null = null;
 let workDir: string | null = null;
 let activeHarness: Harness | null = null;
 let activeServer: ReturnType<typeof startMultiremiServer> | null = null;
@@ -25,8 +32,8 @@ afterEach(async () => {
     activeHarness = null;
     activeServer?.stop(true);
     activeServer = null;
-    db?.close();
-    db = null;
+    await database?.dispose();
+    database=null;db = null;
     if (workDir) {
       rmSync(workDir, { recursive: true, force: true });
       workDir = null;
@@ -113,9 +120,11 @@ async function startHarness(options: {
   withElicitation?: boolean;
   approvalMode?: "ask" | "auto";
 } = {}): Promise<Harness> {
-  db = new Database(":memory:");
+  database=await openHotspotDatabase();
+  db=database.db;
   workDir = mkdtempSync(join(tmpdir(), "multiremi-approval-e2e-"));
   const store = new MultiremiStore(db);
+  store.ensureLocalWorkspace();
   const agent = store.createAgent({ name: "Approval Agent", provider: "claude" });
   const task = options.unattended
     ? (() => {
@@ -128,7 +137,9 @@ async function startHarness(options: {
         if (!run.taskId) throw new Error("Autopilot run did not create a task");
         return store.getTask(run.taskId)!;
       })()
-    : store.createTask({ agentId: agent.id, prompt: "Do something dangerous" });
+    : store.createSessionTask(store.getOrCreateDefaultIssueSession(createResponsibleTestIssue(store, { title: "Approval fixture",
+        assigneeType: "agent", assigneeId: agent.id, responsibleMemberId: "mem_local_local" }).id).id,
+        { agentId: agent.id, prompt: "Do something dangerous" });
   const server = startMultiremiServer({ store, scheduler: null, hostname: "127.0.0.1", port: 0 });
   activeServer = server;
   const baseUrl = `http://127.0.0.1:${server.port}`;
@@ -158,6 +169,15 @@ async function startHarness(options: {
         return chatId === task.id ? streamedText : "";
       },
       async *sendStream() {
+        // #11: a provider follows the offered range hint before responding.
+        // Unattended offers also contain folded timer/status context.
+        const current = store.getTurnForAttempt(task.id)!;
+        const credential = await store.createTaskAccessToken(store.getTask(task.id)!, "local");
+        const input = await fetch(`${baseUrl}/api/sessions/${current.session_id}/messages?from=0&to=${store.getConversationLogHead(current.session_id)!.headSeq}`, {
+          headers: { Authorization: `Bearer ${credential.token}` },
+        });
+        const inputBody = await input.text();
+        expect(input.status, inputBody).toBe(200);
         yield { sessionUpdate: "agent_thought_chunk", content: [{ type: "text", text: "About to run a tool" }] } as any;
         // Block exactly like a real ACP agent: the stream does not advance
         // until the permission promise resolves.
@@ -175,6 +195,8 @@ async function startHarness(options: {
   };
 
   const daemon = new MultiremiDaemon({
+    protocolClientOptions: { cliVersion: DAEMON_MIN_CLI_VERSION },
+    sshMeshManager: disabledSshMeshRuntime(),
     serverUrl: baseUrl,
     token: daemonToken.token,
     daemonId: "daemon-approval",
@@ -188,6 +210,7 @@ async function startHarness(options: {
     approvalMode: options.approvalMode ?? "ask",
     humanRequestTimeoutMs: options.humanRequestTimeoutMs ?? 60_000,
     unattendedHumanRequestTimeoutMs: options.unattendedHumanRequestTimeoutMs,
+    taskDrainTimeoutMs: 1000,
     providerFactory,
   });
 
@@ -205,18 +228,39 @@ async function waitFor<T>(probe: () => T | null | undefined, label: string, time
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-async function fetchRequests(baseUrl: string, taskId: string): Promise<MultiremiTaskHumanRequest[]> {
-  const resp = await fetch(`${baseUrl}/api/tasks/${taskId}/human-requests`);
+async function fetchRequests(store: MultiremiStore, baseUrl: string, taskId: string): Promise<MultiremiTaskHumanRequest[]> {
+  const resp = await fetch(`${baseUrl}/api/sessions/${store.getTurnForAttempt(taskId)!.session_id}/messages`);
   expect(resp.status).toBe(200);
-  return ((await resp.json()) as { requests: MultiremiTaskHumanRequest[] }).requests;
+  return ((await resp.json()) as { messages: Array<{ id: string; metadata: { human_request?: unknown } }> }).messages
+    .flatMap(message => message.metadata.human_request ? [store.getTaskHumanRequest(message.id)!] : []);
 }
 
-async function respond(baseUrl: string, taskId: string, requestId: string, body: Record<string, unknown>): Promise<Response> {
-  return fetch(`${baseUrl}/api/tasks/${taskId}/human-requests/${requestId}/respond`, {
+async function respond(store: MultiremiStore, baseUrl: string, taskId: string, requestId: string, body: Record<string, unknown>): Promise<Response> {
+  return fetch(`${baseUrl}/api/sessions/${store.getMessage(requestId)!.session_id}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ response: body }),
+    body: JSON.stringify({ message_kind: "reply", reply_to_id: requestId, body_md: "Approval response", response: body,
+      expected_route_revision: store.getQuestion(requestId)!.route_revision }),
   });
+}
+
+function expectNativeQuestionSource(h: Harness, request: MultiremiTaskHumanRequest) {
+  const task = h.store.getTask(h.taskId)!;
+  const turn = h.store.getTurnForAttempt(h.taskId)!;
+  const attempt = h.store.listTurnAttempts(turn.id).find(item => item.id === h.taskId)!;
+  const message = h.store.getMessage(request.id)!;
+  const record = message.metadata.question as { wait: { wait_id: string } };
+
+  expect(message).toMatchObject({ task_id: turn.id, session_id: turn.session_id, sender_type: "agent", sender_id: task.agentId });
+  expect(turn).toMatchObject({ current_attempt_id: task.id, agent_id: task.agentId, workspace_id: task.workspaceId });
+  expect(attempt).toMatchObject({ id: task.id, turn_id: turn.id, runtime_id: task.runtimeId });
+  expect(task.runtimeId).toBeTruthy();
+  expect(db!.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?").get(turn.session_id))
+    .toMatchObject({ workspace_id: task.workspaceId });
+  expect(message.metadata.question).toMatchObject({ workspace_id: task.workspaceId, source_attempt_id: task.id,
+    wait: { runtime_id: attempt.runtime_id } });
+  expect(typeof record.wait.wait_id).toBe("string");
+  expect(record.wait.wait_id.length).toBeGreaterThan(0);
 }
 
 describe("Multiremi approval routing e2e", () => {
@@ -228,10 +272,11 @@ describe("Multiremi approval routing e2e", () => {
     );
     await stopHarness(h);
     expect(h.store.getTaskStatus(h.taskId)).toBe("cancelled");
-    expect(h.store.getTaskHumanRequest(pending.id)?.status).toBe("cancelled");
+    expect(h.store.getTaskHumanRequest(pending.id)?.status).toBe("pending");
+    expect(h.store.getQuestion(pending.id)).toMatchObject({ status: 'pending', wait_status: 'detached', wait_reason: 'source_turn_cancelled' });
     await expect(fetch(`${h.baseUrl}/api/health`)).rejects.toThrow();
     await stopHarness(h);
-  });
+  }, 30_000);
 
   it("routes a permission request to a human and honors the approval", async () => {
     const h = await startHarness();
@@ -246,16 +291,16 @@ describe("Multiremi approval routing e2e", () => {
       expect(h.store.getTaskStatus(h.taskId)).toBe("awaiting_human" as MultiremiTaskStatus);
 
       // The kanban reads the same state over the user API.
-      const listed = await fetchRequests(h.baseUrl, h.taskId);
+      const listed = await fetchRequests(h.store, h.baseUrl, h.taskId);
       expect(listed).toHaveLength(1);
       expect(listed[0].status).toBe("pending");
 
       // Human clicks "Allow once".
-      const respondResp = await respond(h.baseUrl, h.taskId, pending.id, { option_id: "opt-allow-once" });
+      const respondResp = await respond(h.store, h.baseUrl, h.taskId, pending.id, { option_id: "opt-allow-once" });
       expect(respondResp.status).toBe(200);
 
       // Double-respond loses the first-write-wins race.
-      const conflict = await respond(h.baseUrl, h.taskId, pending.id, { option_id: "opt-reject" });
+      const conflict = await respond(h.store, h.baseUrl, h.taskId, pending.id, { option_id: "opt-reject" });
       expect(conflict.status).toBe(409);
 
       await h.run;
@@ -263,19 +308,20 @@ describe("Multiremi approval routing e2e", () => {
       const task = h.store.getTask(h.taskId)!;
       expect(task.status).toBe("completed");
 
-      const settled = (await fetchRequests(h.baseUrl, h.taskId))[0];
+      const settled = (await fetchRequests(h.store, h.baseUrl, h.taskId))[0];
       expect(settled.status).toBe("responded");
       expect(settled.response).toEqual({ option_id: "opt-allow-once" });
       expect(settled.respondedBy).toBeTruthy();
 
-      // Transcript carries the request/response audit rows.
-      const types = h.store.listTaskMessages(h.taskId).map((m) => m.type);
-      expect(types).toContain("permission_request");
-      expect(types).toContain("permission_response");
+      // The trace carries the request and its answer as one permission item.
+      const permissions = traceItems(h.daemon.traceStore().read(h.taskId).events).filter((item) => item.type === "permission");
+      expect(permissions).toHaveLength(1);
+      expect(permissions[0]).toMatchObject({ status: "completed", outcome: "selected",
+        decision: { option_id: "opt-allow-once" } });
     } finally {
       await stopHarness(h);
     }
-  });
+  }, 30_000);
 
   it("routes AskUserQuestion to a human and folds answers back", async () => {
     const h = await startHarness({ withElicitation: true });
@@ -284,7 +330,7 @@ describe("Multiremi approval routing e2e", () => {
         () => h.store.listTaskHumanRequests(h.taskId).find((r) => r.kind === "permission" && r.status === "pending"),
         "pending permission request",
       );
-      await respond(h.baseUrl, h.taskId, permission.id, { option_id: "opt-allow-always" });
+      await respond(h.store, h.baseUrl, h.taskId, permission.id, { option_id: "opt-allow-always" });
 
       const question = await waitFor(
         () => h.store.listTaskHumanRequests(h.taskId).find((r) => r.kind === "question" && r.status === "pending"),
@@ -300,21 +346,22 @@ describe("Multiremi approval routing e2e", () => {
 
       // Human answers keyed by question text; the worker folds it back into
       // elicitation content keyed by the original field name.
-      const answerResp = await respond(h.baseUrl, h.taskId, question.id, {
+      const answerResp = await respond(h.store, h.baseUrl, h.taskId, question.id, {
         answers: { [questions[0].question.question]: "staging" },
       });
-      expect(answerResp.status).toBe(200);
+      expect(answerResp.status, await answerResp.clone().text()).toBe(200);
 
       await h.run;
       expect(h.elicitationResults).toEqual([{ action: "accept", content: { question_0: "staging" } }]);
       expect(h.store.getTask(h.taskId)!.status).toBe("completed");
-      const types = h.store.listTaskMessages(h.taskId).map((m) => m.type);
-      expect(types).toContain("question_request");
-      expect(types).toContain("question_response");
+      const items = traceItems(h.daemon.traceStore().read(h.taskId).events);
+      expect(items.filter((item) => item.type === "question")).toEqual([expect.objectContaining({
+        status: "completed", message: "Which environment should I deploy to?", answers: { [questions[0].question.question]: "staging" },
+      })]);
     } finally {
       await stopHarness(h);
     }
-  });
+  }, 30_000);
 
   it("routes AskUserQuestion in auto approval mode while tools remain auto-approved", async () => {
     const h = await startHarness({ withElicitation: true, approvalMode: "auto" });
@@ -325,7 +372,7 @@ describe("Multiremi approval routing e2e", () => {
       );
       expect(h.store.listTaskHumanRequests(h.taskId).some((r) => r.kind === "permission")).toBe(false);
       const questions = (question.payload as { questions: Array<{ question: { question: string } }> }).questions;
-      await respond(h.baseUrl, h.taskId, question.id, {
+      await respond(h.store, h.baseUrl, h.taskId, question.id, {
         answers: { [questions[0]!.question.question]: "production" },
       });
 
@@ -335,7 +382,7 @@ describe("Multiremi approval routing e2e", () => {
     } finally {
       await stopHarness(h);
     }
-  });
+  }, 30_000);
 
   it("expires an unanswered permission request and denies conservatively", async () => {
     const h = await startHarness({ humanRequestTimeoutMs: 500 });
@@ -347,13 +394,14 @@ describe("Multiremi approval routing e2e", () => {
 
       await h.run; // nobody responds; worker times out and expires the request
       expect(h.outcomes).toEqual([{ outcome: "cancelled" }]);
-      expect(h.store.getTaskHumanRequest(pending.id)!.status).toBe("timeout");
+      expect(h.store.getTaskHumanRequest(pending.id)!.status).toBe("pending");
+      expect(h.store.getQuestion(pending.id)).toMatchObject({ status: 'pending', wait_status: 'detached', wait_reason: 'timeout' });
       // The task itself resumes and completes — a denied tool is not a failure.
       expect(h.store.getTask(h.taskId)!.status).toBe("completed");
     } finally {
       await stopHarness(h);
     }
-  });
+  }, 30_000);
 
   it("uses the shorter timeout for unattended permission requests", async () => {
     const h = await startHarness({
@@ -366,14 +414,16 @@ describe("Multiremi approval routing e2e", () => {
         () => h.store.listTaskHumanRequests(h.taskId).find((r) => r.status === "pending"),
         "pending unattended permission request",
       );
+      expectNativeQuestionSource(h, pending);
 
       await h.run;
       expect(h.outcomes).toEqual([{ outcome: "cancelled" }]);
-      expect(h.store.getTaskHumanRequest(pending.id)!.status).toBe("timeout");
+      expect(h.store.getTaskHumanRequest(pending.id)!.status).toBe("pending");
+      expect(h.store.getQuestion(pending.id)).toMatchObject({ status: 'pending', wait_status: 'detached', wait_reason: 'timeout' });
     } finally {
       await stopHarness(h);
     }
-  });
+  }, 30_000);
 
   it("keeps the attended timeout when the unattended timeout is shorter", async () => {
     const h = await startHarness({
@@ -388,13 +438,13 @@ describe("Multiremi approval routing e2e", () => {
       await new Promise((resolve) => setTimeout(resolve, 500));
       expect(h.store.getTaskHumanRequest(pending.id)!.status).toBe("pending");
 
-      await respond(h.baseUrl, h.taskId, pending.id, { option_id: "opt-allow-once" });
+      await respond(h.store, h.baseUrl, h.taskId, pending.id, { option_id: "opt-allow-once" });
       await h.run;
       expect(h.outcomes).toEqual([{ outcome: "selected", optionId: "opt-allow-once" }]);
     } finally {
       await stopHarness(h);
     }
-  });
+  }, 30_000);
 
   it("honors the unattended timeout environment override for questions", async () => {
     process.env.MULTIREMI_UNATTENDED_HUMAN_REQUEST_TIMEOUT_MS = "100";
@@ -409,13 +459,15 @@ describe("Multiremi approval routing e2e", () => {
         () => h.store.listTaskHumanRequests(h.taskId).find((r) => r.kind === "question" && r.status === "pending"),
         "pending unattended question request",
       );
+      expectNativeQuestionSource(h, pending);
 
       await h.run;
       expect(h.elicitationResults).toEqual([{ action: "cancel" }]);
-      expect(h.store.getTaskHumanRequest(pending.id)!.status).toBe("timeout");
+      expect(h.store.getTaskHumanRequest(pending.id)!.status).toBe("pending");
+      expect(h.store.getQuestion(pending.id)).toMatchObject({ status: 'pending', wait_status: 'detached', wait_reason: 'timeout' });
       expect(h.store.getTask(h.taskId)!.status).toBe("completed");
     } finally {
       await stopHarness(h);
     }
-  });
+  }, 30_000);
 });

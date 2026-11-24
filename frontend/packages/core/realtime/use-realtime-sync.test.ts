@@ -1,4 +1,4 @@
-import { QueryClient, type InfiniteData } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setApiInstance } from "../api";
 import type { ApiClient } from "../api/client";
@@ -9,9 +9,7 @@ import { notificationPreferenceKeys } from "../notification-preferences/queries"
 import { workspaceKeys } from "../workspace/queries";
 import type {
   ChatDonePayload,
-  ChatMessage,
   ChatPendingTask,
-  ChatMessagesPage,
   InboxItem,
   Workspace,
 } from "../types";
@@ -24,7 +22,6 @@ import {
 
 const sessionId = "session-1";
 const taskId = "task-1";
-const messagesKey = chatKeys.messages(sessionId);
 const pendingKey = chatKeys.pendingTask(sessionId);
 
 function createQueryClient() {
@@ -33,17 +30,6 @@ function createQueryClient() {
       queries: { retry: false },
     },
   });
-}
-
-function userMessage(): ChatMessage {
-  return {
-    id: "msg-user",
-    chat_session_id: sessionId,
-    role: "user",
-    content: "hello",
-    task_id: null,
-    created_at: "2026-05-13T05:00:00Z",
-  };
 }
 
 function donePayload(overrides: Partial<ChatDonePayload> = {}): ChatDonePayload {
@@ -59,47 +45,67 @@ function donePayload(overrides: Partial<ChatDonePayload> = {}): ChatDonePayload 
 }
 
 describe("applyChatDoneToCache", () => {
-  it("writes the assistant message before clearing pending task", () => {
+  it("clears the pending task when the reply completes", () => {
     const qc = createQueryClient();
-    qc.setQueryData<ChatMessage[]>(messagesKey, [userMessage()]);
     qc.setQueryData<ChatPendingTask>(pendingKey, {
       task_id: taskId,
       status: "running",
     });
 
-    const setQueryData = vi.spyOn(qc, "setQueryData");
-
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
     applyChatDoneToCache(qc, donePayload());
-
-    expect(setQueryData.mock.calls[0]?.[0]).toEqual(messagesKey);
-    expect(setQueryData.mock.calls[2]?.[0]).toEqual(pendingKey);
-    expect(qc.getQueryData<ChatPendingTask>(pendingKey)).toEqual({});
-    expect(qc.getQueryData<ChatMessage[]>(messagesKey)).toEqual([
-      userMessage(),
-      {
-        id: "msg-assistant",
-        chat_session_id: sessionId,
-        role: "assistant",
-        content: "done",
-        task_id: taskId,
-        created_at: "2026-05-13T05:00:02Z",
-        elapsed_ms: 1234,
-      },
-    ]);
+    expect(qc.getQueryData<ChatPendingTask>(pendingKey)).toEqual({ supports_queue: true });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["task-trace", taskId], refetchType: "none" });
   });
 
-  it("does not duplicate a replayed chat done event", () => {
+  it("marks the turn trace stale without rereading it for an active reader", async () => {
     const qc = createQueryClient();
-    const assistant: ChatMessage = {
-      id: "msg-assistant",
-      chat_session_id: sessionId,
-      role: "assistant",
-      content: "done",
-      task_id: taskId,
-      created_at: "2026-05-13T05:00:02Z",
-      elapsed_ms: 1234,
-    };
-    qc.setQueryData<ChatMessage[]>(messagesKey, [userMessage(), assistant]);
+    const read = vi.fn(async () => ({ state: {}, read: { state: "ok" }, pending: [] }));
+    const observer = new QueryObserver(qc, { queryKey: ["task-trace", taskId], queryFn: read, staleTime: Infinity });
+    const unsubscribe = observer.subscribe(() => {});
+    await vi.waitFor(() => expect(observer.getCurrentResult().isSuccess).toBe(true));
+    applyChatDoneToCache(qc, donePayload());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(qc.getQueryState(["task-trace", taskId])?.isInvalidated).toBe(true);
+    unsubscribe();
+  });
+
+  it("leaves a sealed trace fresh, so opening the finished turn's fold does not reread it", async () => {
+    const qc = createQueryClient();
+    const closed = { state: { closed: true, items: [], turn: null, head: 9 }, read: { state: "ok", format: "v2" }, pending: [] };
+    qc.setQueryData(["task-trace", taskId], closed);
+    applyChatDoneToCache(qc, donePayload());
+    expect(qc.getQueryState(["task-trace", taskId])?.isInvalidated).toBe(false);
+    // The fold's reader mounts afterwards; a sealed cache is fresh for it.
+    const read = vi.fn(async () => closed);
+    const observer = new QueryObserver(qc, { queryKey: ["task-trace", taskId], queryFn: read, staleTime: Infinity });
+    const unsubscribe = observer.subscribe(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(read).not.toHaveBeenCalled();
+    expect(observer.getCurrentResult().data).toBe(closed);
+    unsubscribe();
+  });
+
+  it("marks a sealed trace stale when its read was not ok, so the finished turn rereads it", async () => {
+    const qc = createQueryClient();
+    // A live view's first read can land before the daemon claims the attempt;
+    // the stream then delivers and seals the trace.
+    const sealed = { state: { closed: true, items: [], turn: null, head: 5 }, read: { state: "not_found", format: "v2" }, pending: [] };
+    qc.setQueryData(["task-trace", taskId], sealed);
+    applyChatDoneToCache(qc, donePayload());
+    expect(qc.getQueryState(["task-trace", taskId])?.isInvalidated).toBe(true);
+    const fresh = { ...sealed, read: { state: "ok", format: "v2" } };
+    const read = vi.fn(async () => fresh);
+    const observer = new QueryObserver(qc, { queryKey: ["task-trace", taskId], queryFn: read, staleTime: Infinity });
+    const unsubscribe = observer.subscribe(() => {});
+    await vi.waitFor(() => expect(observer.getCurrentResult().data).toEqual(fresh));
+    expect(read).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("handles a replayed chat done event", () => {
+    const qc = createQueryClient();
     qc.setQueryData<ChatPendingTask>(pendingKey, {
       task_id: taskId,
       status: "running",
@@ -107,16 +113,11 @@ describe("applyChatDoneToCache", () => {
 
     applyChatDoneToCache(qc, donePayload());
 
-    expect(qc.getQueryData<ChatMessage[]>(messagesKey)).toEqual([
-      userMessage(),
-      assistant,
-    ]);
-    expect(qc.getQueryData<ChatPendingTask>(pendingKey)).toEqual({});
+    expect(qc.getQueryData<ChatPendingTask>(pendingKey)).toEqual({ supports_queue: true });
   });
 
-  it("falls back to invalidation-only when older servers omit message fields", () => {
+  it("settles pending tasks when older servers omit message fields", () => {
     const qc = createQueryClient();
-    qc.setQueryData<ChatMessage[]>(messagesKey, [userMessage()]);
     qc.setQueryData<ChatPendingTask>(pendingKey, {
       task_id: taskId,
       status: "running",
@@ -127,10 +128,7 @@ describe("applyChatDoneToCache", () => {
       donePayload({ message_id: undefined, content: undefined }),
     );
 
-    expect(qc.getQueryData<ChatMessage[]>(messagesKey)).toEqual([
-      userMessage(),
-    ]);
-    expect(qc.getQueryData<ChatPendingTask>(pendingKey)).toEqual({});
+    expect(qc.getQueryData<ChatPendingTask>(pendingKey)).toEqual({ supports_queue: true });
   });
 });
 
@@ -211,35 +209,6 @@ describe("applyWorkspaceUpdatedToCache", () => {
 });
 
 
-describe("applyChatDoneToCache paged messages", () => {
-  it("patches page zero and skips older pages without duplicating replayed events", () => {
-    const qc = createQueryClient();
-    const older = userMessage();
-    const latest: ChatMessage = {
-      id: "msg-latest",
-      chat_session_id: sessionId,
-      role: "user",
-      content: "latest",
-      task_id: null,
-      created_at: "2026-05-13T05:00:01Z",
-    };
-    qc.setQueryData<InfiniteData<ChatMessagesPage>>(chatKeys.messagesPage(sessionId), {
-      pages: [
-        { messages: [latest], limit: 1, has_more: true, next_cursor: { created_at: latest.created_at, id: latest.id } },
-        { messages: [older], limit: 1, has_more: false, next_cursor: null },
-      ],
-      pageParams: [null, { created_at: latest.created_at, id: latest.id }],
-    });
-
-    applyChatDoneToCache(qc, donePayload());
-    applyChatDoneToCache(qc, donePayload());
-
-    const paged = qc.getQueryData<InfiniteData<ChatMessagesPage>>(chatKeys.messagesPage(sessionId));
-
-    expect(paged?.pages[0]?.messages.map((m) => m.id)).toEqual(["msg-latest", "msg-assistant"]);
-    expect(paged?.pages[1]?.messages.map((m) => m.id)).toEqual(["msg-user"]);
-  });
-});
 describe("resolveInboxSourceSlug", () => {
   function workspace(overrides: Partial<Workspace> = {}): Workspace {
     return {

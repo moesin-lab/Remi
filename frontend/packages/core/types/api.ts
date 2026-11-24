@@ -4,6 +4,7 @@ import type { TimelineEntry } from "./activity";
 import type { IssueSession, SessionEvent, SessionResult } from "./issue-session";
 import type { MemberRole } from "./workspace";
 import type { Project } from "./project";
+import type { TraceTurnPage } from "@multiremi/contracts/trace";
 
 // Issue API
 export interface CreateIssueRequest {
@@ -17,6 +18,7 @@ export interface CreateIssueRequest {
   assignee_type?: IssueAssigneeType | null;
   assignee_id?: string | null;
   parent_issue_id?: string;
+  blocked_by?: string[];
   project_id?: string | null;
   start_date?: string;
   due_date?: string;
@@ -24,6 +26,7 @@ export interface CreateIssueRequest {
 }
 
 export interface UpdateIssueRequest {
+  force?: boolean;
   runtime_workspace_id?: string | null;
   title?: string;
   description?: string;
@@ -57,10 +60,17 @@ export interface IssueRetitleResponse {
 }
 
 export interface ListIssuesParams {
+  top_level_only?: boolean;
   limit?: number;
   offset?: number;
   workspace_id?: string;
   status?: IssueStatus;
+  /**
+   * Comma list form of `status` (MUL-472 c). `GET /api/issues` has always read
+   * `statuses` and `status` through the same splitter; this only exposes the
+   * list form to callers that want one request for several statuses.
+   */
+  statuses?: IssueStatus[];
   priority?: IssuePriority;
   assignee_id?: string;
   assignee_ids?: string[];
@@ -96,7 +106,18 @@ export interface IssueActorRef {
   id: string;
 }
 
+export interface ListIssueStatusPagesParams extends Omit<ListIssuesParams, "status" | "offset"> {
+  statuses: IssueStatus[];
+  include_archived_total?: boolean;
+}
+
+export interface IssueStatusPagesResponse {
+  groups: Partial<Record<IssueStatus, IssueStatusBucket & { has_more: boolean }>>;
+  archived_total?: number;
+}
+
 export interface ListGroupedIssuesParams {
+  top_level_only?: boolean;
   group_by: "assignee";
   limit?: number;
   offset?: number;
@@ -120,6 +141,7 @@ export interface ListGroupedIssuesParams {
   label_ids?: string[];
   group_assignee_type?: IssueAssigneeType | "none";
   group_assignee_id?: string;
+  include_archived_total?: boolean;
   include_archived?: boolean;
   archived_only?: boolean;
   sort_by?: "position" | "priority" | "title" | "created_at" | "start_date" | "due_date";
@@ -143,6 +165,7 @@ export interface IssueAssigneeGroup {
 /** Raw backend response shape for `GET /api/issues/grouped?group_by=assignee`. */
 export interface GroupedIssuesResponse {
   groups: IssueAssigneeGroup[];
+  archived_total?: number;
 }
 
 /** Per-status bucket in the paginated issue cache. `total` is the server count (all pages), not the length of `issues`. */
@@ -153,8 +176,8 @@ export interface IssueStatusBucket {
 
 /**
  * Frontend cache shape for the issue list. Data is bucketed by status so
- * each column can paginate independently. Assembled from per-status
- * `api.listIssues` responses by the query functions in `issues/queries.ts`.
+ * each column can paginate independently. Assembled from a status-pages
+ * snapshot (or legacy per-status responses when an older API returns 404).
  */
 export interface ListIssuesCache {
   byStatus: Partial<Record<IssueStatus, IssueStatusBucket>>;
@@ -270,14 +293,23 @@ export interface SharedIssueBundle {
   timeline: TimelineEntry[];
   sessions: Array<IssueSession & {
     events: SessionEvent[];
-    tasks: Array<AgentTask & { messages?: Array<Record<string, unknown>> }>;
+    tasks: AgentTask[];
   }>;
   session_results: SessionResult[];
-  tasks: Array<AgentTask & { messages?: Array<Record<string, unknown>> }>;
+  tasks: AgentTask[];
   issue_workspace: IssueWorkspace | null;
   usage: IssueUsageSummary;
   actors: SharedIssueActor[];
 }
+
+/** A shared task's trace read: one `view=turn` page plus the read status. */
+export type SharedTaskTracePage = TraceTurnPage & {
+  state: "ok" | "unreachable" | "not_found" | "lost";
+  source?: "daemon" | null;
+  runtime_name?: string | null;
+  reason?: string;
+  retryable?: boolean;
+};
 
 // Pagination
 export interface PaginationParams {

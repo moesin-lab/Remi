@@ -1,3 +1,4 @@
+import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import {
   isQueuedCapabilityAlert,
@@ -54,15 +55,16 @@ describe("queued capability wait decision", () => {
 });
 
 describe("task capability monitor lifecycle", () => {
-  it("starts one unref'd 60-second timer, sweeps immediately, and stops it", () => {
+  it("starts one unref'd 60-second timer, sweeps immediately, and stops it", async () => {
     const refresh = mock(() => {});
     const unref = mock(() => {});
-    const timer = { unref } as unknown as ReturnType<typeof setInterval>;
-    const set = spyOn(globalThis, "setInterval").mockReturnValue(timer);
-    const clear = spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+    const timer = { unref } as unknown as ReturnType<typeof setTimeout>;
+    const set = spyOn(globalThis, "setTimeout").mockReturnValue(timer);
+    const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
     const monitor = new TaskCapabilityMonitor(refresh);
     monitor.start();
     monitor.start();
+    await Promise.resolve();
     expect(set).toHaveBeenCalledTimes(1);
     expect(set.mock.calls[0]?.[1]).toBe(QUEUED_CAPABILITY_SWEEP_MS);
     expect(unref).toHaveBeenCalledTimes(1);
@@ -72,11 +74,13 @@ describe("task capability monitor lifecycle", () => {
     expect(clear).toHaveBeenCalledTimes(1);
     expect(clear).toHaveBeenCalledWith(timer);
     monitor.start();
+    await Promise.resolve();
     expect(refresh).toHaveBeenCalledTimes(2);
     monitor.stop();
   });
 
   it("guards reentry and releases the guard after a failed sweep", () => {
+    spyOn(console, "error").mockImplementation(() => {});
     let calls = 0;
     const monitor = new TaskCapabilityMonitor(() => {
       calls++;
@@ -86,5 +90,33 @@ describe("task capability monitor lifecycle", () => {
     expect(() => monitor.sweep()).not.toThrow();
     monitor.sweep();
     expect(calls).toBe(2);
+  });
+
+  it("runs other maintenance jobs when one throws", () => {
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const bug = new TypeError("capability unavailable");
+    const calls: number[] = [];
+    const monitor = new TaskCapabilityMonitor([
+       () => { throw bug; },
+      now => calls.push(now),
+    ]);
+    monitor.sweep();
+    monitor.sweep();
+    expect(calls).toHaveLength(2);
+    expect(errors).toHaveBeenCalledTimes(2);
+    expect(errors.mock.calls[0]?.[1]).toBe(bug);
+  });
+
+  it("runs every job before propagating a connection failure and releases the guard", () => {
+    const calls = mock(() => {});
+    const outage = new DatabaseUnavailableError();
+    let monitor!: TaskCapabilityMonitor;
+    monitor = new TaskCapabilityMonitor([
+      () => { monitor.sweep(); throw outage; }, calls,
+      () => { throw new DatabaseUnavailableError(); }, calls,
+    ]);
+    expect(() => monitor.sweep()).toThrow(outage);
+    expect(() => monitor.sweep()).toThrow(outage);
+    expect(calls).toHaveBeenCalledTimes(4);
   });
 });

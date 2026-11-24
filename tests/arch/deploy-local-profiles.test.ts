@@ -15,6 +15,29 @@ const base = readCompose("compose.local.yml");
 const dev = readCompose("compose.local-dev.yml");
 
 describe("local stable and dev isolation", () => {
+  test('isolates internal update privileges, persistent data and migration execution', () => {
+    const internal = readCompose('compose.internal-updates.yml');
+    expect(Object.keys(internal.services).sort()).toEqual(['api', 'rehearsal', 'updater', 'web']);
+    for (const role of ['api', 'web']) {
+      expect(internal.services[role]!.command.at(-1)).toBe('/usr/local/lib/remi/supervisor.mjs');
+      expect(internal.services[role]!.volumes).toContain('program:/remi-program:ro');
+    }
+    expect(internal.services.updater!.volumes).toContain('api-home:/remi-data:ro');
+    expect(internal.services.updater!.volumes).toContain('update-state:/remi-state');
+    const rehearsal = internal.services.rehearsal!;
+    expect(rehearsal.network_mode).toBe('none');
+    expect(rehearsal.env_file).toBeUndefined();
+    expect(rehearsal.environment).toBeUndefined();
+    expect(rehearsal.volumes).toEqual(['program:/remi-program:ro', 'update-control:/remi-control', 'update-state:/remi-state:ro']);
+    for (const service of Object.values(internal.services)) {
+      expect(service.privileged).toBeUndefined();
+      expect(service.pid).toBeUndefined();
+      expect(JSON.stringify(service.volumes)).not.toMatch(/docker\.sock|postgres-data/);
+    }
+    for (const volume of Object.values(internal.volumes ?? {})) {
+      expect(volume?.external).toBeUndefined(); expect(volume?.name).toBeUndefined();
+    }
+  });
   test("scopes every persistent resource to the caller's Compose project", () => {
     expect(Object.keys(base.services).sort()).toEqual(["api", "postgres", "web"]);
     expect(Object.keys(dev.services).sort()).toEqual(["api", "web"]);
@@ -65,7 +88,7 @@ describe("local stable and dev isolation", () => {
     expect(api.environment.MULTIREMI_DAEMON_DIRECT_BASE_URL).toContain("${REMI_DAEMON_SERVER_URL:?");
     expect(api.environment.MULTIREMI_ALLOW_PASSWORD_LOGIN).toBe("1");
     expect(api.environment.MULTIREMI_ALLOW_EMAIL_CODE_LOGIN).toBe("0");
-    for (const key of ["HOME", "MULTIREMI_UPLOAD_DIR", "MULTIREMI_SESSION_ARCHIVE_ROOT", "MULTIREMI_SSH_MESH_CONTROL_PLANE_ROOT"]) {
+    for (const key of ["HOME", "MULTIREMI_UPLOAD_DIR", "MULTIREMI_SSH_MESH_CONTROL_PLANE_ROOT"]) {
       expect(api.environment[key]).toMatch(/^\/srv\/multiremi(?:\/|$)/u);
     }
     expect(dev.services.api!.environment.MULTIREMI_BACKGROUND_JOBS).toBe("${REMI_BACKGROUND_JOBS:-0}");

@@ -1,3 +1,7 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue } from './helpers.js';
+import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -17,19 +21,54 @@ afterEach(() => {
 });
 
 describe("Feishu sender allowlist Issue authorization", () => {
-  it("migrates existing bot configurations and pending Chat deliveries to Agent access", async () => {
-    const fixture = await allowlistFixture();
-    expect(fixture.store.isFeishuBotTaskIssueCreationRestricted(fixture.inbound.taskId)).toBe(true);
-    // Reopen this in-memory fixture with the pre-policy schema, as on upgrade.
-    db!.exec("ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN sender_access_policy");
+  it("migrates existing Agent-access bots to the allowlist once without pre-approving anyone", async () => {
+    const fixture = await allowlistFixture(false, false);
+    expect(fixture.config.senderAccessPolicy).toBe("agent");
+    // Reopen this in-memory fixture as a store that has not run the enforcement migration yet.
+    db!.exec("DELETE FROM multiremi_schema_migrations WHERE id = 'feishu_sender_allowlist_enforced_v1'");
+    runMigrations(db!, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(db!);
-    expect(upgraded.getFeishuBotConfig("local")?.senderAccessPolicy).toBe("agent");
+    expect(upgraded.getFeishuBotConfig("local")?.senderAccessPolicy).toBe("allowlist");
     expect(upgraded.listFeishuBotSenders("local")[0]?.allowed).toBe(false);
-    expect(upgraded.isFeishuBotTaskIssueCreationRestricted(fixture.inbound.taskId)).toBe(false);
-    expect((await createIssue(fixture, fixture.headers)).status).toBe(201);
+    expect(upgraded.isFeishuBotTaskIssueCreationRestricted(fixture.inbound.taskId)).toBe(true);
+    expect(() => upgraded.submitFeishuBotMessage("local", "rt_allowlist", {
+      revision: fixture.config.revision, externalSessionKey: "oc_allowlist:thread:omt_allowlist",
+      externalMessageId: "om_after_upgrade", senderOpenId: "ou_allowlist_sender", text: "Still there?",
+    })).toThrow("allowlist");
+
+    // An explicit later choice survives restarts; the migration runs only once.
+    upgraded.upsertFeishuBotConfig("local", { agentId: fixture.agent.id, runtimeId: "rt_allowlist",
+      appId: "cli_allowlist", appSecretOp: "keep", domain: "feishu", enabled: true, senderAccessPolicy: "agent" });
+    expect(new MultiremiStore(db!).getFeishuBotConfig("local")?.senderAccessPolicy).toBe("agent");
+
+    // A pre-policy schema also lands on the allowlist.
+    db!.exec("ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN sender_access_policy");
+    expect(new MultiremiStore(db!).getFeishuBotConfig("local")?.senderAccessPolicy).toBe("allowlist");
   });
 
-  it("defaults to Agent capabilities for every bot sender, including unbound and owner accounts", async () => {
+  it("defaults new bots to the allowlist and admits a sender only after approval", async () => {
+    const store = createLocalStore();
+    const agent = store.createAgent({ name: "Feishu bot", provider: "codex" });
+    store.registerRuntime({ id: "rt_default", name: "codex", provider: "codex", workspaceId: "local", daemonId: "daemon_default" });
+    store.heartbeatRuntime("rt_default", { supportsFeishuBotConfig: true });
+    const config = store.upsertFeishuBotConfig("local", { agentId: agent.id, runtimeId: "rt_default", appId: "cli_default",
+      appSecretOp: "set", appSecret: "wJ4tQ7xR2nB8vC5mZ1kL0pS6dF3gH9jA", domain: "feishu", enabled: true });
+    expect(config.senderAccessPolicy).toBe("allowlist");
+    const message = { revision: config.revision, externalSessionKey: "oc_default", externalMessageId: "om_default",
+      senderOpenId: "ou_default_sender", senderName: "Default sender", text: "Hello", chatType: "p2p" as const };
+    let rejection: unknown;
+    try { store.submitFeishuBotMessage("local", "rt_default", message); } catch (error) { rejection = error; }
+    expect(rejection).toMatchObject({ status: 409, code: "sender_not_allowed" });
+    const [pending] = store.listFeishuBotSenders("local");
+    expect(pending).toMatchObject({ display_name: "Default sender", allowed: false });
+    expect(store.listChatSessions("local")).toHaveLength(0);
+
+    store.setFeishuBotSenderAllowed("local", pending!.id, true, "local");
+    const admitted = store.submitFeishuBotMessage("local", "rt_default", message);
+    expect(admitted).toMatchObject({ duplicate: false, senderAllowed: true });
+  });
+
+  it("grants Agent capabilities to every bot sender in Agent access mode, including unbound and owner accounts", async () => {
     const fixture = await allowlistFixture(false, false);
     expect(fixture.config.senderAccessPolicy).toBe("agent");
     expect(fixture.store.listFeishuBotSenders("local")[0]?.allowed).toBe(false);
@@ -59,7 +98,9 @@ describe("Feishu sender allowlist Issue authorization", () => {
 
   it("restores existing Chats, delegated tasks and Autopilots when sender restrictions are disabled", async () => {
     const fixture = await allowlistFixture();
-    const child = fixture.store.createTask({ agentId: fixture.worker.id, prompt: "Delegated request", parentTaskId: fixture.inbound.taskId });
+    const delegatedChat = fixture.store.createChatSession({ agentId: fixture.worker.id, creatorId: 'local', title: 'Human-created delegated work' });
+    const child = fixture.store.createTask({ agentId: fixture.worker.id, chatSessionId: delegatedChat.id,
+      prompt: "Delegated request", parentTaskId: fixture.inbound.taskId, assignmentAuthorType: "system" });
     const childHeaders = await taskHeaders(fixture.store, child.id);
     await expectApprovalRequired(await createIssue(fixture, childHeaders));
     const request = { agent_id: fixture.agent.id, runtime_id: "rt_allowlist", app_id: "cli_allowlist",
@@ -77,7 +118,7 @@ describe("Feishu sender allowlist Issue authorization", () => {
       await expectIssueCapabilities(fixture, headers, true);
       expect((await createIssue(fixture, headers)).status).toBe(201);
     }
-    const autopilot = fixture.store.createAutopilot({ title: "Follow-up Issue", assigneeId: fixture.worker.id, executionMode: "create_issue" });
+    const autopilot = createResponsibleTestAutopilot(fixture.store, { title: "Follow-up Issue", assigneeId: fixture.worker.id, executionMode: "create_issue" });
     expect(fixture.store.runAutopilot(autopilot.id, { sourceTaskId: fixture.inbound.taskId }).issueId).toBeTruthy();
 
     // Ordinary config saves must not silently change the chosen policy.
@@ -94,7 +135,7 @@ describe("Feishu sender allowlist Issue authorization", () => {
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ code: "issue_creation_requires_proposal" });
     await expectIssueCapabilities(fixture, fixture.headers, false);
-    const child = fixture.store.createTask({ agentId: fixture.worker.id, prompt: "Delegate", parentTaskId: fixture.inbound.taskId,
+    const child = fixture.store.createTask({ agentId: fixture.worker.id, prompt: "Delegate", parentTaskId: fixture.inbound.taskId, assignmentAuthorType: "system",
       issueCreationRestricted: true });
     const childResponse = await createIssue(fixture, await taskHeaders(fixture.store, child.id));
     expect(childResponse.status).toBe(403);
@@ -129,7 +170,7 @@ describe("Feishu sender allowlist Issue authorization", () => {
       expect(response.status, path).toBe(403);
       expect(await response.json(), path).toMatchObject({
         code: "feishu_sender_approval_required",
-        error: expect.stringContaining("Settings > Integrations > Feishu account allowlist"),
+        error: expect.stringContaining("IM platforms > Feishu > Access control > Feishu account allowlist"),
       });
     }
     expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(0);
@@ -152,14 +193,20 @@ describe("Feishu sender allowlist Issue authorization", () => {
   it("applies approval changes to existing delegated and run-only Autopilot tasks without freezing their policy", async () => {
     const fixture = await allowlistFixture();
     fixture.allow(true);
-    const delegated = await fixture.app.request("/api/multiremi/tasks", {
+    const delegated = await fixture.app.request(`/api/sessions/${fixture.inbound.chatSessionId}/messages`, {
       method: "POST",
       headers: fixture.headers,
-      body: JSON.stringify({ agentId: fixture.worker.id, prompt: "Delegate the requested Issue" }),
+      body: JSON.stringify(requestMessageBody(fixture.store, { agentId: fixture.worker.id, prompt: "Delegate the requested Issue" })),
     });
-    expect(delegated.status).toBe(201);
-    const delegatedTaskId = (await delegated.json() as { task: { id: string } }).task.id;
-    const autopilot = fixture.store.createAutopilot({
+    expect(delegated.status).toBe(200);
+    // #3: agent requests from private Chat are retained for the next turn.
+    const delivery = await delegated.json();
+    expect(delivery.wake_applied).toBe("next_turn");
+    expect(delivery.wake_reason).toBe("no_issue_target");
+    const delegatedChat = fixture.store.createChatSession({ agentId: fixture.worker.id, creatorId: 'local', title: 'Human-created delegated work' });
+    const delegatedTaskId = fixture.store.createTask({agentId:fixture.worker.id, chatSessionId: delegatedChat.id, prompt:"Trusted platform handoff",
+      parentTaskId:fixture.inbound.taskId, assignmentAuthorType:"system"}).id;
+    const autopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Existing run-only automation", assigneeId: fixture.worker.id, executionMode: "run_only",
     });
     const run = fixture.store.runAutopilot(autopilot.id, { sourceTaskId: fixture.inbound.taskId });
@@ -167,7 +214,7 @@ describe("Feishu sender allowlist Issue authorization", () => {
     const credentials = [];
     for (const taskId of taskIds) {
       expect(fixture.store.getTask(taskId)).toMatchObject({
-        parentTaskId: fixture.inbound.taskId, issueCreationRestricted: false,
+        issueCreationRestricted: false,
       });
       const headers = await taskHeaders(fixture.store, taskId);
       credentials.push(headers);
@@ -183,19 +230,24 @@ describe("Feishu sender allowlist Issue authorization", () => {
   it("requires every sender contributing to the same Chat, including active steers and later turns", async () => {
     const fixture = await allowlistFixture();
     fixture.allow(true);
-    const mixed = fixture.store.submitFeishuBotMessage("local", "rt_allowlist", {
+    const steer = {
       revision: fixture.config.revision,
       externalSessionKey: "oc_allowlist:thread:omt_allowlist",
       externalMessageId: "om_second_sender",
       senderOpenId: "ou_second_sender",
       senderName: "Second sender",
       text: "Include another Issue while this task is running.",
-    });
-    expect(mixed).toMatchObject({ steered: true, taskId: fixture.inbound.taskId });
-    await expectApprovalRequired(await createIssue(fixture, fixture.headers));
+    };
+    expect(() => fixture.store.submitFeishuBotMessage("local", "rt_allowlist", steer)).toThrow("allowlist");
     const second = fixture.store.listFeishuBotSenders("local").find((sender) => sender.id !== fixture.senderId)!;
+    expect(second.allowed).toBe(false);
     fixture.store.setFeishuBotSenderAllowed("local", second.id, true, "local");
+    const mixed = fixture.store.submitFeishuBotMessage("local", "rt_allowlist", steer);
+    expect(mixed).toMatchObject({ steered: true, taskId: fixture.inbound.taskId });
     expect((await createIssue(fixture, fixture.headers)).status).toBe(201);
+    fixture.store.setFeishuBotSenderAllowed("local", second.id, false, "local");
+    await expectApprovalRequired(await createIssue(fixture, fixture.headers));
+    fixture.store.setFeishuBotSenderAllowed("local", second.id, true, "local");
 
     fixture.allow(false);
     fixture.store.cancelTask(fixture.inbound.taskId);
@@ -229,8 +281,12 @@ describe("Feishu sender allowlist Issue authorization", () => {
   it("preserves dynamic sender authority through queued system-event tasks", async () => {
     const fixture = await allowlistFixture();
     fixture.allow(true);
-    const issue = fixture.store.createIssue({ title: "Source work", workspaceId: "local", status: "todo" });
-    const autopilot = fixture.store.createAutopilot({
+    const parent = createResponsibleTestIssue(fixture.store, { title: "Source parent", workspaceId: "local", status: "in_progress",
+      assigneeType: 'agent', assigneeId: fixture.worker.id });
+    const childOwner = fixture.store.createAgent({ name: "Source child owner", provider: "codex" });
+    const issue = createResponsibleTestIssue(fixture.store, { title: "Source work", workspaceId: "local", status: "todo",
+      parentIssueId: parent.id, assigneeType: 'agent', assigneeId: childOwner.id });
+    const autopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Follow up source Issue", assigneeId: fixture.worker.id, executionMode: "trigger_issue",
     });
     fixture.store.createAutopilotTrigger(autopilot.id, {
@@ -240,28 +296,33 @@ describe("Feishu sender allowlist Issue authorization", () => {
         conditions: [{ field: "status", operator: "becomes", value: "done" }],
       },
     });
+    // The parent's execution owner closes its direct child from a round that
+    // carries the inbound sender's lineage.
+    const source = fixture.store.createTask({ agentId: fixture.worker.id, issueId: parent.id, prompt: 'Review the original request',
+      parentTaskId: fixture.inbound.taskId, assignmentAuthorType: 'system' });
     const changed = await fixture.app.request(`/api/issues/${issue.id}`, {
-      method: "PATCH", headers: fixture.headers, body: JSON.stringify({ status: "done" }),
+      method: "PATCH", headers: await taskHeaders(fixture.store, source.id), body: JSON.stringify({ status: "done" }),
     });
     expect(changed.status).toBe(200);
+    expect(fixture.store.getIssue(issue.id)?.status).toBe("done");
 
     fixture.allow(false);
     const runs = fixture.store.dispatchPendingSystemEvents();
     expect(runs).toHaveLength(1);
     expect(fixture.store.getTask(runs[0]!.taskId!)).toMatchObject({
-      parentTaskId: fixture.inbound.taskId, issueCreationRestricted: false,
+      issueCreationRestricted: false,
     });
     const eventTaskHeaders = await taskHeaders(fixture.store, runs[0]!.taskId!);
     await expectApprovalRequired(await createIssue(fixture, eventTaskHeaders));
-    expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(1);
+    expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(2);
     fixture.allow(true);
     expect((await createIssue(fixture, eventTaskHeaders)).status).toBe(201);
-    expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(2);
+    expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(3);
   });
 
   it("checks the source task again at Autopilot Issue creation instead of trusting its original approval", async () => {
     const fixture = await allowlistFixture();
-    const autopilot = fixture.store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(fixture.store, {
       title: "Create requested Issue", assigneeId: fixture.worker.id, executionMode: "create_issue",
     });
     const run = () => fixture.store.runAutopilot(autopilot.id, { sourceTaskId: fixture.inbound.taskId });
@@ -274,20 +335,19 @@ describe("Feishu sender allowlist Issue authorization", () => {
     expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(1);
   });
 
-  it("does not authorize a message without a sender open_id through another allowed account", async () => {
+  it("rejects a message without a sender open_id even when another account is allowed", async () => {
     const fixture = await allowlistFixture();
     fixture.allow(true);
-    const unknown = fixture.store.submitFeishuBotMessage("local", "rt_allowlist", {
+    const sessions = fixture.store.listChatSessions("local").length;
+    expect(() => fixture.store.submitFeishuBotMessage("local", "rt_allowlist", {
       revision: fixture.config.revision,
       externalSessionKey: "oc_unknown_sender",
       externalMessageId: "om_unknown_sender",
       senderUnionId: "on_unknown_sender",
       text: "Create an Issue without a stable app-scoped sender identity.",
-    });
+    })).toThrow("allowlist");
     expect(fixture.store.listFeishuBotSenders("local")).toHaveLength(1);
-    const unknownHeaders = await taskHeaders(fixture.store, unknown.taskId);
-    await expectApprovalRequired(await createIssue(fixture, unknownHeaders));
-    await expectIssueCapabilities(fixture, unknownHeaders, false);
+    expect(fixture.store.listChatSessions("local")).toHaveLength(sessions);
     expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(0);
   });
 });
@@ -301,21 +361,29 @@ async function allowlistFixture(issueCreationRequiresProposal = false, requireAl
   });
   store.heartbeatRuntime("rt_allowlist", { supportsFeishuBotConfig: true });
   const config = store.upsertFeishuBotConfig("local", {
-    agentId: agent.id, runtimeId: "rt_allowlist", appId: "cli_allowlist",
-    ...(requireAllowlist ? { senderAccessPolicy: "allowlist" as const } : {}),
+    agentId: agent.id, runtimeId: "rt_allowlist", appId: "cli_allowlist", responsibleMemberId: 'mem_local_local',
+    senderAccessPolicy: requireAllowlist ? "allowlist" as const : "agent" as const,
     appSecretOp: "set", appSecret: "wJ4tQ7xR2nB8vC5mZ1kL0pS6dF3gH9jA", domain: "feishu", enabled: true,
   });
-  const inbound = store.submitFeishuBotMessage("local", "rt_allowlist", {
+  const message = {
     revision: config.revision,
     externalSessionKey: "oc_allowlist:thread:omt_allowlist",
     externalMessageId: "om_allowlist_first",
     senderOpenId: "ou_allowlist_sender",
     senderName: "Incoming sender",
     text: "Create an Issue for this request.",
-  });
+  };
+  if (requireAllowlist) {
+    // The first message only records the sender; an admin approves it, it is
+    // retried, and the approval is later revoked while that Chat continues.
+    expect(() => store.submitFeishuBotMessage("local", "rt_allowlist", message)).toThrow("allowlist");
+    store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
+  }
+  const inbound = store.submitFeishuBotMessage("local", "rt_allowlist", message);
   const [sender] = store.listFeishuBotSenders("local");
   expect(sender).toBeDefined();
   const senderId = sender!.id;
+  if (requireAllowlist) store.setFeishuBotSenderAllowed("local", senderId, false, "local");
   return {
     store, agent, worker, config, inbound, senderId,
     app: createMultiremiApp({ store, authToken: "root-secret" }),

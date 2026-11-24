@@ -1,25 +1,32 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readlink, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { mkdir, readFile, readlink, readdir, realpath, lstat, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type {
   MultiremiPlatformOperation,
   MultiremiPlatformRelease,
   MultiremiPlatformService,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
-import { DrainAbortedError, type PlatformDrainGate } from "./drain.js";
+import { type PlatformDrainGate } from "./drain.js";
+import { resolveHealthTimeoutMs, waitForHealthyUrl } from "./health-check.js";
 import type { CommandRunner, PlatformDeploymentDriver, PlatformInspection } from "./types.js";
+import { assertCompatible, atomicJson, checkBackup, createBackup, isWithin, migrationFingerprint, preflightResult, readMigrationSource, readRecoveryJournal, RecoveryRequiredError, type BackupConfig } from "./safety.js";
+import { fetchReleaseResponse } from "./release-feed.js";
 
 interface SystemdReleaseConfig {
+  backup?: BackupConfig;
   root: string;
   apiService: string;
   webService: string;
   apiHealthUrl: string;
   webHealthUrl: string;
   bunExecutable: string;
+  healthTimeoutMs?: number;
+  releasesKeep?: number;
 }
 
 interface SystemdManifest {
+  dataSchema?: string | null;
   version: string;
   ref: string;
   releaseUrl?: string | null;
@@ -27,10 +34,75 @@ interface SystemdManifest {
   sourceSha256: string;
 }
 
+interface SystemdJournal {
+  previousPath: string;
+  previous: MultiremiPlatformRelease;
+  phase?: string;
+  result?: MultiremiPlatformRelease;
+}
+
 export class SystemdReleaseDriver implements PlatformDeploymentDriver {
   readonly kind = "systemd_release" as const;
+  readonly updateMode = "systemd_release" as const;
 
-  constructor(private readonly config: SystemdReleaseConfig, private readonly runner: CommandRunner) {}
+  private readonly healthTimeoutMs: number;
+
+  constructor(private readonly config: SystemdReleaseConfig, private readonly runner: CommandRunner) {
+    this.healthTimeoutMs = resolveHealthTimeoutMs(config.healthTimeoutMs ?? process.env.MULTIREMI_PLATFORM_HEALTH_TIMEOUT_MS);
+  }
+
+  async recoverInterrupted(): Promise<void> {
+    let entries: string[];
+    try { entries = await readdir(this.config.root); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    for (const name of entries.filter((name) => /^operation-[A-Za-z0-9_-]+\.json$/.test(name))) {
+      const path = join(this.config.root, name);
+      const journal = await this.readJournal(path);
+      if (journal?.phase === "committed") await this.recoverJournal(path, journal);
+    }
+  }
+
+  private readJournal(path: string) {
+    return readRecoveryJournal<SystemdJournal>(path, (value) => {
+      if (typeof value.previousPath !== "string" || ![undefined, "committed", "verified", "rolled_back"].includes(value.phase)) throw new Error("Invalid journal");
+      ensureChild(join(this.config.root, "releases"), value.previousPath);
+      assertCompatible(value.previous, value.previous);
+      if (value.phase === "verified") assertCompatible(value.result ?? null, value.result ?? {});
+    });
+  }
+
+  private async recoverJournal(path: string, journal: SystemdJournal): Promise<void> {
+    try {
+      await this.switchCurrent(journal.previousPath);
+      await this.restartAndVerify();
+      await atomicJson(path, { ...journal, phase: "rolled_back" });
+    } catch { throw new RecoveryRequiredError("Interrupted systemd switch recovery failed; scheduling remains paused"); }
+  }
+
+  async preflight() {
+    const checks: Array<{ code: string; ok: boolean; message: string }> = [];
+    for (const [code, run] of [
+      ["host", async () => {
+        if (process.platform !== "linux") throw new Error("systemd requires Linux; use docker_compose on Windows or macOS");
+        await this.mustRun("systemctl", ["is-active", this.config.apiService, this.config.webService]);
+        await this.mustRun("tar", ["--version"]);
+        const bun = await this.runner.run(this.config.bunExecutable, ["--version"]);
+        if (bun.exitCode !== 0 || bun.stdout.trim() !== "1.3.14") throw new Error("Bun 1.3.14 is required for release builds");
+      }],
+      ["backup", () => checkBackup(this.config.backup)],
+      ["current_release", async () => {
+        const current = await this.readCurrentRelease();
+        if (!current) throw new Error("Current release metadata is missing");
+        assertCompatible(current, current);
+        const source = await readMigrationSource(join(this.config.root, "current"));
+        if (migrationFingerprint(source) !== current.dataSchema) throw new Error("Current release schema does not match its manifest");
+      }],
+    ] as const) {
+      try { await run(); checks.push({ code, ok: true, message: `${code}: ready` }); }
+      catch (error) { checks.push({ code, ok: false, message: errorMessage(error) }); }
+    }
+    return preflightResult(checks);
+  }
 
   async inspect(): Promise<PlatformInspection> {
     const [currentRelease, recentReleases, api, web] = await Promise.all([
@@ -41,6 +113,7 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
     ]);
     return {
       driver: this.kind,
+      updateMode: this.updateMode,
       currentRelease,
       recentReleases,
       services: [api, web, unknownDependency("postgres", "PostgreSQL"), unknownDependency("openviking", "OpenViking")],
@@ -53,10 +126,25 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
     drain?: PlatformDrainGate,
   ): Promise<MultiremiPlatformRelease | null> {
     if (operation.kind === "check_updates") return (await this.inspect()).currentRelease;
+    if (!drain) throw new Error("A platform drain is required before restarting or updating services");
+    const interrupted = await this.readJournal(this.journalPath(operation.id));
+    if (interrupted) {
+      if (interrupted.phase === "verified") return interrupted.result!;
+      if (interrupted.phase === "rolled_back") throw new Error("Previous release recovered; the update did not complete");
+      if (!["switching", "restarting", "verifying", "rolling_back"].includes(operation.status)) {
+        await rm(this.journalPath(operation.id));
+        throw new Error("Prepared update was interrupted before commit; current services were left running");
+      }
+      await this.recoverJournal(this.journalPath(operation.id), interrupted);
+      throw new Error("Interrupted platform operation recovered to the previous release");
+    }
+    if (["switching", "restarting", "verifying", "rolling_back"].includes(operation.status)) throw new RecoveryRequiredError("Committed operation has no recovery journal");
+    if (operation.kind === "update") parseSystemdManifest(operation.targetManifest);
+    const preflight = await this.preflight();
+    if (!preflight.ready) throw new Error(preflight.checks.filter((check) => !check.ok).map((check) => check.message).join("; "));
     if (operation.kind === "restart") {
-      await report({ status: "restarting", progress: { message: "Restarting platform services" } });
-      await this.restartAndVerify();
-      return (await this.inspect()).currentRelease;
+      const current = (await this.inspect()).currentRelease!;
+      return this.activateTarget(operation, await this.releasePathFor(current), current, report, drain);
     }
     if (operation.kind === "rollback") return this.rollback(operation, report, drain);
     return this.update(operation, report, drain);
@@ -69,23 +157,30 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
   ): Promise<MultiremiPlatformRelease> {
     const manifest = parseSystemdManifest(operation.targetManifest);
     const previous = await this.readCurrentRelease();
-    const releaseName = safeReleaseName(`${manifest.version}-${manifest.ref.slice(0, 12)}`);
+    assertCompatible(previous, manifest);
+    if (operation.targetVersion && operation.targetVersion.replace(/^v/, "") !== manifest.version.replace(/^v/, "")) throw new Error("Manifest version does not match requested version");
+    const releaseName = safeReleaseName(`${manifest.version}-${manifest.ref.slice(0, 12)}-${operation.id}`);
     const releasesDir = join(this.config.root, "releases");
     const target = ensureChild(releasesDir, join(releasesDir, releaseName));
     const archive = ensureChild(this.config.root, join(this.config.root, `.download-${operation.id}.tar.gz`));
     await report({ status: "pulling", previousRelease: previous, progress: { message: `Downloading ${manifest.version}` } });
     try {
-      await mkdir(target, { recursive: true });
-      const response = await fetch(manifest.sourceUrl, { signal: AbortSignal.timeout(120_000) });
+      await mkdir(releasesDir, { recursive: true });
+      await mkdir(target);
+      const response = await fetchReleaseResponse(manifest.sourceUrl);
       if (!response.ok) throw new Error(`release archive returned ${response.status}`);
       const bytes = Buffer.from(await response.arrayBuffer());
       const digest = createHash("sha256").update(bytes).digest("hex");
       if (digest !== manifest.sourceSha256.toLowerCase()) throw new Error("release archive checksum mismatch");
       await writeFile(archive, bytes, { mode: 0o600 });
-      await this.mustRun("tar", ["-xzf", archive, "--strip-components=1", "-C", target]);
+      const listing = await this.runner.run("tar", ["-tzf", archive]);
+      if (listing.exitCode !== 0 || listing.stdout.split("\n").some((path) => path.startsWith("/") || path.split(/[\\/]/).includes(".."))) throw new Error("Invalid release archive paths");
+      await this.mustRun("tar", ["-xzf", archive, "--strip-components=1", "--no-same-owner", "--no-same-permissions", "-C", target]);
+      if (migrationFingerprint(await readMigrationSource(target)) !== manifest.dataSchema) throw new Error("Release archive schema does not match its manifest");
       await this.mustRun(this.config.bunExecutable, ["install", "--frozen-lockfile", "--ignore-scripts", "--registry", "https://registry.npmjs.org"], target);
       await this.mustRun(this.config.bunExecutable, ["run", "--filter", "@multiremi/web", "build"], target, { STANDALONE: "true" });
       const release: MultiremiPlatformRelease = {
+        dataSchema: manifest.dataSchema,
         version: manifest.version,
         ref: manifest.ref,
         publishedAt: new Date().toISOString(),
@@ -98,20 +193,7 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
       // The release is fully staged; only the symlink switch + service restart
       // require a drained platform. Timeout/cancel throws with drain released
       // and the current release untouched.
-      if (drain) await drain.waitUntilDrained(report);
-      await report({ status: "switching", previousRelease: previous, progress: { message: "Activating release" } });
-      await this.switchCurrent(target);
-      await report({ status: "restarting", previousRelease: previous, progress: { message: "Restarting services" } });
-      await this.restartAndVerify();
-      return release;
-    } catch (error) {
-      if (error instanceof DrainAbortedError) throw error;
-      if (previous) {
-        await report({ status: "rolling_back", previousRelease: previous, error: errorMessage(error) });
-        await this.switchCurrent(await this.releasePathFor(previous));
-        await this.restartAndVerify();
-      }
-      throw error;
+      return await this.activateTarget(operation, target, release, report, drain!);
     } finally {
       await rm(archive, { force: true });
     }
@@ -124,21 +206,87 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
   ): Promise<MultiremiPlatformRelease> {
     const targetRelease = await this.findRelease(operation.targetRef ?? operation.targetVersion ?? "");
     if (!targetRelease) throw new Error("rollback release not found");
-    const previous = await this.readCurrentRelease();
-    if (drain) await drain.waitUntilDrained(report);
-    await report({ status: "rolling_back", previousRelease: previous, progress: { message: `Switching to ${targetRelease.version}` } });
-    await this.switchCurrent(await this.releasePathFor(targetRelease));
-    await report({ status: "restarting", previousRelease: previous });
-    await this.restartAndVerify();
-    return targetRelease;
+    return this.activateTarget(operation, await this.releasePathFor(targetRelease), targetRelease, report, drain!);
+  }
+
+  private journalPath(id: string): string {
+    safeReleaseName(id);
+    return join(this.config.root, `operation-${id}.json`);
+  }
+
+  private async activateTarget(operation: MultiremiPlatformOperation, target: string, release: MultiremiPlatformRelease, report: (input: ReportPlatformOperationInput) => Promise<void>, drain: PlatformDrainGate) {
+    const previous = (await this.readCurrentRelease())!;
+    assertCompatible(previous, release);
+    const previousPath = ensureChild(join(this.config.root, "releases"), resolve(this.config.root, await readlink(join(this.config.root, "current"))));
+    await drain.waitUntilDrained(report);
+    await report({ status: "backing_up", progress: { message: "Backing up database and persistent state" } });
+    const backup = await createBackup(this.config.backup, this.runner, operation.id);
+    await drain.assertReady();
+    const journal = { previous, previousPath, backup };
+    await atomicJson(this.journalPath(operation.id), journal);
+    let committed = false;
+    try {
+      await report({ status: "switching", previousRelease: previous, progress: { message: "Activating release", backup } });
+      committed = true;
+      await atomicJson(this.journalPath(operation.id), { ...journal, phase: "committed" });
+      await this.switchCurrent(target);
+      await this.restartAndVerify();
+      await atomicJson(this.journalPath(operation.id), { ...journal, phase: "verified", result: release });
+      await this.pruneReleases(target);
+      return release;
+    } catch (error) {
+      if (!committed) { await rm(this.journalPath(operation.id), { force: true }); throw error; }
+      try {
+        await this.switchCurrent(previousPath);
+        await this.restartAndVerify();
+        await atomicJson(this.journalPath(operation.id), { ...journal, phase: "rolled_back" });
+      } catch { throw new RecoveryRequiredError("Update and rollback verification failed; backup retained and scheduling remains paused"); }
+      throw error;
+    }
+  }
+
+  private async pruneReleases(target: string): Promise<void> {
+    try {
+      const keep = this.config.releasesKeep ?? Number(process.env.REMI_RELEASES_KEEP ?? 3);
+      if (!Number.isSafeInteger(keep) || keep < 0) throw new Error("REMI_RELEASES_KEEP must be a non-negative integer");
+      const root = join(this.config.root, "releases");
+      const canonicalRoot = await realpath(root);
+      if (canonicalRoot !== join(await realpath(this.config.root), "releases")) throw new Error("release path escapes platform root");
+      const protectedPaths = new Set([await realpath(target), await realpath(resolve(this.config.root, await readlink(join(this.config.root, "current"))))]);
+      for (const name of await readdir(this.config.root)) {
+        if (!/^operation-[A-Za-z0-9._-]+\.json$/.test(name)) continue;
+        const journal = await this.readJournal(join(this.config.root, name));
+        if (journal && !["verified", "rolled_back"].includes(journal.phase ?? "")) {
+          protectedPaths.add(await realpath(journal.previousPath));
+        }
+      }
+      const releases: Array<{ path: string; time: number }> = [];
+      for (const name of await readdir(root)) {
+        const path = ensureChild(root, join(root, name));
+        const stat = await lstat(path);
+        // Symlinks and unmarked manual directories are never deletion candidates.
+        if (!stat.isDirectory()) continue;
+        let marker;
+        try { marker = await lstat(join(path, ".platform-release.json")); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        if (!marker.isFile()) continue;
+        const canonical = await realpath(path);
+        ensureChild(canonicalRoot, canonical);
+        releases.push({ path: canonical, time: stat.mtimeMs });
+      }
+      releases.sort((a, b) => b.time - a.time || b.path.localeCompare(a.path));
+      for (const release of releases.slice(0, keep)) protectedPaths.add(release.path);
+      for (const release of releases) if (!protectedPaths.has(release.path)) await rm(release.path, { recursive: true });
+    } catch (error) { console.warn(`Release pruning failed: ${errorMessage(error)}`); }
   }
 
   private async restartAndVerify(): Promise<void> {
     await this.mustRun("systemctl", ["restart", this.config.apiService, this.config.webService]);
-    await Promise.all([verifyUrl(this.config.apiHealthUrl), verifyUrl(this.config.webHealthUrl)]);
+    await Promise.all([this.config.apiHealthUrl, this.config.webHealthUrl].map(url => waitForHealthyUrl(url, this.healthTimeoutMs)));
   }
 
   private async switchCurrent(target: string): Promise<void> {
+    ensureChild(join(this.config.root, "releases"), target);
     const current = join(this.config.root, "current");
     const next = join(this.config.root, `.current-${process.pid}`);
     await rm(next, { force: true });
@@ -169,7 +317,7 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
     try {
       return JSON.parse(await readFile(join(path, ".platform-release.json"), "utf8")) as MultiremiPlatformRelease;
     } catch {
-      return { version: basename(path), ref: basename(path), publishedAt: null, releaseUrl: null, manifestUrl: null, apiImage: null, webImage: null };
+      return null;
     }
   }
 
@@ -179,9 +327,12 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
 
   private async releasePathFor(release: MultiremiPlatformRelease): Promise<string> {
     const entries = await readdir(join(this.config.root, "releases"));
-    const name = entries.find((entry) => entry === release.ref || entry === release.version || entry.startsWith(`${release.version}-`));
-    if (!name) throw new Error(`release directory for ${release.version} not found`);
-    return ensureChild(join(this.config.root, "releases"), join(this.config.root, "releases", name));
+    for (const name of entries) {
+      const path = ensureChild(join(this.config.root, "releases"), join(this.config.root, "releases", name));
+      const candidate = await this.readRelease(path);
+      if (candidate?.version === release.version && candidate.ref === release.ref) return path;
+    }
+    throw new Error(`release directory for ${release.version} not found`);
   }
 
   private async inspectService(id: "api" | "web", name: string, unit: string): Promise<MultiremiPlatformService> {
@@ -217,25 +368,9 @@ function safeReleaseName(value: string): string {
 }
 
 function ensureChild(parent: string, child: string): string {
-  const base = `${resolve(parent)}/`;
   const candidate = resolve(child);
-  if (!`${candidate}/`.startsWith(base)) throw new Error("release path escapes platform root");
+  if (!isWithin(parent, candidate) || resolve(parent) === candidate) throw new Error("release path escapes platform root");
   return candidate;
-}
-
-async function verifyUrl(url: string): Promise<void> {
-  let lastError = "health check failed";
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-      if (response.ok) return;
-      lastError = `${url} returned ${response.status}`;
-    } catch (error) {
-      lastError = errorMessage(error);
-    }
-    await Bun.sleep(2_500);
-  }
-  throw new Error(lastError);
 }
 
 function unknownDependency(id: "postgres" | "openviking", name: string): MultiremiPlatformService {

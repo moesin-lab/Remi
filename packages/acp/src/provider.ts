@@ -6,20 +6,40 @@
 
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 import type {
   Provider,
   SendOptions,
   AgentResponse,
+  AsyncTaskChangeListener,
+  AsyncTaskSnapshot,
+  ListenAutonomousOptions,
   ProviderEvent,
+  ProviderReuseRejection,
+  ReuseCheckResult,
+  SettleAsyncTasksOptions,
+  SteerOutcome,
+  SteerResult,
+  StopAsyncTaskResult,
 } from "@shared/contracts/provider-types.js";
-import { createAgentResponse } from "@shared/contracts/provider-types.js";
-import { isCompactionChunk } from "@shared/contracts/compaction.js";
+import { createAgentResponse, STEER_REASONS } from "@shared/contracts/provider-types.js";
+import { TRACE_STEER_OUTCOMES } from "@shared/contracts/trace.js";
 import { readContextUsage, type ContextUsage } from "@shared/agent-execution.js";
+import { UsageCollector } from "./usage-collector.js";
+import { observeAvailableCommands, type ObservedSlashCommand } from "@shared/contracts/slash-commands.js";
+import { beginCodexRolloutUsage, codexHomeFor, collectCodexRolloutUsage, type CodexRolloutCursor } from "./codex-rollout-usage.js";
+import type { TaskUsageUnit } from "@shared/contracts/usage-accounting.js";
 import { AcpClient } from "./client.js";
+import { discoverGrokModelCapabilities } from "./grok-model-discovery.js";
+import { AcpRpcError, AcpSessionFailureError, airMetadata, readSessionFailure, redactProviderError, redactProviderErrorText, record, type AcpSessionFailure } from "./session-failure.js";
 import { resolveAcpProcessLaunch } from "./launch.js";
 import { createAdapter, type AgentAdapter } from "./adapters/index.js";
-import { hasOneMillionContext, resolveClaudeContextModel } from "./adapters/claude-code/model-context.js";
+import { resolveClaudeContextSelection, hasOneMillionContext } from "./adapters/claude-code/model-context.js";
+import { autonomousOrigin, isWorkspaceTrustPrompt, nativeAgentId, permissionAsQuestion, serviceMessage, serviceMessageFailure, type PermissionQuestion } from "./adapters/trace-vendor.js";
+import { ANTIGRAVITY_NATIVE_ACCESS, nativeAntigravityLaunch } from "./access/antigravity-native.js";
+import { accessConfigFor, type AcpAccessConfig } from "./access/index.js";
+import type { GatewayShimChannel, GatewayShimEvent, GatewayShimHost, GatewayShimListingFailure } from "./access/gateway-shim-types.js";
+import { GEMINI_USAGE_SOURCE, geminiObservationUsage } from "./gemini-request-usage.js";
 import type {
   SessionNotification,
   SessionUpdate,
@@ -37,12 +57,14 @@ import type {
   NewSessionMeta,
   NewSessionResult,
   PromptUsageSettleScope,
+  SteerResponse,
+  AsyncTaskState,
 } from "@shared/contracts/acp-protocol.js";
 
 export interface AcpProviderOptions {
   /** Internal capability probes keep descendants inside the supervisor's process group. */
   inheritProcessGroup?: boolean;
-  /** Agent type: "claude" | "codex" (default: "claude"). */
+  /** Agent type: "claude" | "codex" | "grok" (default: "claude"). */
   agentType?: string;
   /** ACP executable path (auto-detected from agentType if omitted). */
   executable?: string;
@@ -54,14 +76,21 @@ export interface AcpProviderOptions {
   baseUrl?: string;
   /** Default model. */
   model?: string | null;
+  /** Administrator-declared Claude gateway models using the 1M context window. */
+  claudeOneMillionModels?: readonly string[];
   /** Default timeout in seconds. */
   timeout?: number;
   /** Tools to allow. */
   allowedTools?: string[];
   /** Working directory. */
   cwd?: string;
-  /** Daemon-owned directory mounted as this task execution's literal /tmp. */
+  /**
+   * Daemon-owned directory bound to this task execution. Linux mounts it as the
+   * literal /tmp; macOS (MUL-449) exports it through TMPDIR/TMP/TEMP instead.
+   */
   privateTmpDirectory?: string;
+  /** Platform override for the private-/tmp contract (test injection). */
+  privateTmpPlatform?: NodeJS.Platform;
   /** Inject MCP servers at construction time (ACP wire shape — see {@link McpServerConfig}). */
   getMcpServers?: () => McpServerConfig[];
   /** Extra environment variables for the spawned ACP process. */
@@ -74,6 +103,57 @@ export interface AcpProviderOptions {
   pluginFingerprint?: string;
   /** Isolated home used only for Codex Plugin execution. */
   codexHome?: string;
+  /**
+   * Session (lane) provider home, for agents whose access config derives the
+   * agent home from it (Antigravity: `GEMINI_HOME`).
+   */
+  providerHome?: string;
+  /** The run's loopback gateway shim; one channel per ACP process. In-process only, never serialized. */
+  gatewayShim?: GatewayShimHost;
+  /** A shim base URL without usage observations, for subprocess model probes that cannot hold a host. */
+  gatewayUrl?: string;
+  /** Explicit local agy ACP connection; never inferred from a missing gateway. */
+  antigravityNative?: boolean;
+  /**
+   * Stall watchdog bound for access configs that declare one (Antigravity:
+   * 120 s). Tests shorten it; production leaves it unset.
+   */
+  turnStallTimeoutMs?: number;
+  /** How long a native steer may take before it falls back (default 30 s; tests shorten it). */
+  steerTimeoutMs?: number;
+  /** How long a steer waits for running top-level tool calls (default 30 s; tests shorten it). */
+  toolCallWaitMs?: number;
+  /** How long a bridge `promptRequired` during our prompt is retried (default 10 s; tests shorten it). */
+  steerRetryWindowMs?: number;
+  /**
+   * Ask the bridge for native child sessions (PR 5 §1.1), when the adapter
+   * declares them. Each subagent's frames then arrive on its own session and
+   * are passed on stamped with `_meta.remiSessionId`. Default off.
+   */
+  nativeSubagentSessions?: boolean;
+  /**
+   * Keep every frame that arrives between prompts, not only usage, so
+   * {@link AcpProvider.listenAutonomous} can replay an autonomous round that
+   * started before anyone listened (PR 5 §2.3). Only for adapters that declare
+   * `autonomousRounds` (Claude). Default off.
+   */
+  captureAutonomousRounds?: boolean;
+  /** Once an autonomous round's frames flow, how long it may run without its result (default 10 min; tests shorten it). */
+  autonomousRoundCapMs?: number;
+  /**
+   * Ask the bridge for background tasks (PR 6 §3.1), when the adapter declares
+   * `asyncTasks`: the AIR capability, a registry per pooled session, stop and
+   * settle. Default off (`packages/remi` leaves it off; the daemon passes
+   * `REMI_ACP_ASYNC_TASKS !== "0"`).
+   */
+  asyncTasks?: boolean;
+  /** A pooled session's background task changed (the parked-lane supervisor, PR 6 §3.2). */
+  onAsyncTaskChange?: AsyncTaskChangeListener;
+  /**
+   * A pooled session's process died without being closed (PR 6 §2.7 "lost"):
+   * its tasks, as the registry last saw them, are gone with it.
+   */
+  onSessionLost?: (chatId: string, reason: string, tasks: AsyncTaskSnapshot[]) => void;
 }
 
 /** ACP-local SendOptions extension kept out of the provider-neutral contract. */
@@ -144,6 +224,42 @@ export class UnsupportedAcpEffortError extends Error {
 
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 60 * 1000;
+const PROMPT_CANCEL_SETTLE_MS = 5_000;
+/** The server's own text after a `session/cancel` (server 1.4.0), not the model's. */
+const CANCELLED_BY_CLIENT_TEXT = "The request was cancelled by the client.";
+/** claude-agent-acp 0.93 `LOCAL_ONLY_COMMANDS` (dist/acp-agent.js 709-710): Claude Code answers them without the model. */
+const CLAUDE_LOCAL_ONLY_COMMANDS = new Set(["/context", "/heapdump", "/extra-usage"]);
+/** How long a prompt waits for its last gateway-shim observations before settling usage. */
+const GATEWAY_SETTLE_MS = 2_000;
+/** After cutting the calls still open at prompt end, how long their (aborted) observations may take. */
+const GATEWAY_ABORT_SETTLE_MS = 500;
+/** Codex appends a turn's last rollout records just after the prompt resolves. */
+const CODEX_ROLLOUT_SETTLE_MS = 1_000;
+/** A native steer that has not answered by then falls back to interrupt + re-prompt (ADR 0020). */
+const STEER_TIMEOUT_MS = 30_000;
+/** How long a steer waits for running top-level tool calls before interrupt + re-prompt. */
+const STEER_TOOL_CALL_WAIT_MS = 30_000;
+/** A bridge `promptRequired` while our prompt runs is retried this long, at most this often. */
+const STEER_RETRY_WINDOW_MS = 10_000;
+const STEER_MAX_ATTEMPTS = 5;
+const NO_ACTIVE_PROMPT: SteerResult = { outcome: "promptRequired", reason: STEER_REASONS.noActivePrompt };
+/** A cancelled bridge-started turn counts as settled after this long without a session/update. */
+const STEER_QUIET_MS = 500;
+/** Usage frames kept between prompts for billing replay; the oldest are dropped first. */
+const MAX_IDLE_USAGE_FRAMES = 1_000;
+/** Frames kept between prompts while capturing autonomous rounds (PR 5 §2.3); the oldest non-usage frame goes first. */
+const MAX_AUTONOMOUS_FRAMES = 2_000;
+const MAX_AUTONOMOUS_BYTES = 4 * 1024 * 1024;
+/** How long `listenAutonomous` waits for an autonomous round's first frame by default. */
+const AUTONOMOUS_IDLE_MS = 60_000;
+/** Once a round's frames flow, the longest it may run before the listen gives up (Codex's own child wait). */
+const AUTONOMOUS_HARD_CAP_MS = 10 * 60 * 1000;
+/** Unknown session ids logged per pool entry, at most. */
+const MAX_LOGGED_UNKNOWN_SESSIONS = 32;
+/** How long `_session/async_task/stop` may take (PR 6 §3.3). */
+const ASYNC_TASK_STOP_TIMEOUT_MS = 10_000;
+/** Background tasks kept per pooled session; the oldest ended ones go first. */
+const MAX_ASYNC_TASKS = 256;
 const DEFAULT_PERMISSION_MODE_BY_AGENT: Record<string, string | null> = {
   claude: "bypassPermissions",
   // codex advertises read-only/agent/agent-full-access, so the literal id is
@@ -151,6 +267,7 @@ const DEFAULT_PERMISSION_MODE_BY_AGENT: Record<string, string | null> = {
   // `agent-full-access`. Without an entry here an unconfigured codex chat
   // stayed in codex's own initial mode and prompted for every tool call.
   codex: "bypassPermissions",
+  grok: "bypassPermissions",
 };
 const REMI_CLAUDE_AGENT_ACP_WRAPPER = "remi-claude-agent-acp";
 
@@ -166,21 +283,20 @@ const MODEL_OPTION_CATEGORY = "model";
 const EFFORT_OPTION_CATEGORY = "thought_level";
 
 export interface PromptUsageState {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
+  collector: UsageCollector;
   /** Latest `used` context-occupancy snapshot, retained for existing displays. */
   totalTokens: number;
-  /** Sum of `used` from unpatched usage updates (totals-only fallback). */
-  streamedTotalSum: number;
-  /** Sum of per-request totalTokens from patched codex usage metadata. */
-  detailedTotalTokens: number;
-  hasStreamedTotal: boolean;
-  hasDetailedUsage: boolean;
-  costUsd: number;
+  costUsd: number | null;
   model: string | null;
   contextWindowSize: number | null;
+  /**
+   * PR 6 §2.4: an adopted session's Claude turn-cost estimate is cumulative for
+   * the process, so it counts from here (the parked prompt's last cumulative
+   * `total_cost_usd`). Null: no baseline.
+   */
+  costBaselineUsd?: number | null;
+  /** The last cumulative cost the agent reported, before any baseline. */
+  lastCumulativeCostUsd?: number | null;
 }
 
 interface PromptState {
@@ -190,30 +306,26 @@ interface PromptState {
   usage: PromptUsageState;
   completedToolCount: number;
   contextUsage?: ContextUsage;
+  /** Native rollout position for requests app-server cannot stream (resume/fork). */
+  codexRollout?: CodexRolloutCursor;
 }
 
-export function createPromptUsageState(): PromptUsageState {
+export function createPromptUsageState(costBaselineUsd: number | null = null): PromptUsageState {
   return {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
+    collector: new UsageCollector(),
     totalTokens: 0,
-    streamedTotalSum: 0,
-    detailedTotalTokens: 0,
-    hasStreamedTotal: false,
-    hasDetailedUsage: false,
-    costUsd: 0,
+    costUsd: null,
     model: null,
     contextWindowSize: null,
+    ...(costBaselineUsd !== null ? { costBaselineUsd } : {}),
   };
 }
 
-function createPromptState(): PromptState {
+function createPromptState(costBaselineUsd: number | null = null): PromptState {
   return {
     promptStartTime: Date.now(),
     text: "",
-    usage: createPromptUsageState(),
+    usage: createPromptUsageState(costBaselineUsd),
     completedToolCount: 0,
   };
 }
@@ -238,11 +350,169 @@ interface PoolEntry {
   pluginPathsKey: string;
   pluginFingerprint: string;
   codexHome: string | null;
+  /** Session env is fixed at creation; a changed declaration requires a new process. */
+  customModelOption: string | null;
+  /** Claude model pinned in the bridge process env, including resumed sessions. */
+  startupModel: string | null;
   /** Values currently in force, so a re-apply is only sent when they change. */
   appliedModel: string | null;
+  /** Last requested model, including an unsuccessful but already attempted declaration. */
+  attemptedModel: string | null;
+  appliedContext: string | null;
   appliedEffort: string | null;
   /** Last permission mode we logged about, so a fallback is reported once per session. */
   warnedPermissionMode: string | null;
+  /**
+   * The `session/prompt` currently awaiting its response, or null. Native
+   * steering needs one to join; without it `steer()` makes no wire call.
+   */
+  promptInFlight: object | null;
+  /** When the agent last sent a `session/update` for this session. */
+  lastUpdateAt: number;
+  /**
+   * ADR 0025: the root session's latest `available_commands_update`, observed
+   * (no `_meta`, no paths). Both bridges send one right after `session/new`,
+   * `load` or `resume`, while no prompt listens; claude-agent-acp sends another
+   * inside the first prompt once Claude Code names its terminal-only commands.
+   */
+  availableCommands?: ObservedSlashCommand[];
+  /** Top-level tool calls of the current prompt that have not completed or failed. */
+  openToolCalls: Set<string>;
+  /** Wakes steers waiting for the turn, tool calls, a person, or the prompt's end. */
+  steerWaiters: Set<() => void>;
+  /** Turn-level updates of the current prompt (text, tool calls, usage). */
+  turnUpdates: number;
+  /** Permission and question requests of this session waiting for an answer. */
+  userInputs: number;
+  /** Since when at least one is waiting, and how long people took in total before that (autonomous budget, PR 5). */
+  userInputSince?: number;
+  userInputWaitedMs?: number;
+  /** A timed-out steer a bridge without the idle opt-in may still turn into a turn of its own. */
+  lateSteer: Promise<SteerResponse> | null;
+  /** `steer()` calls in progress (held for the turn, a tool call or the retry window): the turn is not stalled. */
+  steersInFlight?: number;
+  /**
+   * Frames that arrived while no stream was listening (a bridge-started turn,
+   * a task-notification follow-up after the prompt resolved). Only
+   * `usage_update` frames, unless the provider captures autonomous rounds
+   * (then every accepted frame, PR 5 §2.3). The next `listenAutonomous` or
+   * `sendStream` replays them, so their requests are billed.
+   */
+  idleFrames: SessionNotification[];
+  /** Serialized size of {@link idleFrames} while capturing. */
+  idleFrameBytes?: number;
+  /**
+   * Native child sessions announced on the root or on another child (PR 5
+   * §1.2), by session id. A child stays registered after its state update:
+   * late frames still route to it.
+   */
+  children?: Map<string, NativeChildSession>;
+  /** Unknown session ids already logged for this entry. */
+  unknownSessions?: Set<string>;
+  /**
+   * When this session's autonomous rounds run out of time (PR 5 §2.5): set at
+   * the first autonomous activity, shared by every later round, extended by the
+   * time a person took to answer a permission or question.
+   */
+  autonomousBudgetEndsAt?: number;
+  /** Codex rollout read position for this session; each settle advances it. */
+  codexRollout?: CodexRolloutCursor;
+  /** The gateway-shim channel of this ACP process (access configs with `usage: "gateway-shim"`). */
+  gateway?: GatewayState;
+  /**
+   * Background tasks of this session and its native children (PR 6 §3.2), by
+   * the bridge's `asyncTaskId`, in announcement order. Only with `asyncTasks`.
+   */
+  asyncTasks?: Map<string, AsyncTaskRecord>;
+  /** Parked between attempts (PR 6 §2.2): no idle cleanup, every frame captured. */
+  parked?: boolean;
+  /** The cost baseline every prompt state of this (adopted) session starts from (PR 6 §2.4). */
+  costBaselineUsd?: number | null;
+  /** The last cumulative cost the agent reported for this process. */
+  lastCumulativeCostUsd?: number | null;
+}
+
+/** What a session or its process fixes at creation (see `_sessionKey`). */
+interface SessionKey {
+  cwd: string;
+  mcpServers: McpServerConfig[];
+  mcpServersKey: string;
+  model: string | null;
+  pluginPaths: string[];
+  pluginPathsKey: string;
+  pluginFingerprint: string;
+  codexHome: string | null;
+  startupModel: string | null;
+  customModelOption: string | null;
+}
+
+/** A registry entry: the snapshot, plus what the end-state rules need. */
+interface AsyncTaskRecord extends AsyncTaskSnapshot {
+  /** A level-closed `stopped` was corrected to `completed` or `failed` once (claude-agent-acp dist/async-tasks.js:520-529). */
+  corrected?: boolean;
+  /** The stop request in flight, so a second stop joins it. */
+  stopping?: Promise<StopAsyncTaskResult>;
+}
+
+interface NativeChildSession {
+  /** The session that announced it: the root or another child. */
+  parentSessionId: string;
+  /** Its `subagent_state_update` arrived. */
+  terminal: boolean;
+  /** The announced name, for a request it raises before the trace saw the announcement. */
+  name: string | null;
+}
+
+/** One ACP process's gateway-shim channel and what the provider learned from it. */
+interface GatewayState {
+  channel: GatewayShimChannel | null;
+  unsubscribe: () => void;
+  /** The active prompt's listener; null between prompts. */
+  listener: ((event: GatewayShimEvent) => void) | null;
+  /** The breaker opened: this process can no longer reach the gateway. */
+  fatal: Extract<GatewayShimEvent, { type: "fatal" }> | null;
+  /** The agent's own context window report; its `used` is never trusted. */
+  nativeContextSize: number | null;
+  /** Model calls the shim reported started but not yet ended. */
+  inflight: number;
+  /** The last model listing failed (refused or unreachable); cleared by a listing that succeeds. */
+  listingFailure: GatewayShimListingFailure | null;
+}
+
+/** Usage updates the provider synthesized from shim observations (unforgeable by the agent). */
+const SHIM_USAGE_UPDATES = new WeakSet<object>();
+
+function openGateway(host: GatewayShimHost, label: string): GatewayState {
+  const channel = host.open(label);
+  const state: GatewayState = { channel, unsubscribe: () => {}, listener: null, fatal: null, nativeContextSize: null, inflight: 0, listingFailure: null };
+  state.unsubscribe = channel.subscribe((event) => {
+    if (event.type === "fatal") state.fatal = event;
+    if (event.type === "request_started") state.inflight++;
+    if (event.type === "request") state.inflight = Math.max(0, state.inflight - 1);
+    if (event.type === "listing") state.listingFailure = event.failure;
+    state.listener?.(event);
+  });
+  return state;
+}
+
+/** `settled()` is bounded by contract; a misbehaving shim still cannot hold the prompt open. */
+async function settleGateway(channel: GatewayShimChannel, ms: number = GATEWAY_SETTLE_MS): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      channel.settled(ms).catch(() => {}),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, ms + 500); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function closeGateway(state: GatewayState | undefined): void {
+  if (!state) return;
+  state.listener = null;
+  try { state.unsubscribe(); } catch {}
+  try { state.channel?.close(); } catch {}
 }
 
 type PermissionHandler = (params: RequestPermissionParams) => Promise<PermissionOutcome>;
@@ -251,7 +521,7 @@ type ElicitationHandler = (params: ElicitationCreateParams) => Promise<Elicitati
 export function resolveAcpPermissionMode(agentType: string, mode?: string | null): string | null {
   const normalized = typeof mode === "string" ? mode.trim() : "";
   if (normalized) return normalized === "bypass" ? "bypassPermissions" : normalized;
-  return DEFAULT_PERMISSION_MODE_BY_AGENT[agentType] ?? null;
+  return DEFAULT_PERMISSION_MODE_BY_AGENT[agentType] ?? accessConfigFor(agentType)?.defaultPermissionMode ?? null;
 }
 
 /**
@@ -325,19 +595,53 @@ function recommendedConfigValue(option: SessionConfigOption | undefined): string
   return typeof value === "string" ? value : undefined;
 }
 
+function capabilitiesFromModelState(models: SessionModelState | undefined): AcpModelCapability[] {
+  return (models?.availableModels ?? []).map((model) => {
+    const efforts = model._meta?.reasoningEfforts ?? [];
+    return {
+      id: model.modelId,
+      label: model.name || model.modelId,
+      ...(model.description ? { description: model.description } : {}),
+      default: model.modelId === models?.currentModelId,
+      ...(efforts.length
+        ? {
+            effort: {
+              supportedLevels: efforts.map((effort) => ({
+                value: effort.value,
+                label: effort.label || effort.name || effort.value,
+                ...(effort.description ? { description: effort.description } : {}),
+              })),
+            },
+          }
+        : {}),
+    };
+  });
+}
+
 function isAcpDefaultSentinel(value: string): boolean {
   return value.trim().toLowerCase() === "default";
 }
 
 export function resolveAcpExecutableForAgent(agentType: string, executable: string | null | undefined, fallback: string): string {
   const explicit = typeof executable === "string" ? executable.trim() : "";
-  if (explicit) return explicit;
+  const access = accessConfigFor(agentType);
+  if (explicit) {
+    if (access?.retiredExecutables.includes(basename(explicit))) {
+      throw new Error(`[acp_executable_retired] ${agentType}: Agent executable "${explicit}" points at the retired agy CLI; clear it`);
+    }
+    return explicit;
+  }
+  if (access) {
+    // The pinned per-machine install; a missing one surfaces through health and launch.
+    try { return access.launch().executable; } catch { return fallback; }
+  }
 
+  const userHome = homedir();
   if (agentType === "claude") {
     const envExecutable = process.env.REMI_CLAUDE_AGENT_ACP_EXECUTABLE?.trim();
     if (envExecutable) return envExecutable;
 
-    const remiHome = process.env.REMI_HOME ?? join(homedir(), ".remi");
+    const remiHome = process.env.REMI_HOME ?? join(userHome, ".remi");
     const candidates = [
       // Prefer the wrapper shipped next to the running remi binary — it always
       // matches this build. Otherwise a stale copy earlier on PATH (e.g. an old
@@ -346,7 +650,7 @@ export function resolveAcpExecutableForAgent(agentType: string, executable: stri
       // bun binary, so this candidate simply doesn't exist and we fall through.)
       join(dirname(process.execPath), REMI_CLAUDE_AGENT_ACP_WRAPPER),
       join(remiHome, "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
-      join(homedir(), ".remi", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
+      join(userHome, ".remi", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
       join(import.meta.dir, "..", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
       join(import.meta.dir, "..", "..", "..", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
     ];
@@ -362,17 +666,31 @@ export function resolveAcpExecutableForAgent(agentType: string, executable: stri
     const envExecutable = process.env.REMI_CODEX_AGENT_ACP_EXECUTABLE?.trim();
     if (envExecutable) return envExecutable;
 
-    const remiHome = process.env.REMI_HOME ?? join(homedir(), ".remi");
+    const remiHome = process.env.REMI_HOME ?? join(userHome, ".remi");
     const candidates = [
       join(remiHome, "bin", "codex-acp"),
-      join(homedir(), ".remi", "bin", "codex-acp"),
-      join(homedir(), ".npm-global", "bin", "codex-acp"),
+      join(userHome, ".remi", "bin", "codex-acp"),
+      join(userHome, ".npm-global", "bin", "codex-acp"),
     ];
     for (const candidate of candidates) {
       if (existsSync(candidate)) return candidate;
     }
 
     const pathExecutable = resolveExecutableOnPath("codex-acp");
+    if (pathExecutable) return pathExecutable;
+  }
+
+  if (agentType === "grok") {
+    const envExecutable = process.env.REMI_GROK_EXECUTABLE?.trim();
+    if (envExecutable) return envExecutable;
+
+    const grokHome = process.env.GROK_HOME?.trim() || join(userHome, ".grok");
+    const candidates = [join(grokHome, "bin", "grok"), join(userHome, ".grok", "bin", "grok")];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+
+    const pathExecutable = resolveExecutableOnPath("grok");
     if (pathExecutable) return pathExecutable;
   }
 
@@ -396,14 +714,24 @@ export interface AcpHealthCheckCommand {
    * probe flag.
    */
   args?: string[];
+  /** A spawn-free check already failed (e.g. the pinned install does not match its manifest). */
+  failure?: string;
 }
 
 export function resolveAcpHealthCheckCommand(
   agentType: string,
   executable: string | null | undefined,
   fallback: string,
+  antigravityNative = false,
 ): AcpHealthCheckCommand {
+  if (agentType === "antigravity" && antigravityNative) return { command: executable?.trim() || "agy" };
   const command = resolveAcpExecutableForAgent(agentType, executable, fallback);
+  const access = accessConfigFor(agentType);
+  if (access && !executable?.trim()) {
+    // Never spawned at daemon start: the manifest, executables and machine policy are the check.
+    const failure = access.healthProblem();
+    return failure ? { command, failure } : { command };
+  }
   // The claude wrapper applies + verifies the AskUserQuestion patch, so it
   // genuinely has to run --verify-patch.
   if (agentType === "claude" && command.endsWith(REMI_CLAUDE_AGENT_ACP_WRAPPER)) {
@@ -433,6 +761,8 @@ export class AcpProvider implements Provider {
   private _adapter: AgentAdapter;
   private _pool = new Map<string, PoolEntry>();
   private _startingClients = new Set<AcpClient>();
+  /** ADR 0025: the command list a starting client advertised before its session was pooled. */
+  private readonly _startingCommands = new Map<AcpClient, { sessionId: string; commands: ObservedSlashCommand[] }>();
   private _activeStreaming = new Set<string>();
   private _cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _permissionHandler: PermissionHandler | null = null;
@@ -441,17 +771,32 @@ export class AcpProvider implements Provider {
   private _elicitationHandlers = new Map<string, ElicitationHandler>();
   private _sessionToChatId = new Map<string, string>();
   private _lastResponse: AgentResponse | null = null;
+  private _typedSessionFailures: boolean | undefined;
   /** Active-stream wakeups keyed by chatId, fired when the entry's ACP process dies. */
   private _deathListeners = new Map<string, (reason: string) => void>();
+
+  /** The agent's access config; null for the npm-bridge agents. */
+  private _access: AcpAccessConfig | null;
 
   constructor(options: AcpProviderOptions = {}) {
     this._options = options;
     this._adapter = createAdapter(options.agentType ?? "claude");
+    this._access = options.antigravityNative && this._adapter.agentType === "antigravity"
+      ? ANTIGRAVITY_NATIVE_ACCESS : accessConfigFor(this._adapter.agentType);
     this.name = `acp:${this._adapter.agentType}`;
+  }
+
+  /** A requested model the agent cannot select fails instead of running another one. */
+  private get _strictModel(): boolean {
+    return this._adapter.agentType === "codex" || this._access?.strictModel === true;
   }
 
   get adapter(): AgentAdapter {
     return this._adapter;
+  }
+
+  get typedSessionFailures(): boolean | undefined {
+    return this._typedSessionFailures;
   }
 
   /** Register external handler for permission requests (AskUserQuestion, ExitPlanMode, tool approval). */
@@ -487,6 +832,31 @@ export class AcpProvider implements Provider {
    * changed, so a single session must walk the model selector in order.
    */
   async discoverModelCapabilities(): Promise<AcpModelCapability[]> {
+    if (this._adapter.agentType === "grok") {
+      const launch = this._resolveLaunch();
+      const env = {
+        ...(this._options.apiKey ? { XAI_API_KEY: this._options.apiKey } : {}),
+        ...this._options.env,
+      };
+      const client = new AcpClient({
+        inheritProcessGroup: this._options.inheritProcessGroup,
+        executable: launch.executable,
+        args: this._adapter.buildLaunchArgs?.(launch.args ?? []) ?? launch.args,
+        agentType: this._adapter.agentType,
+        cwd: this._options.cwd ?? homedir(),
+        privateTmpDirectory: this._options.privateTmpDirectory,
+        privateTmpPlatform: this._options.privateTmpPlatform,
+        env,
+      });
+      this._startingClients.add(client);
+      try {
+        await client.start();
+        return await discoverGrokModelCapabilities(client, this._adapter, { ...process.env, ...env });
+      } finally {
+        await client.stop();
+        this._startingClients.delete(client);
+      }
+    }
     const chatId = `__capability_probe__:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     const entry = await this._ensureSession(chatId, {
       chatId,
@@ -495,13 +865,26 @@ export class AcpProvider implements Provider {
     });
 
     try {
+      // A refused or unreachable listing leaves the server's built-in fallback ids, not the gateway's models.
+      const listing = entry.gateway?.fatal ?? entry.gateway?.listingFailure;
+      if (listing) throw gatewaySessionFailure(this._adapter.agentType, listing, credentialsOf(this._options));
       const modelOption = selectConfigOption(entry.configOptions, MODEL_OPTION_CATEGORY);
-      if (!modelOption) return [];
+      if (!modelOption) return capabilitiesFromModelState(entry.models);
 
       const initialModel = modelOption.currentValue;
       const models = flattenSelectOptions(modelOption).filter((model) => !isAcpDefaultSentinel(model.value));
       if (isAcpDefaultSentinel(initialModel)) {
         models.unshift({ value: initialModel, name: "Default" });
+      }
+      if (this._access?.effort === "none") {
+        // No effort selector in this access mode: one read, no per-model walk.
+        return models.map((model) => ({
+          id: model.value,
+          label: model.name || model.value,
+          ...(model.description ? { description: model.description } : {}),
+          default: model.value === initialModel,
+          effort: { status: "unsupported" as const, supportedLevels: [] },
+        }));
       }
       const discovered: AcpModelCapability[] = [];
 
@@ -568,23 +951,50 @@ export class AcpProvider implements Provider {
   }
 
   async *sendStream(message: string, options?: SendOptions): AsyncGenerator<ProviderEvent> {
+    this._lastResponse = null;
+    const credentials = this._credentials();
     const chatId = options?.chatId ?? "__default__";
+    if (this._access?.modelRequired && !(options?.model ?? this._options.model)) {
+      // Without an explicit selection the agent silently runs the gateway's first model.
+      throw new Error(`[${this._adapter.agentType}_model_required] ${this._adapter.agentType} needs a model: `
+        + "set the Agent's model or the Model gateway default_model");
+    }
+    // A bridge-started turn from a timed-out steer must not overlap this prompt.
+    const previous = this._pool.get(chatId);
+    if (previous?.lateSteer) await this._settleLateSteer(previous);
     const entry = await abortableEnsureSession(this._ensureSession(chatId, options), options?.signal);
+    // An access config that turns service messages into typed failures needs no legacy text heuristics.
+    this._typedSessionFailures = (entry.client.typedSessionFailures ?? false) || this._access?.serviceMessages === true;
 
     this._activeStreaming.add(chatId);
     entry.lastUsed = Date.now();
-    entry.promptState = createPromptState();
+    entry.promptState = createPromptState(entry.costBaselineUsd ?? null);
+    const promptState = entry.promptState;
+    const requestedModel = () => currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY)
+      ?? entry.models?.currentModelId ?? options?.model ?? this._options.model;
+    const requestedModelSource = (): TaskUsageUnit["modelSource"] => currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY)
+      || entry.models?.currentModelId ? "session_acknowledged" : requestedModel() ? "configured" : "unknown";
     this._lastResponse = null;
 
     const eventQueue: ProviderEvent[] = [];
     let promptDone = false;
     let promptError: Error | null = null;
+    const failureState: { failure: AcpSessionFailure | null; compaction: AcpSessionFailure | null } = { failure: null, compaction: null };
+    const turnFailure = () => failureState.failure?.severity === "error"
+      ? failureState.failure : failureState.compaction ?? failureState.failure;
     let resolveWaiting: (() => void) | null = null;
 
     const pushEvent = (evt: ProviderEvent) => {
       eventQueue.push(evt);
       resolveWaiting?.();
     };
+    // A Claude command that runs without the model (`LOCAL_ONLY_COMMANDS`, dist/acp-agent.js 709-710,
+    // matched as the bridge does: the first space-separated word of the prompt).
+    const localOnlyCommand = this._adapter.agentType === "claude"
+      && CLAUDE_LOCAL_ONLY_COMMANDS.has(message.split(" ", 1)[0] ?? "");
+    /** This prompt's root messages, in order, while `localOnlyCommand` (ADR 0025). */
+    const rootMessages: Array<{ id: string; text: string }> = [];
+    const droppedMessageIds = new Set<string>();
 
     // Publish the acknowledged session model, including default/resumed sessions.
     // Construction-time model options alone do not prove what the bridge selected.
@@ -599,58 +1009,354 @@ export class AcpProvider implements Provider {
     // bookkeeping this guarantees the stream still terminates.
     this._deathListeners.set(chatId, (reason) => {
       promptDone = true;
-      promptError ??= new Error(`ACP agent died unexpectedly (${reason})`);
+      promptError ??= new Error(redactProviderErrorText(`ACP agent died unexpectedly (${reason})`, credentials));
       resolveWaiting?.();
     });
 
+    // Set once this stream's prompt is on the wire; see onPromptStarted.
+    let promptToken: object | null = null;
+    let promptStarted = false;
     const originalOnUpdate = entry.client["_options"].onSessionUpdate;
-    entry.client["_options"].onSessionUpdate = (notification: SessionNotification) => {
-      if (notification.sessionId !== entry.acpSessionId) return;
-      const update = notification.update;
-      if (update.sessionUpdate === "config_option_update" && update.configOptions) {
-        entry.configOptions = update.configOptions;
-      } else if (update.sessionUpdate === "config_option_update" && update.id === "model" && typeof update.value === "string") {
-        const value = update.value;
-        entry.configOptions = entry.configOptions?.map(option => option.type === "select" && (option.category === "model" || option.id === "model")
-          ? { ...option, currentValue: value } : option);
-        if (entry.models) entry.models = { ...entry.models, currentModelId: value };
+    /** Last HTTP status the gateway shim saw in this prompt (service-message category). */
+    let gatewayStatus: number | null = null;
+    let syntheticSeq = 0;
+    /** This round sent `session/cancel` (a stop, a steer, an opened breaker or the stall watchdog). */
+    let cancelSent = false;
+    /** Stall watchdog state (access configs with `turnStallTimeoutMs`). */
+    let lastActivity = Date.now();
+    let stalled = false;
+    /** The opened shim breaker asked to stop the turn. */
+    let gatewayStop = false;
+    /** A cancel is waiting for the prompt to settle (a stop, a steer fallback, the breaker or the watchdog). */
+    let settling = false;
+    /** Order of agent frames, and of the last one that was model output (text, thought or a new tool call). */
+    let frameSeq = 0;
+    let lastOutputSeq = 0;
+    /** Tool calls still pending / in progress, with the frame order of their last update. */
+    const openTools = new Map<string, number>();
+    const onUpdate = (notification: SessionNotification) => {
+      const child = this._routeFrame(chatId, entry, notification);
+      if (child === undefined) return;
+      entry.lastUpdateAt = Date.now();
+      if (child !== null) {
+        // A child's frame is its own (PR 5 §1.2): it never touches the root
+        // turn's model, failure, text, context or steering state.
+        lastActivity = Date.now();
+        pushEvent(this._childUpdate(entry, notification.update, child, requestedModel(), requestedModelSource(), credentials));
+        return;
       }
-      if (update.sessionUpdate === "usage_update") {
-        accumulateUsage(entry.promptState.usage, update);
-        const context = (update._meta?.claudeCode as { parentToolUseId?: string } | undefined)?.parentToolUseId
-          ? null : readContextUsage(update);
-        if (context) entry.promptState.contextUsage = context;
+      let update = notification.update;
+      if (promptToken && entry.promptInFlight === promptToken && isTurnLevelUpdate(update)) {
+        // The bridge registers the turn asynchronously (codex-acp `prompt()`
+        // awaits before its pending turn start; claude-agent-acp awaits in
+        // `startTurn`): only a turn-level update proves a steer can join it.
+        entry.turnUpdates = (entry.turnUpdates ?? 0) + 1;
+        wakeSteerWaiters(entry);
+        if (!promptStarted) {
+          promptStarted = true;
+          try {
+            options?.onPromptStarted?.();
+          } catch (error) {
+            console.warn(`[AcpProvider] onPromptStarted failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
       }
-      if (update.sessionUpdate === "agent_message_chunk") {
+      lastActivity = Date.now();
+      frameSeq++;
+      if (update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "agent_thought_chunk") lastOutputSeq = frameSeq;
+      if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+        const id = (update as { toolCallId?: unknown }).toolCallId;
+        const status = (update as { status?: unknown }).status;
+        if (typeof id === "string") {
+          if (update.sessionUpdate === "tool_call" && !openTools.has(id)) lastOutputSeq = frameSeq;
+          if (status === "completed" || status === "failed") openTools.delete(id);
+          else if (status === "pending" || status === "in_progress" || update.sessionUpdate === "tool_call" || openTools.has(id)) openTools.set(id, frameSeq);
+        }
+      }
+      if (update.sessionUpdate === "usage_update" && entry.gateway && !SHIM_USAGE_UPDATES.has(update)) {
+        // Native `used` is total + cached (double-counts the cache): keep only the window size.
+        const size = nonNegativeFinite(update.size);
+        if (size) entry.gateway.nativeContextSize = size;
+        return;
+      }
+      if (update.sessionUpdate === "agent_message_chunk" && this._access?.serviceMessages) {
         const text = extractChunkText((update as Record<string, any>).content);
-        if (!isCompactionChunk(text)) entry.promptState.text += text;
+        // The server's acknowledgement of our own cancel, not the model's words.
+        if (cancelSent && text.trim() === CANCELLED_BY_CLIENT_TEXT) return;
+        const service = serviceMessage(text);
+        if (service?.type === "failure") {
+          const failure = serviceMessageFailure(service, `${this._adapter.agentType}:service:${++syntheticSeq}`, gatewayStatus);
+          onUpdate({ sessionId: entry.acpSessionId, update: {
+            sessionUpdate: "session_info_update", _meta: { jetbrains: { air: { sessionFailure: failure } } },
+          } as SessionUpdate });
+          return;
+        }
+        if (service?.type === "model_replaced") {
+          // The agent also sends the new selection as `config_option_update` (the turn's model).
+          pushEvent({ sessionUpdate: "notice", severity: "warning", title: "Model replaced",
+            description: `${service.previous} is no longer available; the agent switched to ${service.replacement}.` });
+          if (!service.rest) return;
+          update = { ...update, content: [{ type: "text", text: service.rest }] } as SessionUpdate;
+        }
+      }
+      if (update.sessionUpdate === "session_info_update") {
+        const read = withRedactedSessionFailure(update, credentials);
+        const failure = read.failure;
+        if (failure && (failure.severity === "error" || failureState.failure?.severity !== "error")) failureState.failure = failure;
+        update = read.update;
+      }
+      this._applyConfigUpdate(entry, update);
+      if (update.sessionUpdate === "usage_update") {
+        update = this._stampUsage(entry, update, requestedModel(), requestedModelSource(), true);
+      }
+      if (update.sessionUpdate === "agent_message_chunk" && !stampedParent(update)) {
+        const text = extractChunkText((update as Record<string, any>).content);
+        const rawMessageId = (update as { messageId?: unknown }).messageId;
+        const messageId = typeof rawMessageId === "string" ? rawMessageId : null;
+        if (localOnlyCommand && messageId) {
+          // claude-agent-acp 0.93 forwards a local-only command's output twice: as
+          // `local_command_output`, then as the turn's result (dist/acp-agent.js
+          // 4242-4260, 5381-5395), under two message ids. The second copy is dropped.
+          const previous = rootMessages.at(-1);
+          if (previous && previous.id !== messageId && previous.text === text && text.trim()) {
+            droppedMessageIds.add(messageId);
+            return;
+          }
+          if (droppedMessageIds.has(messageId)) return;
+          if (previous?.id === messageId) previous.text += text;
+          else rootMessages.push({ id: messageId, text });
+        }
+        // Remi advertises `session.compaction` and `session.notices`, so neither
+        // bridge reports compaction or notices as message text any more. A
+        // subagent's prose (stamped with its Agent call) is never the reply.
+        entry.promptState.text += text;
+        if (text.trim() && failureState.compaction) {
+          failureState.compaction = null;
+          console.warn("[AcpProvider] Assistant continued after a context compaction failure");
+        }
+      }
+      if (update.sessionUpdate === "compaction_update") {
+        const compaction = update as { compactionId?: unknown; status?: unknown; error?: unknown };
+        // The ACP compaction lifecycle (CA/context-compaction.js, CX:42234-42296):
+        // a failed compaction ends the turn unless the assistant continues.
+        if (compaction.status === "failed") {
+          const error = typeof compaction.error === "string" ? compaction.error
+            : typeof record(compaction.error)?.message === "string" ? record(compaction.error)!.message as string : "Compacting failed";
+          failureState.compaction = {
+            id: typeof compaction.compactionId === "string" ? compaction.compactionId : "compaction",
+            revision: 1, category: "unknown", severity: "error",
+            title: "Context compaction failed",
+            details: redactProviderErrorText(error, credentials),
+          };
+          update = JSON.parse(JSON.stringify(update, (_key, value) =>
+            typeof value === "string" ? redactProviderErrorText(value, credentials) : value));
+        }
+      }
+      if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+        trackToolCall(entry, update);
       }
       if (update.sessionUpdate === "tool_call_update") {
         const status = (update as any).status;
+        const compaction = record(record(update._meta)?.contextCompaction);
+        // Claude /compact can resolve end_turn after this failed tool, without
+        // an AIR failure. Only later assistant output in this prompt recovers it.
+        if (status === "failed" && compaction) {
+          const details = redactProviderErrorText(typeof compaction.error === "string" ? compaction.error : "Compacting failed", credentials);
+          failureState.compaction = {
+            id: update.toolCallId, revision: 1, category: "unknown", severity: "error",
+            title: "Context compaction failed",
+            details,
+          };
+          // This failed tool's text also becomes task messages, not just Error.message.
+          update = JSON.parse(JSON.stringify(update, (_key, value) =>
+            typeof value === "string" ? redactProviderErrorText(value, credentials) : value));
+        }
         if (status === "completed" || status === "failed") {
           entry.promptState.completedToolCount++;
         }
       }
       pushEvent(update);
     };
+    entry.client["_options"].onSessionUpdate = onUpdate;
 
+    const gateway = entry.gateway;
+    if (gateway) {
+      // Shim observations enter the same queue as agent updates: one writer, in order.
+      gateway.listener = (event) => {
+        if (event.type === "fatal") {
+          gatewayStatus = event.status ?? gatewayStatus;
+          onUpdate({ sessionId: entry.acpSessionId, update: {
+            sessionUpdate: "session_info_update",
+            _meta: { jetbrains: { air: { sessionFailure: gatewayFatalFailure(event, `${this._adapter.agentType}:gateway:${++syntheticSeq}`) } } },
+          } as SessionUpdate });
+          // The harness retries a dead gateway forever; end the turn through the cancel settle path.
+          gatewayStop = true;
+          resolveWaiting?.();
+          return;
+        }
+        lastActivity = Date.now();
+        if (event.type === "request_started" || event.type === "listing") return;
+        const obs = event.obs;
+        if (obs.status) gatewayStatus = obs.status;
+        const usage = geminiObservationUsage(obs, entry.acpSessionId);
+        if (!usage) return;
+        // Subagent and browser calls run other models; only the session model's calls are its context (R9).
+        const sessionModel = requestedModel();
+        const context = usage.contextTokens !== null && (!obs.requestedModel || !sessionModel || obs.requestedModel === sessionModel);
+        const synthetic: UsageUpdate = {
+          sessionUpdate: "usage_update",
+          used: context ? usage.contextTokens! : 0,
+          size: context ? gateway.nativeContextSize ?? this._access!.defaultContextWindow : 0,
+          _meta: { remiUsageMode: "request", ...("remiTokenUsage" in usage
+            ? { remiTokenUsage: usage.remiTokenUsage } : { remiMissingRequestUsage: usage.remiMissingRequestUsage }) },
+        };
+        SHIM_USAGE_UPDATES.add(synthetic);
+        onUpdate({ sessionId: entry.acpSessionId, update: synthetic });
+      };
+    }
+    entry.openToolCalls?.clear();
+    entry.turnUpdates = 0;
+    // Bill the requests of turns no stream was listening to (ADR 0020): a
+    // bridge-started turn the daemon cancelled, or a follow-up after a resolve.
+    // While capturing autonomous rounds, the whole follow-up replays into this
+    // round (PR 5 §2.6: a steer that stopped the wait re-prompts here).
+    for (const notification of takeIdleFrames(entry)) onUpdate(notification);
+
+    const rolloutHome = this._adapter.agentType === "codex" ? codexHomeFor(entry.codexHome, { ...process.env, ...this._options.env }) : null;
+    if (rolloutHome) {
+      // The ACP session ID is the native thread ID. One cursor per session, so a
+      // turn the bridge ran between prompts is read now, as idle usage is billed.
+      if (entry.codexRollout?.threadId !== entry.acpSessionId || entry.codexRollout.sessionsDir !== join(rolloutHome, "sessions")) {
+        entry.codexRollout = beginCodexRolloutUsage(rolloutHome, entry.acpSessionId, promptState.promptStartTime);
+      }
+      promptState.codexRollout = entry.codexRollout;
+    }
     const promptStartMs = Date.now();
-    entry.client
-      .prompt(entry.acpSessionId, message, buildMediaContent(options?.media))
-      .then((result: PromptResult) => {
+    promptToken = {};
+    const settlePromptInFlight = () => {
+      if (entry.promptInFlight === promptToken) entry.promptInFlight = null;
+      wakeSteerWaiters(entry);
+    };
+    // The shim serves model calls only while a prompt of this process is active.
+    let endGatewayPrompt: (() => void) | null = null;
+    // Model calls still running when the prompt ends are this prompt's: wait
+    // for their observations (bounded), then cut the rest, which bill as
+    // partial. Nothing outside a prompt is metered, so nothing may run there.
+    const drainGateway = async () => {
+      const channel = gateway?.channel;
+      if (!channel) return;
+      // The server ended the prompt: refuse new model calls first, so none can
+      // start after the drain and finish unobserved.
+      endGatewayPrompt?.();
+      await settleGateway(channel);
+      if (gateway!.inflight > 0) {
+        channel.abortInflight();
+        await settleGateway(channel, GATEWAY_ABORT_SETTLE_MS);
+      }
+    };
+    endGatewayPrompt = gateway?.channel?.beginPrompt() ?? null;
+    const promptCompletion = entry.client
+      .prompt(entry.acpSessionId, message, buildMediaContent(options?.media,
+        entry.client.initializeResult?.agentCapabilities?.promptCapabilities?.image === true, this._adapter.agentType))
+      .then(async (result: PromptResult) => {
+        // The turn is over for steering at once; usage settles before promptDone,
+        // so the stream cannot build its fallback response first.
+        settlePromptInFlight();
+        // The last requests' usage must land in this prompt's collector.
+        await drainGateway();
+        if (entry.promptState === promptState) {
+          await settleCodexRolloutUsage(promptState, requestedModel(), requestedModelSource(), CODEX_ROLLOUT_SETTLE_MS);
+        }
         promptDone = true;
-        this._lastResponse = buildAgentResponse(entry, result, this._adapter.promptUsageSettleScope);
+        const failure = readSessionFailure(result._meta, credentials);
+        if (failure && (failure.severity === "error" || failureState.failure?.severity !== "error")) failureState.failure = failure;
+        if (entry.promptState === promptState && this._activeStreaming.has(chatId)) {
+          const normalized = this._adapter.normalizePromptResult?.(result);
+          if (normalized?.model !== undefined) entry.promptState.usage.model = normalized.model;
+          if (normalized?.costUsd != null) {
+            entry.promptState.usage.costUsd = normalized.costUsd;
+            entry.promptState.usage.collector.cost(normalized.costUsd, "USD", "turn", "provider_reported");
+          }
+          const responseResult = normalized?.usage !== undefined ? { ...result, usage: normalized.usage } : result;
+          this._lastResponse = buildAgentResponse(entry, responseResult, this._adapter.promptUsageSettleScope, turnFailure(),
+            this._adapter.agentType, requestedModel(), requestedModelSource());
+        }
         if (result.stopReason === "cancelled" || result.stopReason === "interrupted") {
           promptError = new Error("Cancelled");
         }
         resolveWaiting?.();
       })
-      .catch((err: Error) => {
+      .catch(async (err: unknown) => {
+        settlePromptInFlight();
+        await drainGateway();
         promptDone = true;
-        promptError = err;
-        console.error(`[AcpProvider] prompt FAILED after ${((Date.now() - promptStartMs) / 1000).toFixed(1)}s: ${err.message}`);
+        promptError = redactProviderError(err, credentials);
+        console.error(`[AcpProvider] prompt FAILED after ${((Date.now() - promptStartMs) / 1000).toFixed(1)}s: ${promptError.message}`);
         resolveWaiting?.();
       });
+    // The request is on the wire; `onPromptStarted` waits for the turn itself.
+    if (!promptDone) entry.promptInFlight = promptToken;
+
+    // The breaker opened before this prompt (e.g. while `session/new` listed
+    // models): the harness would retry the dead token forever, so fail now.
+    // Sent after the prompt request, so the agent sees the cancel for it.
+    if (gateway?.fatal) gateway.listener?.(gateway.fatal);
+
+    // cancel is only a notification. Keep this stream and its update handler
+    // alive until the original prompt settles; the daemon may then send its
+    // steering prompt on the same session without overlap.
+    const cancelAndSettle = async () => {
+      cancelSent = true;
+      settling = true;
+      await entry.client.cancel(entry.acpSessionId).catch(() => {});
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        const settled = await Promise.race([
+          promptCompletion.then(() => true),
+          new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), PROMPT_CANCEL_SETTLE_MS); }),
+        ]);
+        if (!settled) {
+          // An unresponsive bridge cannot retain an in-flight prompt or
+          // block task shutdown. Stop it before allowing session reuse.
+          await entry.client.stop();
+          await promptCompletion;
+          if (!this._lastResponse) await settleCodexRolloutUsage(promptState, requestedModel(), requestedModelSource(), 0);
+          this._lastResponse ??= buildAgentResponse(entry, { stopReason: "cancelled" }, this._adapter.promptUsageSettleScope, turnFailure(),
+            this._adapter.agentType, requestedModel(), requestedModelSource());
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+        settling = false;
+      }
+    };
+
+    // Stall watchdog: no agent update, no model call in flight, no tool call
+    // the model is waiting on and no pending permission or question for the
+    // whole bound. An open tool call counts as blocking until later model
+    // output (text, a thought, another tool call) arrives on the same ordered
+    // ACP stream: a model can only continue once the tool returned, so after
+    // that the tool runs in the background and no longer explains the silence.
+    const stallMs = this._access?.turnStallTimeoutMs && gateway
+      ? Math.max(1, this._options.turnStallTimeoutMs ?? this._access.turnStallTimeoutMs) : null;
+    const watchdog = stallMs === null ? null : setInterval(() => {
+      // A stop, a steer fallback or the breaker is already ending the turn through the settle path.
+      if (promptDone || stalled || settling || gatewayStop || options?.signal?.aborted) return;
+      const now = Date.now();
+      const blockingTool = [...openTools.values()].some((updatedSeq) => updatedSeq >= lastOutputSeq);
+      if (gateway!.inflight > 0 || blockingTool || (entry.userInputs ?? 0) > 0 || (entry.steersInFlight ?? 0) > 0) {
+        lastActivity = now;
+        return;
+      }
+      if (now - lastActivity < stallMs) return;
+      stalled = true;
+      // An earlier typed failure (e.g. an opened breaker whose cancel the server ignored) stays the turn's reason.
+      if (failureState.failure?.severity !== "error") onUpdate({ sessionId: entry.acpSessionId, update: {
+        sessionUpdate: "session_info_update",
+        _meta: { jetbrains: { air: { sessionFailure: turnStalledFailure(this._adapter.agentType, stallMs, `${this._adapter.agentType}:stall:${++syntheticSeq}`) } } },
+      } as SessionUpdate });
+      resolveWaiting?.();
+    }, Math.max(5, Math.min(5_000, Math.floor(stallMs / 4))));
+    (watchdog as { unref?: () => void } | null)?.unref?.();
 
     try {
       while (true) {
@@ -660,9 +1366,17 @@ export class AcpProvider implements Provider {
 
         if (promptDone) break;
 
+        if (stalled || gatewayStop) {
+          // Stop the turn the way a cancel does; the typed failure above fails it.
+          await cancelAndSettle();
+          while (eventQueue.length) yield eventQueue.shift()!;
+          break;
+        }
+
         if (options?.signal?.aborted) {
-          // A dead process makes cancel a no-op; the abort must still win.
-          await entry.client.cancel(entry.acpSessionId).catch(() => {});
+          await cancelAndSettle();
+          // ACP permits final tool/content updates before the cancelled reply.
+          while (eventQueue.length) yield eventQueue.shift()!;
           throw new Error("Cancelled");
         }
 
@@ -673,21 +1387,885 @@ export class AcpProvider implements Provider {
         resolveWaiting = null;
       }
     } finally {
+      if (watchdog) clearInterval(watchdog);
+      endGatewayPrompt?.();
+      // Streaming errors, process death, generator return and task aborts all
+      // retain actual requests observed before the prompt stopped.
+      if (!this._lastResponse) {
+        await settleCodexRolloutUsage(promptState, requestedModel(), requestedModelSource(), 0);
+        this._lastResponse = buildAgentResponse(entry,
+          { stopReason: options?.signal?.aborted ? "cancelled" : "end_turn" }, this._adapter.promptUsageSettleScope, turnFailure(),
+          this._adapter.agentType, requestedModel(), requestedModelSource());
+      }
       this._deathListeners.delete(chatId);
       entry.client["_options"].onSessionUpdate = originalOnUpdate;
+      if (gateway) gateway.listener = null;
       this._activeStreaming.delete(chatId);
       entry.lastUsed = Date.now();
     }
 
+    const failure = turnFailure();
+    if (failure?.severity === "error") throw new AcpSessionFailureError(failure, promptError ?? undefined, credentials);
     if (promptError) throw promptError;
   }
 
+  /**
+   * Stream an autonomous round of `chatId`'s session (PR 5 §2.3): a model cycle
+   * the bridge started after the last prompt resolved, such as Claude's
+   * task-notification follow-up for a background subagent that finished before
+   * the human turn's result. Frames that arrived since the prompt replay first.
+   *
+   * The round keeps the last prompt's state: its usage collector (so Claude's
+   * cumulative turn-cost estimate replaces the prompt's, R6), streamed text and
+   * context. It ends at the first of:
+   * - a root `usage_update` whose `_meta["_claude/origin"].kind` is one of the
+   *   adapter's result origins, once the round did root work (text, a thought,
+   *   a tool call). Claude Code 2.1.274+ answers queued notifications with one
+   *   model call and gives the others empty placeholder results first
+   *   (`num_turns: 0`, claude-agent-acp 0.90 dist/acp-agent.js "CLI 2.1.274+"),
+   *   which still carry the marker: those do not end the round;
+   * - `idleMs` without a frame of turn activity, before the first one;
+   * - the session's autonomous budget: {@link AUTONOMOUS_HARD_CAP_MS} from the
+   *   first autonomous activity of any round of this pool entry (one attempt in
+   *   the daemon), shared by every later round;
+   * - `deadline` (a wrap-up's grace);
+   * - `signal` abort or the agent process dying.
+   * While a permission or question waits for a person, the idle, budget and
+   * deadline limits do not end it (the daemon's human-request timeout bounds the
+   * wait): the time people take extends the budget and the deadline, and after
+   * an answer the budget leaves the round at least `min(cap, idleMs)` to go on.
+   * Afterwards `getLastResponse()` covers the prompt and the round. Without a
+   * pooled, idle session, or for an adapter without autonomous rounds, it
+   * yields nothing. A failure is reported as frames, never thrown.
+   */
+  async *listenAutonomous(options: ListenAutonomousOptions = {}): AsyncGenerator<ProviderEvent> {
+    const chatId = options.chatId ?? "__default__";
+    const entry = this._pool.get(chatId);
+    const rounds = this._adapter.autonomousRounds;
+    if (!entry || !rounds || !this._capturesAutonomousRounds || entry.promptInFlight || !entry.client.alive
+      || this._activeStreaming.has(chatId)) return;
+    const credentials = this._credentials();
+    const requestedModel = () => currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY)
+      ?? entry.models?.currentModelId ?? this._options.model;
+    const requestedModelSource = (): TaskUsageUnit["modelSource"] => currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY)
+      || entry.models?.currentModelId ? "session_acknowledged" : requestedModel() ? "configured" : "unknown";
+    const resultOrigins = new Set(rounds.resultOrigins);
+    const idleMs = Math.max(1, options.idleMs ?? AUTONOMOUS_IDLE_MS);
+    const capMs = Math.max(1, this._options.autonomousRoundCapMs ?? AUTONOMOUS_HARD_CAP_MS);
+    const startedAt = Date.now();
+    let active = false;
+    /** Root work since the last result marker: a marker without it is a placeholder. */
+    let rootWork = false;
+    /** People's waiting time already added to the budget, and whether one was being asked at the last check. */
+    const waitedAtStart = waitedMs(entry, startedAt);
+    let waitedSeen = waitedAtStart;
+    let wasAsking = false;
+    let ended = null as "result" | "death" | null;
+    const queue: ProviderEvent[] = [];
+    let wake: (() => void) | null = null;
+    const push = (event: ProviderEvent) => {
+      queue.push(event);
+      wake?.();
+    };
+    const markActive = () => {
+      active = true;
+      entry.autonomousBudgetEndsAt ??= Date.now() + capMs;
+    };
+
+    this._activeStreaming.add(chatId);
+    this._deathListeners.set(chatId, () => {
+      ended ??= "death";
+      wake?.();
+    });
+    const onUpdate = (notification: SessionNotification) => {
+      const routed = this._idleStreamUpdate(chatId, entry, notification, credentials, requestedModel(), requestedModelSource());
+      if (!routed) return;
+      const { child, update } = routed;
+      if (child !== null || isTurnLevelUpdate(update) || isSubagentLifecycle(update)) markActive();
+      if (child === null && isRootWork(update)) rootWork = true;
+      push(update);
+      if (child === null && update.sessionUpdate === "usage_update") {
+        const origin = autonomousOrigin(update as unknown as Record<string, unknown>);
+        if (origin && resultOrigins.has(origin) && rootWork) {
+          ended ??= "result";
+          wake?.();
+        }
+      }
+    };
+    const originalOnUpdate = entry.client["_options"].onSessionUpdate;
+    entry.client["_options"].onSessionUpdate = onUpdate;
+    let stop: "result" | "death" | "idle" | "cap" | "deadline" | "abort" | null = null;
+    try {
+      for (const notification of takeIdleFrames(entry)) onUpdate(notification);
+      while (true) {
+        while (queue.length) yield queue.shift()!;
+        if (ended) { stop = ended; break; }
+        if (options.signal?.aborted) { stop = "abort"; break; }
+        const now = Date.now();
+        // A person being asked holds the round open; the time they take extends the budget, and
+        // after the answer the round gets at least a short grace to go on.
+        const asking = (entry.userInputs ?? 0) > 0;
+        if (asking) markActive();
+        const waited = waitedMs(entry, now);
+        if (entry.autonomousBudgetEndsAt !== undefined) entry.autonomousBudgetEndsAt += waited - waitedSeen;
+        waitedSeen = waited;
+        if (wasAsking && !asking && entry.autonomousBudgetEndsAt !== undefined) {
+          entry.autonomousBudgetEndsAt = Math.max(entry.autonomousBudgetEndsAt, now + Math.min(capMs, idleMs));
+        }
+        wasAsking = asking;
+        const limits: Array<[number, "idle" | "cap" | "deadline"]> = [active ? [entry.autonomousBudgetEndsAt!, "cap"] : [startedAt + idleMs, "idle"]];
+        // Nor does the time people took count against a wrap-up's deadline.
+        if (options.deadline !== undefined) limits.push([options.deadline + (waited - waitedAtStart), "deadline"]);
+        const [deadline, reason] = limits.reduce((first, next) => next[0] < first[0] ? next : first);
+        if (!asking && now >= deadline) { stop = reason; break; }
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const onAbort = () => wake?.();
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          // A card starting or ending wakes this too (`_whileUserInput`).
+          entry.steerWaiters?.add(resolve);
+          timer = setTimeout(resolve, asking ? 1_000 : Math.min(1_000, Math.max(0, deadline - now)));
+          options.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        entry.steerWaiters?.delete(wake!);
+        wake = null;
+        if (timer) clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+      }
+    } finally {
+      if (entry.client["_options"].onSessionUpdate === onUpdate) entry.client["_options"].onSessionUpdate = originalOnUpdate;
+      this._deathListeners.delete(chatId);
+      this._activeStreaming.delete(chatId);
+      entry.lastUsed = Date.now();
+      if (stop === "cap") {
+        console.warn(`[AcpProvider] ${this._adapter.agentType}: autonomous rounds used their ${Math.round(capMs / 1000)} s budget without a result; stopped listening`);
+      }
+      this._lastResponse = buildAgentResponse(entry, { stopReason: "end_turn" }, this._adapter.promptUsageSettleScope, null,
+        this._adapter.agentType, requestedModel(), requestedModelSource());
+    }
+  }
+
+  /**
+   * One frame read outside a prompt (a listen or a settle): routed to its
+   * session, then transformed as `_childUpdate` or `_rootIdleUpdate` does.
+   * Undefined when the frame is not this entry's.
+   */
+  private _idleStreamUpdate(chatId: string, entry: PoolEntry, notification: SessionNotification, credentials: string[],
+    requestedModel: string | null | undefined, modelSource: TaskUsageUnit["modelSource"]): { child: string | null; update: SessionUpdate } | undefined {
+    const child = this._routeFrame(chatId, entry, notification);
+    if (child === undefined) return undefined;
+    entry.lastUpdateAt = Date.now();
+    const update = child !== null
+      ? this._childUpdate(entry, notification.update, child, requestedModel, modelSource, credentials)
+      : this._rootIdleUpdate(entry, notification.update, requestedModel, modelSource, credentials);
+    return { child, update };
+  }
+
+  // ── Background tasks (PR 6 §3.3) ───────────────────────────────
+
+  /** The pooled session's background tasks, in announcement order; empty without a registry. */
+  listAsyncTasks(options: { chatId?: string | null } = {}): AsyncTaskSnapshot[] {
+    const entry = this._pool.get(options.chatId ?? "__default__");
+    return [...entry?.asyncTasks?.values() ?? []].map(asyncTaskSnapshot);
+  }
+
+  /**
+   * Stop one background task: `_session/async_task/stop` on the root session,
+   * whichever session announced it, bounded by `timeoutMs` (10 s). A task the
+   * registry does not hold, or one that is not running, answers `{stopped:
+   * false}` without a wire call; a stop already in flight is joined. Never throws.
+   */
+  async stopAsyncTask(taskId: string, options: { chatId?: string | null; timeoutMs?: number; by?: "user" | "remi"; requestedAt?: string } = {}): Promise<StopAsyncTaskResult> {
+    const entry = this._pool.get(options.chatId ?? "__default__");
+    const task = entry?.asyncTasks?.get(taskId);
+    if (!entry || !task || !task.canStop || !isLiveAsyncTaskState(task.state) || !entry.client.alive) return { stopped: false };
+    if (task.stopping) return task.stopping;
+    // The request's own time (a person's stop is answered by it), not this host's clock.
+    const requestedAt = options.requestedAt !== undefined ? Date.parse(options.requestedAt) : NaN;
+    task.stop = { requestedAt: Number.isFinite(requestedAt) ? requestedAt : Date.now(), by: options.by ?? "remi", outcome: "pending" };
+    this._notifyAsyncTask(this._chatIdOf(entry) ?? options.chatId ?? "__default__", task);
+    const timeoutMs = Math.max(1, options.timeoutMs ?? ASYNC_TASK_STOP_TIMEOUT_MS);
+    const stopping = (async (): Promise<StopAsyncTaskResult> => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let outcome: NonNullable<AsyncTaskSnapshot["stop"]>["outcome"];
+      try {
+        const result = await Promise.race([
+          entry.client.stopAsyncTask(entry.acpSessionId, taskId),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("async task stop timed out")), timeoutMs); }),
+        ]);
+        outcome = result.stopped ? "stopped" : "not_running";
+      } catch (error) {
+        console.warn(`[AcpProvider] ${this._adapter.agentType}: stopping background task ${taskId} failed: `
+          + redactProviderErrorText(error instanceof Error ? error.message : String(error), this._credentials()));
+        outcome = "failed";
+      } finally {
+        if (timer) clearTimeout(timer);
+        task.stopping = undefined;
+      }
+      // The bridge's own `stopped` state update may already have settled it.
+      if (task.stop?.outcome === "pending" || outcome === "failed") task.stop = { ...task.stop!, outcome };
+      const chatId = this._chatIdOf(entry);
+      if (chatId) this._notifyAsyncTask(chatId, task);
+      return { stopped: outcome === "stopped" };
+    })();
+    task.stopping = stopping;
+    return stopping;
+  }
+
+  /**
+   * End-of-attempt settle (PR 6 §2.2, §3.3): replay the frames that arrived
+   * since the last prompt, wait `drainMs` for announcements a bridge sends
+   * after the prompt resolved (Codex), optionally stop every running task (in
+   * parallel), then yield frames until none runs or `timeoutMs` (from the call)
+   * passes. Frames are transformed as in an autonomous round, so their usage
+   * lands in the last prompt's collector. Yields nothing without a pooled,
+   * idle session.
+   */
+  async *settleAsyncTasks(options: SettleAsyncTasksOptions): AsyncGenerator<ProviderEvent> {
+    const chatId = options.chatId ?? "__default__";
+    const entry = this._pool.get(chatId);
+    if (!entry || entry.promptInFlight || this._activeStreaming.has(chatId)) return;
+    const credentials = this._credentials();
+    const requestedModel = () => currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY)
+      ?? entry.models?.currentModelId ?? this._options.model;
+    const requestedModelSource = (): TaskUsageUnit["modelSource"] => currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY)
+      || entry.models?.currentModelId ? "session_acknowledged" : requestedModel() ? "configured" : "unknown";
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(0, options.timeoutMs);
+    const drainUntil = Math.min(deadline, startedAt + Math.max(0, options.drainMs ?? 0));
+    const queue: ProviderEvent[] = [];
+    let wake: (() => void) | null = null;
+    let died = false;
+    const onUpdate = (notification: SessionNotification) => {
+      const routed = this._idleStreamUpdate(chatId, entry, notification, credentials, requestedModel(), requestedModelSource());
+      if (!routed) return;
+      queue.push(routed.update);
+      wake?.();
+    };
+    this._activeStreaming.add(chatId);
+    this._deathListeners.set(chatId, () => { died = true; wake?.(); });
+    const originalOnUpdate = entry.client["_options"].onSessionUpdate;
+    entry.client["_options"].onSessionUpdate = onUpdate;
+    const pendingStops: Array<Promise<unknown>> = [];
+    let stopsSent = false;
+    // A stop the bridge answered settles its task even before its `stopped` frame arrives.
+    const running = () => [...entry.asyncTasks?.values() ?? []].some((task) => isLiveAsyncTaskState(task.state)
+      && !(task.stop && (task.stop.outcome === "stopped" || task.stop.outcome === "not_running")));
+    try {
+      for (const notification of takeIdleFrames(entry)) onUpdate(notification);
+      while (true) {
+        while (queue.length) yield queue.shift()!;
+        if (died || options.signal?.aborted) break;
+        const now = Date.now();
+        if (now >= drainUntil) {
+          if (options.stopRunning && !stopsSent) {
+            stopsSent = true;
+            for (const task of entry.asyncTasks?.values() ?? []) {
+              if (isLiveAsyncTaskState(task.state) && task.canStop) {
+                pendingStops.push(this.stopAsyncTask(task.id, { chatId, by: "remi", timeoutMs: Math.max(1, deadline - now) }));
+              }
+            }
+            continue;
+          }
+          if (!running() || now >= deadline) break;
+        }
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const onAbort = () => wake?.();
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          const until = now < drainUntil ? drainUntil : deadline;
+          timer = setTimeout(resolve, Math.max(0, Math.min(100, until - now)));
+          options.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        wake = null;
+        if (timer) clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+      }
+      while (queue.length) yield queue.shift()!;
+    } finally {
+      if (entry.client["_options"].onSessionUpdate === onUpdate) entry.client["_options"].onSessionUpdate = originalOnUpdate;
+      this._deathListeners.delete(chatId);
+      this._activeStreaming.delete(chatId);
+      entry.lastUsed = Date.now();
+      // Stops still in flight finish on their own and report through the registry.
+      void Promise.allSettled(pendingStops);
+      this._lastResponse = buildAgentResponse(entry, { stopReason: "end_turn" }, this._adapter.promptUsageSettleScope, null,
+        this._adapter.agentType, requestedModel(), requestedModelSource());
+    }
+  }
+
+  /**
+   * Whether the session pooled under `chatId` could serve `options` without
+   * being recreated: `_ensureSession`'s staleness rule, with no side effects
+   * (PR 6 §2.4). A model or effort change alone never makes it stale; those
+   * are applied to the live session.
+   */
+  reuseCheck(chatId: string, options?: SendOptions): ReuseCheckResult {
+    const entry = this._pool.get(chatId);
+    if (!entry) return { reuse: false, reason: "no_session" };
+    let key: SessionKey;
+    try {
+      key = this._sessionKey(options);
+    } catch {
+      // A plugin set `_ensureSession` would refuse is never this session's.
+      return { reuse: false, reason: "plugins" };
+    }
+    const reason = this._staleReason(entry, key);
+    return reason ? { reuse: false, reason } : { reuse: true };
+  }
+
+  /**
+   * Re-key the session pooled under `fromChatId` to `toChatId` for the next
+   * attempt of a parked lane (PR 6 §2.4): its process, its native children,
+   * its handlers and its background tasks move with it. A new prompt state
+   * starts, and Claude's cumulative turn-cost estimate counts from the parked
+   * prompt's last cumulative cost. False when nothing idle is pooled under
+   * `fromChatId`, or `toChatId` is taken.
+   */
+  adoptSession(fromChatId: string, toChatId: string): boolean {
+    const entry = this._pool.get(fromChatId);
+    if (!entry || !entry.client.alive || entry.promptInFlight || this._activeStreaming.has(fromChatId)) return false;
+    if (fromChatId !== toChatId) {
+      if (this._pool.has(toChatId)) return false;
+      this._pool.delete(fromChatId);
+      this._pool.set(toChatId, entry);
+      for (const [sessionId, owner] of this._sessionToChatId) {
+        if (owner === fromChatId) this._sessionToChatId.set(sessionId, toChatId);
+      }
+      for (const handlers of [this._permissionHandlers, this._elicitationHandlers] as Array<Map<string, unknown>>) {
+        const handler = handlers.get(fromChatId);
+        if (handler !== undefined) {
+          handlers.delete(fromChatId);
+          handlers.set(toChatId, handler);
+        }
+      }
+      const death = this._deathListeners.get(fromChatId);
+      if (death) {
+        this._deathListeners.delete(fromChatId);
+        this._deathListeners.set(toChatId, death);
+      }
+    }
+    entry.costBaselineUsd = entry.lastCumulativeCostUsd ?? entry.costBaselineUsd ?? null;
+    entry.promptState = createPromptState(entry.costBaselineUsd);
+    // The autonomous budget and the time people took belong to one attempt (PR 5 §2.5).
+    entry.autonomousBudgetEndsAt = undefined;
+    entry.userInputWaitedMs = 0;
+    entry.lastUsed = Date.now();
+    return true;
+  }
+
+  /**
+   * Park (`on`) or unpark the session pooled under `chatId` (PR 6 §2.2): while
+   * parked the idle cleanup leaves it alone and every frame is captured for
+   * the next attempt. Unparking keeps what was captured.
+   */
+  park(chatId: string, on: boolean): void {
+    const entry = this._pool.get(chatId);
+    if (!entry) return;
+    entry.parked = on;
+    entry.lastUsed = Date.now();
+  }
+
+  /** The bridge's own process group, for the daemon's crash sweep; null when none is pooled. */
+  processGroupId(chatId: string): number | null {
+    const entry = this._pool.get(chatId);
+    return entry?.client.alive ? entry.client.processGroupId : null;
+  }
+
+  /**
+   * End a model cycle the bridge started on its own while nobody reads it
+   * (PR 6 §2.5: a doorbell the server rejected): `session/cancel` on the root
+   * session. Nothing while a prompt is on the wire.
+   */
+  async cancelIdle(chatId: string): Promise<void> {
+    const entry = this._pool.get(chatId);
+    if (!entry || entry.promptInFlight || !entry.client.alive) return;
+    await entry.client.cancel(entry.acpSessionId).catch(() => {});
+  }
+
+  /** Whether a live process is pooled under `chatId`. */
+  sessionAlive(chatId: string): boolean {
+    return this._pool.get(chatId)?.client.alive === true;
+  }
+
+  /** The adapter declares autonomous rounds and the caller asked to capture them. */
+  private get _capturesAutonomousRounds(): boolean {
+    return this._options.captureAutonomousRounds === true && !!this._adapter.autonomousRounds;
+  }
+
+  /**
+   * Whether `notification` belongs to `entry` (PR 5 §1.2): its root session or
+   * a registered child. Returns null for a root frame, the child's session id
+   * for a child frame, undefined to drop it (logged once per unknown id).
+   * A `subagent_spawned` on either registers the announced child and routes its
+   * permission and question requests to `chatId`; a `subagent_state_update`
+   * marks it ended but keeps it registered.
+   */
+  private _routeFrame(chatId: string, entry: PoolEntry, notification: SessionNotification): string | null | undefined {
+    const sessionId = notification.sessionId;
+    let child: string | null = null;
+    if (sessionId !== entry.acpSessionId) {
+      if (!entry.children?.has(sessionId)) {
+        entry.unknownSessions ??= new Set();
+        if (!entry.unknownSessions.has(sessionId) && entry.unknownSessions.size < MAX_LOGGED_UNKNOWN_SESSIONS) {
+          entry.unknownSessions.add(sessionId);
+          console.warn(`[AcpProvider] ${this._adapter.agentType}: dropping updates for unknown session ${sessionId}`);
+        }
+        return undefined;
+      }
+      child = sessionId;
+    }
+    const update = notification.update as unknown as Record<string, unknown> | undefined;
+    // ADR 0025: every handler (a prompt, an idle wait, a listen) routes here, so
+    // the list is kept whenever it arrives; the frame itself goes on as before.
+    if (child === null && update?.sessionUpdate === "available_commands_update") {
+      const observed = observeAvailableCommands(update.availableCommands);
+      if (observed) entry.availableCommands = observed;
+    }
+    const announced = typeof update?.subagentSessionId === "string" ? update.subagentSessionId : "";
+    if (update?.sessionUpdate === "subagent_spawned" && announced && announced !== entry.acpSessionId) {
+      entry.children ??= new Map();
+      const name = typeof update.name === "string" && update.name.trim() ? update.name.trim() : null;
+      const known = entry.children.get(announced);
+      if (known) {
+        known.terminal = false;
+        known.name = name ?? known.name;
+      } else {
+        entry.children.set(announced, { parentSessionId: sessionId, terminal: false, name });
+      }
+      this._sessionToChatId.set(announced, chatId);
+    } else if (update?.sessionUpdate === "subagent_state_update" && announced) {
+      const known = entry.children?.get(announced);
+      if (known) known.terminal = true;
+    }
+    if (entry.asyncTasks && typeof update?.sessionUpdate === "string" && update.sessionUpdate.startsWith("async_task_")) {
+      this._trackAsyncTask(chatId, entry, sessionId, update);
+    }
+    return child;
+  }
+
+  /** Whether this provider keeps background-task registries (the option and the adapter, PR 6 §3.1). */
+  private get _asyncTasksRequested(): boolean {
+    return this._options.asyncTasks === true && !!this._adapter.asyncTasks;
+  }
+
+  /**
+   * Fold one accepted `async_task_*` frame into the session's registry (PR 6
+   * §3.2), whether a prompt, a listen, a settle or nobody is reading it. The
+   * same frame may be folded twice (once while idle, once when replayed): every
+   * rule is idempotent, and only a real change is reported.
+   */
+  private _trackAsyncTask(chatId: string, entry: PoolEntry, sessionId: string, update: Record<string, unknown>): void {
+    const id = typeof update.asyncTaskId === "string" ? update.asyncTaskId.trim() : "";
+    if (!id) return;
+    const tasks = entry.asyncTasks!;
+    let task = tasks.get(id);
+    const before = task ? JSON.stringify(asyncTaskSnapshot(task)) : null;
+    const text = (key: string): string | undefined => typeof update[key] === "string" ? update[key] as string : undefined;
+    if (!task) {
+      task = { id, sessionId, state: "running", canStop: true, name: "", taskType: "shell", description: null, toolCallId: null,
+        outputFilePath: null, summary: null, lastToolName: null, usage: null, startedAt: Date.now(), endedAt: null, stop: null };
+      tasks.set(id, task);
+      pruneAsyncTasks(tasks);
+    }
+    const kind = update.sessionUpdate;
+    if (kind === "async_task_spawned") {
+      task.sessionId = sessionId;
+      if (text("name") !== undefined) task.name = text("name")!;
+      if (text("taskType") !== undefined) task.taskType = text("taskType")!;
+      if (text("description") !== undefined) task.description = text("description")!;
+      if (typeof update.canStop === "boolean") task.canStop = update.canStop;
+    } else if (kind === "async_task_progress") {
+      if (text("description") !== undefined) task.description = text("description")!;
+      if (text("summary") !== undefined) task.summary = text("summary")!;
+      if (text("lastToolName") !== undefined) task.lastToolName = text("lastToolName")!;
+      const usage = record(update.usage);
+      const totalTokens = nonNegativeFinite(usage?.totalTokens);
+      const toolUses = nonNegativeFinite(usage?.toolUses);
+      const durationMs = nonNegativeFinite(usage?.durationMs);
+      if (totalTokens !== null && toolUses !== null && durationMs !== null) task.usage = { totalTokens, toolUses, durationMs };
+    } else if (kind === "async_task_state_update") {
+      const state = update.state as AsyncTaskState;
+      if (state === "running" || state === "paused") {
+        if (!isEndedAsyncTaskState(task.state)) task.state = state;
+      } else if (state === "completed" || state === "failed" || state === "stopped") {
+        if (!isEndedAsyncTaskState(task.state)) {
+          task.state = state;
+          task.endedAt = Date.now();
+        } else if (task.state === "stopped" && state !== "stopped" && !task.corrected) {
+          // A lost end edge closed it `stopped` from the level signal; the real end corrects it once.
+          task.state = state;
+          task.corrected = true;
+        }
+        if (state === "stopped" && task.stop?.outcome === "pending") task.stop = { ...task.stop, outcome: "stopped" };
+      }
+      if (text("summary") !== undefined) task.summary = text("summary")!;
+    }
+    if (text("outputFilePath") !== undefined) task.outputFilePath = text("outputFilePath")!;
+    if (text("toolCallId") !== undefined) task.toolCallId = text("toolCallId")!;
+    if (before !== JSON.stringify(asyncTaskSnapshot(task))) this._notifyAsyncTask(chatId, task);
+  }
+
+  private _notifyAsyncTask(chatId: string, task: AsyncTaskRecord): void {
+    try {
+      this._options.onAsyncTaskChange?.(chatId, asyncTaskSnapshot(task));
+    } catch (error) {
+      console.warn(`[AcpProvider] onAsyncTaskChange failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** The pool key an entry is filed under now (it moves when a parked session is adopted). */
+  private _chatIdOf(entry: PoolEntry): string | null {
+    for (const [chatId, candidate] of this._pool) if (candidate === entry) return chatId;
+    return null;
+  }
+
+  /** Forget the entry's background tasks (wherever its root session is forgotten). */
+  private _forgetAsyncTasks(entry: PoolEntry): void {
+    entry.asyncTasks?.clear();
+  }
+
+  /**
+   * A child session's frame, stamped `_meta.remiSessionId`. Only its billing
+   * reaches the root prompt's collector (context occupancy is the child's own);
+   * failures and compaction errors are redacted but never fail the root turn.
+   */
+  private _childUpdate(entry: PoolEntry, update: SessionUpdate, sessionId: string, requestedModel: string | null | undefined,
+    modelSource: TaskUsageUnit["modelSource"], credentials: string[]): SessionUpdate {
+    let next = update;
+    if (next.sessionUpdate === "session_info_update") next = withRedactedSessionFailure(next, credentials).update;
+    if (next.sessionUpdate === "usage_update") next = this._stampUsage(entry, next, requestedModel, modelSource, false);
+    if (next.sessionUpdate === "compaction_update" || next.sessionUpdate === "tool_call_update") next = redactFailedFrame(next, credentials);
+    return { ...next, _meta: { ...metaOf(next), remiSessionId: sessionId } } as SessionUpdate;
+  }
+
+  /**
+   * A root frame of an autonomous round: the prompt's text, model, usage and
+   * context carry on, as in `sendStream`; failures are only reported.
+   */
+  private _rootIdleUpdate(entry: PoolEntry, update: SessionUpdate, requestedModel: string | null | undefined,
+    modelSource: TaskUsageUnit["modelSource"], credentials: string[]): SessionUpdate {
+    let next = update;
+    if (next.sessionUpdate === "session_info_update") next = withRedactedSessionFailure(next, credentials).update;
+    this._applyConfigUpdate(entry, next);
+    if (next.sessionUpdate === "usage_update") next = this._stampUsage(entry, next, requestedModel, modelSource, true);
+    if (next.sessionUpdate === "agent_message_chunk" && !stampedParent(next)) {
+      entry.promptState.text += extractChunkText((next as Record<string, any>).content);
+    }
+    if (next.sessionUpdate === "compaction_update" || next.sessionUpdate === "tool_call_update") next = redactFailedFrame(next, credentials);
+    if (next.sessionUpdate === "tool_call_update") {
+      const status = (next as { status?: unknown }).status;
+      if (status === "completed" || status === "failed") entry.promptState.completedToolCount++;
+    }
+    return next;
+  }
+
+  /** A model or config change the agent reported for the root session. */
+  private _applyConfigUpdate(entry: PoolEntry, update: SessionUpdate): void {
+    if (update.sessionUpdate !== "config_option_update") return;
+    if (update.configOptions) {
+      entry.configOptions = update.configOptions;
+    } else if (update.id === "model" && typeof update.value === "string") {
+      const value = update.value;
+      entry.configOptions = entry.configOptions?.map(option => option.type === "select" && (option.category === "model" || option.id === "model")
+        ? { ...option, currentValue: value } : option);
+      if (entry.models) entry.models = { ...entry.models, currentModelId: value };
+    }
+  }
+
+  /**
+   * Fold a `usage_update` into the current prompt's collector and stamp the
+   * units it changed (`_meta.remiUsageUnits`). `context` false (a child
+   * session, PR 5 §1.4) keeps it out of the root's context occupancy.
+   */
+  private _stampUsage(entry: PoolEntry, update: Extract<SessionUpdate, { sessionUpdate: "usage_update" }>,
+    requestedModel: string | null | undefined, modelSource: TaskUsageUnit["modelSource"], context: boolean): SessionUpdate {
+    accumulateUsage(entry.promptState.usage, update, requestedModel, modelSource, this._adapter.agentType, { context });
+    if (entry.promptState.usage.lastCumulativeCostUsd != null) entry.lastCumulativeCostUsd = entry.promptState.usage.lastCumulativeCostUsd;
+    const occupancy = !context || stampedParent(update)
+      // A billing-only shim observation (size 0) says nothing about context.
+      || (SHIM_USAGE_UPDATES.has(update) && !(update.size > 0))
+      ? null : readContextUsage(update);
+    if (occupancy) entry.promptState.contextUsage = occupancy;
+    return { ...update, _meta: { ...update._meta,
+      remiUsageUnits: entry.promptState.usage.collector.takeChangedUnits(this._adapter.agentType, requestedModel),
+    } };
+  }
+
+  /**
+   * The native agent a child session belongs to, as this provider registered
+   * it from `subagent_spawned` (PR 5 §1.3): the agent id without the
+   * generation suffix, and its announced name. Null for a root or unknown
+   * session. Answers synchronously, while the announcement may still be
+   * queued for the stream's consumer.
+   */
+  subagentSession(sessionId: string): { agentId: string; name: string | null } | null {
+    for (const entry of this._pool.values()) {
+      const child = entry.children?.get(sessionId);
+      if (!child) continue;
+      // Any generation's own announcement may carry the name; the first one does.
+      const name = child.name ?? entry.children?.get(nativeAgentId(sessionId))?.name ?? null;
+      return { agentId: nativeAgentId(sessionId), name };
+    }
+    return null;
+  }
+
+  /** Forget the entry's child sessions and background tasks (wherever its root session is forgotten). */
+  private _forgetChildren(entry: PoolEntry): void {
+    for (const sessionId of entry.children?.keys() ?? []) this._sessionToChatId.delete(sessionId);
+    entry.children?.clear();
+    this._forgetAsyncTasks(entry);
+  }
+
+  /**
+   * Native steering (ADR 0020): inject `text` into the prompt streaming for
+   * `chatId`. Every failure is an outcome; the caller falls back to interrupt
+   * and re-prompt for anything but `injected` (see {@link STEER_REASONS}).
+   *
+   * Before the wire call: no permission or question may be waiting for a
+   * person, the bridge must have started the turn (a turn-level update), and,
+   * for a bridge that backgrounds running calls, no top-level tool call may be
+   * running (capped). A bridge `promptRequired` while our prompt still runs
+   * is retried on the next turn-level update, within a bounded window.
+   */
+  async steer(text: string, options: { chatId?: string | null } = {}): Promise<SteerResult> {
+    const entry = this._pool.get(options.chatId ?? "__default__");
+    const prompt = entry?.promptInFlight;
+    // Nothing to join: no wire call, the caller sends the text as a prompt.
+    if (!entry || !prompt || !entry.client.alive) return NO_ACTIVE_PROMPT;
+    const steering = this._adapter.steering;
+    if (!steering || !entry.client.steeringSupported) return { outcome: "unsupported" };
+    entry.steersInFlight = (entry.steersInFlight ?? 0) + 1;
+    try {
+      return await this._steerInto(entry, prompt, text, steering);
+    } finally {
+      entry.steersInFlight = Math.max(0, (entry.steersInFlight ?? 1) - 1);
+    }
+  }
+
+  private async _steerInto(entry: PoolEntry, prompt: object, text: string, steering: NonNullable<AgentAdapter["steering"]>): Promise<SteerResult> {
+    // The daemon steers only after onPromptStarted, so the turn has normally started already.
+    let ready = await this._waitForSteerable(entry, prompt, () => (entry.turnUpdates ?? 0) > 0, Number.POSITIVE_INFINITY);
+    let retryDeadline: number | null = null;
+    for (let attempt = 1; ; attempt++) {
+      if (ready === "ready" && steering.waitForToolCalls) {
+        ready = await this._waitForSteerable(entry, prompt, () => !entry.openToolCalls?.size,
+          Date.now() + (this._options.toolCallWaitMs ?? STEER_TOOL_CALL_WAIT_MS));
+        if (ready === "timeout") return { outcome: "promptRequired", reason: STEER_REASONS.toolCallRunning };
+      }
+      if (ready === "ended") return NO_ACTIVE_PROMPT;
+      if (ready === "userInput") return { outcome: "promptRequired", reason: STEER_REASONS.userInputPending };
+      if (ready === "timeout") return { outcome: "promptRequired", reason: STEER_REASONS.noRunningTurn };
+      const seen = entry.turnUpdates ?? 0;
+      const result = await this._sendSteer(entry, text, steering);
+      if (result.outcome === "startedNewTurn") await this._cancelBridgeTurn(entry);
+      if (result.outcome !== "promptRequired") return result;
+      if (entry.promptInFlight !== prompt || !entry.client.alive) return NO_ACTIVE_PROMPT;
+      // The turn settled just before our prompt answers, or has not been
+      // registered yet: try again on the next turn-level update.
+      retryDeadline ??= Date.now() + (this._options.steerRetryWindowMs ?? STEER_RETRY_WINDOW_MS);
+      if (attempt >= STEER_MAX_ATTEMPTS || Date.now() >= retryDeadline) {
+        return { outcome: "promptRequired", reason: STEER_REASONS.noRunningTurn };
+      }
+      ready = await this._waitForSteerable(entry, prompt, () => (entry.turnUpdates ?? 0) > seen, retryDeadline);
+    }
+  }
+
+  /** One `_session/steering` request, with the timeout and the outcome mapping. */
+  private async _sendSteer(entry: PoolEntry, text: string, steering: NonNullable<AgentAdapter["steering"]>): Promise<SteerResult> {
+    const timeoutMs = this._options.steerTimeoutMs ?? STEER_TIMEOUT_MS;
+    const request = entry.client.steer(entry.acpSessionId, text, steering);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let response: SteerResponse | null | undefined;
+    try {
+      response = await Promise.race([
+        request,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new SteerTimeoutError(timeoutMs)), timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof SteerTimeoutError) {
+        // The bridge may still inject it, so the re-prompt can deliver it twice (R9).
+        console.warn(`[AcpProvider] ${this._adapter.agentType} steer did not answer within ${timeoutMs}ms; falling back to re-prompt`);
+        // Without the idle opt-in the bridge may still start a turn of its own
+        // with this text once our prompt ends; settle it before re-prompting.
+        if (!steering.idleOptIn) entry.lateSteer = request;
+      }
+      // A bridge that advertises steering but does not serve the method.
+      if (error instanceof AcpRpcError && error.code === -32601) return { outcome: "unsupported" };
+      const message = error instanceof Error ? error.message : String(error);
+      return { outcome: "failed", error: redactProviderErrorText(message, this._credentials()).slice(0, 2_000) };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    const reason = typeof response?.reason === "string" && response.reason ? response.reason : undefined;
+    const answered = response?.outcome;
+    const outcome = TRACE_STEER_OUTCOMES.includes(answered as SteerOutcome) && answered !== "unsupported"
+      ? answered as SteerOutcome : "failed";
+    if (outcome === "failed") {
+      return { outcome, ...(reason ? { reason } : {}),
+        error: answered === "failed" ? reason ?? "The agent could not apply the steer" : `Unexpected steer outcome: ${String(answered)}` };
+    }
+    return { outcome, ...(reason ? { reason } : {}) };
+  }
+
+  /**
+   * Wait until `ready()` holds for this prompt. A person-facing request beats
+   * readiness: the caller must not steer while a permission or question waits.
+   */
+  private async _waitForSteerable(entry: PoolEntry, prompt: object, ready: () => boolean,
+    deadline: number): Promise<"ready" | "ended" | "userInput" | "timeout"> {
+    while (true) {
+      if (entry.promptInFlight !== prompt || !entry.client.alive) return "ended";
+      if ((entry.userInputs ?? 0) > 0) return "userInput";
+      if (ready()) return "ready";
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return "timeout";
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      await new Promise<void>((resolve) => {
+        entry.steerWaiters.add(resolve);
+        // A missed wake costs at most a second.
+        timer = setTimeout(resolve, Math.min(remaining, 1_000));
+      });
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A steer that timed out on a bridge without the idle opt-in may still start
+   * a turn of its own once the previous prompt ended (codex-acp
+   * `startNewTurnFromSteering`). Before the next prompt: wait for its answer,
+   * cancel such a turn (D3), and stop a bridge that does not answer in time.
+   */
+  private async _settleLateSteer(entry: PoolEntry): Promise<void> {
+    const late = entry.lateSteer;
+    if (!late) return;
+    entry.lateSteer = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const answer = await Promise.race([
+      late.then((response) => response, () => null),
+      new Promise<"pending">((resolve) => { timer = setTimeout(() => resolve("pending"), PROMPT_CANCEL_SETTLE_MS); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (answer === "pending") {
+      console.warn(`[AcpProvider] ${this._adapter.agentType}: a timed-out steer is still unanswered; stopping the bridge before re-prompting`);
+      await entry.client.stop();
+    } else if (answer?.outcome === "startedNewTurn") {
+      await this._cancelBridgeTurn(entry);
+    }
+  }
+
+  /**
+   * The bridge started a turn of its own (codex-acp's idle steer, D3). Cancel
+   * it and wait until the session has been quiet for {@link STEER_QUIET_MS},
+   * at most {@link PROMPT_CANCEL_SETTLE_MS}; a bridge that keeps talking is
+   * stopped, as an unresponsive cancel is, so the next prompt never overlaps it.
+   */
+  private async _cancelBridgeTurn(entry: PoolEntry): Promise<void> {
+    const cancelledAt = Date.now();
+    await entry.client.cancel(entry.acpSessionId).catch(() => {});
+    while (true) {
+      const now = Date.now();
+      const quietSince = Math.max(cancelledAt, entry.lastUpdateAt ?? 0);
+      if (now - quietSince >= STEER_QUIET_MS) return;
+      if (now - cancelledAt >= PROMPT_CANCEL_SETTLE_MS) break;
+      await Bun.sleep(Math.min(50, STEER_QUIET_MS - (now - quietSince)));
+    }
+    console.warn(`[AcpProvider] ${this._adapter.agentType}: the bridge-started turn did not go quiet within `
+      + `${PROMPT_CANCEL_SETTLE_MS / 1000}s of cancel; stopping the bridge before re-prompting`);
+    await entry.client.stop();
+  }
+
+  /** Values of credential-like settings, redacted from provider errors. */
+  private _credentials(): string[] {
+    return [this._options.apiKey, ...Object.entries(this._options.env ?? {})
+      .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
+      .map(([, value]) => value)].filter((value): value is string => Boolean(value));
+  }
+
+  /**
+   * Updates that arrive while no stream is listening. Records activity for
+   * the steer quiet-wait, registers announced child sessions, and keeps
+   * `usage_update` frames for the next stream, so a bridge-started or
+   * follow-up turn is still billed. While capturing autonomous rounds every
+   * accepted frame is kept (PR 5 §2.3), up to {@link MAX_AUTONOMOUS_FRAMES} or
+   * {@link MAX_AUTONOMOUS_BYTES}; the oldest non-usage frame goes first. A
+   * bridge that starts a turn of its own without that (Codex D3) keeps only
+   * the billing: its text is discarded.
+   */
+  private _handleIdleUpdate(client: AcpClient, notification: SessionNotification): void {
+    for (const [chatId, entry] of this._pool) {
+      if (entry.client !== client) continue;
+      if (this._routeFrame(chatId, entry, notification) === undefined) return;
+      entry.lastUpdateAt = Date.now();
+      entry.idleFrames ??= [];
+      // A parked session captures everything (PR 6 §2.2): its next attempt replays the cycle.
+      if (this._capturesAutonomousRounds || entry.parked) {
+        entry.idleFrames.push(notification);
+        entry.idleFrameBytes = (entry.idleFrameBytes ?? 0) + frameBytes(notification);
+        let dropped = 0;
+        while (entry.idleFrames.length > MAX_AUTONOMOUS_FRAMES
+          || (entry.idleFrameBytes > MAX_AUTONOMOUS_BYTES && entry.idleFrames.length > 1)) {
+          // Billing and task lifecycle frames go last; the registry already holds the latter.
+          let index = entry.idleFrames.findIndex((frame) => !keptIdleFrame(frame) && frame.update?.sessionUpdate !== "usage_update");
+          if (index < 0) index = entry.idleFrames.findIndex((frame) => frame.update?.sessionUpdate !== "usage_update");
+          const [removed] = entry.idleFrames.splice(index >= 0 ? index : 0, 1);
+          entry.idleFrameBytes -= frameBytes(removed!);
+          dropped++;
+        }
+        if (dropped) {
+          console.warn(`[AcpProvider] ${this._adapter.agentType}: dropped ${dropped} frame(s) received between prompts (buffer full)`);
+        }
+        return;
+      }
+      // PR 6 §3.2: a background task's lifecycle (and the call's "backgrounded"
+      // marker) reaches the trace even when nothing captures: Codex announces a
+      // terminal left running only after the prompt resolved (§1.2).
+      if (entry.asyncTasks && keptIdleFrame(notification)) {
+        entry.idleFrames.push(notification);
+        if (entry.idleFrames.length > MAX_IDLE_USAGE_FRAMES) {
+          entry.idleFrames.splice(0, entry.idleFrames.length - MAX_IDLE_USAGE_FRAMES);
+          console.warn(`[AcpProvider] ${this._adapter.agentType}: dropped the oldest frames received between prompts`);
+        }
+        return;
+      }
+      if (notification.update?.sessionUpdate !== "usage_update") return;
+      entry.idleFrames.push(notification);
+      if (entry.idleFrames.length > MAX_IDLE_USAGE_FRAMES) {
+        entry.idleFrames.splice(0, entry.idleFrames.length - MAX_IDLE_USAGE_FRAMES);
+        console.warn(`[AcpProvider] ${this._adapter.agentType}: dropped the oldest usage frames received between prompts`);
+      }
+      return;
+    }
+    // ADR 0025: a starting client is not pooled yet while Remi still sets its mode and model, and
+    // both bridges advertise their commands right after `session/new` answered. Keep that list
+    // until the session is pooled (`_ensureSession` adopts it for the session it opened).
+    const update = notification.update as unknown as Record<string, unknown> | undefined;
+    if (this._startingClients.has(client) && update?.sessionUpdate === "available_commands_update") {
+      const commands = observeAvailableCommands(update.availableCommands);
+      if (commands) this._startingCommands.set(client, { sessionId: notification.sessionId, commands });
+    }
+  }
+
   async healthCheck(): Promise<boolean> {
-    const check = resolveAcpHealthCheckCommand(
-      this._adapter.agentType,
-      this._options.executable,
-      this._adapter.defaultExecutable(),
-    );
+    let check: AcpHealthCheckCommand;
+    try {
+      check = resolveAcpHealthCheckCommand(
+        this._adapter.agentType,
+        this._options.executable,
+        this._adapter.defaultExecutable(),
+        this._options.antigravityNative,
+      );
+    } catch (error) {
+      // A retired executable override.
+      console.error(`[acp] ${this._adapter.agentType} health check failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    if (check.failure) {
+      console.error(`[acp] ${this._adapter.agentType} health check failed: ${check.failure}`);
+      return false;
+    }
     // No probe args → existence is the whole check (e.g. codex-acp).
     if (!check.args) {
       const ok = acpExecutableResolves(check.command);
@@ -736,60 +2314,110 @@ export class AcpProvider implements Provider {
 
   // ── Session pool management ────────────────────────────────────
 
-  private async _ensureSession(chatId: string, options?: SendOptions): Promise<PoolEntry> {
+  /**
+   * The values a session or its process fixes at creation, for `options`: a
+   * pooled session whose values differ cannot serve them (the staleness rule
+   * shared by `_ensureSession` and {@link reuseCheck}).
+   */
+  private _sessionKey(options?: SendOptions): SessionKey {
     const pluginOptions = options as SendOptions & AcpAgentPluginSendOptions | undefined;
-    const permissionMode = resolveAcpPermissionMode(this._adapter.agentType, options?.permissionMode);
     const cwd = options?.cwd ?? this._options.cwd ?? homedir();
     const mcpServers = this._options.getMcpServers?.() ?? [];
-    const mcpServersKey = JSON.stringify(mcpServers);
-    const requestedModel = options?.model ?? this._options.model ?? null;
-    const model = this._adapter.agentType === "claude"
-      ? resolveClaudeContextModel(requestedModel,
-        this._options.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT ?? process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT)
-      : requestedModel;
-    const effort = options?.effort ?? null;
+    const model = options?.model ?? this._options.model ?? null;
     const pluginPaths = absolutePluginPaths(pluginOptions?.pluginPaths ?? this._options.pluginPaths);
     const pluginPathsKey = JSON.stringify(pluginPaths);
-    const pluginFingerprint = cleanFingerprint(
-      pluginOptions?.pluginFingerprint ?? this._options.pluginFingerprint,
-      pluginPathsKey,
-    );
     const codexHome = this._adapter.agentType === "codex"
       ? absoluteCodexHome(pluginOptions?.codexHome ?? this._options.codexHome)
       : null;
     if (this._adapter.agentType === "codex" && pluginPaths.length && !codexHome) {
       throw new Error("Codex Agent Plugins require an isolated CODEX_HOME");
     }
+    return {
+      cwd, mcpServers, mcpServersKey: JSON.stringify(mcpServers), model, pluginPaths, pluginPathsKey,
+      pluginFingerprint: cleanFingerprint(pluginOptions?.pluginFingerprint ?? this._options.pluginFingerprint, pluginPathsKey),
+      codexHome,
+      startupModel: this._adapter.agentType === "claude" ? model : null,
+      customModelOption: this._adapter.agentType === "claude"
+        ? resolveClaudeContextSelection(model, this._options.claudeOneMillionModels).customModelOption
+        : null,
+    };
+  }
+
+  /** Why `existing` cannot serve `key`; null when it can. */
+  private _staleReason(existing: PoolEntry, key: SessionKey): ProviderReuseRejection | null {
+    if (!existing.client.alive) return "process_dead";
+    // The shim breaker opened for this process's token; a new process gets a new one.
+    if (existing.gateway?.fatal) return "gateway_unavailable";
+    if (existing.cwd !== key.cwd) return "cwd";
+    if (existing.mcpServersKey !== key.mcpServersKey) return "mcp_servers";
+    if (existing.pluginPathsKey !== key.pluginPathsKey || existing.pluginFingerprint !== key.pluginFingerprint) return "plugins";
+    if (existing.codexHome !== key.codexHome) return "codex_home";
+    if (existing.customModelOption !== key.customModelOption) return "context_declaration";
+    if (existing.startupModel !== key.startupModel) return "startup_model";
+    return null;
+  }
+
+  private async _ensureSession(chatId: string, options?: SendOptions): Promise<PoolEntry> {
+    const permissionMode = resolveAcpPermissionMode(this._adapter.agentType, options?.permissionMode);
+    const key = this._sessionKey(options);
+    const { cwd, mcpServers, mcpServersKey, model, startupModel, customModelOption, pluginPaths, pluginPathsKey,
+      pluginFingerprint, codexHome } = key;
+    const effort = options?.effort ?? null;
+
+    const sessionMeta = this._adapter.buildSessionMeta({
+      model,
+      permissionMode,
+      claudeEnv: customModelOption ? { ANTHROPIC_CUSTOM_MODEL_OPTION: customModelOption } : undefined,
+      claudeSettings: this._options.claudeSettings,
+      allowedTools: options?.allowedTools ?? this._options.allowedTools,
+      systemPrompt: options?.systemPrompt,
+      pluginPaths,
+      home: this._options.providerHome,
+      cwd,
+    } as Parameters<AgentAdapter["buildSessionMeta"]>[0]);
 
     const existing = this._pool.get(chatId);
+    // Unbilled frames survive a process replacement (e.g. the bridge stopped
+    // after a bridge-started turn would not go quiet); a captured autonomous
+    // round does not (PR 5 §1.5): its children died with the process.
+    let idleFrames: SessionNotification[] = [];
     if (existing) {
-      const stale =
-        !existing.client.alive ||
-        existing.cwd !== cwd ||
-        existing.mcpServersKey !== mcpServersKey ||
-        existing.pluginPathsKey !== pluginPathsKey ||
-        existing.pluginFingerprint !== pluginFingerprint ||
-        existing.codexHome !== codexHome;
+      const stale = this._staleReason(existing, key) !== null;
       if (stale && existing.client.alive) {
-        const reason = existing.cwd !== cwd
+        const reason = existing.gateway?.fatal ? `gateway unavailable (${existing.gateway.fatal.reason})` : existing.cwd !== cwd
           ? `cwd ${existing.cwd} -> ${cwd}`
           : existing.mcpServersKey !== mcpServersKey
             ? "mcpServers changed"
             : existing.pluginFingerprint !== pluginFingerprint || existing.pluginPathsKey !== pluginPathsKey
               ? "Agent Plugins changed"
-              : "CODEX_HOME changed";
+              : existing.customModelOption !== customModelOption
+                ? "Claude context declaration changed"
+                : existing.startupModel !== startupModel
+                  ? `startup model ${existing.startupModel} -> ${model}`
+                  : "CODEX_HOME changed";
         console.warn(
           `[acp] ${this._adapter.agentType}: recreating session for ${chatId} — ` +
             `${reason} (fixed at process/session creation and cannot be re-applied)`,
         );
       }
       if (stale) {
+        idleFrames = (existing.idleFrames ?? []).filter((frame) => frame.update?.sessionUpdate === "usage_update");
         await this._discardEntry(chatId, existing);
       } else {
         try {
           if (options?.sessionId && options.sessionId !== existing.acpSessionId) {
             this._sessionToChatId.delete(existing.acpSessionId);
-            const result = await existing.client.loadSession(options.sessionId, cwd, mcpServers);
+            // The registry holds live children only (PR 5 §1.5); a load replays none into it,
+            // and the loaded session's background tasks are not this process's (PR 6 §3.2).
+            this._forgetChildren(existing);
+            dropCapturedRound(existing);
+            const addDirs = absoluteAdditionalDirectories(options.addDirs, this._adapter.agentType);
+            const officialAddDirs = !!existing.client.initializeResult?.agentCapabilities?.sessionCapabilities?.additionalDirectories;
+            const meta = addDirs.length && !officialAddDirs
+              ? { ...(sessionMeta ?? {}), additionalRoots: addDirs } : sessionMeta;
+            const result = await existing.client.loadSession(options.sessionId, cwd, mcpServers, {
+              additionalDirectories: officialAddDirs ? addDirs : undefined, _meta: meta,
+            });
             existing.acpSessionId = result.sessionId;
             this._adoptSessionState(existing, result);
             this._sessionToChatId.set(existing.acpSessionId, chatId);
@@ -814,32 +2442,64 @@ export class AcpProvider implements Provider {
       if (this._options.apiKey) env.ANTHROPIC_API_KEY = this._options.apiKey;
       if (this._options.baseUrl) env.ANTHROPIC_BASE_URL = this._options.baseUrl;
     }
+    if (this._adapter.agentType === "grok" && this._options.apiKey) {
+      env.XAI_API_KEY = this._options.apiKey;
+    }
     if (this._options.env) Object.assign(env, this._options.env);
+    // The bridge's current-model/effort state reads its process env, not startup metadata.
+    if (startupModel) env.ANTHROPIC_MODEL = startupModel;
     if (codexHome) env.CODEX_HOME = codexHome;
 
-    const sessionMeta = this._adapter.buildSessionMeta({
+    const initializeMeta = this._adapter.buildInitializeMeta?.({
       model,
-      claudeSettings: this._options.claudeSettings,
+      home: this._options.providerHome,
       allowedTools: options?.allowedTools ?? this._options.allowedTools,
       systemPrompt: options?.systemPrompt,
+      permissionMode,
       pluginPaths,
-    } as Parameters<AgentAdapter["buildSessionMeta"]>[0]);
+    });
+
+    const launch = this._resolveLaunch(permissionMode ?? undefined);
+    let gateway: GatewayState | undefined;
+    if (this._access) {
+      const home = this._options.providerHome?.trim();
+      if (this._access.requiresHome && !(home && isAbsolute(home))) {
+        throw new Error(`[${this._adapter.agentType}_home_required] ${this._adapter.agentType} needs an absolute session home`);
+      }
+      if (this._access.usage === "gateway-shim" && this._options.gatewayShim) {
+        gateway = openGateway(this._options.gatewayShim, `${this._adapter.agentType}:${chatId}`);
+      }
+      const shimUrl = gateway?.channel?.baseUrl ?? this._options.gatewayUrl;
+      if (!shimUrl && this._access.usage === "gateway-shim") {
+        throw new Error(`[${this._adapter.agentType}_gateway_unconfigured] ${this._adapter.agentType} runs only through the `
+          + "workspace Model gateway; configure it under Model gateway");
+      }
+      try {
+        // Last, so the access config owns home, routing and the blanked credentials.
+        Object.assign(env, this._access.buildEnv({
+          home: home!, shimUrl: shimUrl ?? "", model, daemonEnv: { ...process.env, ...this._options.env },
+          launch: launch.pinned ? { executable: launch.executable, args: launch.args ?? [] } : null,
+        }));
+      } catch (error) {
+        closeGateway(gateway);
+        throw error;
+      }
+    }
 
     const client = new AcpClient({
       inheritProcessGroup: this._options.inheritProcessGroup,
-      executable: resolveAcpExecutableForAgent(
-        this._adapter.agentType,
-        this._options.executable,
-        this._adapter.defaultExecutable(),
-      ),
-      args: this._options.args,
+      executable: launch.executable,
+      args: this._adapter.buildLaunchArgs?.(launch.args ?? []) ?? launch.args,
       agentType: this._adapter.agentType,
+      nativeSubagents: this._options.nativeSubagentSessions ? this._adapter.nativeSubagents ?? null : null,
+      asyncTasks: this._asyncTasksRequested,
       cwd,
       privateTmpDirectory: this._options.privateTmpDirectory,
+      privateTmpPlatform: this._options.privateTmpPlatform,
       env,
       onPermissionRequest: (params) => this._handlePermission(params),
       onElicitationRequest: (params) => this._handleElicitation(params),
-      onSessionUpdate: () => {},
+      onSessionUpdate: (notification) => this._handleIdleUpdate(client, notification),
       onProcessExit: (reason) => this._handleClientDeath(client, reason),
       log: (...args) => {
         if (process.env.REMI_DEBUG) console.error(...args);
@@ -849,7 +2509,14 @@ export class AcpProvider implements Provider {
     this._startingClients.add(client);
     try {
       await client.start();
-      const initializeResult = await client.initialize();
+      const initializeResult = await client.initialize(initializeMeta);
+      const authentication = this._adapter.selectAuthentication?.(
+        initializeResult,
+        { ...(process.env as Record<string, string | undefined>), ...env },
+      );
+      if (authentication) {
+        await client.authenticate(authentication.methodId, authentication.meta);
+      }
 
       // Official field when the agent advertises it, `_meta.additionalRoots`
       // otherwise — both pinned bridges read the meta form as the compatibility
@@ -862,7 +2529,9 @@ export class AcpProvider implements Provider {
       const additionalDirectories = officialAddDirs ? addDirs : undefined;
 
       const result = options?.sessionId
-        ? await client.resumeSession(options.sessionId, cwd, mcpServers, { additionalDirectories, _meta: meta })
+        ? this._adapter.sessionRestoreMethod === "load"
+          ? await client.loadSession(options.sessionId, cwd, mcpServers)
+          : await client.resumeSession(options.sessionId, cwd, mcpServers, { additionalDirectories, _meta: meta })
         : await client.newSession({ cwd, mcpServers, additionalDirectories, _meta: meta });
 
       const entry: PoolEntry = {
@@ -875,14 +2544,41 @@ export class AcpProvider implements Provider {
         pluginPathsKey,
         pluginFingerprint,
         codexHome,
+        customModelOption,
+        startupModel,
         appliedModel: null,
+        attemptedModel: null,
+        appliedContext: null,
         appliedEffort: null,
         warnedPermissionMode: null,
+        ...(gateway ? { gateway } : {}),
+        promptInFlight: null,
+        lastUpdateAt: 0,
+        openToolCalls: new Set(),
+        steerWaiters: new Set(),
+        turnUpdates: 0,
+        userInputs: 0,
+        lateSteer: null,
+        idleFrames,
+        children: new Map(),
+        ...(this._asyncTasksRequested && client.asyncTasksEnabled ? { asyncTasks: new Map<string, AsyncTaskRecord>() } : {}),
       };
       this._adoptSessionState(entry, result);
+      // Server 1.4.0 never fails `session/new` on a refused listing: it falls
+      // back to built-in model ids. A failure the shim saw is the real cause.
+      if (gateway?.fatal) throw gatewaySessionFailure(this._adapter.agentType, gateway.fatal, credentialsOf(this._options));
       await this._applyMode(entry, permissionMode);
-      await this._applyModelAndEffort(entry, model, effort);
+      try {
+        await this._applyModelAndEffort(entry, model, effort);
+      } catch (error) {
+        const problem = gateway?.fatal ?? gateway?.listingFailure;
+        if (problem) throw gatewaySessionFailure(this._adapter.agentType, problem, credentialsOf(this._options), error);
+        throw error;
+      }
 
+      const startupCommands = this._startingCommands.get(client);
+      if (startupCommands?.sessionId === entry.acpSessionId) entry.availableCommands ??= startupCommands.commands;
+      this._startingCommands.delete(client);
       this._pool.set(chatId, entry);
       this._sessionToChatId.set(entry.acpSessionId, chatId);
       this._startCleanupTimer();
@@ -890,9 +2586,29 @@ export class AcpProvider implements Provider {
       return entry;
     } catch (error) {
       this._startingClients.delete(client);
+      this._startingCommands.delete(client);
       await client.stop();
+      closeGateway(gateway);
       throw error;
     }
+  }
+
+  /**
+   * The executable and args to spawn. An Agent `executable` override wins (and
+   * keeps its own args); otherwise an access config supplies its pinned launch.
+   */
+  private _resolveLaunch(permissionMode?: string): { executable: string; args: string[] | undefined; pinned: boolean } {
+    if (this._options.antigravityNative && this._adapter.agentType === "antigravity") {
+      return { ...nativeAntigravityLaunch(this._options.providerHome, permissionMode, this._options.executable), pinned: false };
+    }
+    const explicit = this._options.executable?.trim();
+    const executable = resolveAcpExecutableForAgent(this._adapter.agentType, this._options.executable, this._adapter.defaultExecutable());
+    if (!this._access || explicit) return { executable, args: this._options.args, pinned: false };
+    const pinned = this._access.launch();
+    if (this._options.args?.length) {
+      console.warn(`[acp] ${this._adapter.agentType}: ignoring custom args without an executable override`);
+    }
+    return { executable: pinned.executable, args: pinned.args, pinned: true };
   }
 
   /** Record what the agent advertised for a freshly created/loaded session. */
@@ -900,7 +2616,10 @@ export class AcpProvider implements Provider {
     entry.modes = result.modes;
     entry.configOptions = result.configOptions;
     entry.models = result.models;
-    entry.appliedModel = currentConfigValue(result.configOptions, MODEL_OPTION_CATEGORY);
+    // Apply the declaration once even when new/resume/load already selected the ID.
+    entry.appliedModel = currentConfigValue(result.configOptions, MODEL_OPTION_CATEGORY) ?? result.models?.currentModelId ?? null;
+    entry.attemptedModel = this._adapter.agentType === "claude" ? null : entry.appliedModel;
+    entry.appliedContext = null;
     entry.appliedEffort = currentConfigValue(result.configOptions, EFFORT_OPTION_CATEGORY);
   }
 
@@ -914,8 +2633,17 @@ export class AcpProvider implements Provider {
   private _handleClientDeath(client: AcpClient, reason: string): void {
     for (const [chatId, entry] of this._pool) {
       if (entry.client !== client) continue;
+      if (entry.asyncTasks && this._options.onSessionLost) {
+        try {
+          this._options.onSessionLost(chatId, reason, [...entry.asyncTasks.values()].map(asyncTaskSnapshot));
+        } catch (error) {
+          console.warn(`[AcpProvider] onSessionLost failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       this._pool.delete(chatId);
       this._sessionToChatId.delete(entry.acpSessionId);
+      this._forgetChildren(entry);
+      closeGateway(entry.gateway);
       console.error(`[AcpProvider] ${this._adapter.agentType} agent for ${chatId} died (${reason}); session evicted`);
       this._deathListeners.get(chatId)?.(reason);
     }
@@ -926,11 +2654,16 @@ export class AcpProvider implements Provider {
       if (entry.client.alive) await entry.client.closeSession(entry.acpSessionId);
     } catch {}
     await entry.client.stop();
+    closeGateway(entry.gateway);
     this._sessionToChatId.delete(entry.acpSessionId);
+    this._forgetChildren(entry);
     this._pool.delete(chatId);
   }
 
   private async _applyMode(entry: PoolEntry, permissionMode: string | null): Promise<void> {
+    // Grok fixes always-approve per session through session/new._meta.yoloMode;
+    // its advertised modes are prompt modes, not Remi permission modes.
+    if (this._adapter.sessionPermissionModeMethod === "session-meta") return;
     const effectiveMode = resolveAvailableAcpPermissionMode(permissionMode, entry.modes, this._adapter);
     // Report a translation or a skip once per session, not once per turn.
     if (effectiveMode !== permissionMode && permissionMode !== entry.warnedPermissionMode) {
@@ -949,22 +2682,46 @@ export class AcpProvider implements Provider {
     if (entry.modes) entry.modes = { ...entry.modes, currentModeId: effectiveMode };
   }
 
+  private async _applyModel(entry: PoolEntry, model: string): Promise<void> {
+    if (model === entry.attemptedModel && entry.appliedContext === entry.customModelOption) return;
+    if (entry.customModelOption) {
+      try {
+        await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, entry.customModelOption);
+      } catch (error) {
+        if (!entry.client.alive) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        const applied = await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model);
+        const actual = currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY) ?? entry.models?.currentModelId ?? null;
+        console.warn(
+          `[acp_model_context_fallback] claude: model="${model}", selection="${entry.customModelOption}": ${reason}; ` +
+            `actual="${actual ?? "unknown"}"; ` +
+            (applied && actual === model ? "running with the standard context window"
+              : "standard model not confirmed; keeping the agent's actual selection"),
+        );
+      }
+    } else if (!await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model)) {
+      return;
+    }
+    // Cache the attempt separately: a skipped fallback must not claim the requested model was applied.
+    entry.appliedModel = currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY) ?? entry.models?.currentModelId ?? null;
+    entry.attemptedModel = model;
+    entry.appliedContext = entry.customModelOption;
+    entry.appliedEffort = currentConfigValue(entry.configOptions, EFFORT_OPTION_CATEGORY);
+  }
+
   /**
    * Model first, then effort: switching rewrites the valid effort values and
    * may reset or retain the current effort, depending on the bridge.
    */
   private async _applyModelAndEffort(entry: PoolEntry, model: string | null, effort: string | null): Promise<void> {
-    if (model && model !== entry.appliedModel) {
-      if (await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model)) {
-        entry.appliedModel = model;
-        // The agent just rewrote the effort option: codex re-derives it from the
-        // new model's supported list (dist/index.js:29372-29374) and claude
-        // rebuilds and re-clamps it (dist/acp-agent.js:4084-4100). Re-read what
-        // it now reports, or a requested effort equal to the pre-switch value
-        // would look already-applied and be skipped.
-        entry.appliedEffort = currentConfigValue(entry.configOptions, EFFORT_OPTION_CATEGORY);
-      }
+    if (
+      this._adapter.modelSelectionMethod === "set-model" &&
+      !selectConfigOption(entry.configOptions, MODEL_OPTION_CATEGORY)
+    ) {
+      await this._applyExtendedModelAndEffort(entry, model, effort);
+      return;
     }
+    if (model) await this._applyModel(entry, model);
     const requestedEffort = effort?.trim() || null;
     if (requestedEffort) {
       const option = selectConfigOption(entry.configOptions, EFFORT_OPTION_CATEGORY);
@@ -992,6 +2749,44 @@ export class AcpProvider implements Provider {
     }
   }
 
+  private async _applyExtendedModelAndEffort(
+    entry: PoolEntry,
+    model: string | null,
+    effort: string | null,
+  ): Promise<void> {
+    const requestedModel = model?.trim() || entry.models?.currentModelId || entry.appliedModel;
+    const requestedEffort = effort?.trim() || null;
+    if (!requestedModel) {
+      if (requestedEffort) {
+        throw new UnsupportedAcpEffortError(this._adapter.agentType, null, requestedEffort, []);
+      }
+      return;
+    }
+
+    const catalog = entry.models?.availableModels ?? [];
+    const selected = catalog.find((item) => item.modelId === requestedModel);
+    if (model && catalog.length > 0 && !selected) {
+      console.warn(`[acp] ${this._adapter.agentType}: skipping model="${requestedModel}" — the agent does not offer it`);
+      return;
+    }
+
+    const effortLevels = selected?._meta?.reasoningEfforts ?? [];
+    const supported = effortLevels.map((item) => item.value);
+    if (requestedEffort && !supported.includes(requestedEffort)) {
+      throw new UnsupportedAcpEffortError(this._adapter.agentType, requestedModel, requestedEffort, supported);
+    }
+
+    if (requestedModel === entry.appliedModel && requestedEffort === entry.appliedEffort) return;
+    await entry.client.setModel(
+      entry.acpSessionId,
+      requestedModel,
+      requestedEffort ? { reasoningEffort: requestedEffort } : undefined,
+    );
+    entry.appliedModel = requestedModel;
+    entry.appliedEffort = requestedEffort ?? effortLevels.find((item) => item.default)?.value ?? null;
+    if (entry.models) entry.models = { ...entry.models, currentModelId: requestedModel };
+  }
+
   private async _setConfigOption(entry: PoolEntry, category: string, value: string): Promise<boolean> {
     const option = selectConfigOption(entry.configOptions, category);
     if (option?.currentValue === value) return true;
@@ -1005,12 +2800,12 @@ export class AcpProvider implements Provider {
       if (option?.currentValue === value) return true;
       if (!option) throw new Error(`[acp_model_context_unsupported] Claude cannot select ${value}: no model selector`);
       // Claude ACP resolves full IDs against its SDK modelInfos, including
-      // resolvedModel aliases (e.g. claude-fable-5-1[1m] -> fable[1m]).
+      // resolvedModel aliases (e.g. claude-opus-5-5[1m] -> opus[1m]).
       // Let that resolver validate the request; never silently drop the hint.
       change = { configId: option.id, value };
     }
     if (!change) {
-      if (this._adapter.agentType !== "codex") {
+      if (!this._strictModel) {
         // Claude's session metadata can already select a full SDK model ID
         // while its picker reports an alias. Preserve that existing path;
         // the explicit 1M resolver above still validates context selection.
@@ -1028,10 +2823,13 @@ export class AcpProvider implements Provider {
     if (result?.configOptions) entry.configOptions = result.configOptions;
     if (claudeOneMillion) {
       const selected = currentConfigValue(entry.configOptions, category);
-      if (!selected || !hasOneMillionContext(selected)) {
+      const selectedOption = selectConfigOption(entry.configOptions, category);
+      const declaredCustomRow = entry.customModelOption === value && selectedOption
+        && flattenSelectOptions(selectedOption).some(item => item.value === selected && item.description?.includes(value));
+      if (!selected || (!hasOneMillionContext(selected) && !declaredCustomRow)) {
         throw new Error(`[acp_model_context_unsupported] Claude did not select ${value} (selected: ${selected ?? "unknown"})`);
       }
-    } else if (this._adapter.agentType === "codex"
+    } else if (this._strictModel
       && category === MODEL_OPTION_CATEGORY && currentConfigValue(entry.configOptions, category) !== value) {
       throw new UnsupportedAcpModelError(
         this._adapter.agentType,
@@ -1048,24 +2846,84 @@ export class AcpProvider implements Provider {
     return this._pool.get(chatId)?.modes;
   }
 
+  /**
+   * ADR 0025: the latest command list this chat's agent advertised, or null
+   * when it advertised none. The process keeps it across prompts, so a parked
+   * process that is reused still has it.
+   */
+  availableCommands(chatId: string): ObservedSlashCommand[] | null {
+    return this._pool.get(chatId)?.availableCommands ?? null;
+  }
+
   private async _handlePermission(params: RequestPermissionParams): Promise<PermissionOutcome> {
+    if (this._access?.denyWorkspaceTrust && isWorkspaceTrustPrompt(params)) {
+      // Seeded `untrusted` already suppresses repository hooks; never trust them on a model's behalf.
+      return { outcome: "selected", optionId: "deny" };
+    }
+    if (this._access?.permissionQuestions) {
+      const question = permissionAsQuestion(params);
+      // Not a tool approval: the daemon's auto-approve would answer the model's question arbitrarily.
+      if (question) return this._permissionQuestion(params, question);
+    }
     const chatId = this._sessionToChatId.get(params.sessionId);
     const handler = (chatId ? this._permissionHandlers.get(chatId) : undefined) ?? this._permissionHandler;
     if (handler) {
-      return handler(params);
+      return this._whileUserInput(chatId, () => handler(params));
     }
     console.error(`[AcpProvider] permission request cancelled: no handler for session ${params.sessionId}`);
     return { outcome: "cancelled" };
+  }
+
+  /** A single-choice question asked through `session/request_permission`, answered through the elicitation handler. */
+  private async _permissionQuestion(params: RequestPermissionParams, question: PermissionQuestion): Promise<PermissionOutcome> {
+    const field = "answer";
+    const result = await this._handleElicitation({
+      mode: "form",
+      sessionId: params.sessionId,
+      toolCallId: params.toolCall.toolCallId,
+      message: question.question,
+      requestedSchema: {
+        type: "object",
+        properties: { [field]: { type: "string", oneOf: question.options.map((option) => ({ const: option.label, title: option.label })) } },
+        required: [field],
+      },
+    });
+    const answer = result.action === "accept" ? result.content?.[field] : undefined;
+    const chosen = typeof answer === "string" ? question.options.find((option) => option.label === answer.trim()) : undefined;
+    return chosen ? { outcome: "selected", optionId: chosen.optionId } : { outcome: "cancelled" };
   }
 
   private async _handleElicitation(params: ElicitationCreateParams): Promise<ElicitationResult> {
     const chatId = this._sessionToChatId.get(params.sessionId);
     const handler = (chatId ? this._elicitationHandlers.get(chatId) : undefined) ?? this._elicitationHandler;
     if (handler) {
-      return handler(params);
+      return this._whileUserInput(chatId, () => handler(params));
     }
     console.error(`[AcpProvider] elicitation request cancelled: no handler for session ${params.sessionId}`);
     return { action: "cancel" };
+  }
+
+  /**
+   * A permission or question is with the daemon (in ask mode, a card waits
+   * for a person): a native steer must not be sent meanwhile (ADR 0020).
+   */
+  private async _whileUserInput<T>(chatId: string | undefined, handle: () => Promise<T>): Promise<T> {
+    const entry = chatId ? this._pool.get(chatId) : undefined;
+    if (!entry) return handle();
+    if (!entry.userInputs) entry.userInputSince = Date.now();
+    entry.userInputs = (entry.userInputs ?? 0) + 1;
+    wakeSteerWaiters(entry);
+    try {
+      return await handle();
+    } finally {
+      entry.userInputs--;
+      if (!entry.userInputs) {
+        entry.userInputWaitedMs = (entry.userInputWaitedMs ?? 0) + (Date.now() - (entry.userInputSince ?? Date.now()));
+        entry.userInputSince = undefined;
+        // An autonomous round holding for this answer may go on now.
+        wakeSteerWaiters(entry);
+      }
+    }
   }
 
   // ── Cleanup ────────────────────────────────────────────────────
@@ -1078,13 +2936,16 @@ export class AcpProvider implements Provider {
   private async _cleanupIdle(): Promise<void> {
     const now = Date.now();
     for (const [chatId, entry] of this._pool) {
-      if (this._activeStreaming.has(chatId)) continue;
+      // A parked session (PR 6 §2.2) stays until its lane releases it; the keep-alive cap bounds it.
+      if (this._activeStreaming.has(chatId) || entry.parked) continue;
       if (now - entry.lastUsed > IDLE_TIMEOUT_MS) {
         try {
           await entry.client.closeSession(entry.acpSessionId);
           await entry.client.stop();
         } catch {}
+        closeGateway(entry.gateway);
         this._sessionToChatId.delete(entry.acpSessionId);
+        this._forgetChildren(entry);
         this._permissionHandlers.delete(chatId);
         this._elicitationHandlers.delete(chatId);
         this._pool.delete(chatId);
@@ -1102,7 +2963,9 @@ export class AcpProvider implements Provider {
       if (entry) {
         try { await entry.client.closeSession(entry.acpSessionId); } catch {}
         await entry.client.stop();
+        closeGateway(entry.gateway);
         this._sessionToChatId.delete(entry.acpSessionId);
+        this._forgetChildren(entry);
         this._permissionHandlers.delete(chatId);
         this._elicitationHandlers.delete(chatId);
         this._pool.delete(chatId);
@@ -1111,7 +2974,9 @@ export class AcpProvider implements Provider {
       for (const [, entry] of this._pool) {
         try { await entry.client.closeSession(entry.acpSessionId); } catch {}
         await entry.client.stop();
+        closeGateway(entry.gateway);
         this._sessionToChatId.delete(entry.acpSessionId);
+        this._forgetChildren(entry);
       }
       this._pool.clear();
       this._permissionHandlers.clear();
@@ -1128,6 +2993,153 @@ export class AcpProvider implements Provider {
     this._startingClients.clear();
     await Promise.allSettled(starting.map((client) => client.stop()));
     await this.clearSession();
+  }
+}
+
+/** Updates that only a running turn sends: text, thoughts, tool calls, plans, usage. */
+function isTurnLevelUpdate(update: SessionUpdate): boolean {
+  switch (update.sessionUpdate) {
+    case "agent_message_chunk":
+    case "agent_thought_chunk":
+    case "tool_call":
+    case "tool_call_update":
+    case "plan":
+    case "usage_update":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** A child session's announcement or end (PR 5): turn activity of an autonomous round. */
+function isSubagentLifecycle(update: SessionUpdate): boolean {
+  return update.sessionUpdate === "subagent_spawned" || update.sessionUpdate === "subagent_state_update";
+}
+
+/** How long people took to answer this session's permissions and questions so far, up to `now`. */
+function waitedMs(entry: PoolEntry, now: number): number {
+  return (entry.userInputWaitedMs ?? 0) + (entry.userInputs && entry.userInputSince !== undefined ? now - entry.userInputSince : 0);
+}
+
+/** Root work of a model cycle: its own text or thought, or a tool call (an empty placeholder result has none). */
+function isRootWork(update: SessionUpdate): boolean {
+  if (stampedParent(update)) return false;
+  if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") return true;
+  return (update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "agent_thought_chunk")
+    && extractChunkText((update as Record<string, any>).content).trim().length > 0;
+}
+
+/** A frame claude-agent-acp stamped with the subagent call it belongs to (`_meta.claudeCode.parentToolUseId`). */
+function stampedParent(update: SessionUpdate): boolean {
+  return !!(metaOf(update)?.claudeCode as { parentToolUseId?: unknown } | undefined)?.parentToolUseId;
+}
+
+/** A frame's `_meta`; ACP lets every update carry one, though not every contract type spells it. */
+function metaOf(update: SessionUpdate): Record<string, unknown> | undefined {
+  return (update as { _meta?: Record<string, unknown> })._meta;
+}
+
+/** A `session_info_update` with its AIR session failure redacted, and that failure. */
+function withRedactedSessionFailure(update: SessionUpdate, credentials: readonly string[]): { update: SessionUpdate; failure: AcpSessionFailure | null } {
+  const meta = metaOf(update);
+  const failure = readSessionFailure(meta, credentials);
+  if (!failure) return { update, failure: null };
+  return { failure, update: {
+    ...update, _meta: { ...meta, jetbrains: {
+      ...record(record(meta)?.jetbrains), air: { ...airMetadata(meta), sessionFailure: failure },
+    } },
+  } as SessionUpdate };
+}
+
+/** A failed compaction (its `compaction_update`, or Claude's failed /compact tool call) with credentials redacted. */
+function redactFailedFrame(update: SessionUpdate, credentials: readonly string[]): SessionUpdate {
+  const frame = update as { sessionUpdate: string; status?: unknown; _meta?: unknown };
+  const failed = frame.status === "failed"
+    && (frame.sessionUpdate === "compaction_update" || record(record(frame._meta)?.contextCompaction) !== null);
+  if (!failed) return update;
+  return JSON.parse(JSON.stringify(update, (_key, value) =>
+    typeof value === "string" ? redactProviderErrorText(value, credentials) : value));
+}
+
+/** The registry's public view of a task (a copy). */
+function asyncTaskSnapshot(task: AsyncTaskRecord): AsyncTaskSnapshot {
+  return {
+    id: task.id, sessionId: task.sessionId, state: task.state, canStop: task.canStop, name: task.name, taskType: task.taskType,
+    description: task.description, toolCallId: task.toolCallId, outputFilePath: task.outputFilePath, summary: task.summary,
+    lastToolName: task.lastToolName, usage: task.usage ? { ...task.usage } : null, startedAt: task.startedAt, endedAt: task.endedAt,
+    stop: task.stop ? { ...task.stop } : null,
+  };
+}
+
+function isLiveAsyncTaskState(state: AsyncTaskState): boolean {
+  return state === "running" || state === "paused";
+}
+
+function isEndedAsyncTaskState(state: AsyncTaskState): boolean {
+  return state === "completed" || state === "failed" || state === "stopped";
+}
+
+/** Bound a registry: the oldest ended tasks go first; running ones are never dropped. */
+function pruneAsyncTasks(tasks: Map<string, AsyncTaskRecord>): void {
+  if (tasks.size <= MAX_ASYNC_TASKS) return;
+  for (const [id, task] of tasks) {
+    if (tasks.size <= MAX_ASYNC_TASKS) return;
+    if (isEndedAsyncTaskState(task.state)) tasks.delete(id);
+  }
+}
+
+/**
+ * A frame kept between prompts even when nothing captures (PR 6 §3.2): a
+ * background task's lifecycle, and a call's "backgrounded" marker
+ * (`_meta.jetbrains.air.asyncTasks.backgrounded`).
+ */
+function keptIdleFrame(notification: SessionNotification): boolean {
+  const update = notification.update as unknown as Record<string, unknown> | undefined;
+  const kind = update?.sessionUpdate;
+  if (typeof kind === "string" && kind.startsWith("async_task_")) return true;
+  if (kind !== "tool_call_update" && kind !== "tool_call") return false;
+  const air = record(record(record(update?._meta)?.jetbrains)?.air);
+  return record(air?.asyncTasks)?.backgrounded === true;
+}
+
+function frameBytes(notification: SessionNotification): number {
+  try { return Buffer.byteLength(JSON.stringify(notification)); } catch { return 0; }
+}
+
+/** The frames kept between prompts, oldest first, leaving the buffer empty. */
+function takeIdleFrames(entry: PoolEntry): SessionNotification[] {
+  entry.idleFrameBytes = 0;
+  return (entry.idleFrames ?? []).splice(0);
+}
+
+/** Drop a captured autonomous round, keeping only its billing (PR 5 §1.5: before a load or resume). */
+function dropCapturedRound(entry: PoolEntry): void {
+  entry.idleFrames = (entry.idleFrames ?? []).filter((frame) => frame.update?.sessionUpdate === "usage_update");
+  entry.idleFrameBytes = entry.idleFrames.reduce((sum, frame) => sum + frameBytes(frame), 0);
+}
+
+/** Keep the prompt's running top-level tool calls; subagent calls carry a parent. */
+function trackToolCall(entry: PoolEntry, update: SessionUpdate): void {
+  const call = update as { sessionUpdate: string; toolCallId?: unknown; status?: unknown; _meta?: Record<string, any> };
+  if (!entry.openToolCalls || typeof call.toolCallId !== "string" || call._meta?.claudeCode?.parentToolUseId) return;
+  if (call.status === "completed" || call.status === "failed") {
+    if (entry.openToolCalls.delete(call.toolCallId) && !entry.openToolCalls.size) wakeSteerWaiters(entry);
+  } else if (call.sessionUpdate === "tool_call") {
+    entry.openToolCalls.add(call.toolCallId);
+  }
+}
+
+function wakeSteerWaiters(entry: PoolEntry): void {
+  if (!entry.steerWaiters?.size) return;
+  const waiters = [...entry.steerWaiters];
+  entry.steerWaiters.clear();
+  for (const wake of waiters) wake();
+}
+
+class SteerTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Steer did not answer within ${timeoutMs}ms`);
+    this.name = "SteerTimeoutError";
   }
 }
 
@@ -1169,10 +3181,21 @@ function abortableEnsureSession(promise: Promise<PoolEntry>, signal?: AbortSigna
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+/**
+ * Image blocks for the prompt. ACP sends them only to an agent that advertises
+ * `promptCapabilities.image`; a caller that also names the file in its text
+ * (native Chat, ADR 0023) loses nothing when they are dropped.
+ */
 function buildMediaContent(
-  media?: SendOptions["media"],
+  media: SendOptions["media"] | undefined,
+  imagesSupported: boolean,
+  agentType: string,
 ): Array<{ type: string; data: string; mimeType: string }> | undefined {
   if (!media?.length) return undefined;
+  if (!imagesSupported) {
+    console.warn(`[acp] ${agentType}: the agent does not accept image prompts; ${media.length} image(s) not sent`);
+    return undefined;
+  }
   return media
     .filter((m) => m.mediaType === "image" || m.mediaType === "sticker")
     .map((m) => ({
@@ -1237,76 +3260,144 @@ function extractChunkText(content: unknown): string {
 }
 
 /**
- * Resolve the provider-specific usage scope. Claude's settle result covers the
- * whole turn and remains authoritative (MUL-92). Codex's settle result covers
- * only the last model request, so its per-request stream is authoritative; an
- * unpatched stream deliberately resolves to totals-only instead of inventing a
- * split. Codex falls back to settle only when no usable stream event arrived.
+ * Actual request telemetry is authoritative. Claude's whole-turn settle can
+ * expose unattributed work; Codex's last-request settle is only a partial
+ * fallback. Context occupancy is never consumption.
  */
 export function resolvePromptUsage(
   streamed: PromptUsageState,
   settle: PromptResult["usage"],
   settleScope: PromptUsageSettleScope,
 ): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalTokens: number } {
-  const settled = (value: number | null | undefined, fallback: number): number => {
-    if (value == null) return fallback;
-    const parsed = Number(value);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
-  };
-
-  if (settleScope === "last-request") {
-    if (streamed.hasDetailedUsage && !streamed.hasStreamedTotal) {
-      return {
-        inputTokens: streamed.inputTokens,
-        outputTokens: streamed.outputTokens,
-        cacheReadTokens: streamed.cacheReadTokens,
-        cacheWriteTokens: streamed.cacheWriteTokens,
-        totalTokens: streamed.detailedTotalTokens,
-      };
-    }
-    if (streamed.hasStreamedTotal) {
-      return {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        totalTokens: streamed.detailedTotalTokens + streamed.streamedTotalSum,
-      };
-    }
+  const totals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+  for (const entry of streamed.collector.units("", null, settle, settleScope)) {
+    if (entry.source === "context_snapshot") continue;
+    totals.inputTokens += entry.inputTokens ?? 0;
+    totals.outputTokens += entry.outputTokens ?? 0;
+    totals.cacheReadTokens += entry.cacheReadTokens ?? 0;
+    totals.cacheWriteTokens += entry.cacheWriteTokens ?? 0;
+    totals.totalTokens += (entry.inputTokens ?? 0) + (entry.outputTokens ?? 0) + (entry.cacheReadTokens ?? 0)
+      + (entry.cacheWriteTokens ?? 0) + (entry.actualUnsplitTokens ?? 0);
   }
-
-  // Turn-scoped settle is authoritative. An explicit 0 is legitimate and
-  // must not fall back; only a missing, non-finite, or negative field does.
-  return {
-    inputTokens: settled(settle?.inputTokens, streamed.inputTokens),
-    outputTokens: settled(settle?.outputTokens, streamed.outputTokens),
-    cacheReadTokens: settled(settle?.cachedReadTokens, streamed.cacheReadTokens),
-    cacheWriteTokens: settled(settle?.cachedWriteTokens, streamed.cacheWriteTokens),
-    totalTokens: settled(settle?.totalTokens, streamed.totalTokens),
-  };
+  return totals;
 }
 
-export function accumulateUsage(state: PromptUsageState, update: SessionUpdate): void {
+/**
+ * Add the native rollout's requests for this prompt. They share the bridge
+ * hook's identity (native thread + response ID), so a request also streamed
+ * by rawResponse/completed merges into the same unit instead of adding usage.
+ */
+export async function settleCodexRolloutUsage(promptState: { codexRollout?: CodexRolloutCursor; usage: PromptUsageState },
+  requestedModel: string | null | undefined, modelSource: TaskUsageUnit["modelSource"], waitMs: number): Promise<void> {
+  const cursor = promptState.codexRollout;
+  if (!cursor) return;
+  promptState.codexRollout = undefined;
+  try {
+    for (const request of await collectCodexRolloutUsage(cursor, { requestedModel: requestedModel ?? null, waitMs })) {
+      promptState.usage.collector.update(request.usage, requestedModel, modelSource);
+    }
+  } catch (error) {
+    console.warn(`[AcpProvider] Codex rollout usage unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Fold one `usage_update` into a prompt's usage. `context: false` (a native
+ * child session's frame, PR 5 §1.4) keeps it out of the context occupancy:
+ * `totalTokens`, the context snapshot and the window size. Billing (request
+ * units, uncertain totals, cost) accumulates either way.
+ */
+export function accumulateUsage(state: PromptUsageState, update: SessionUpdate, requestedModel?: string | null, modelSource?: TaskUsageUnit["modelSource"], providerType?: string,
+  options: { context?: boolean } = {}): void {
+  const context = options.context !== false;
   const u = update as Record<string, any>;
   const used = nonNegativeFinite(u.used);
-  if (used != null) state.totalTokens = used;
+  if (context && used != null) state.totalTokens = used;
+  if (context && !(u._meta?.claudeCode?.parentToolUseId)) state.collector.context(u.used, u.size);
+  const shimUsage = accessConfigFor(providerType)?.usage === "gateway-shim";
+  if ((providerType === "codex" || shimUsage) && u._meta?.remiUsageMode === "request") state.collector.useRequestTelemetry();
 
   const remiUsage = readRemiTokenUsage(u._meta?.remiTokenUsage);
   if (remiUsage) {
-    state.inputTokens += remiUsage.inputTokens;
-    state.cacheReadTokens += remiUsage.cachedInputTokens;
-    state.outputTokens += remiUsage.outputTokens;
-    state.detailedTotalTokens += remiUsage.totalTokens;
-    state.hasDetailedUsage = true;
-  } else if (used != null) {
-    state.streamedTotalSum += used;
-    state.hasStreamedTotal = true;
+    state.collector.update(u._meta.remiTokenUsage, requestedModel, modelSource);
   }
+  const missing = u._meta?.remiMissingRequestUsage;
+  if (providerType === "codex" && missing?.source === "codex_response_usage"
+    && typeof missing.providerSessionId === "string" && missing.providerSessionId
+    && typeof missing.providerRequestId === "string" && missing.providerRequestId) {
+    state.collector.update(missing, requestedModel, modelSource);
+  } else if (shimUsage && missing?.source === GEMINI_USAGE_SOURCE && typeof missing.id === "string" && missing.id) {
+    // A shim observation whose counters cannot be split: billed as unknown, never guessed.
+    state.collector.update(missing, requestedModel, modelSource);
+  }
+  state.collector.uncertainTotal(u._meta?.remiUncertainUsage?.reportedTotalTokens);
 
   const size = nonNegativeFinite(u.size);
-  if (size != null) state.contextWindowSize = size;
-  const cost = nonNegativeFinite(u.cost?.amount);
-  if (cost != null) state.costUsd = cost;
+  if (context && size != null && size > 0) state.contextWindowSize = size;
+  const reported = nonNegativeFinite(u.cost?.amount);
+  if (reported != null) {
+    const monetary = u._meta?.remiCostUsage;
+    const established = monetary && ["request", "turn", "task"].includes(monetary.scope);
+    // Claude's turn-scope estimate is the process's cumulative cost: an adopted
+    // session counts from its baseline, so no attempt bills another's (PR 6 §2.4).
+    const cumulative = providerType === "claude" && (!established || monetary.scope === "turn");
+    const baseline = cumulative && u.cost?.currency === "USD" ? state.costBaselineUsd ?? null : null;
+    const cost = baseline !== null ? Math.max(0, reported - baseline) : reported;
+    if (u.cost?.currency === "USD") {
+      state.costUsd = cost;
+      state.lastCumulativeCostUsd = reported;
+    }
+    const source = established && monetary.source === "provider_reported" ? "provider_reported"
+      : established && monetary.source === "sdk_estimate" || providerType === "claude" ? "sdk_estimate" : "unknown";
+    state.collector.cost(cost, u.cost?.currency, established ? monetary.scope : providerType === "claude" ? "turn" : "task", source,
+      established && typeof monetary.requestId === "string" ? monetary.requestId : undefined,
+      established && typeof monetary.providerSessionId === "string" ? monetary.providerSessionId : undefined);
+  }
+}
+
+/**
+ * The typed failure of a turn the stall watchdog stopped. Classified as an
+ * agent timeout (`errorKind: turn_stalled`), never retried automatically.
+ */
+function turnStalledFailure(agentType: string, stallMs: number, id: string): AcpSessionFailure {
+  const bound = stallMs >= 1000 ? `${Math.round(stallMs / 1000)} s` : `${stallMs} ms`;
+  return { id, revision: 1, severity: "error", category: "timeout", errorKind: "turn_stalled",
+    title: `The ${agentType} turn timed out after ${bound} without progress`,
+    details: `No agent update, model call, running tool or pending question for ${bound}, so Remi stopped the turn. `
+      + "A shell command left running in the background can hold a turn open; ask for it to run in the foreground." };
+}
+
+function credentialsOf(options: AcpProviderOptions): string[] {
+  return [options.apiKey, ...Object.entries(options.env ?? {})
+    .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
+    .map(([, value]) => value)].filter((value): value is string => Boolean(value));
+}
+
+/** A gateway failure the shim saw while the session was set up (breaker or listing), as a typed failure. */
+function gatewaySessionFailure(agentType: string, problem: Extract<GatewayShimEvent, { type: "fatal" }> | GatewayShimListingFailure,
+  credentials: string[], cause?: unknown): AcpSessionFailureError {
+  const event = "type" in problem ? problem
+    : { type: "fatal" as const, reason: problem.reason, status: problem.status || null, message: problem.message };
+  return new AcpSessionFailureError(gatewayFatalFailure(event, `${agentType}:gateway:setup`),
+    cause instanceof Error ? cause : undefined, credentials);
+}
+
+/** The typed failure of an opened gateway-shim breaker (§4.2). */
+function gatewayFatalFailure(event: Extract<GatewayShimEvent, { type: "fatal" }>, id: string): AcpSessionFailure {
+  const status = event.status !== null && !event.message.includes(`HTTP ${event.status}`) ? ` (HTTP ${event.status})` : "";
+  switch (event.reason) {
+    case "auth":
+      return { id, revision: 1, severity: "error", category: "authentication", errorKind: "authentication_failed",
+        title: "The model gateway rejected the credentials", details: `${event.message}${status}` };
+    case "quota":
+      return { id, revision: 1, severity: "error", category: "quota", errorKind: "rate_limit",
+        title: "The model gateway is rate limiting or out of quota", details: `${event.message}${status}` };
+    default:
+      // 5xx answers are the gateway's own errors; no answer at all is the network.
+      return { id, revision: 1, severity: "error", category: "connection",
+        errorKind: event.status !== null && event.status >= 500 ? "server_error" : "gateway_unreachable",
+        title: "The model gateway is unreachable", details: `${event.message}${status}` };
+  }
 }
 
 function readRemiTokenUsage(value: unknown): {
@@ -1331,20 +3422,23 @@ function nonNegativeFinite(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope: PromptUsageSettleScope): AgentResponse {
+function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope: PromptUsageSettleScope, sessionFailure?: AcpSessionFailure | null,
+  providerType = "acp", requestedModel?: string | null, modelSource?: TaskUsageUnit["modelSource"]): AgentResponse {
   const { usage, text, promptStartTime, completedToolCount, contextUsage } = entry.promptState;
   const durationMs = Date.now() - promptStartTime;
 
-  // Reset per-prompt state for next prompt
-  entry.promptState = createPromptState();
-
   const resolved = resolvePromptUsage(usage, result.usage, settleScope);
+  // A normalized settle model does not identify independent requests or an unattributed remainder.
+  const usageUnits = usage.collector.units(providerType, requestedModel, result.usage, settleScope, modelSource)
+    .map(unit => usage.model && unit.evidenceRef === "acp_prompt_settle"
+      ? { ...unit, model: usage.model, modelSource: "provider_reported" as const }
+      : unit);
 
   return createAgentResponse({
     text,
     sessionId: entry.acpSessionId,
     model: usage.model,
-    costUsd: usage.costUsd || null,
+    costUsd: usage.costUsd,
     inputTokens: resolved.inputTokens || null,
     outputTokens: resolved.outputTokens || null,
     totalTokens: resolved.totalTokens || null,
@@ -1356,6 +3450,8 @@ function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope:
     metadata: {
       stopReason: result.stopReason,
       provider: "acp",
+      usageUnits,
+      ...(sessionFailure ? { sessionFailure } : {}),
       ...(contextUsage ? { contextUsage } : {}),
     },
   });

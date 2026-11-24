@@ -1,13 +1,48 @@
+import { type ExecutionModelPolicy, executionModelPolicyReason } from "@multiremi/contracts/execution-endpoint.js";
 import type { MultiremiRuntime, MultiremiRuntimeModel, MultiremiRuntimeModelThinking } from "@multiremi/contracts/types.js";
-import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
+import { runtimeConnectionModels, type RuntimeConnectionProfile, type RuntimeBindingModelCatalog } from "@multiremi/contracts/runtime-connection";
 import { commonThinkingLevels, modelThinkingLevels } from "@multiremi/contracts/model-thinking.js";
+import { extractAntigravityDefaultModel, RELAY_ENGINES } from "@multiremi/relay/fragment.js";
 import type { GatewayModelReasoningDecl, MultiremiStore, RelayEngine } from "./store.js";
+
+/** Canonical groups use only their own authenticated binding catalogs, never workspace fallback catalogs. */
+export function executionEndpointGroupCatalog(
+  group: Pick<import("@multiremi/contracts/types.js").MultiremiExecutionGroup, "id" | "provider" | "runtimeIds" | "modelPolicy">,
+  snapshot: (runtimeId: string) => RuntimeBindingModelCatalog | null,
+  online = 0,
+): FleetProviderModelsResponse {
+  const providers = [...group.runtimeIds].sort().map(runtimeId => {
+    const catalog = snapshot(runtimeId);
+    const allowed = catalog?.models.filter(model => !executionModelPolicyReason(group.modelPolicy, model.id)) ?? [];
+    const selected = group.modelPolicy.model || allowed.find(model => model.default)?.id || allowed[0]?.id;
+    return { provider: group.provider, online_runtime_count: 0,
+      model_catalog_status: catalog?.status ?? "unknown" as const,
+      models: allowed.map(model => runtimeModelCompatibilityResponse({ ...model, default: model.id === selected })) };
+  });
+  const result = intersectExecutionGroupCatalogs(group.provider, providers, online, true)[0]!;
+  if (group.modelPolicy.model && !result.models.some(model => model.id === group.modelPolicy.model)) {
+    result.models = result.models.map(model => ({ ...model, default: false }));
+  }
+  return { ...result, blocked_models: group.modelPolicy.blocked_models ?? [] };
+}
+
+/** Legacy catalogs retain their old behavior until an explicit block policy is added. */
+export function blockExecutionGroupCatalog(catalog: FleetProviderModelsResponse, policy: ExecutionModelPolicy): FleetProviderModelsResponse {
+  if (!policy.blocked_models?.length) return catalog;
+  const models = catalog.models.filter(model => !executionModelPolicyReason(policy, model.id));
+  const selected = models.find(model => model.default)?.id ?? models[0]?.id;
+  return { ...catalog, blocked_models: policy.blocked_models,
+    models: models.map(model => ({ ...model, default: model.id === selected })) };
+}
 
 /** Minimal data source shared by API catalogs and dispatch capability checks. */
 export type RuntimeModelCatalogSource = Pick<MultiremiStore,
   "getRelayModelDiscovery" | "getRelayConfigForDaemon" | "getGatewayModels" |
   "listGatewayModelReasoning" |
-  "listWorkspaceCodexProfileModels" | "listWorkspaceClaudeProfileModels" | "getRuntimeExecutionProfile">;
+  "listWorkspaceCodexProfileModels" | "listWorkspaceClaudeProfileModels" | "getRuntimeExecutionProfile"> & {
+    runtimeProfileModelEvidenceMatches?: (runtimeId: string, provider: string, profile: RuntimeConnectionProfile) => boolean;
+    getRuntimeBindingModelCatalog?: (groupId: string, runtimeId: string) => RuntimeBindingModelCatalog | null;
+  };
 
 /**
  * The effort values an administrator may declare per engine. Deliberately the
@@ -19,6 +54,9 @@ export type RuntimeModelCatalogSource = Pick<MultiremiStore,
 export const GATEWAY_REASONING_LEVELS: Record<RelayEngine, readonly string[]> = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex: ["minimal", "low", "medium", "high", "xhigh", "max"],
+  // The Antigravity server's gateway path offers no `thought_level` selector, so
+  // there is no level an administrator could declare that the engine would honour.
+  antigravity: [],
 };
 
 /** Display labels for the declared enum, matching the CLIs' own spelling. */
@@ -51,7 +89,7 @@ export function isGatewayReasoningLevel(engine: RelayEngine, value: unknown): va
  */
 export type FleetModelThinkingSource = "gateway" | "runtime" | "manual" | "family" | "none";
 
-export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "antigravity"]);
+export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "grok", "antigravity"]);
 
 /**
  * Union of the online runtimes' model catalogs, grouped by provider — the
@@ -66,7 +104,7 @@ export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "antigravi
  */
 // Maps a model's vendor (as the daemon reports it) to the engine that runs it,
 // for the rare "any" runtime that carries a model catalog but no fixed engine.
-const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude" };
+const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude", xai: "grok" };
 
 export interface FleetModelThinkingLevelResponse {
   value: string;
@@ -95,6 +133,7 @@ export interface FleetModelResponse {
 }
 
 export interface FleetProviderModelsResponse {
+  blocked_models?: string[];
   provider: string;
   online_runtime_count: number;
   models: FleetModelResponse[];
@@ -204,10 +243,9 @@ function capabilityRank(model: MultiremiRuntimeModel): number {
   return provenance;
 }
 
-export function fleetModelsResponse(runtimes: MultiremiRuntime[], callerOwnerId: string): FleetProviderModelsResponse[] {
-  const usable = runtimes.filter(
-    (r) => r.visibility === "public" || (r.ownerId ?? "local") === (callerOwnerId ?? "local"),
-  );
+export function fleetModelsResponse(runtimes: MultiremiRuntime[], _callerOwnerId: string): FleetProviderModelsResponse[] {
+  // The caller supplies an already workspace-scoped Runtime list.
+  const usable = runtimes;
   const buckets = new Map<string, {
     online: number;
     models: Map<string, MultiremiRuntimeModel>;
@@ -440,7 +478,7 @@ export function overlayGatewayModels(
   const config = store.getRelayConfigForDaemon(workspaceId);
   const byEngine = new Map<string, FleetProviderModelsResponse>();
   for (const provider of providers) byEngine.set(provider.provider, provider);
-  for (const engine of ["claude", "codex"] as const) {
+  for (const engine of RELAY_ENGINES) {
     const engineConfig = config[engine];
     // No live gateway credential → don't surface any (possibly stale) snapshot.
     if (!engineConfig || !engineConfig.authToken) continue;
@@ -511,6 +549,10 @@ export function overlayGatewayModels(
       continue;
     }
     if (!snapshot || snapshot.sourceRevision !== engineConfig.revision || snapshot.models.length === 0) continue;
+    // An Antigravity Agent without a model runs the engine's configured
+    // default_model, never whatever the server happens to list first, so that is
+    // the only model this catalog may mark as the default.
+    const configuredDefault = engine === "antigravity" ? extractAntigravityDefaultModel(engineConfig.fragment) : null;
     const existingModels = existing?.models ?? [];
     const runtimeModels = new Map(existingModels.map((model) => [model.id, model]));
     const familyModels = new Map<ClaudeModelFamily, FleetModelResponse[]>();
@@ -540,12 +582,14 @@ export function overlayGatewayModels(
         manual: manualDecl ? manualThinkingResponse(manualDecl) : undefined,
         family: familyMatched ? familyThinkingConsensus(matchingFamilyModels) : undefined,
       });
-      const isDefault = runtimeModel
-        ? runtimeModel.default === true
-        : family !== undefined
-          && familyMatched
-          && gatewayFamilyCounts.get(family) === 1
-          && matchingFamilyModels.filter((candidate) => candidate.default).length === 1;
+      const isDefault = engine === "antigravity"
+        ? model.id === configuredDefault
+        : runtimeModel
+          ? runtimeModel.default === true
+          : family !== undefined
+            && familyMatched
+            && gatewayFamilyCounts.get(family) === 1
+            && matchingFamilyModels.filter((candidate) => candidate.default).length === 1;
       return {
         id: model.id,
         label: model.label,
@@ -555,7 +599,7 @@ export function overlayGatewayModels(
         ...(thinking && source ? { thinking_source: source } : {}),
       };
     });
-    if (options.preserveCustomProfileModels !== false) {
+    if (engine === "claude" && options.preserveCustomProfileModels !== false) {
       const customIds = new Set(store.listWorkspaceClaudeProfileModels(workspaceId));
       for (const model of existingModels) {
         if (customIds.has(model.id) && !models.some(candidate => candidate.id === model.id)) models.push(model);
@@ -626,21 +670,54 @@ export function runtimeTargetModelCatalog(
   store: RuntimeModelCatalogSource,
   workspaceId: string,
   runtime: MultiremiRuntime,
+  profileOverride?: RuntimeConnectionProfile | null,
+  bindingGroupId?: string,
 ): FleetProviderModelsResponse[] {
   // Keep the last reported catalog while offline so saved configurations remain editable.
   const providers = fleetModelsResponse([{ ...runtime, status: "online", visibility: "public" }], runtime.ownerId ?? "local");
   return providers.map((entry) => {
-    const profile = store.getRuntimeExecutionProfile(runtime.id, entry.provider);
-    const online_runtime_count = runtime.status === "online" ? 1 : 0;
-    if (profile) {
-      const models = runtimeConnectionModels(profile, entry.provider, entry.models);
-      // Custom connections use their own catalog and never inherit a workspace
-      // gateway's native membership constraint or loading status.
-      return { ...entry, online_runtime_count, models, default_thinking: defaultModelThinking(models) };
+    const legacyProfile = store.getRuntimeExecutionProfile(runtime.id, entry.provider);
+    const profile = profileOverride === undefined ? legacyProfile : profileOverride;
+    if (profile && bindingGroupId) {
+      const snapshot = store.getRuntimeBindingModelCatalog?.(bindingGroupId, runtime.id);
+      if (snapshot) {
+        const models = runtimeConnectionModels(profile, entry.provider, snapshot.models).map(model => ({
+          ...runtimeModelCompatibilityResponse(model),
+          ...(snapshot.models.find(entry => entry.id === model.id)?.thinking ? { thinking_source: "gateway" as const } : {}),
+        }));
+        return { provider: entry.provider, online_runtime_count: runtime.status === "online" ? 1 : 0,
+          models, model_catalog_status: snapshot.status, default_thinking: defaultModelThinking(models) };
+      }
+      // No current discovery can identify a central connection with no default.
+      // Administrator-declared IDs retain their existing manual semantics.
+      if (!profile.model) return { provider: entry.provider, online_runtime_count: runtime.status === "online" ? 1 : 0,
+        models: [], model_catalog_status: "unknown" as const };
     }
-    const gateway = overlayGatewayModels(store, workspaceId, [entry], { preserveCustomProfileModels: entry.provider !== "codex", requireRuntimeMembership: entry.provider === "codex" })
-      .find((candidate) => candidate.provider === entry.provider);
-    return { ...(gateway ?? entry), online_runtime_count };
+    // A model ID alone cannot identify an endpoint's capabilities. Reuse legacy
+    // evidence only for the same connection on this runtime, including migration
+    // provenance when an API credential was re-encrypted under a new reference.
+    const matchingEnvConnection = profileOverride && legacyProfile
+      && (profileOverride.auth_mode ?? "env") === "env"
+      && (legacyProfile.auth_mode ?? "env") === "env"
+      && profileOverride.base_url === legacyProfile.base_url
+      && profileOverride.model === legacyProfile.model
+      && profileOverride.env_key === legacyProfile.env_key;
+    const matchesLegacy = matchingEnvConnection || (profileOverride
+      && store.runtimeProfileModelEvidenceMatches?.(runtime.id, entry.provider, profileOverride));
+    const reportedModels = profileOverride === undefined || (!profileOverride && !legacyProfile) || matchesLegacy ? entry.models : [];
+    const online_runtime_count = runtime.status === "online" ? 1 : 0;
+    const reportedEntry = reportedModels === entry.models ? entry : { provider: entry.provider, online_runtime_count, models: reportedModels };
+    if (profile) {
+      const models = runtimeConnectionModels(profile, entry.provider, reportedModels);
+      // Custom connections never inherit the workspace gateway's native
+      // membership constraint, nor another connection's loading outcome.
+      return { ...reportedEntry, online_runtime_count, models, default_thinking: defaultModelThinking(models) };
+    }
+    const gateway = overlayGatewayModels(store, workspaceId, [reportedEntry], {
+      preserveCustomProfileModels: entry.provider !== "codex",
+      requireRuntimeMembership: entry.provider === "codex",
+    }).find((candidate) => candidate.provider === entry.provider);
+    return { ...(gateway ?? reportedEntry), online_runtime_count };
   });
 }
 
@@ -655,4 +732,62 @@ export function catalogAllowsModel(catalog: FleetProviderModelsResponse | undefi
   if (catalog?.provider === "codex" && catalog.runtime_catalog_status) return Boolean(model?.catalog);
   if (catalog?.model_catalog_status === "ready" || catalog?.model_catalog_status === "error") return Boolean(model);
   return true;
+}
+
+
+/** One capability-group contract for model selection and default freezing. */
+export function intersectExecutionGroupCatalogs(
+  provider: string,
+  providers: Array<FleetProviderModelsResponse | undefined>,
+  onlineRuntimeCount: number,
+  resolveDiscoveredDefault = false,
+): FleetProviderModelsResponse[] {
+  const catalogs = providers.map((entry) => entry?.models ?? []);
+  const models = (catalogs[0] ?? []).flatMap((model): FleetModelResponse[] => {
+    const matches = catalogs.map((catalog) => catalog.find((candidate) => candidate.id === model.id));
+    if (matches.some((candidate) => !candidate)) return [];
+    const supported = modelThinkingLevels([model], model.id).filter((level) => matches.every((candidate) =>
+      candidate && modelThinkingLevels([candidate], candidate.id).some((entry) => entry.value === level.value)));
+    const failed = matches.find((candidate) => candidate?.thinking?.status === "error")?.thinking;
+    const unknown = matches.some((candidate) => !candidate?.thinking || candidate.thinking.status === "unknown");
+    const status = failed ? "error" : unknown ? "unknown" : supported.length ? "supported" : "unsupported";
+    const explicitStatus = matches.some((candidate) => candidate?.thinking?.status !== undefined);
+    const defaultLevel = model.thinking?.default_level;
+    const thinkingDefault = defaultLevel && supported.some((level) => level.value === defaultLevel)
+      && matches.every((candidate) => candidate?.thinking?.default_level === defaultLevel) ? defaultLevel : undefined;
+    // These levels are the intersection across the group's members, so naming a
+    // single member's source for the consensus would misattribute it: report one
+    // only when every member that offers the model states the same source.
+    const sources = matches.map((candidate) => candidate?.thinking_source);
+    const thinkingSource = sources.length > 0
+      && sources.every((source) => source !== undefined && source === sources[0]) ? sources[0] : undefined;
+    return [{
+      id: model.id, label: model.label, provider,
+      ...(matches.some(candidate => candidate?.execution_status !== undefined) ? {
+        execution_status: matches.some(candidate => candidate?.execution_status === "unknown") ? "unknown" as const
+          : matches.some(candidate => candidate?.execution_status === "unavailable") ? "unavailable" as const : "available" as const,
+      } : {}),
+      ...(matches.every((candidate) => candidate?.default) ? { default: true } : {}),
+      ...(supported.length || explicitStatus || matches.every((candidate) => candidate?.thinking) ? { thinking: {
+        supported_levels: supported,
+        ...(explicitStatus ? { status } : {}),
+        ...(failed?.error ? { error: failed.error } : {}),
+        ...(thinkingDefault ? { default_level: thinkingDefault } : {}),
+      } } : {}),
+      ...(thinkingSource ? { thinking_source: thinkingSource } : {}),
+    }];
+  });
+  if (resolveDiscoveredDefault && models.length && !models.some(model => model.default)) models[0]!.default = true;
+  return [{ provider, models, online_runtime_count: onlineRuntimeCount,
+    ...(providers.some((entry) => entry?.model_catalog_status === "unknown")
+      ? { model_catalog_status: "unknown" as const }
+      : providers.some((entry) => entry?.model_catalog_status === "error")
+      ? { model_catalog_status: "error" as const }
+      : providers.some((entry) => entry?.model_catalog_status === "ready")
+      ? { model_catalog_status: "ready" as const } : {}),
+    ...(resolveDiscoveredDefault ? { default_thinking: defaultModelThinking(models) }
+      : providers.some((entry) => entry?.default_thinking) ? { default_thinking: commonThinkingCapabilities(providers.map((entry) =>
+      entry?.default_thinking ?? { supported_levels: modelThinkingLevels(entry?.models ?? [], "") })),
+    } : {}),
+  }];
 }

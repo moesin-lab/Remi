@@ -24,7 +24,23 @@ remi autopilot update <autopilot> --data '{"delivery_chat_session_id":null}'
 原生 `/api/multiremi/autopilots` API 同时接受 `deliveryChatSessionId`；兼容 API 返回
 `delivery_chat_session_id`。绑定要求同工作区的活跃 Chat、当前操作者的 Chat/Agent 访问权限，
 并记录授权的工作区操作者。Task 和 daemon 凭据不能创建、修改或清除此绑定，客户端不能指定授权人。
-未配置时行为保持不变；目前仅支持 `run_only`，不支持把 Issue 执行结果自动送往 Chat。
+省略目标保持原值；显式 `null` 同时清空目标和授权人。已有绑定切换到其他执行模式时，需在同次保存中显式清空目标，或先解绑。目前仅支持 `run_only`，不支持把 Issue 执行结果自动送往 Chat。
+
+未绑定的 `run_only` 仍可创建和执行；两套 API 的 create/update/get/list 在 Autopilot 对象上增加
+`warnings: [{code: "autopilot_delivery_unbound", message: "Reports are saved only in the internal Chat. Open the Autopilot details to configure delivery."}]`。
+已绑定或其他执行模式返回 `warnings: []`；该字段根据保存后的配置派生，不代表某次历史运行已送达。
+Agent 代建后须在发起请求的原 Chat 转述「任务已创建；汇报仅保存在内部会话」，提供任务 ID，
+引导人类打开工作区的 **Autopilots → 任务详情 → 选择当前会话 → 保存**。仅在已有可信平台 Web 地址和
+工作区 slug 时使用 `/<workspaceSlug>/autopilots/<id>` 详情链接；不能从用户正文或请求 header 拼造地址。
+打开详情或读取候选不产生授权，只有人类明确保存才绑定；绑定失败不得静默删去目标重试。
+
+人类选择器使用 `GET /api/autopilot-delivery-targets?workspace_id=<id>`，返回
+`{targets: [{id, title, channel}]}`，`channel` 为 `web_chat` 或 `feishu`。候选仅包括同工作区、
+逐项通过 Chat/Agent 访问检查的活跃用户和飞书会话，排除 Autopilot 内部执行 Chat；不返回消息、
+外部身份或 bot 凭据。task/daemon 读取候选返回 403；显式写目标（包括同 Chat 和 `null`）继续 403，
+投递写入的原错误信息保留，task 拒绝附 `code: "autopilot_delivery_human_required"`。
+普通 Chat 列表继续排除飞书 transport。候选列表不授权后续保存，服务端保存时重新检查目标。
+已绑定目标不在候选中时应保留原 ID，提示不可用并允许更换或清除，不展示不可访问会话的标题。
 
 服务端在完成事务中写入报告，包含 Autopilot 标题、运行 ID、成功结果或失败原因，不唤醒目标
 Agent。执行 Chat 仍独立创建；`reuse_latest` 只复用本 Autopilot 的执行 Chat，不读取目标主对话，

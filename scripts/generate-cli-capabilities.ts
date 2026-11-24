@@ -620,6 +620,7 @@ function mappedOperationsCommand(route: string): string | null {
     "POST /api/cloud-runtime/nodes/exec": "runtime.cloud.node.exec",
     "GET /api/multiremi/daemons": "daemon.list",
     "GET /api/multiremi/scheduler": "autopilot.scheduler",
+    "GET /api/autopilot-delivery-targets": "autopilot.delivery-targets",
     "GET /api/autopilots": "autopilot.list",
     "GET /api/multiremi/autopilots": "autopilot.list",
     "POST /api/autopilots": "autopilot.create",

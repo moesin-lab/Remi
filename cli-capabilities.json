@@ -6826,6 +6826,22 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "autopilot.delivery-targets": {
+      "command": "remi autopilot delivery-targets",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "autopilot.delivery-targets",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "autopilot.list": {
       "command": "remi autopilot list",
       "aliases": [],
@@ -11786,6 +11802,9 @@
     },
     "GET /api/attachments/:id/download": {
       "command": "issue.attachment.download"
+    },
+    "GET /api/autopilot-delivery-targets": {
+      "command": "autopilot.delivery-targets"
     },
     "GET /api/autopilots": {
       "command": "autopilot.list"

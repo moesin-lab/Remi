@@ -12,10 +12,12 @@ import {
   HardDrive,
   GitBranch,
   ServerCog,
+  ShieldCheck,
   FileText,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { platformStatusOptions } from "@multiremi/core/platform-lifecycle";
+import { rootContextOptions } from "@multiremi/core/root";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multiremi/ui/components/ui/tabs";
 import { useCurrentWorkspace } from "@multiremi/core/paths";
 import { useNavigation } from "../../navigation";
@@ -31,6 +33,7 @@ import { ServicesTab } from "./services-tab";
 import { StorageTab } from "./storage-tab";
 import { PlatformTab } from "./platform-tab";
 import { PromptsTab } from "./prompts-tab";
+import { RootTab } from "./root-tab";
 import { useT } from "../../i18n";
 
 const ACCOUNT_TAB_KEYS = ["profile", "preferences", "notifications", "tokens"] as const;
@@ -97,6 +100,12 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
   const workspaceName = useCurrentWorkspace()?.name;
   const navigation = useNavigation();
   const platformStatus = useQuery(platformStatusOptions());
+  const rootContext = useQuery(rootContextOptions());
+  const showRootTab =
+    rootContext.data?.capabilities.can_manage_root === true
+    || rootContext.data?.capabilities.can_manage_runtime_trust === true
+    || rootContext.data?.capabilities.can_revoke_credential_family === true
+    || rootContext.data?.capabilities.can_read_root_audit === true;
   // Render the System group optimistically while the status query is still in
   // flight, so the tab doesn't pop into the sidebar after load. A resolved
   // query without manage permission (or a 403) collapses it. `data?.canManage`
@@ -105,6 +114,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
   const showPlatformTab =
     platformStatus.isPending || platformStatus.data?.canManage === true
     || (platformStatus.isError && ![401, 403].includes(Number((platformStatus.error as { status?: number } | null)?.status)));
+  const showSystemSection = showPlatformTab || showRootTab;
 
   // Whitelist of valid tab values; unknown ?tab=… values silently fall back to
   // the default. Whitelisting also blocks junk like ?tab=<script> from
@@ -115,9 +125,10 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
         ...ACCOUNT_TAB_KEYS,
         ...Object.values(WORKSPACE_TAB_VALUES),
         ...(showPlatformTab ? ["platform"] : []),
+        ...(showRootTab ? ["root"] : []),
         ...(extraAccountTabs?.map((tab) => tab.value) ?? []),
       ]),
-    [extraAccountTabs, showPlatformTab],
+    [extraAccountTabs, showPlatformTab, showRootTab],
   );
 
   const tabFromUrl = navigation.searchParams.get(TAB_QUERY_KEY);
@@ -180,15 +191,23 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
               </TabsTrigger>
             );
           })}
-          {showPlatformTab && (
+          {showSystemSection && (
             <>
               <span className="px-2 pb-1 pt-4 text-xs font-medium text-muted-foreground">
                 {t(($) => $.page.system)}
               </span>
-              <TabsTrigger value="platform">
-                <ServerCog className="h-4 w-4" />
-                {t(($) => $.page.tabs.platform)}
-              </TabsTrigger>
+              {showPlatformTab && (
+                <TabsTrigger value="platform">
+                  <ServerCog className="h-4 w-4" />
+                  {t(($) => $.page.tabs.platform)}
+                </TabsTrigger>
+              )}
+              {showRootTab && (
+                <TabsTrigger value="root">
+                  <ShieldCheck className="h-4 w-4" />
+                  {t(($) => $.page.tabs.root)}
+                </TabsTrigger>
+              )}
             </>
           )}
         </TabsList>
@@ -209,6 +228,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="storage"><StorageTab /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
           {showPlatformTab && <TabsContent value="platform"><PlatformTab /></TabsContent>}
+          {showRootTab && <TabsContent value="root"><RootTab /></TabsContent>}
           {extraAccountTabs?.map((tab) => (
             <TabsContent key={tab.value} value={tab.value}>{tab.content}</TabsContent>
           ))}

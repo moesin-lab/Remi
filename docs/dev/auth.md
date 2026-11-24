@@ -96,6 +96,14 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 应用工厂保留本地无鉴权模式并打印警告，这不等于生产入口允许忽略配置。[jwtSecret](../../packages/server/src/api/helpers/jwt.ts)仅在精确的 `NODE_ENV=development/test` 下允许开发默认密钥，其他环境未设密钥时拒绝 JWT；启动配置检查与 JWT 校验是两个不同入口。
 
+## 系统 Root 公开契约与客户端边界（MUL-1）
+
+- 系统级 root 权限与既有 Agent 业务角色（`normal` / `maintainer` / `supervisor`）正交，不引入第四种业务角色。公开 DTO、错误信封与只读字段边界定义在 [root-authority.ts](../../packages/contracts/src/root-authority.ts)，A2 机器投递收据与不可变环境承载契约定义在 [root-delivery.ts](../../packages/contracts/src/root-delivery.ts) 与 [daemon-protocol.ts](../../packages/contracts/src/daemon-protocol.ts)。内部事务句柄、已认证证明及原始密钥摘要不进入公开 DTO、日志或 UI。
+- 公开错误信封统一为 `{error: {code, message, retryable, requestId, currentRevision?}}`，覆盖 `root_required`、`root_attempt_not_eligible`、`root_authority_revoked`、`root_runtime_untrusted`、`root_invoker_untrusted`、`root_input_unapproved`、`root_execution_protected`、`authority_revision_conflict`、`credential_version_conflict`、`receipt_conflict`、`authority_depth_exceeded` 与 `security_state_unavailable`。
+- 公开上下文区分 `transport_identity`、`authenticated_subject`（真实 `user:<id>` 或 `agent:<id>`）、`is_agent_origin`、`agent_granted_root` 与 `current_attempt_effective_root` / `effective_reason_code`。任务与 Agent 派生 PAT 保留 Agent 身份标记，不显示为真实人类登录会话；旧 attempt 不因后续授予而升权。
+- root 执行在 CLI 侧固定走本 run 不可变进程环境承载（`MULTIREMI_ROOT_CARRIER=immutable_run_env`，见 [task-context-file.ts](../../packages/shared/src/task-context-file.ts) 与 [task-context.ts](../../apps/remi/cli/core/task-context.ts)），不读取也不回退旧 `MULTIREMI_TASK_CONTEXT_FILE` 磁盘上下文文件；缺失或违规载体按 fail-closed 拒绝。
+- 完整内核存储、派生来源图、服务端路由鉴权、daemon JWE 解封安装与真实 PostgreSQL 并发验收由 MUL-1 整合分支（#174）各开发线及独立 QA 共同收口；仅凭客户端/公开契约单测不代表服务端已激活 root。
+
 ## 验证入口
 
 | 变更 | 已有测试 |

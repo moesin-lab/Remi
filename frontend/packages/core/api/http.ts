@@ -146,8 +146,11 @@ export class HttpClient {
 
   async parseErrorMessage(res: Response, fallback: string): Promise<string> {
     try {
-      const data = await res.json() as { error?: string };
+      const data = await res.json() as { error?: string | { message?: string; code?: string } };
       if (typeof data.error === "string" && data.error) return data.error;
+      if (data.error && typeof data.error === "object" && typeof data.error.message === "string" && data.error.message) {
+        return data.error.message;
+      }
     } catch {
       // Ignore non-JSON error bodies.
     }
@@ -159,8 +162,12 @@ export class HttpClient {
   // both pieces have to come from a single read.
   private async parseErrorBody(res: Response, fallback: string): Promise<{ message: string; body: unknown }> {
     try {
-      const data = await res.json() as { error?: string };
-      const message = typeof data.error === "string" && data.error ? data.error : fallback;
+      const data = await res.json() as { error?: string | { message?: string; code?: string } };
+      const message = typeof data.error === "string" && data.error
+        ? data.error
+        : data.error && typeof data.error === "object" && typeof data.error.message === "string" && data.error.message
+          ? data.error.message
+          : fallback;
       return { message, body: data };
     } catch {
       return { message: fallback, body: undefined };
@@ -256,7 +263,7 @@ export class HttpClient {
   async fetch<T>(path: string, init?: HttpRequestInit): Promise<T> {
     const res = await this.fetchRaw(path, {
       ...init,
-      extraHeaders: { "Content-Type": "application/json" },
+      extraHeaders: { "Content-Type": "application/json", ...(init?.extraHeaders ?? {}) },
     });
     // Handle 204 No Content
     if (res.status === 204) {

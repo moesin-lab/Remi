@@ -150,6 +150,9 @@
     "./skills": "./skills/index.ts",
     "./skills/frontmatter": "./skills/frontmatter.ts",
     "./im-platforms": "./im-platforms/index.ts",
+    "./root": "./root/index.ts",
+    "./root/queries": "./root/queries.ts",
+    "./root/mutations": "./root/mutations.ts",
     "./api/turn-task": "./api/turn-task.ts"
   },
   "dependencies": {

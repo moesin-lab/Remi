@@ -1,3 +1,4 @@
+import { parsePublicErrorEnvelope } from "@multiremi/contracts/root-authority.js";
 import { cliFetch } from "./proxy-fetch.js";
 import { CliError, cliErrorCodeForStatus } from "./errors.js";
 import { remiCliUserAgent } from "./user-agent.js";
@@ -44,7 +45,10 @@ export interface CliServerCapabilities {
 interface CliServerCommandCapability {
   id?: string;
   allowed?: boolean;
+  denied_code?: string;
 }
+
+const CAPABILITIES_CACHE_TTL_MS = 30_000;
 
 export interface CliApiClientOptions {
   serverUrl: string;
@@ -71,6 +75,7 @@ export class CliApiClient {
   private readonly fetchFn: CliFetch;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private capabilitiesPromise: Promise<CliServerCapabilities> | null = null;
+  private capabilitiesFetchedAt = 0;
 
   constructor(options: CliApiClientOptions) {
     const serverUrl = options.serverUrl.trim().replace(/\/+$/, "");
@@ -97,6 +102,7 @@ export class CliApiClient {
       try {
         const response = await this.fetchAttempt<T>(request);
         if (response instanceof Response) {
+          if (response.status === 401 || response.status === 403) this.invalidateCapabilities();
           const error = await responseError(request.method, request.path, response);
           if (retryableMethod && attempt < retryLimit && error.retryable) {
             await this.sleepFn(retryDelayMs(response.headers.get("retry-after"), attempt));
@@ -137,13 +143,20 @@ export class CliApiClient {
     } while (cursor);
   }
 
+  invalidateCapabilities(): void {
+    this.capabilitiesPromise = null;
+    this.capabilitiesFetchedAt = 0;
+  }
+
   capabilities(force = false): Promise<CliServerCapabilities> {
-    if (force || !this.capabilitiesPromise) {
+    const expired = this.capabilitiesFetchedAt > 0 && Date.now() - this.capabilitiesFetchedAt >= CAPABILITIES_CACHE_TTL_MS;
+    if (force || expired || !this.capabilitiesPromise) {
+      this.capabilitiesFetchedAt = Date.now();
       this.capabilitiesPromise = this.request<CliServerCapabilities>({
         method: "GET",
         path: "/api/cli/capabilities",
       }).then((response) => response.data).catch((error) => {
-        this.capabilitiesPromise = null;
+        this.invalidateCapabilities();
         throw error;
       });
     }
@@ -151,18 +164,37 @@ export class CliApiClient {
   }
 
   async requireCapability(commandId: string): Promise<CliServerCapabilities> {
-    const capabilities = await this.capabilities();
-    const commands = Array.isArray(capabilities.commands)
-      ? capabilities.commands as CliServerCommandCapability[]
-      : [];
-    const command = commands.find((candidate) => candidate.id === commandId);
+    const hadCached = this.capabilitiesPromise !== null;
+    let capabilities = await this.capabilities();
+    let command = findCommandCapability(capabilities, commandId);
+    if ((!command || command.allowed !== true) && hadCached) {
+      capabilities = await this.capabilities(true);
+      command = findCommandCapability(capabilities, commandId);
+    }
     if (!command) {
       throw new CliError("unsupported_capability", `server does not advertise CLI capability ${commandId}`, {
         hint: "Upgrade the platform and CLI together, then retry.",
       });
     }
     if (command.allowed !== true) {
-      throw new CliError("forbidden", `current credential cannot run ${commandId}`);
+      const rootMeta = isRecord(capabilities.root) ? capabilities.root : capabilities;
+      const agentGranted = rootMeta.agent_granted_root === true;
+      const attemptEffective = rootMeta.current_attempt_effective_root === false;
+      const reasonCode = typeof rootMeta.effective_reason_code === "string" ? rootMeta.effective_reason_code : null;
+      if ((agentGranted && attemptEffective) || reasonCode === "attempt_not_eligible" || command.denied_code === "root_attempt_not_eligible") {
+        throw new CliError(
+          "forbidden",
+          `root_attempt_not_eligible: agent has a root grant, but this attempt is not eligible to run ${commandId}; start a new authorized attempt`,
+          {
+            serverCode: "root_attempt_not_eligible",
+            hint: "Root grants only apply to new attempts admitted after the grant on a trusted Runtime; renewing or resuming this attempt will not activate root.",
+          },
+        );
+      }
+      const deniedCode = typeof command.denied_code === "string" && command.denied_code ? command.denied_code : undefined;
+      throw new CliError("forbidden", deniedCode ? `${deniedCode}: current credential cannot run ${commandId}` : `current credential cannot run ${commandId}`, {
+        ...(deniedCode ? { serverCode: deniedCode } : {}),
+      });
     }
     return capabilities;
   }
@@ -246,19 +278,50 @@ function requestAbortScope(timeoutMs: number, parent?: AbortSignal): {
   };
 }
 
+function findCommandCapability(
+  capabilities: CliServerCapabilities,
+  commandId: string,
+): CliServerCommandCapability | undefined {
+  const commands = Array.isArray(capabilities.commands)
+    ? capabilities.commands as CliServerCommandCapability[]
+    : [];
+  return commands.find((candidate) => candidate.id === commandId);
+}
+
 async function responseError(method: string, path: string, response: Response): Promise<CliError> {
   const text = await response.text();
   const details = parseResponseBody(text);
+  const envelope = parsePublicErrorEnvelope(details);
+  if (envelope) {
+    const { code, message, retryable, requestId, currentRevision } = envelope.error;
+    const diagnostic = `${code}: ${message}`;
+    const hint = code === "root_attempt_not_eligible"
+      ? "Create a new authorized attempt on a trusted Runtime; renewing or resuming this attempt will not activate root."
+      : code === "authority_revision_conflict" && currentRevision !== undefined
+        ? `Security revision changed (currentRevision=${currentRevision}); refresh context and retry with the new expected revision.`
+        : undefined;
+    return new CliError(cliErrorCodeForStatus(response.status), diagnostic, {
+      status: response.status,
+      retryable,
+      serverCode: code,
+      ...(requestId ? { requestId } : {}),
+      ...(currentRevision === undefined ? {} : { currentRevision }),
+      details,
+      ...(hint ? { hint } : {}),
+    });
+  }
   const record = isRecord(details) ? details : null;
+  const serverCode = typeof record?.code === "string" && record.code.trim() ? record.code.trim() : undefined;
   const message = typeof record?.error === "string"
     ? record.error
     : typeof record?.message === "string"
       ? record.message
       : `${method} ${path} returned ${response.status}`;
-  const diagnostic = record?.code === "workspace_move_blocked" ? `${record.code}: ${message}` : message;
+  const diagnostic = serverCode ? `${serverCode}: ${message}` : message;
   return new CliError(cliErrorCodeForStatus(response.status), diagnostic, {
     status: response.status,
     retryable: RETRYABLE_STATUSES.has(response.status),
+    ...(serverCode ? { serverCode } : {}),
     details,
   });
 }

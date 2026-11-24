@@ -36,6 +36,7 @@ import {
 } from "@multiremi/ui/components/ui/popover";
 import { PropRow } from "../../common/prop-row";
 import { availabilityConfig } from "../presence";
+import { AgentRootBadge } from "./agent-root-badge";
 import { CharCounter } from "./char-counter";
 import { useT } from "../../i18n";
 import { ConcurrencyPicker } from "./inspector/concurrency-picker";
@@ -127,7 +128,10 @@ export function AgentDetailInspector({
           canEdit={canEdit}
           onUpdate={update}
         />
-        <PresenceBadge presence={presence} />
+        <div className="flex flex-wrap items-center gap-1.5">
+          <PresenceBadge presence={presence} />
+          <AgentRootBadge root={agent.root} />
+        </div>
       </div>
 
       {/* Properties — editable when canEdit. When the current user lacks

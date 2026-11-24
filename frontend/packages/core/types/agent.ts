@@ -1,4 +1,5 @@
 import type { RuntimeProtocolStatus } from "@multiremi/contracts/runtime-protocol";
+import type { RootRuntimeTrustSummary, RootSubjectProjection } from "@multiremi/contracts/root-authority";
 
 export type AgentStatus = "idle" | "working" | "blocked" | "error" | "offline";
 
@@ -33,6 +34,8 @@ export interface RuntimeDevice {
   device_info: string;
   metadata: Record<string, unknown>;
   protocol?: RuntimeProtocolStatus | null;
+  /** Read-only root Runtime trust projection (MUL-1 §7.1). */
+  readonly root_trust?: RootRuntimeTrustSummary | null;
   owner_id: string | null;
   /** Defaults to "private" when the backend predates the visibility flag. */
   visibility: RuntimeVisibility;
@@ -286,6 +289,8 @@ export interface Agent {
   thinking_level?: string;
   /** Permission ceiling. Missing on legacy backends and treated as normal. */
   role?: AgentRole;
+  /** Read-only system root projection orthogonal to `role` (MUL-1 §3, §8.2). */
+  readonly root?: RootSubjectProjection;
   owner_id: string | null;
   skills: AgentSkillSummary[];
   created_at: string;

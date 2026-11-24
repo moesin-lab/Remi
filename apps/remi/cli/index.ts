@@ -17,6 +17,7 @@ import { memberCommandSpecs } from "./commands/member.js";
 import { operationsCommandSpecs } from "./commands/operations.js";
 import { projectCommandSpecs } from "./commands/project.js";
 import { repoCommandSpecs } from "./commands/repo.js";
+import { rootCommandSpecs } from "./commands/root.js";
 import { tokenCommandSpecs } from "./commands/token.js";
 import { workspaceCommandSpecs } from "./commands/workspace.js";
 import { runtimePrepareCommandSpec } from "./commands/runtime-prepare.js";
@@ -33,6 +34,7 @@ for (const spec of replaceRetiredSpecs([
   ...tokenCommandSpecs(),
   ...projectCommandSpecs(),
   ...repoCommandSpecs(),
+  ...rootCommandSpecs(),
   ...knowledgeCommandSpecs(),
   ...collaborationCommandSpecs(),
   ...externalChatCommandSpecs(),

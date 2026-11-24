@@ -3,6 +3,22 @@ export const SYSTEM_PROMPT_SLOTS = ["common", "code_delivery", "chat_delivery", 
 export type SystemPromptSlot = typeof SYSTEM_PROMPT_SLOTS[number];
 export type SystemPromptContent = Record<SystemPromptSlot, string>;
 export type SystemPromptMode = "default" | "custom";
+export interface PolicyOfferIdentity {
+  workspace_id: string;
+  daemon_id: string;
+  runtime_id: string;
+  attempt_id: string;
+  offer_generation: string;
+  content_hash: string;
+  receipt_id: string;
+}
+
+export function samePolicyOffer(expected: PolicyOfferIdentity, actual: Partial<PolicyOfferIdentity>): boolean {
+  return expected.workspace_id === actual.workspace_id && expected.daemon_id === actual.daemon_id
+    && expected.runtime_id === actual.runtime_id && expected.attempt_id === actual.attempt_id
+    && expected.offer_generation === actual.offer_generation && expected.content_hash === actual.content_hash
+    && expected.receipt_id === actual.receipt_id;
+}
 export type SystemPromptOperation = "initialize" | "edit" | "reset" | "rollback";
 export const MAX_SYSTEM_PROMPT_CODE_POINTS = 8_000;
 

@@ -74,11 +74,11 @@ for (const kind of ["task", "autopilot", "lost response", "large context"] as co
     expect(h.ledger.some(e => e.type === "turn.restart.checkpoint")).toBe(true);
     expect(h.ledger.some(e => e.type === "turn.restart.suspend")).toBe(true);
     await h.stopDaemon();
-    const originalResume = (h.layer as any).rpcHandlers.get("turn.restart.resume");
+    const originalResume = (h.layer as any).rpcHandlers.get("turn.restart.resume_bound");
     let dropped = false;
     let fenced = false;
     let failed = false;
-    h.layer.registerRpcHandler("turn.restart.resume", async (frame, session) => {
+    h.layer.registerRpcHandler("turn.restart.resume_bound", async (frame, session) => {
       const reply = await originalResume(frame, session);
       if (reply.code === "resume_fenced") fenced = true;
       if (kind === "lost response" && reply.ok && dropped && !failed) {
@@ -113,7 +113,8 @@ for (const kind of ["task", "autopilot", "lost response", "large context"] as co
     if (kind === "lost response") expect(failed).toBe(true);
     if (run) expect(h.store.getAutopilotRun(run.id)?.status).toBe("completed");
     expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, maxAttempts, result: "complete resumed answer" });
-    expect(h.ledger.some(e => e.type === "turn.restart.resume")).toBe(true);
+    expect(h.ledger.some(e => e.type === "turn.restart.resume_bound")).toBe(true);
+    expect(h.ledger.some(e => e.type === "turn.restart.resume")).toBe(false);
     expect(h.ledger.some(e => e.type === "task.fail")).toBe(false);
     expect(h.ledger.filter(e => e.type === "turn.complete").at(-1)?.frame.p.generation).toBe(1);
     expect(h.db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id=?").all(handoff.turn_id)).toHaveLength(1);
@@ -583,32 +584,23 @@ for (const cleanup of ["resume", "sweep", "exhaustion"] as const) test(`stale lo
       expect(restarts.get(task.id)?.state).toBe("running");
       if (cleanup === "sweep") restarts.recoverExpiredResumes(runtimeId);
     } finally { journal.close(); }
-    const before = h.ledger.filter(e => e.type === "turn.restart.resume").length;
-    if (cleanup === "exhaustion") {
-      h.layer.registerRpcHandler("turn.restart.resume", async () => ({ ok: false, code: "server_error", retryable: true }));
+    const evidence = openSqliteDatabase(join(h.root,journalPath));
+    const row = () => evidence.query('SELECT * FROM planned_restart_journal WHERE handoff_id=?').get(handoff.handoff_id);
+    try {
+      if (cleanup === 'exhaustion') evidence.run('INSERT INTO planned_restart_retries VALUES(?,?,?,?)',[handoff.handoff_id,Date.now(),24,Date.now()]);
+      const before = row();
+      const retries = () => evidence.query('SELECT * FROM planned_restart_retries WHERE handoff_id=?').get(handoff.handoff_id);
+      const budget = retries();
       await h.startDaemon();
-      await waitFor(() => h.sockets.flatMap(socket => socket.frames).some(f => f.t === "res" && f.p?.code === "server_error"), "injected server failure");
+      await h.settleHeartbeat();
       await (h.daemon as any).resumePlannedRestarts();
-      expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
-      const retryDb = openSqliteDatabase(join(h.root, journalPath));
-      try { retryDb.run("UPDATE planned_restart_retries SET attempts=24"); } finally { retryDb.close(); }
-      await (h.daemon as any).resumePlannedRestarts();
-      expect((h.daemon as any).restartRecoveryCandidates.has(handoff.handoff_id)).toBe(false);
       await h.recreateDaemon();
       await (h.daemon as any).resumePlannedRestarts();
-      expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
-      expect((h.daemon as any).restartJournal.entries()).toHaveLength(1);
-      expect(providerCalls).toBe(0);
-      return;
-    }
-    await h.startDaemon();
-    await waitFor(() => (h.daemon as any).restartJournal.entries().length === 0, "terminal journal cleanup");
-    const requests = h.ledger.filter(e => e.type === "turn.restart.resume").slice(before);
-    expect(requests).toHaveLength(1);
-    expect(h.sockets.flatMap(socket => socket.frames).some(f => f.t === "res" && f.p?.code === "restart_terminal")).toBe(true);
-    expect(restarts.get(task.id)?.state).toBe("terminated");
-    for (let i = 0; i < 3; i++) await (h.daemon as any).resumePlannedRestarts();
-    expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
+      expect(h.ledger.filter(e => ['turn.restart.suspend','turn.restart.resume','turn.restart.resume_bound'].includes(e.type))).toHaveLength(0);
+      expect(row()).toEqual(before);
+      expect(retries()).toEqual(budget);
+      expect(evidence.query('SELECT reason FROM planned_restart_holds WHERE handoff_id=?').get(handoff.handoff_id)).toEqual({reason:'restart_policy_unverifiable'});
+    } finally { evidence.close(); }
     expect(providerCalls).toBe(0);
   } finally { await h.dispose(); }
 }, 30_000);

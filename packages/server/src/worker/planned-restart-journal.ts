@@ -48,7 +48,7 @@ function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoin
       || checkpoint.question_ids.some(id => typeof id !== "string" || !id || id.length > 256)
       || new Set(checkpoint.question_ids).size !== checkpoint.question_ids.length))
     || Object.keys(execution).some(key => !["workspace_id", "daemon_id", "runtime_id", "turn_id", "attempt_id", "handoff_id", "generation"].includes(key))
-    || Object.keys(checkpoint).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids"].includes(key))) {
+    || Object.keys(checkpoint).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids", "policy_receipt"].includes(key))) {
     throw new Error("Invalid planned restart journal entry");
   }
   // Canonical field order makes retries insensitive to object construction order.
@@ -57,7 +57,8 @@ function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoin
     handoff_id: execution.handoff_id, generation: execution.generation }, checkpoint: {
     version: 1, session_id: checkpoint.session_id, work_dir: checkpoint.work_dir, trace_head: checkpoint.trace_head,
     input_ack_seq: checkpoint.input_ack_seq, delivered_message_ids: checkpoint.delivered_message_ids,
-    ...(checkpoint.question_ids ? { question_ids: checkpoint.question_ids } : {}) } });
+    ...(checkpoint.question_ids ? { question_ids: checkpoint.question_ids } : {}),
+    ...(checkpoint.policy_receipt ? {policy_receipt:checkpoint.policy_receipt} : {}) } });
 }
 
 /**
@@ -81,6 +82,8 @@ export class PlannedRestartJournal {
         handoff_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
         attempts INTEGER NOT NULL, next_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS planned_restart_holds (handoff_id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS planned_restart_launches (handoff_id TEXT PRIMARY KEY, consumer_id TEXT NOT NULL, generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS planned_restart_trace_identities (
         handoff_id TEXT PRIMARY KEY, payload TEXT NOT NULL, sha256 TEXT NOT NULL
       );`);
@@ -150,7 +153,21 @@ export class PlannedRestartJournal {
 
   entries(): RestartJournalEntry[] {
     const rows = this.db.query("SELECT handoff_id FROM planned_restart_journal ORDER BY handoff_id").all() as { handoff_id: string }[];
-    return rows.map(row => this.get(row.handoff_id)!);
+    return rows.flatMap(row => {
+      try { return [this.get(row.handoff_id)!]; }
+      catch { this.hold(row.handoff_id); return []; }
+    });
+  }
+
+  hold(handoffId: string): void {
+    this.db.run("INSERT OR IGNORE INTO planned_restart_holds(handoff_id,reason) VALUES(?,'restart_policy_unverifiable')",[handoffId]);
+  }
+
+  claimLaunch(entry: RestartJournalEntry): boolean {
+    if (!entry.checkpoint.policy_receipt || entry.state !== 'resumed' || entry.resumed_generation !== entry.execution.generation + 1) return false;
+    return this.db.run(`INSERT INTO planned_restart_launches(handoff_id,consumer_id,generation)
+      SELECT handoff_id,consumer_id,resumed_generation FROM planned_restart_journal WHERE handoff_id=? AND consumer_id=? AND state='resumed'
+      AND resumed_generation=? ON CONFLICT(handoff_id) DO NOTHING`, [entry.execution.handoff_id,entry.consumer_id,entry.resumed_generation]).changes === 1;
   }
 
   acknowledge(handoffId: string): void {
@@ -196,6 +213,7 @@ export class PlannedRestartJournal {
 }
 
 export interface PlannedRestartRemote {
+  preflight?(entry: RestartJournalEntry): Promise<boolean>;
   /** Must resolve only after the server has committed the matching checkpoint. */
   suspend(entry: RestartJournalEntry): Promise<void>;
   /** Must perform server resume CAS + fresh execution authorization atomically. */
@@ -242,10 +260,12 @@ export class PlannedRestartTransfer {
   async resume(handoffId: string): Promise<RestartJournalEntry> {
     let entry = this.journal.get(handoffId);
     if (!entry) throw new Error("Missing planned restart journal entry");
+    if (this.remote.preflight && !await this.remote.preflight(entry)) throw new Error('restart_policy_unverifiable');
     if (entry.state === "prepared") {
       await this.remote.suspend(entry);
       this.journal.acknowledge(handoffId);
       entry = this.journal.get(handoffId)!;
+      if (this.remote.preflight && !await this.remote.preflight(entry)) throw new Error('restart_policy_unverifiable');
     }
     // Even for a local resumed receipt, recheck remote authority. Cancellation
     // or another execution after a process crash must not be revived locally.

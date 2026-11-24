@@ -53,6 +53,27 @@ function httpError(status: number, path = "/api/daemon/tasks/x"): MultiremiDaemo
 }
 
 describe("MultiremiTaskReportOutbox", () => {
+  it('retains the same receipt and consumes one launch grant across reopened SQLite connections', async () => {
+    const path = tempPath();
+    const open = (file:string) => track(new MultiremiTaskReportOutbox({path:file,deliver:async()=>({ok:true})}));
+    const scope = {workspace_id:'w',runtime_id:'r',daemon_id:'d',attempt_id:'a',offer_generation:'g',content_hash:'hash'};
+    const original = open(path);
+    const proof = original.preparePolicyReceipt(scope);
+    await original.close();
+    const second = open(path);
+    const rival = open(path);
+    expect(second.preparePolicyReceipt(scope)).toEqual(proof);
+    expect(second.transitionPolicyReceipt({...proof,offer_generation:'different'},'launch')).toBe(false);
+    expect(second.transitionPolicyReceipt({...proof,receipt_id:'different'},'launch')).toBe(false);
+    expect(second.transitionPolicyReceipt(proof,'launch')).toBe(true);
+    expect(rival.transitionPolicyReceipt(proof,'launch')).toBe(false);
+    await second.close();
+    expect(open(path).policyReceipt(scope)?.state).toBe('launch_claimed');
+    expect(rival.transitionPolicyReceipt(proof,'forget_revoked')).toBe(false);
+    expect(rival.transitionPolicyReceipt(proof,'terminal')).toBe(true);
+    expect(open(path).transitionPolicyReceipt(proof,'launch')).toBe(false);
+    expect(open(tempPath()).preparePolicyReceipt(scope).receipt_id).not.toBe(proof.receipt_id);
+  });
   it("replays a turn charge whose 5000 request links exceed one frame, preserving exactly one billed amount", async () => {
     const store = createLocalStore();
     const runtime = store.registerRuntime({ name: "long-charge", provider: "claude", workspaceId: "local" });

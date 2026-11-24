@@ -93,7 +93,7 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
       const taskId = typeof payload.task_id === "string" ? payload.task_id : null;
       const generation = taskId ? executionGeneration(taskId) : 0;
       try { protocol.send({ t: type, rt: runtime() ?? undefined,
-        p: { ...(generation ? { generation } : {}), ...payload } }); }
+        p: { ...(taskId ? outbox().reportIdentity(taskId,runtime()) : {}), ...(generation ? { generation } : {}), ...payload } }); }
       catch (error) { if (!(error instanceof DaemonProtocolRpcError)) throw error; }
     },
   };

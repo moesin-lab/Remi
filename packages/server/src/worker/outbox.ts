@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { openSqliteDatabase } from "../store/db/sqlite.js";
+import type { PolicyOfferIdentity } from "@multiremi/contracts/system-prompt-policy.js";
 import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { createLogger } from "@shared/logger.js";
@@ -143,6 +144,12 @@ export class MultiremiTaskReportOutbox {
       );
       CREATE INDEX IF NOT EXISTS idx_outbox_task_seq ON outbox_events(task_id, seq);
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_events(status);
+      CREATE TABLE IF NOT EXISTS policy_offer_receipts (
+        workspace_id TEXT NOT NULL, daemon_id TEXT NOT NULL, runtime_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL, offer_generation TEXT NOT NULL, content_hash TEXT NOT NULL,
+        receipt_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','launch_claimed','terminal')),
+        PRIMARY KEY(workspace_id,daemon_id,runtime_id,attempt_id)
+      );
       CREATE TABLE IF NOT EXISTS outbox_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -205,9 +212,50 @@ export class MultiremiTaskReportOutbox {
     }
   }
 
+  policyReceipt(scope: Pick<PolicyOfferIdentity, 'workspace_id' | 'daemon_id' | 'runtime_id' | 'attempt_id'>) {
+    return this.db.query(`SELECT * FROM policy_offer_receipts WHERE workspace_id=? AND daemon_id=? AND runtime_id=? AND attempt_id=?`)
+      .get(scope.workspace_id, scope.daemon_id, scope.runtime_id, scope.attempt_id) as (PolicyOfferIdentity & {state:'prepared'|'launch_claimed'|'terminal'}) | null;
+  }
+
+  private readonly heldAttempts = new Set<string>();
+
+  preparedOffers(runtimeId: string): PolicyOfferIdentity[] {
+    return this.db.query(`SELECT workspace_id,daemon_id,runtime_id,attempt_id,offer_generation,content_hash,receipt_id FROM policy_offer_receipts
+      WHERE runtime_id=? AND state='prepared' ORDER BY attempt_id`).all(runtimeId) as PolicyOfferIdentity[];
+  }
+
+  holdAttempt(taskId: string, hold: boolean): void {
+    if (hold) this.heldAttempts.add(taskId);
+    else if (this.heldAttempts.delete(taskId)) this.ensurePump(taskId);
+  }
+
+  reportIdentity(taskId:string, runtimeId:unknown): Partial<PolicyOfferIdentity> {
+    if (typeof runtimeId !== 'string') return {};
+    return this.db.query(`SELECT offer_generation,content_hash,receipt_id FROM policy_offer_receipts WHERE attempt_id=?
+      AND runtime_id=? AND state IN ('launch_claimed','terminal')`).get(taskId,runtimeId) ?? {};
+  }
+
+  preparePolicyReceipt(identity: Omit<PolicyOfferIdentity, 'receipt_id'>) {
+    const {workspace_id, daemon_id, runtime_id, attempt_id, offer_generation, content_hash} = identity;
+    this.db.run(`INSERT INTO policy_offer_receipts(workspace_id,daemon_id,runtime_id,attempt_id,offer_generation,content_hash,receipt_id,state)
+      VALUES(?,?,?,?,?,?,?,'prepared') ON CONFLICT(workspace_id,daemon_id,runtime_id,attempt_id) DO NOTHING`,
+      [workspace_id,daemon_id,runtime_id,attempt_id,offer_generation,content_hash,randomUUID()]);
+    return this.policyReceipt(identity)!;
+  }
+
+  transitionPolicyReceipt(identity: PolicyOfferIdentity, operation: 'launch'|'forget_revoked'|'terminal'): boolean {
+    const sql = operation === 'forget_revoked' ? 'DELETE FROM policy_offer_receipts' :
+      `UPDATE policy_offer_receipts SET state='${operation === 'launch' ? 'launch_claimed' : 'terminal'}'`;
+    return this.db.run(`${sql} WHERE workspace_id=? AND daemon_id=? AND runtime_id=? AND attempt_id=?
+      AND offer_generation=? AND content_hash=? AND receipt_id=? AND state=?`, [identity.workspace_id, identity.daemon_id,
+      identity.runtime_id, identity.attempt_id, identity.offer_generation, identity.content_hash, identity.receipt_id,
+      operation === 'terminal' ? 'launch_claimed' : 'prepared']).changes === 1;
+  }
+
   /** Persist a report and wake the task's delivery pump. Never throws on queue pressure. */
   enqueue(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>): number | null {
     if (this.closed) throw new Error("outbox is closed");
+    if (!taskId.startsWith('rt:')) payload = {...this.reportIdentity(taskId,payload.runtime_id), ...payload};
     const snapshot = payload.usageSnapshot as import("@multiremi/contracts/usage-accounting.js").TaskUsageSnapshot | undefined;
     if (kind === "usage" && snapshot?.version === 2 && Array.isArray(snapshot.units)) {
       const chunks = splitUsageReport(snapshot);
@@ -490,6 +538,7 @@ export class MultiremiTaskReportOutbox {
     for (const row of rows) {
       if (!this.canSend()) { nextWake = Math.min(nextWake, 100); break; }
       const taskId = row.task_id;
+      if (this.heldAttempts.has(taskId)) continue;
       if (this.inFlight.has(taskId)) continue;
       const delivery = this.nextDelivery(taskId);
       if (!delivery || delivery.blocked || this.readMeta(`blocked:${taskId}`) !== null) continue;
@@ -525,6 +574,9 @@ export class MultiremiTaskReportOutbox {
     if (!this.query("SELECT id FROM outbox_events WHERE id = ? AND status = 'pending'").get(record.id)) return;
     try {
       const reply = await this.deliver(record);
+      if (record.terminal && record.payload.receipt_id) this.db.run(`UPDATE policy_offer_receipts SET state='terminal'
+        WHERE attempt_id=? AND runtime_id=? AND offer_generation=? AND content_hash=? AND receipt_id=? AND state='launch_claimed'`,
+        [taskId,String(record.payload.runtime_id),String(record.payload.offer_generation),String(record.payload.content_hash),String(record.payload.receipt_id)]);
       this.deleteRecords(recordIds);
       for (const id of recordIds) {
         this.recordWaiters.get(id)?.resolve(reply ?? { ok: true });
@@ -557,6 +609,11 @@ export class MultiremiTaskReportOutbox {
             work_dir: record.payload.work_dir ?? record.payload.workDir,
             failure_reason: "runtime_recovery", error: "完成时有未注入的 steer，执行端已不在" });
         }
+        return;
+      }
+      if (error instanceof DaemonProtocolRpcError && error.code === 'policy_offer_mismatch') {
+        this.deleteRecords(recordIds);
+        for (const id of recordIds) { this.recordWaiters.get(id)?.reject(error); this.recordWaiters.delete(id); }
         return;
       }
       if (error instanceof DaemonProtocolRpcError && error.code === "task_not_found") {

@@ -2,6 +2,9 @@ import { normalizeDaemonClaimTask } from "./client.js";
 import type { DaemonProtocolClient } from "./daemon-protocol-client.js";
 import type { DaemonParsedFrame } from "../api/daemon-protocol/frames.js";
 import type { DaemonTurnInput } from "@multiremi/contracts/daemon-protocol.js";
+import { samePolicyOffer, type PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
+import { hashSystemPromptContent, LEGACY_BASELINE_DEFAULT_REVISION } from '@shared/system-prompt-policy-hash.js';
+import type { MultiremiTaskReportOutbox } from './outbox.js';
 
 export type DaemonTurnTask = NonNullable<ReturnType<typeof normalizeDaemonClaimTask>> & DaemonTurnInput;
 
@@ -31,11 +34,13 @@ export type OfferRejection = "disk_critical" | "capacity" | "claims_paused" | "d
 
 export function registerDaemonOfferHandler(client: DaemonProtocolClient, options: {
   runtimeId(): string | null;
+  adoption?: { workspace(): string; daemon(): string; outbox(): MultiremiTaskReportOutbox; held(attemptId:string): boolean };
   /** Why this offer is refused, or null; it sees the task (PR 6 §2.5: a parked lane's offer skips `capacity`). */
   rejection(task: DaemonTurnTask): OfferRejection | null;
   run(task: DaemonTurnTask): void;
 }): void {
-  client.registerFrameHandler("task.offer", (frame: DaemonParsedFrame) => {
+  const pending = new Set<string>();
+  client.registerFrameHandler("task.offer", async (frame: DaemonParsedFrame) => {
     if (!frame.rt || frame.rt !== options.runtimeId() || frame.seq === null) return;
     let task: DaemonTurnTask;
     try { task = normalizeDaemonTurnOffer(frame.payload); }
@@ -45,6 +50,46 @@ export function registerDaemonOfferHandler(client: DaemonProtocolClient, options
     }
     // A replay of an accepted entity stays accepted even after local capacity filled.
     const key = "task.offer";
+    const adoption = options.adoption;
+    const policy = task.systemPromptPolicy;
+    const respond = (ok: boolean, code?: string) => client.send({t:'res',re:String(frame.seq),p:{ok,code}});
+    if (adoption?.held(task.id)) { respond(false, 'restart_policy_unverifiable'); return; }
+    if (adoption && client.sharesCap('prompt.policy.adopt.v1')) {
+      if (pending.has(task.id)) return;
+      const generation = frame.payload.offer_generation;
+      if (typeof generation !== 'string' || !generation || !policy || policy.workspaceId !== adoption.workspace()
+        || task.workspaceId !== policy.workspaceId || hashSystemPromptContent(policy.content) !== policy.contentHash) {
+        respond(false,'policy_offer_mismatch'); return;
+      }
+      const scope = {workspace_id:policy.workspaceId,daemon_id:adoption.daemon(),runtime_id:frame.rt,attempt_id:task.id};
+      const desired = {...scope,offer_generation:generation,content_hash:policy.contentHash};
+      const outbox = adoption.outbox();
+      pending.add(task.id);
+      try {
+        let local = outbox.policyReceipt(scope);
+        if (local && !samePolicyOffer(local, {...desired,receipt_id:local.receipt_id})) {
+          if (local.state !== 'prepared') { respond(false,'policy_offer_mismatch'); return; }
+          const status = await client.rpc('task.offer_status',local,frame.rt);
+          if (status.state !== 'revoked_or_superseded' || !samePolicyOffer(local,status) || !outbox.transitionPolicyReceipt(local,'forget_revoked')) {
+            respond(false,'policy_offer_mismatch'); return;
+          }
+          local = null;
+        }
+        const reason = options.rejection(task);
+        if (reason && local?.state !== 'launch_claimed') { respond(false,reason); return; }
+        const receipt: PolicyOfferIdentity = local ?? outbox.preparePolicyReceipt(desired);
+        if (!samePolicyOffer(receipt,{...desired,receipt_id:receipt.receipt_id})) { respond(false,'policy_offer_mismatch'); return; }
+        const accepted = await client.rpc('task.offer_adopt',receipt,frame.rt);
+        if (accepted.state !== 'adopted' || !samePolicyOffer(receipt,accepted) || !client.sharesCap('prompt.policy.adopt.v1') || adoption.held(task.id)) return;
+        if (outbox.transitionPolicyReceipt(receipt,'launch')) options.run(task);
+        respond(true);
+      } finally { pending.delete(task.id); }
+      return;
+    }
+    if (adoption && (frame.payload.offer_generation || (policy && (policy.mode !== 'default'
+      || policy.defaultRevision !== LEGACY_BASELINE_DEFAULT_REVISION || hashSystemPromptContent(policy.content) !== LEGACY_BASELINE_DEFAULT_REVISION)))) {
+      respond(false,'policy_offer_mismatch'); return;
+    }
     if (!client.dedupe.claim(key, task.id)) {
       client.send({ t: "res", re: String(frame.seq), p: { ok: true } });
       return;

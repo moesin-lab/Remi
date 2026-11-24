@@ -198,6 +198,25 @@ describe.skipIf(!adminUrl)("System Prompt atomicity on real PostgreSQL (requires
     expect(Number(documents.n)).toBe(1);
   }
 
+  it('serializes adoption against revocation from independent connections', async () => {
+    const workspace = store.createWorkspace({name:'Policy offer race'});
+    const daemonId = 'dmn_policy_race';
+    const rt = store.registerRuntime({id:'rt_policy_race',workspaceId:workspace.id,name:'Race',daemonId,provider:'claude',ownerId:'local',status:'online',maxConcurrency:1});
+    const agent = store.createAgent({workspaceId:workspace.id,runtimeId:rt.id,name:'Race',provider:'claude'});
+    const task = store.createTask({agentId:agent.id,prompt:'race'});
+    const generation = crypto.randomUUID();
+    expect(store.claimTask(rt.id,{policyProtocol:'adopt',supportsPromptPolicy:true,offerGeneration:generation})?.id).toBe(task.id);
+    expect(store.recordTaskOffered(task.id,rt.id,undefined,generation)).toBe(true);
+    const identity = {workspace_id:workspace.id,daemon_id:daemonId,runtime_id:rt.id,attempt_id:task.id,offer_generation:generation,
+      receipt_id:crypto.randomUUID(),content_hash:store.getAttemptSystemPrompt(task.id)!.contentHash};
+    const result = await race(workspace.id,[{operation:'adopt',requestId:'a',identity},{operation:'revoke',requestId:'b',identity}]);
+    expect(result.map(row=>row.status).sort()).toEqual([200,409]);
+    const adopted = result[0]!.status === 200;
+    expect(store.systemPromptsRepo().offerStatus(identity)).toBe(adopted ? 'adopted' : 'revoked_or_superseded');
+    expect(Boolean(store.getTask(task.id)?.acceptedAt)).toBe(adopted);
+    expect(store.getTask(task.id)?.status).toBe(adopted ? 'dispatched' : 'queued');
+  });
+
   it("rolls failed level-4 DDL back, then applies exactly once on retry", async () => {
     const migrationName = `${databaseName}_ddl`;
     let migrationDb: PostgresSyncDatabase | undefined;

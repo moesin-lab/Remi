@@ -3,9 +3,11 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
+import type { PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
 
 export type SystemPromptPgWrite = { requestId: string } & (
   { operation?: "edit"; common: string } | { operation: "reset" } | { operation: "restore"; versionId: string }
+  | { operation:'adopt'|'revoke'; identity:PolicyOfferIdentity }
 );
 
 export type SystemPromptPgJob = SystemPromptPgWrite & {
@@ -35,6 +37,12 @@ if (import.meta.main) {
       await Bun.sleep(10);
     }
     if (!ready) throw new Error("System Prompt PostgreSQL process barrier timed out");
+    if (job.operation === 'adopt' || job.operation === 'revoke') {
+      const identity = job.identity;
+      const won = job.operation === 'adopt' ? store.systemPromptsRepo().adoptOffer(identity)
+        : store.requeueTaskOffer(identity.attempt_id,identity.runtime_id,'unknown',identity.offer_generation);
+      console.log(`SYSTEM_PROMPT_TEST_RESULT:${JSON.stringify({participant:job.participant,status:won ? 200 : 409,body:{won}})}`);
+    } else {
     const path = `/api/workspaces/${job.workspaceId}/system-prompt`;
     const edit = job.operation === undefined || job.operation === "edit";
     const body = { expectedRevision: job.expectedRevision, requestId: job.requestId,
@@ -46,5 +54,6 @@ if (import.meta.main) {
     });
     const result = { participant: job.participant, status: response.status, body: await response.json() };
     console.log(`SYSTEM_PROMPT_TEST_RESULT:${JSON.stringify(result)}`);
+    }
   } finally { db.close(); }
 }

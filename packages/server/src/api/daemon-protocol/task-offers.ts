@@ -15,6 +15,8 @@ import type { DaemonProtocolLayer } from "./index.js";
 import { DaemonProtocolSession } from "./session.js";
 import type { DaemonParsedFrame } from "./frames.js";
 import { fitTaskOfferToBudget, useTaskSessionInput } from "./offer-budget.js";
+import { authorizeReportRuntime } from './report-handlers.js';
+import type { PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
 
 export const DAEMON_OFFER_SWEEP_MS = 60_000;
 
@@ -77,6 +79,7 @@ interface RuntimePump {
 /** The database is the queue; memory holds only leases, deadlines and single-flight state. */
 export class DaemonTaskOffers {
   private readonly pumps = new Map<string, RuntimePump>();
+  private readonly reconciled = new Map<string, DaemonProtocolSession>();
   private readonly clock: DaemonProtocolClock;
   private readonly heartbeatCounts = new Map<string, number>();
   private stopped = false;
@@ -95,6 +98,38 @@ export class DaemonTaskOffers {
   }) {
     this.clock = options.clock ?? systemClock;
     this.stopped = options.autostart === false;
+    for (const method of ['task.offer_adopt', 'task.offer_status']) {
+      options.layer.registerRpcHandler(method, async (frame, session) => {
+        const p = frame.payload;
+        if (this.stopped || !frame.rt || this.session(frame.rt) !== session || !session.supportsPromptPolicy) return { ok:false, code:'authority_revoked' };
+        authorizeReportRuntime(options.store, session, frame.rt);
+        if (typeof p.attempt_id !== 'string' || typeof p.content_hash !== 'string' || typeof p.offer_generation !== 'string'
+          || typeof p.receipt_id !== 'string' || !p.receipt_id || p.receipt_id.length > 128) return { ok:false, code:'invalid_report' };
+        const identity = {workspace_id: options.store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local', daemon_id: session.daemonId, runtime_id:frame.rt,
+          attempt_id:p.attempt_id, content_hash:p.content_hash, offer_generation:p.offer_generation, receipt_id:p.receipt_id};
+        return withBackgroundTerm(this.generation.term, () => {
+          this.generation.term?.assertCurrent();
+          const policy = options.store.systemPromptsRepo();
+          if (method === 'task.offer_status') {
+            const state = policy.offerStatus(identity);
+            const handoff = state === 'adopted' && typeof p.handoff_id === 'string' && session.supportsPlannedRestart ? options.store.plannedRestarts().get(identity.attempt_id) : null;
+            return {ok:true,state,...identity,...(handoff?.handoff_id === p.handoff_id && handoff ? {handoff} : {})};
+          }
+          if (!policy.adoptOffer(identity)) return {ok:false,code:'policy_offer_mismatch',retryable:false};
+          const pump = this.pumps.get(identity.runtime_id);
+          const pending = pump?.pending;
+          if (pump && pending?.taskId === identity.attempt_id && pending.generation === identity.offer_generation) {
+            this.clock.clearTimeout(pending.timer);
+            pump.pending = null;
+            pump.accepted.add(identity.attempt_id);
+            if (pending.inlineRead) options.store.recordSessionAgentInlineRead(pending.inlineRead.sessionId,pending.agentId,
+              pending.inlineRead.seqs,pending.inlineRead.toSeq,pending.inlineRead.coldStart,pending.taskId);
+            this.kick(identity.runtime_id);
+          }
+          return {ok:true,state:'adopted',...identity};
+        });
+      });
+    }
     options.layer.registerSessionHooks({
       stop: () => { void this.stop(); },
       hello: (session, hello) => this.inGeneration(() => {
@@ -126,7 +161,7 @@ export class DaemonTaskOffers {
       drain: session => this.inGeneration(() => this.resume(session)),
       close: session => this.inGeneration(() => this.closed(session)),
     });
-    options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.inGeneration(() => this.ready(frame, session)));
+    options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.stopped ? null : withBackgroundTerm(this.generation.term, () => this.ready(frame, session)));
     // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
     // Keep a low-frequency safety net for missed events; recoveries expose missing wiring.
     if (options.autostart !== false) this.start();
@@ -319,6 +354,7 @@ export class DaemonTaskOffers {
     const { store } = this.options;
     const session = this.session(runtimeId);
     if (this.stopped || !session || pump.pending || this.clock.now() < pump.cooldownUntil) return;
+    if (session.supportsPromptPolicy && this.reconciled.get(runtimeId) !== session) return;
     const maintenance = store.getPlatformMaintenance();
     if (maintenance.mode === "draining") {
       if (maintenance.expiresAt) this.scheduleRetry("platform-drain", null, Date.parse(maintenance.expiresAt));
@@ -329,10 +365,13 @@ export class DaemonTaskOffers {
     // heartbeat write when this workspace has no queued or offered turn.
     if (!runtime || !store.hasPendingTaskOffers(runtime.workspaceId ?? "local")) return;
     const generation = crypto.randomUUID();
-    const policyCapableRuntimeIds = session.supportsPromptPolicy ? undefined : this.options.layer.registry.listSessions()
-      .flatMap(peer => peer.runtimeIds).filter(id => this.session(id)?.supportsPromptPolicy);
+    const connected = session.supportsPromptPolicy ? [] : this.options.layer.registry.listSessions()
+      .flatMap(peer => peer.runtimeIds).filter(id => this.session(id));
     const task = store.claimTask(runtimeId, { offerGeneration: generation, supportsBinarySkillFiles: true,
-      supportsPromptPolicy: session.supportsPromptPolicy, policyCapableRuntimeIds });
+      policyProtocol: session.supportsPromptPolicy ? 'adopt' : 'legacy',
+      supportsPromptPolicy: session.supportsPromptPolicy, policyCapableRuntimeIds: connected.filter(id => this.session(id)?.supportsPromptPolicy),
+      policyLegacyRuntimeIds: connected.filter(id => !this.session(id)?.supportsPromptPolicy),
+      continuePolicyScan: () => { pump.dirty = true; } });
     if (!task) return;
     pump.preparing = { taskId: task.id, generation };
     try {
@@ -349,6 +388,7 @@ export class DaemonTaskOffers {
         return;
       }
       if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id, generation); return; }
+      if (session.supportsPromptPolicy) payload.offer_generation = generation;
       const budgeted = fitTaskOfferToBudget(payload, runtimeId, undefined, session.supportsWikiFetch);
       console.info(JSON.stringify({ event: "daemon_offer_budget", task_id: task.id, runtime_id: runtimeId, ...budgeted.report }));
       let report = budgeted.report;
@@ -358,6 +398,7 @@ export class DaemonTaskOffers {
         store.failTask(task.id, { error, failureReason: "offer_too_large" });
         pump.dirty = true;
       };
+      if (!store.recordTaskOffered(task.id, runtimeId, new Date(this.clock.now()).toISOString(), generation)) return;
       let sent = session.sendEvent({ t: "task.offer", rt: runtimeId, p: payload }, { pausable: true });
       if (!sent.ok && sent.reason === "too_large") {
         const compact = fitTaskOfferToBudget(payload, runtimeId, 16 * 1024, session.supportsWikiFetch);
@@ -370,11 +411,11 @@ export class DaemonTaskOffers {
         else if (sent.reason === "closed") this.rescind(runtimeId, pump, task.id, generation);
         else {
           pump.waiting = true;
-          store.requeueTaskOffer(task.id, runtimeId, "unknown", generation);
+          store.requeueTaskOffer(task.id, runtimeId, "rejected", generation);
         }
         return;
       }
-      if (!store.recordTaskOffered(task.id, runtimeId, new Date(this.clock.now()).toISOString(), generation)) return;
+      currentBackgroundTerm()?.assertCurrent();
       if (fromSweep) {
         console.warn(JSON.stringify({ event: "daemon_offer_sweep_recovered", runtime_id: runtimeId, task_id: task.id }));
         this.options.layer.recordOfferSweepRecovery();
@@ -401,6 +442,7 @@ export class DaemonTaskOffers {
       const pump = this.pumps.get(runtimeId);
       const pending = pump?.pending;
       if (!pump || !pending || pending.session !== session || String(pending.seq) !== frame.re) continue;
+      if (session.supportsPromptPolicy && frame.payload.ok !== false) return;
       if (frame.payload.ok !== true) {
         const reason = frame.payload.reason ?? frame.payload.code;
         this.rescind(runtimeId, pump, pending.taskId, pending.generation, typeof reason === "string" ? reason : null, frame.payload.ok === false);
@@ -468,10 +510,28 @@ export class DaemonTaskOffers {
     }
   }
 
-  private ready(frame: DaemonParsedFrame, session: DaemonProtocolSession): void {
+  private async ready(frame: DaemonParsedFrame, session: DaemonProtocolSession): Promise<void> {
     const runtimeId = frame.rt;
     const ids = frame.payload.active_task_ids;
     if (!runtimeId || !session.runtimeIds.includes(runtimeId) || !Array.isArray(ids) || ids.some(id => typeof id !== "string")) return;
+    const store = this.options.store;
+    authorizeReportRuntime(store,session,runtimeId);
+    if (session.supportsPromptPolicy) {
+      for (const proof of Array.isArray(frame.payload.prepared_offers) ? frame.payload.prepared_offers : []) {
+        if (!proof || proof.runtime_id !== runtimeId || proof.daemon_id !== session.daemonId || typeof proof.attempt_id !== 'string') continue;
+        const policy = store.systemPromptsRepo();
+        if (!['adopted','proposed'].includes(policy.offerStatus(proof as PolicyOfferIdentity))) continue;
+        const task = store.getTaskWithAgent(proof.attempt_id);
+        if (!task || task.status !== 'dispatched') continue;
+        const payload = await this.options.prepare(task,session.supportsWikiFetch);
+        currentBackgroundTerm()?.assertCurrent();
+        if (this.session(runtimeId) !== session || !payload || !['adopted','proposed'].includes(policy.offerStatus(proof))) continue;
+        payload.offer_generation = proof.offer_generation;
+        const fitted = fitTaskOfferToBudget(payload,runtimeId,undefined,session.supportsWikiFetch);
+        session.sendEvent({t:'task.offer',rt:runtimeId,p:fitted.response},{pausable:true});
+      }
+      this.reconciled.set(runtimeId,session);
+    }
     const waits = Array.isArray(frame.payload.active_question_waits) ? frame.payload.active_question_waits.filter((value): value is import('@multiremi/contracts/daemon-protocol.js').DaemonQuestionWait =>
       !!value && typeof value === 'object' && typeof value.message_id === 'string' && typeof value.attempt_id === 'string' && typeof value.wait_id === 'string' && value.wait_id.length >= 16) : [];
     this.options.store.reconcileQuestionWaits(runtimeId, waits);
@@ -484,7 +544,13 @@ export class DaemonTaskOffers {
         }
       }
     }
-    this.options.store.recoverOrphans(runtimeId, ids as string[]);
+    const holds = Array.isArray(frame.payload.held_restart_attempts) ? frame.payload.held_restart_attempts : [];
+    const held = holds.flatMap(entry => {
+      if (!entry || typeof entry.attempt_id !== 'string' || typeof entry.handoff_id !== 'string') return [];
+      const handoff = store.plannedRestarts().get(entry.attempt_id);
+      return handoff?.handoff_id === entry.handoff_id && store.getTaskIdentity(entry.attempt_id)?.runtimeId === runtimeId ? [entry.attempt_id] : [];
+    });
+    this.options.store.recoverOrphans(runtimeId, [...ids as string[],...held]);
     this.kick(runtimeId);
   }
 }

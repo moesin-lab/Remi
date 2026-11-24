@@ -14,6 +14,44 @@ import { useMigratedIntegrationDatabases } from "../../helpers/integration-datab
 
 useMigratedIntegrationDatabases();
 
+for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only the adopted policy after reconnect with lost ${loss}`, async () => {
+  let providerRuns = 0;
+  const h = await DaemonProtocolHarness.create({database:'sqlite',manualOfferClock:true,providerFactory: () => ({
+    async *sendStream() { providerRuns++; yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:'finished'}]} as any; },
+    getLastResponse: () => ({text:'finished',sessionId:'policy-test',usage:[],toolCalls:[]} as any),close:async()=>{},
+  })});
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const [runtime] = h.store.listRuntimes();
+    const agent = h.store.createAgent({name:'Adoption',provider:'claude',runtimeId:runtime!.id});
+    const edit = (common:string) => {
+      const state = h.store.getSystemPrompt('local');
+      h.store.editSystemPrompt('local',{expectedRevision:state.document.revision,requestId:common,content:{...state.content,common}},
+        {type:'human',operatorId:'local',userId:'local',displayName:'Fixture'});
+    };
+    edit('POLICY A');
+    const adopt = (h.layer as any).rpcHandlers.get('task.offer_adopt');
+    let dropped = false;
+    h.layer.registerRpcHandler('task.offer_adopt', async (frame,session) => {
+      if (dropped) return adopt(frame,session);
+      if (loss === 'adopt_response') expect((await adopt(frame,session)).state).toBe('adopted');
+      dropped = true;
+      return session.deferReply(frame.id!,new Promise(() => {}));
+    });
+    const task = h.store.createTask({agentId:agent.id,prompt:'Exercise durable policy adoption'});
+    await waitFor(()=>dropped,'first adoption reached the transport',5000);
+    expect(providerRuns).toBe(0);
+    edit('POLICY B');
+    await h.disconnect(); await h.reconnect();
+    if (loss === 'adopt_request') h.clock.advance(DAEMON_OFFER_COOLDOWN_MS);
+    await waitFor(()=>h.store.getTask(task.id)?.status === 'completed','same attempt completed',45_000);
+    expect(providerRuns).toBe(1);
+    const expected = loss === 'adopt_response' ? 'POLICY A' : 'POLICY B';
+    expect(h.store.getAttemptSystemPrompt(task.id)?.content.common).toBe(expected);
+    expect(h.ledger.filter(entry=>entry.type === 'task.prompt').at(-1)?.frame.p.system_prompt_policy.content.common).toBe(expected);
+  } finally { await h.dispose(); }
+},60_000);
+
 for (const nativeRunId of ["historical-evidence-v2", "current"]) test(`late deprecated aggregates beside ${nativeRunId} park as invalid without blocking independent bound usage over the real socket`, async () => {
   const h = await DaemonProtocolHarness.create();
   let outbox: MultiremiTaskReportOutbox | undefined;

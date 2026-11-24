@@ -183,6 +183,7 @@ export class DaemonProtocolHarness {
   private createDaemons!: () => MultiremiDaemon[];
   private requestMetrics?: RequestMetricsOptions;
   private offerSweepMs?: number;
+  private manualOfferClock = false;
   private apiRole: "all" | "runtime" = "all";
   private peerChannel: PeerChannel | null = null;
   private peerSecret = "";
@@ -193,6 +194,7 @@ export class DaemonProtocolHarness {
   get url() { return `http://127.0.0.1:${this.server.port}`; }
 
   static async create(options: {
+    manualOfferClock?: boolean;
     database?: "sqlite";
     providers?: string[];
     runtimeId?: string;
@@ -222,6 +224,7 @@ export class DaemonProtocolHarness {
       h.store.ensureLocalWorkspace();
       const daemonId = options.omitDaemonId ? "protocol-fixture-device" : "dmn_fixture";
       h.apiRole = options.apiRole ?? "all";
+      h.manualOfferClock = options.manualOfferClock ?? false;
       h.requestMetrics = options.requestMetrics;
       h.offerSweepMs = options.offerSweepMs;
       h.peerChannel = options.peerChannel ?? null;
@@ -293,6 +296,7 @@ export class DaemonProtocolHarness {
     this.server = startMultiremiServer({
       store: this.store, scheduler: null, backgroundJobs: false, hostname: "127.0.0.1", port,
       authToken: "fixture-master", apiRole: this.apiRole, requestMetrics: this.requestMetrics, daemonOfferSweepMs: this.offerSweepMs,
+      daemonWorkClock: this.manualOfferClock ? this.clock : undefined,
       liveHub: this.liveHub,
       peerChannel: this.peerChannel, peerSecret: this.peerSecret,
       onDaemonProtocol: layer => {

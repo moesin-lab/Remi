@@ -1,5 +1,7 @@
 import { foldStoredTrace } from "./trace-pages.js";
-import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
+import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution, type RestartJournalEntry } from "./planned-restart-journal.js";
+import { samePolicyOffer } from '@multiremi/contracts/system-prompt-policy.js';
+import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
 import { restartQuestionKey, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
 import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
@@ -1621,7 +1623,7 @@ export class MultiremiDaemon {
       daemonId: this.options.daemonId ?? this.options.runtimeName,
       cliVersion: multiremiVersion,
       launchedBy: this.options.launchedBy,
-      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch", "prompt.policy.v1"],
+      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch", "prompt.policy.adopt.v1"],
       log,
       ...options.protocolClientOptions,
     });
@@ -1637,7 +1639,7 @@ export class MultiremiDaemon {
         }));
     }
     // Co-resident lanes share a client whose construction-time caps may be empty.
-    this.protocolClient.advertiseCaps(["input_unread", "turn.restart"]);
+    this.protocolClient.advertiseCaps(["input_unread", "turn.restart", "prompt.policy.adopt.v1"]);
     // PR 6 §5.3: this lane keeps Chat processes alive for background tasks; it parks only when the server echoes the cap.
     if (this.options.asyncTasks) this.protocolClient.advertiseCaps(["lane.background"]);
     this.parkedLanes = new ParkedLanes({
@@ -1734,8 +1736,14 @@ export class MultiremiDaemon {
         for (const reporter of this.activityReporters) reporter.resend();
         this.parkedLanes?.resendAll();
         const runtime = this.protocolLane.runtime();
-        if (runtime) this.protocolClient.send({ t: "runtime.ready",
-          rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids, active_question_waits: runtime.active_question_waits ?? [] } });
+        if (runtime) {
+          const held = this.restartJournal?.entries().filter(entry => entry.execution.runtime_id === runtime.runtime_id && this.restartRecoveryCandidates.has(entry.execution.handoff_id)) ?? [];
+          this.protocolClient.send({ t: "runtime.ready", rt: runtime.runtime_id, p: { active_task_ids: this.protocolClient.sharesCap('prompt.policy.adopt.v1') ? runtime.active_task_ids
+            : [...runtime.active_task_ids, ...held.map(entry => entry.execution.attempt_id)],
+            held_restart_attempts: held.map(({execution}) => ({attempt_id:execution.attempt_id,handoff_id:execution.handoff_id})),
+            prepared_offers: this.ensureOutbox().preparedOffers(runtime.runtime_id),
+            active_question_waits: runtime.active_question_waits ?? [] } });
+        }
         if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
           this.onceOfferTimer = setTimeout(() => { this.onceOfferTimer = null; this.stop(); }, this.options.onceOfferTimeoutMs);
         }
@@ -1744,6 +1752,7 @@ export class MultiremiDaemon {
     // Requests are derived from persisted server handoffs, never a local timer.
     this.protocolClient.registerFrameHandler("turn.restart", frame => {
       const p = frame.payload;
+      if (!this.protocolClient.sharesCap('prompt.policy.adopt.v1') || !this.protocolClient.sharesCap('turn.restart')) return;
       if (!frame.rt || frame.rt !== this.options.runtimeId || typeof p.attempt_id !== "string"
         || typeof p.turn_id !== "string" || typeof p.handoff_id !== "string"
         || !Number.isSafeInteger(p.generation) || Number(p.generation) < 0) return;
@@ -1773,6 +1782,8 @@ export class MultiremiDaemon {
     this.protocolClient.addLane(this.protocolLane);
     registerDaemonOfferHandler(this.protocolClient, {
       runtimeId: () => this.options.runtimeId,
+      adoption: { workspace: () => this.options.workspaceId ?? 'local', daemon: () => this.options.daemonId ?? this.options.runtimeName,
+        outbox: () => this.ensureOutbox(), held: id => Boolean(this.restartJournal?.entries().some(entry => entry.execution.attempt_id === id)) },
       rejection: (task) => {
         if (this.diskMonitor.critical) return "disk_critical";
         if (this.options.once && this.onceTaskAccepted) return "draining";
@@ -2040,6 +2051,7 @@ export class MultiremiDaemon {
     const outbox = this.ensureOutbox();
     this.plannedRestartTransfer();
     this.restartRecoveryCandidates = new Set(this.restartJournal!.entries().map(entry => entry.execution.handoff_id));
+    for (const entry of this.restartJournal!.entries()) outbox.holdAttempt(entry.execution.attempt_id,true);
     this.startRepoCheckoutServer();
     try {
       await this.registerCurrentRuntime();
@@ -2286,6 +2298,7 @@ export class MultiremiDaemon {
   }
 
   private async canRecoverOrphans(outbox: MultiremiTaskReportOutbox): Promise<boolean> {
+    if (this.restartRecoveryCandidates.size || outbox.preparedOffers(this.options.runtimeId ?? '').length) return false;
     const pending = outbox.taskIdsWithPendingTerminal(this.options.runtimeId ?? undefined);
     if (!pending.length) return true;
     if (this.protocolClient.connectionState() === "connected") {
@@ -4444,7 +4457,12 @@ export class MultiremiDaemon {
             } catch (error) {
               log.warn(`Task ${task.id}: optional trace identity snapshot omitted: ${error instanceof Error ? error.message : String(error)}`);
             }
-            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: head };
+            const scope = checkpointRestart!;
+            const local = this.ensureOutbox().policyReceipt(scope);
+            if (!local || local.state !== 'launch_claimed') throw new Error('restart_policy_unverifiable');
+            const {state, ...identity} = local;
+            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: head, policy_receipt:{ ...identity,
+              handoff_id:scope.handoff_id,turn_id:scope.turn_id,prior_restart_generation:scope.generation } };
           });
           const deadline = this.restartDeadlines.get(task.id);
           if (deadline) clearTimeout(deadline);
@@ -4478,11 +4496,32 @@ export class MultiremiDaemon {
 
   private readonly pendingResumedTasks = new Map<string, ReturnType<typeof normalizeDaemonTurnOffer>>();
 
+  private async preflightRestart(entry: RestartJournalEntry): Promise<boolean> {
+    const scope = entry.execution;
+    const proof = entry.checkpoint.policy_receipt;
+    const local = this.ensureOutbox().policyReceipt(scope);
+    if (!proof || !local || local.state !== 'launch_claimed' || !samePolicyOffer(local,proof) || proof.turn_id !== scope.turn_id
+      || proof.handoff_id !== scope.handoff_id || proof.prior_restart_generation !== scope.generation
+      || !this.protocolClient.sharesCap('turn.restart') || !this.protocolClient.sharesCap('prompt.policy.adopt.v1')) return false;
+    const info = await this.taskDownlinks.rpc('task.offer_status',{...proof});
+    const current = info.handoff as import('../store/planned-restarts.js').PlannedRestartHandoff | undefined;
+    if (info.state !== 'adopted' || !samePolicyOffer(proof,info) || !current || current.handoff_id !== scope.handoff_id || current.turn_id !== scope.turn_id) return false;
+    if (current.state === 'requested') return entry.state === 'prepared' && current.generation === scope.generation;
+    const frozen = current.checkpoint?.policy_receipt;
+    return Boolean(frozen && samePolicyOffer(proof,frozen) && frozen.handoff_id === proof.handoff_id && frozen.prior_restart_generation === scope.generation
+      && (current.state === 'suspended' && current.generation === scope.generation || ['resuming','running'].includes(current.state)
+        && current.generation === scope.generation + 1 && current.consumer_id === entry.consumer_id));
+  }
+
   private async resumePlannedRestarts(): Promise<void> {
     this.plannedRestartTransfer();
     for (const entry of this.restartJournal!.entries()) {
       if (this.stopped || !this.restartRecoveryCandidates.has(entry.execution.handoff_id) || this.resumedRestartIds.has(entry.execution.handoff_id)
         || entry.execution.runtime_id !== this.options.runtimeId) continue;
+      if (!await this.preflightRestart(entry).catch(() => false)) {
+        this.restartJournal!.hold(entry.execution.handoff_id);
+        continue;
+      }
       const retry = this.restartJournal!.reserveResume(entry.execution.handoff_id);
       if (retry === "waiting") continue;
       if (retry === "expired") {
@@ -4493,10 +4532,12 @@ export class MultiremiDaemon {
         continue;
       }
       try {
-        await this.restartTransfer!.resume(entry.execution.handoff_id);
+        const resumed = await this.restartTransfer!.resume(entry.execution.handoff_id);
         const task = this.pendingResumedTasks.get(entry.execution.handoff_id)!;
         this.pendingResumedTasks.delete(entry.execution.handoff_id);
         this.resumedRestartIds.add(entry.execution.handoff_id);
+        if (!this.restartJournal!.claimLaunch(resumed)) continue;
+        this.ensureOutbox().holdAttempt(entry.execution.attempt_id,false);
         const run = this.handleTask(task).finally(() => this.inflight.delete(run));
         this.inflight.add(run);
         void run.catch(error => log.error(`Resumed task ${task.id} failed: ${String(error)}`));
@@ -4519,13 +4560,20 @@ export class MultiremiDaemon {
     this.restartJournal ??= new PlannedRestartJournal(this.outboxPath === ":memory:" ? ":memory:"
       : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash("sha256").update(this.legacyOutboxPath).digest("hex").slice(0, 16)}.db`));
     return this.restartTransfer = new PlannedRestartTransfer(this.restartJournal, {
+      preflight: entry => this.preflightRestart(entry),
       suspend: async entry => {
         await this.taskDownlinks.rpc("turn.restart.suspend", { ...entry.execution, checkpoint: entry.checkpoint }, this.options.requestTimeoutMs);
       },
       resume: async entry => {
         const identities = this.restartJournal!.traceIdentities(entry, reason => log.warn(`Task ${entry.execution.attempt_id}: ${reason}; using trace fold only`));
-        const result = await this.taskDownlinks.rpc("turn.restart.resume", { ...entry.execution, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
+        const proof = entry.checkpoint.policy_receipt!;
+        const result = await this.taskDownlinks.rpc("turn.restart.resume_bound", { ...entry.execution, ...proof, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
         const task = normalizeDaemonTurnOffer(result.task as Record<string, unknown>);
+        const echoed = result.policy_receipt as typeof proof | undefined;
+        if (!echoed || !samePolicyOffer(proof,echoed) || echoed.handoff_id !== proof.handoff_id || echoed.turn_id !== proof.turn_id
+          || echoed.prior_restart_generation !== proof.prior_restart_generation || task.id !== proof.attempt_id || task.turn_id !== proof.turn_id
+          || task.workspaceId !== proof.workspace_id || !task.systemPromptPolicy || hashSystemPromptContent(task.systemPromptPolicy.content) !== proof.content_hash
+          || task.systemPromptPolicy.contentHash !== proof.content_hash) throw new Error('restart_policy_mismatch');
         const generation = Number(result.generation);
         if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
         this.executionGenerations.set(task.id, generation);

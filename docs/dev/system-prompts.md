@@ -42,7 +42,7 @@ task hard deny 与 CLI parity deny 同步维护。原 appendix 的既有权限�
 保存对后续新 claim 生效。每次 claim 持久化 offer 代次，发送、回执及收回按代次校验。未接受的 offer 再次领取时重绑，已确认或运行中的尝试保留原快照。
 offer 的 system_prompt_policy 对象完整发送。指令预算截短时，全文入口携带 attempt ID 和内容 SHA-256，从绑定读取五槽正文。
 新 daemon 经 provider home AGENTS.md 消费，最终指令纳入驻留启动指纹；内容变化按既有 config_changed 流程重建。
-当 custom 或服务端默认偏离首版等价基线时，claim 前要求 prompt.policy.v1；无合格 daemon 时应提供可诊断等待原因。
+当 custom 或服务端默认偏离首版等价基线时，claim 前要求 `prompt.policy.adopt.v1`。当前连接协商的能力、数据库内领取资格和设备等待原因共同决定排队诊断。诊断每次按创建时间与 ID 检查最多 32 项，正常领取沿用任务优先级。
 用户文字优先让出指令预算；只读协议自身超限必须显式失败。
 
 查看和修改入口为工作区设置的 Prompts 页，以及 `remi workspace system-prompt` 的

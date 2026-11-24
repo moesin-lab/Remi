@@ -66,10 +66,12 @@ offer 输入与会话投影的范围记录都为 complete 时什么也不加；�
 工作区系统默认行为通过 `system_prompt_policy` 下发，格式及字段见
 [共享契约](../packages/contracts/src/system-prompt-policy.ts)。服务端在 claim 同一事务冻结版本、默认 revision、
 完整五槽快照与内容哈希；offer 准备阶段不重读最新配置。未 accept 的 rescind/requeue/stale reclaim 可以重绑，
-running 尝试保持原快照。新 daemon 声明 `prompt.policy.v1`，校验格式及哈希后写入 provider home；实际输入记录关联该 binding。
+running 尝试保持原快照。`prompt.policy.adopt.v1` 单独协商。daemon 校验完整五槽与内容哈希，在本地 outbox 数据库登记收据，通过 `task.offer_adopt` 取得同一代次、哈希及收据的授权，再以条件更新消费启动权。`task.offer_status` 用于只读对账。裸成功回执只说明传输结果。
 当 mode 为 custom，或当前服务端默认不等于首版 `LEGACY_BASELINE_DEFAULT_REVISION` 时，claim 前必须具备此能力，
 否则等待并提供升级诊断。仅 default 且默认仍等价于基线时允许旧 daemon 兼容执行；reset 不绕过未来默认升级的能力门禁。
 整个 `system_prompt_policy` 属于执行绑定，预算降级不得删除或截短其字符串。
+
+切换 server 或 daemon 版本前须检查仍在途的 planned restart。可验证原策略时，由原兼容的执行者完成任务并排空可靠上报。旧 journal 缺少原采用收据，单独升级 server 无法补证。出现历史 A/B 不一致时应保留两端证据。新 checkpoint 在双方同时协商 `turn.restart` 与 `prompt.policy.adopt.v1`、只读对账匹配后使用 `turn.restart.resume_bound`。原 offer 代次和收据沿用，数字 restart generation 仍标识此次续接。旧 server 对 suspended 有原生孤儿保护，requested 或 resuming 仍可能独立过期。
 
 长正文带完整展开指针；范围命令为 `remi message list <session> --from X --to Y`，语义为 `X < seq ≤ Y`，
 调用 `GET /api/sessions/:id/messages`。旧 CLI log 命令只返回退役提示；浏览器 `/log` 窗口继续只读展示。

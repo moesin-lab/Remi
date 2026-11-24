@@ -124,7 +124,17 @@ it("rejects conflicting checkpoints, unknown fields and corrupt disk evidence", 
   try { db.run("UPDATE planned_restart_journal SET payload='{}' WHERE handoff_id=?", [execution.handoff_id]); }
   finally { db.close(); }
   expect(() => local.get(execution.handoff_id)).toThrow("Corrupt");
-  expect(() => local.entries()).toThrow("Corrupt");
+  const healthy = local.prepare({...execution,attempt_id:'healthy_attempt',handoff_id:'healthy_handoff'},checkpoint);
+  expect(local.entries()).toEqual([healthy]);
+  const evidence = openSqliteDatabase(path);
+  try {
+    expect(evidence.query('SELECT payload,consumer_id FROM planned_restart_journal WHERE handoff_id=?').get(execution.handoff_id))
+      .toEqual({payload:'{}',consumer_id:first.consumer_id});
+    expect(evidence.query('SELECT reason FROM planned_restart_holds WHERE handoff_id=?').get(execution.handoff_id))
+      .toEqual({reason:'restart_policy_unverifiable'});
+    expect(evidence.query('SELECT COUNT(*) AS count FROM planned_restart_trace_identities').get()).toEqual({count:0});
+    expect(evidence.query<{name:string},[]>('PRAGMA table_info(planned_restart_journal)').all().map(row => row.name)).not.toContain('attempt_id');
+  } finally { evidence.close(); }
 });
 
 it("treats trace identities as optional and discards bad digest, head or generation bindings", async () => {

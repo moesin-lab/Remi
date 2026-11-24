@@ -24,7 +24,7 @@ export interface PlannedRestartHandoff {
 }
 
 export class PlannedRestartError extends Error {
-  constructor(readonly code: "stale_execution" | "invalid_checkpoint" | "drain_not_active" | "resume_fenced" | "capacity") { super(code); }
+  constructor(readonly code: "stale_execution" | "invalid_checkpoint" | "drain_not_active" | "resume_fenced" | "capacity" | "restart_policy_mismatch") { super(code); }
 }
 
 
@@ -144,6 +144,12 @@ export class PlannedRestarts {
       if (!handoff || handoff.handoff_id !== handoffId || handoff.generation !== generation
         || !["requested", "suspended"].includes(handoff.state)) throw new PlannedRestartError("stale_execution");
       const value = this.validateCheckpoint(checkpoint, attempt);
+      if (this.ctx.systemPrompts().dispatchPolicy(attemptId)?.protocol === 'adopt' || value.policy_receipt) {
+        const receipt = value.policy_receipt;
+        if (!receipt || receipt.handoff_id !== handoffId || receipt.prior_restart_generation !== generation || receipt.turn_id !== handoff.turn_id
+          || receipt.attempt_id !== attemptId || receipt.workspace_id !== scope.workspaceId || receipt.daemon_id !== scope.daemonId
+          || receipt.runtime_id !== scope.runtimeId || this.ctx.systemPrompts().offerStatus(receipt) !== 'adopted') throw new PlannedRestartError('restart_policy_mismatch');
+      }
       const encoded = JSON.stringify(value);
       const digest = createHash("sha256").update(encoded).digest("hex");
       const stored = this.ctx.db.query("SELECT checkpoint_sha256 FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
@@ -167,7 +173,8 @@ export class PlannedRestarts {
    * A duplicate response for the same consumer returns its committed generation.
    */
   resume(attemptId: string, handoffId: string, consumerId: string, scope: PlannedRestartScope,
-    authorize: (generation: number, checkpoint: PlannedRestartCheckpoint) => void): PlannedRestartHandoff {
+    authorize: (generation: number, checkpoint: PlannedRestartCheckpoint) => void,
+    validate?: (handoff: PlannedRestartHandoff) => void): PlannedRestartHandoff {
     if (this.reconcileTerminal(attemptId, scope, handoffId)) throw new PlannedRestartError("stale_execution");
     return this.ctx.db.transaction(() => {
       const attempt = this.lock(attemptId, scope);
@@ -175,6 +182,8 @@ export class PlannedRestarts {
       if (typeof consumerId !== "string" || consumerId.length < 16 || consumerId.length > 256) throw new PlannedRestartError("stale_execution");
       const handoff = this.get(attemptId);
       if (!handoff || handoff.handoff_id !== handoffId) throw new PlannedRestartError("stale_execution");
+      if (this.ctx.systemPrompts().dispatchPolicy(attemptId)?.protocol === 'adopt' && !validate) throw new PlannedRestartError('restart_policy_mismatch');
+      validate?.(handoff);
       if (handoff.state === "resuming" && this.resumeExpired(attemptId)) throw new PlannedRestartError("stale_execution");
       if (["resuming", "running"].includes(handoff.state) && handoff.consumer_id === consumerId) return handoff;
       if (handoff.state !== "suspended") throw new PlannedRestartError("stale_execution");
@@ -325,7 +334,7 @@ export class PlannedRestarts {
       || !Array.isArray(value.delivered_message_ids) || value.delivered_message_ids.length > 1024
       || value.delivered_message_ids.some(id => typeof id !== "string" || !id || id.length > 256)
       || new Set(value.delivered_message_ids).size !== value.delivered_message_ids.length
-      || Object.keys(value).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids"].includes(key))) {
+      || Object.keys(value).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids", "policy_receipt"].includes(key))) {
       throw new PlannedRestartError("invalid_checkpoint");
     }
     const questionIds = value.question_ids ?? [];
@@ -341,6 +350,6 @@ export class PlannedRestarts {
     }
     return { version: 1, session_id: value.session_id, work_dir: value.work_dir, trace_head: value.trace_head,
       input_ack_seq: value.input_ack_seq, delivered_message_ids: [...value.delivered_message_ids],
-      ...(value.question_ids ? { question_ids: [...value.question_ids] } : {}) };
+      ...(value.question_ids ? { question_ids: [...value.question_ids] } : {}), ...(value.policy_receipt ? {policy_receipt:value.policy_receipt} : {}) };
   }
 }

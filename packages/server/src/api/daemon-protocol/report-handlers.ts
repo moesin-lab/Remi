@@ -203,6 +203,17 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
   const handle = async (frame: DaemonParsedFrame, session: DaemonProtocolSession) => {
     try {
       const p = frame.payload;
+      const policyTask = string(frame.type === 'turn.complete' ? p.attempt_id : p.task_id);
+      if (policyTask && (frame.type === 'turn.complete' || frame.type.startsWith('task.'))) {
+        const repo = store.systemPromptsRepo();
+        const dispatch = repo.dispatchPolicy(policyTask);
+        if (dispatch?.protocol === 'adopt') {
+          if (dispatch.state !== 'adopted' || !frame.rt || !session.supportsPromptPolicy) reject('policy_offer_mismatch');
+          const state = repo.offerStatus({ workspace_id:store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local',daemon_id:session.daemonId,
+            runtime_id:frame.rt,attempt_id:policyTask, offer_generation:string(p.offer_generation), content_hash:string(p.content_hash),receipt_id:string(p.receipt_id) });
+          if (state !== 'adopted' && state !== 'terminal') reject('policy_offer_mismatch');
+        } else if (p.receipt_id !== undefined || p.offer_generation !== undefined) reject('policy_offer_mismatch');
+      }
       // Persisted pre-turn reports must be quarantined, never upgraded on replay.
       if (frame.type === "task.complete") return { ok: false, code: "report_shape_retired", retryable: false };
       if (frame.type === "turn.complete") {

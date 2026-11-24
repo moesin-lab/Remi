@@ -2786,6 +2786,14 @@ runMigrations(this.db);
     return this.scm.listChangeRequestsForIssue(issueId);
   }
 
+  prepareScmChangeRequestBinding(...args: Parameters<ScmRepo["prepareChangeRequestBinding"]>) {
+    return this.scm.prepareChangeRequestBinding(...args);
+  }
+
+  bindScmChangeRequestByReference(input: Parameters<ScmRepo["bindChangeRequestByReference"]>[0]) {
+    return this.scm.bindChangeRequestByReference(input);
+  }
+
   linkScmChangeRequestToIssue(issueId: string, changeRequestId: string): {
     changeRequest: MultiremiScmChangeRequest;
     link: MultiremiScmIssueLink;

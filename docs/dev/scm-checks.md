@@ -1,10 +1,57 @@
 ---
-title: SCM 实时检查查询
+title: SCM 显式绑定与实时检查查询
 status: active
-summary: Agent 使用任务凭据读取 GitHub PR head 的 CI 观测，不获取 provider token。
+summary: 通过外部 PR/MR 引用持久化绑定 Issue，并使用任务凭据读取 GitHub CI 观测。
 ---
 
-# SCM 实时检查查询
+# SCM 显式绑定与实时检查查询
+
+## 按外部引用绑定 PR/MR
+
+外部工具创建 PR/MR 后，可立即绑定到 Issue，无需等待首次轮询或在标题、正文、分支中写入 Issue Key：
+
+```bash
+remi scm change-request bind <issue> --url https://github.com/owner/repo/pull/42 --json
+remi scm change-request bind <issue> --repository owner/repo --number 42 --json
+remi scm change-request list <issue> --json
+```
+
+命令调用 `PUT /api/issues/:issueId/change-requests/by-reference`，请求为
+`{"url":"https://github.com/owner/repo/pull/42"}` 或 `{"repository":"owner/repo","number":42}`，
+两种形式互斥，不接受额外字段。repository 支持平台仓库 ID、`owner/name` 或 Git URL。
+旧内部 ID 的 `link <issue> <change-request>`、`unlink`、`list` 与原 API 保留。
+
+解析仅限 Issue 所属工作区已配置且启用的 SCM 仓库及连接。PR URL 使用 GitHub 的
+`https://<host>/<owner>/<repo>/pull/<number>`；Codebase MR URL 使用已验证格式
+`https://<host>/<owner>/<repo>/merge_requests/<number>`。主机、非默认端口、仓库路径及 provider
+必须匹配配置；拒绝 userinfo、查询、片段、路径规范化、编码分隔符和非正整数编号。
+服务端从配置坐标构造请求，不抓取用户提供的任意 URL，不向任务返回 provider token，不回退到全局 token。
+
+已有真实投影直接绑定；尚未采集时，GitHub 复用只读 PR 查询，Codebase 复用
+`ListRepoMergeRequests`，不使用 watermark，最多读取 20 页（每页 100），整个查询限时 30 秒。
+Codebase 请求虽为 POST，其 Action 仅用于读取；不创建或修改远端 MR。
+达到页数上限返回 `scm_pagination_limit`，与完整读取后的 `scm_change_request_not_found` 区分。
+无配置为 `scm_binding_not_found`；歧义为 `scm_reference_ambiguous`；连接无权访问为
+`scm_provider_forbidden`；限流为 `scm_rate_limited`；超时为 `scm_lookup_timeout`。
+远端 404 也可能表示连接无权查看，不向调用方断言对象一定不存在。
+
+网络读取发生在数据库事务外；提交时重验工作区、连接、仓库、凭据配置修订和启用状态，
+期间发生变化返回 409 `scm_binding_conflict`。同一事务写入真实投影和 `source=manual` 的 active link，
+200 返回 `{changeRequest, link}` 才表示绑定已提交。重复引用保留既有关联 ID 与时间戳，不重复广播；
+较旧读取不会覆盖较新的同步快照，`legacy-number:*` 投影继续原位复用。
+首次导入采用实体 baseline，不补放绑定前的 opened/merged 等历史事件；即使连接尚未完成首次轮询，
+已有实体的后续真实状态变化仍沿用 canonical event 链路。若读取期间其他采集已建立实体，
+提交时基于锁内前序快照推导变化，避免并发导入吞掉合并事件。当前启用的文字自动发现照常执行。
+已存在投影不需要解密凭据；连接验证的状态、计数与时间更新不会使未变更配置的绑定请求冲突。
+
+外部 PR/MR 创建成功而绑定失败时，保留原 URL，以同一引用重试并报告绑定尚未完成，不能重建第二个 PR。
+该入口不改变现有文字自动发现、历史归属、默认交付规则或设置开关；这些切换需要配套实现后发布。
+服务端绑定能力应先于依赖该命令的 daemon/CLI 默认指引上线。
+
+验证入口：[绑定测试](../../tests/unit/multiremi/scm-change-request-binding.test.ts)覆盖真实 Store/API 与模拟 provider；
+PostgreSQL 用例需要 `MULTIREMI_TEST_POSTGRES_URL`。Codebase 使用本地 fixture；真实服务验证另行执行。
+
+## GitHub 实时检查查询
 
 `remi scm change-request checks <repository> <number> --json` 调用
 `GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks`。

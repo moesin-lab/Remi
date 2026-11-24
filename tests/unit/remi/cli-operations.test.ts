@@ -68,6 +68,29 @@ describe("operations CLI contracts", () => {
     }
   });
 
+  it.each([
+    { options: ["--url", "https://github.com/acme/widgets/pull/42"], body: { url: "https://github.com/acme/widgets/pull/42" } },
+    { options: ["--repository", "acme/widgets", "--number", "42"], body: { repository: "acme/widgets", number: 42 } },
+  ])("binds an external reference through the canonical Registry command: %j", async ({ options, body }) => {
+    useCliEnv();
+    const spec = specById("scm.change-request.bind");
+    globalThis.fetch = capabilityFetch(spec.id, async request => {
+      expect(request.method).toBe("PUT");
+      expect(new URL(request.url).pathname).toBe("/api/issues/iss_test/change-requests/by-reference");
+      expect(await request.json()).toEqual(body);
+      return Response.json({ changeRequest: { id: "scr_test" }, link: { active: true, source: "manual" } });
+    });
+    const output = await capture(() => registryFor([spec]).execute(["scm", "change-request", "bind", "iss_test", ...options, "--json"]));
+    expect(JSON.parse(output.stdout).link.active).toBe(true);
+  });
+
+  it.each([[], ["--repository", "acme/widgets"], ["--number", "42"], ["--repository", "repo", "--number", "1e2"], ["--url", "https://github.com/a/b/pull/1", "--number", "1"]].map(options => ({ options })))("rejects incomplete or mixed binding options: %j", async ({ options }) => {
+    useCliEnv();
+    const spec = specById("scm.change-request.bind");
+    globalThis.fetch = capabilityFetch(spec.id, () => { throw new Error("must not write"); });
+    await expect(registryFor([spec]).execute(["scm", "change-request", "bind", "iss_test", ...options])).rejects.toBeInstanceOf(CliError);
+  });
+
   it("reads live checks with the canonical repository and provider PR number", async () => {
     useCliEnv();
     const spec = specById("scm.change-request.checks");

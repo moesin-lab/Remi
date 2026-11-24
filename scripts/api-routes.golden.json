@@ -1,10 +1,10 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 842,
+    "routeCount": 843,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 596,
+      "compat": 597,
       "root": 20
     },
     "getRoutes": 366,
@@ -15,7 +15,7 @@
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 476,
+    "mutationRoutes": 477,
     "mutationRoutesCovered": 299,
     "flows": [
       "agents-compat",
@@ -873,6 +873,7 @@
     "PUT /api/issues/:id",
     "PUT /api/issues/:id/metadata/:key",
     "PUT /api/issues/:issueId/change-requests/:changeRequestId",
+    "PUT /api/issues/:issueId/change-requests/by-reference",
     "PUT /api/labels/:id",
     "PUT /api/multiremi/agents/:id/skills",
     "PUT /api/multiremi/comments/:id",
@@ -10847,6 +10848,17 @@
             "id": "scm.capabilities",
             "command": "remi scm capabilities",
             "capability": "scm.capabilities",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.bind",
+            "command": "remi scm change-request bind",
+            "capability": "scm.change-request.bind",
             "outputs": [
               "table",
               "json",

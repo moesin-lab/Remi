@@ -19,6 +19,13 @@ import type {
   UpsertScmSyncCursorInput,
 } from "@multiremi/contracts/types.js";
 
+export interface ScmChangeRequestBindingTarget {
+  connection: MultiremiScmConnection;
+  binding: MultiremiScmRepositoryBinding;
+  /** Opaque revision of persisted configuration, including encrypted credentials. */
+  revision: string;
+}
+
 export interface ScmStreamCapability {
   poll: boolean;
   webhook: boolean;

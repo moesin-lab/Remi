@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { ScmOperationError } from "@multiremi/scm/operations.js";
+import { observationCanonicalEvents, observationSnapshotInput } from "@multiremi/scm/reconcile.js";
+import { afterCommit } from "@multiremi/store/db/postgres.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
@@ -10,6 +14,8 @@ import {
 } from "@multiremi/store/repos/autopilots-repo.js";
 import { resolveRepositoryWikiAutomation } from "@multiremi/repository-wiki/automation.js";
 import type {
+  ScmChangeRequestBindingTarget,
+  ScmEntityObservation,
   ScmSnapshotEventFactory,
   ScmSnapshotEventWriteResult,
 } from "@multiremi/scm/types.js";
@@ -986,6 +992,123 @@ export class ScmRepo {
        WHERE l.issue_id = ? AND l.active = 1 AND cr.workspace_id = ?
        ORDER BY COALESCE(cr.provider_updated_at, cr.updated_at) DESC, cr.id ASC`,
     ).all(issueId, issue.workspaceId) as Row[]).map(toChangeRequest);
+  }
+
+  prepareChangeRequestBinding(issueId: string, connectionId: string, repositoryId: string, number: number) {
+    return this.ctx.db.transaction(() => {
+      const issue = this.ctx.issues().getIssue(issueId);
+      if (!issue) throw new Error(`Issue not found: ${issueId}`);
+      this.lockWorkspace(issue.workspaceId);
+      const { connection, binding } = this.lockConnectionAndBinding(connectionId, repositoryId);
+      this.assertBindingAvailable(issue.workspaceId, connection, binding);
+      const changeRequest = this.changeRequestByNumber(connectionId, repositoryId, number);
+      return {
+        target: { connection, binding, revision: this.bindingRevision(connectionId, repositoryId) },
+        changeRequest,
+        credential: changeRequest ? null : this.getConnectionCredential(connectionId),
+      };
+    })();
+  }
+
+  bindChangeRequestByReference(input: {
+    issueId: string;
+    target: ScmChangeRequestBindingTarget;
+    number: number;
+    observation?: ScmEntityObservation;
+  }): { changeRequest: MultiremiScmChangeRequest; link: MultiremiScmIssueLink } {
+    return this.ctx.db.transaction(() => {
+      const { target, number, issueId } = input;
+      this.lockWorkspace(target.connection.workspaceId);
+      // Configuration writers use the same workspace -> connection -> binding order.
+      const currentConnection = this.getConnection(target.connection.id);
+      const currentBinding = this.getRepositoryBinding(target.connection.id, target.binding.repositoryId);
+      if (!currentConnection || !currentBinding) {
+        throw new ScmOperationError("scm_binding_conflict", "SCM binding changed while resolving; retry the reference");
+      }
+      const { connection, binding } = this.lockConnectionAndBinding(currentConnection.id, currentBinding.repositoryId);
+      lockIssueRowWithinTransaction(this.ctx.db, issueId);
+      const issue = this.ctx.issues().getIssue(issueId);
+      if (!issue || issue.workspaceId !== target.connection.workspaceId
+        || this.bindingRevision(connection.id, binding.repositoryId) !== target.revision) {
+        throw new ScmOperationError("scm_binding_conflict", "SCM binding changed while resolving; retry the reference");
+      }
+      this.assertBindingAvailable(issue.workspaceId, connection, binding);
+      let projectionChanged = false;
+      let eventInputs: RecordScmCanonicalEventInput[] = [];
+      if (input.observation) {
+        const observation = input.observation;
+        if (observation.entityType !== "change_request" || observation.stream !== "change_requests"
+          || observation.payload.number !== number) {
+          throw new ScmOperationError("scm_reference_invalid", "SCM observation does not match the reference");
+        }
+        const written = this.advanceEntitySnapshotLocked(observationSnapshotInput(binding, observation));
+        projectionChanged = written.projection !== null;
+        // First insertion is a baseline; an existing predecessor must retain real transitions.
+        eventInputs = observationCanonicalEvents({ binding, observation, baseline: true }, written.advance);
+      }
+      const changeRequest = this.changeRequestByNumber(connection.id, binding.repositoryId, number);
+      if (!changeRequest) throw new ScmOperationError("scm_binding_conflict", "SCM projection changed while resolving; retry the reference");
+      const previous = this.ctx.db.query(
+        "SELECT * FROM multiremi_scm_issue_links WHERE change_request_id = ? AND issue_id = ?",
+      ).get(changeRequest.id, issueId) as Row | null;
+      const changed = !previous || previous.source !== "manual" || !Number(previous.active);
+      if (changed) {
+        const now = nowIso();
+        this.ctx.db.run(
+          `INSERT INTO multiremi_scm_issue_links (
+            id, workspace_id, change_request_id, issue_id, source, active,
+            linked_at, unlinked_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'manual', 1, ?, NULL, ?, ?)
+          ON CONFLICT(change_request_id, issue_id) DO UPDATE SET
+            source = 'manual', active = 1, linked_at = excluded.linked_at,
+            unlinked_at = NULL, updated_at = excluded.updated_at`,
+          [createId("sil"), issue.workspaceId, changeRequest.id, issueId, now, now, now],
+        );
+      }
+      const linkRow = this.ctx.db.query(
+        "SELECT * FROM multiremi_scm_issue_links WHERE change_request_id = ? AND issue_id = ?",
+      ).get(changeRequest.id, issueId) as Row;
+      const events = eventInputs.map(event => this.recordCanonicalEventLocked(event));
+      if (changed || projectionChanged) {
+        const projection = { changeRequestId: changeRequest.id, issueIds: this.activeIssueIds(changeRequest.id) };
+        afterCommit(this.ctx.db, () => this.emitChangeRequestUpdated(issue.workspaceId, projection));
+      }
+      afterCommit(this.ctx.db, () => {
+        for (const result of events) this.processPendingMergeEffects(result.event);
+      });
+      return { changeRequest, link: toIssueLink(linkRow) };
+    })();
+  }
+
+  private changeRequestByNumber(connectionId: string, repositoryId: string, number: number): MultiremiScmChangeRequest | null {
+    const rows = this.ctx.db.query(
+      "SELECT * FROM multiremi_scm_change_requests WHERE connection_id = ? AND repository_id = ? AND number = ?",
+    ).all(connectionId, repositoryId, number) as Row[];
+    if (rows.length > 1) throw new ScmOperationError("scm_reference_ambiguous", "Multiple SCM projections match this reference");
+    return rows[0] ? toChangeRequest(rows[0]) : null;
+  }
+
+  private assertBindingAvailable(workspaceId: string, connection: MultiremiScmConnection, binding: MultiremiScmRepositoryBinding): void {
+    if (connection.workspaceId !== workspaceId || binding.workspaceId !== workspaceId
+      || !connection.enabled || !binding.enabled) {
+      throw new ScmOperationError("scm_binding_conflict", "SCM connection or repository binding is unavailable");
+    }
+    assertScmRepositoryMatchesConnection(binding.repositoryUrl, connection.baseUrl);
+  }
+
+  private bindingRevision(connectionId: string, repositoryId: string): string {
+    // Include ciphertext so even credential rotation with an unchanged hint invalidates an in-flight read.
+    const connection = this.ctx.db.query(
+      `SELECT id, workspace_id, provider, base_url, api_base_url, enabled,
+        access_token_encrypted, webhook_secret_encrypted, created_at
+       FROM multiremi_scm_connections WHERE id = ?`,
+    ).get(connectionId);
+    const binding = this.ctx.db.query(
+      `SELECT id, workspace_id, connection_id, repository_id, repository_url, external_id,
+        owner, name, default_branch, enabled, created_at
+       FROM multiremi_scm_repository_bindings WHERE connection_id = ? AND repository_id = ?`,
+    ).get(connectionId, repositoryId);
+    return createHash("sha256").update(JSON.stringify([connection, binding])).digest("hex");
   }
 
   linkChangeRequestToIssue(issueId: string, changeRequestId: string): {

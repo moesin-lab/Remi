@@ -1,3 +1,4 @@
+import type { FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
 import type { Hono } from "hono";
 import { ensureDaemonProtocolUpgrade } from "../helpers/daemon-protocol-upgrade.js";
 import { CHAT_ATTACHMENT_MAX_BYTES, sanitizeChatAttachmentFilename } from "@multiremi/contracts/attachments.js";
@@ -601,6 +602,28 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     } catch (error) {
       if (error instanceof FeishuBotConfigError) return c.json({ error: error.message, code: error.code }, error.status as 400 | 403 | 409);
       return c.json({ error: error instanceof Error ? error.message : "attachment upload failed" }, 400);
+    }
+  });
+  app.post("/api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender", async (c) => {
+    if (currentAccessToken(c)?.type !== "daemon") return c.json({ error: "daemon token required" }, 403);
+    const runtimeId = c.req.param("runtimeId");
+    const denied = denyDaemonTokenRuntimeIdentity(c, store, runtimeId);
+    if (denied) return denied;
+    const runtime = store.getRuntimeLite(runtimeId);
+    if (!runtime) return c.json({ error: "runtime not found", code: "runtime_not_found" }, 404);
+    const body = await readJsonStrict<FeishuBotAuthorizeSenderRequest>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (!body || typeof body.external_session_key !== "string") return c.json({ error: "external_session_key must be a string" }, 400);
+    if (!Number.isSafeInteger(body.revision)) return c.json({ error: "revision must be an integer" }, 400);
+    try {
+      return c.json(store.authorizeFeishuBotSender(runtime.workspaceId ?? "local", runtimeId, {
+        revision: body.revision, externalSessionKey: body.external_session_key,
+        senderOpenId: body.sender_open_id, senderUserId: body.sender_user_id,
+        senderUnionId: body.sender_union_id, senderTenantKey: body.sender_tenant_key, senderName: body.sender_name,
+      }));
+    } catch (error) {
+      if (error instanceof FeishuBotConfigError) return c.json({ error: error.message, code: error.code }, error.status as 400 | 403 | 409);
+      throw error;
     }
   });
   app.post("/api/daemon/runtimes/:runtimeId/feishu-bot/messages", async (c) => {

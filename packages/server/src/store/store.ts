@@ -2344,6 +2344,10 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).getDaemonConfig(workspaceId, runtimeId);
   }
 
+  authorizeFeishuBotSender(workspaceId: string, runtimeId: string, input: Parameters<FeishuBotRepo["authorizeSender"]>[2]) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).authorizeSender(workspaceId, runtimeId, input);
+  }
+
   submitFeishuBotMessage(
     workspaceId: string,
     runtimeId: string,

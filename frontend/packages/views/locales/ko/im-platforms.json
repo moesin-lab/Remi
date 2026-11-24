@@ -246,6 +246,7 @@
       }
     },
     "concierge": {
+      "wake_words": "그룹 호출어 (한 줄에 하나)",
       "title": "Feishu 컨시어지 봇",
       "description": "이 봇의 응답 Agent, 호스트 Runtime 및 Feishu 앱 자격 증명을 선택합니다. 각 봇의 설정, 시작과 중지, 대화 라우팅은 독립적입니다.",
       "member_available": "{{name}}이(가) 온라인입니다. Feishu에서 메시지를 보내면 이 workspace로 전달됩니다.",

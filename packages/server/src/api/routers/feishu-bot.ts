@@ -1,3 +1,4 @@
+import { normalizeFeishuWakeWords } from "@multiremi/shared/feishu-wake-words.ts";
 import { createId } from "@multiremi/ids.js";
 /**
  * Workspace Feishu concierge bot routes (MUL-206).
@@ -605,6 +606,7 @@ interface FeishuBotConfigBody {
   app_id?: unknown;
   domain?: unknown;
   enabled?: unknown;
+  wake_words?: unknown;
   sender_access_policy?: unknown;
   responsible_member_id?: unknown;
   app_secret?: unknown;
@@ -628,6 +630,9 @@ function parseConfigBody(
     return { error: "responsible_member_id must be a member id or null" };
   }
 
+  let wakeWords: string[] | undefined;
+  try { if (body.wake_words !== undefined) wakeWords = normalizeFeishuWakeWords(body.wake_words); }
+  catch (error) { return { error: (error as Error).message }; }
   let appId = optionalString(body.app_id) ?? "";
   let appSecretOp = parseSecretOp(body.app_secret_op, body.app_secret);
   let appSecret = optionalString(body.app_secret) ?? undefined;
@@ -655,6 +660,7 @@ function parseConfigBody(
       appId,
       domain,
       enabled: body.enabled,
+      wakeWords,
       senderAccessPolicy: body.sender_access_policy,
       responsibleMemberId: body.responsible_member_id,
       appSecretOp,
@@ -734,6 +740,7 @@ export function configView(store: MultiremiStore, workspaceId: string, botId = "
       app_id: "",
       domain: "feishu",
       enabled: false,
+      wake_words: [],
       sender_access_policy: "allowlist",
       revision: 0,
       app_secret_configured: false,
@@ -765,6 +772,7 @@ export function configView(store: MultiremiStore, workspaceId: string, botId = "
     app_id: config.appId,
     domain: config.domain,
     enabled: config.enabled,
+    wake_words: config.wakeWords,
     sender_access_policy: config.senderAccessPolicy,
     responsible_member_id:config.responsibleMemberId??null,
     revision: config.revision,

@@ -1,3 +1,4 @@
+import { normalizeFeishuWakeWords } from "@multiremi/shared/feishu-wake-words.ts";
 import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
 import { STORAGE_SETTINGS_DEFAULTS, STORAGE_SETTINGS_KEYS, type WorkspaceStorageResponse } from "@multiremi/contracts/storage.js";
 import {
@@ -62,6 +63,7 @@ const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
   { name: "name", type: "string", valueName: "name", description: "Bot display name" },
   { name: "responsible-member", type: "string", description: "Member who answers questions from Feishu Chats without an Issue", conflictsWith: ["clear-responsible"] },
   { name: "clear-responsible", type: "boolean", description: "Clear it; such Chat questions then have no handler", conflictsWith: ["responsible-member"] },
+  { name: "wake-words-json", type: "string", valueName: "JSON", description: "Group wake words as a JSON string array ([] clears)" },
   { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Require a sender allowlist (default) or let anyone use Agent permissions" },
   { name: "agent", type: "string", valueName: "agent-id", description: "Agent that answers concierge messages" },
   { name: "runtime", type: "string", valueName: "runtime-id", description: "Runtime that hosts the connector" },
@@ -651,8 +653,13 @@ function feishuBotRegistrationPath(workspaceId: string, sessionId: string): stri
 }
 
 async function feishuBotBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
+  const rawWords = rawStringOption(invocation, "wake-words-json");
+  let wakeWords: string[] | undefined;
+  try { if (rawWords !== undefined) wakeWords = normalizeFeishuWakeWords(JSON.parse(rawWords)); }
+  catch (error) { throw new CliError("usage", `Invalid --wake-words-json: ${(error as Error).message}`); }
   const body = await requestBody(invocation, {
     name: stringOption(invocation, "name") ?? undefined,
+    wake_words: wakeWords,
     sender_access_policy: stringOption(invocation, "sender-access-policy") ?? undefined,
     responsible_member_id: booleanOption(invocation, "clear-responsible") === true ? null : stringOption(invocation, "responsible-member") ?? undefined,
     agent_id: stringOption(invocation, "agent") ?? undefined,

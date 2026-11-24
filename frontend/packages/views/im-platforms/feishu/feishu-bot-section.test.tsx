@@ -289,12 +289,15 @@ describe("FeishuBotSection (admin form)", () => {
 
   it("saves the selected bot without asking for a designated human", async () => {
     botSelectionRef.botId = "bot-2";
-    botRef.current = { role: "admin", config: { ...CONFIGURED.config, bot_id: "bot-2", name: "Second bot" } };
+    botRef.current = { role: "admin", config: { ...CONFIGURED.config, bot_id: "bot-2", name: "Second bot", wake_words: ["Ask", "小助理"] } };
     const user = userEvent.setup(); renderSection();
     expect(screen.queryByRole("combobox", { name: "Designated human" })).not.toBeInTheDocument();
     expect(mockSaveHook).toHaveBeenCalledWith("workspace-1", "bot-2");
+    const words = screen.getByLabelText("Group wake words (one per line)");
+    expect(words).toHaveValue("Ask\n小助理");
+    await user.clear(words);
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Second bot", app_secret_op: "keep" }));
+    expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Second bot", app_secret_op: "keep", wake_words: [] }));
     expect(mockSave.mock.calls.at(-1)?.[0]).toHaveProperty("responsible_member_id", null);
   });
 

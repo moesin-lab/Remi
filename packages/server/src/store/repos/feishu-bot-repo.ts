@@ -1,3 +1,4 @@
+import { normalizeFeishuWakeWords } from "@multiremi/shared/feishu-wake-words.ts";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 /** Feishu message UUID dedup is one hour; reserve five minutes for transit/clock skew. */
 export const FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS = 55 * 60_000;
@@ -627,6 +628,11 @@ export class FeishuBotRepo {
       const human=this.ctx.workspaces().getWorkspaceMember(responsibleMemberId);
       if(!human||human.archivedAt||human.workspaceId!==workspaceId)throw new FeishuBotConfigError('responsible_member_id must name an active human in this workspace',400,'invalid_config');
     }
+    let wakeWordsJson = String(existing?.wake_words_json ?? "[]");
+    if (input.wakeWords !== undefined) {
+      try { wakeWordsJson = JSON.stringify(normalizeFeishuWakeWords(input.wakeWords)); }
+      catch (error) { throw new FeishuBotConfigError((error as Error).message, 400, "invalid_wake_words"); }
+    }
     const senderAccessPolicy = input.senderAccessPolicy ?? existing?.sender_access_policy ?? "allowlist";
     if (senderAccessPolicy !== "agent" && senderAccessPolicy !== "allowlist") {
       throw new FeishuBotConfigError("sender_access_policy must be agent or allowlist", 400, "invalid_sender_access_policy");
@@ -657,10 +663,10 @@ export class FeishuBotRepo {
       `INSERT INTO multiremi_feishu_bot_configs (
          workspace_id, bot_id, name, agent_id, runtime_id, app_id,
          app_secret_encrypted, app_secret_hint,
-         domain, enabled, sender_access_policy, responsible_member_id, revision,
+         domain, enabled, wake_words_json, sender_access_policy, responsible_member_id, revision,
          bot_name, bot_open_id, last_tested_at, last_test_error, last_test_error_code,
          created_at, updated_at, updated_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(workspace_id, bot_id) DO UPDATE SET
          name = excluded.name,
          agent_id = excluded.agent_id,
@@ -670,6 +676,7 @@ export class FeishuBotRepo {
          app_secret_hint = excluded.app_secret_hint,
          domain = excluded.domain,
          enabled = excluded.enabled,
+         wake_words_json = excluded.wake_words_json,
          sender_access_policy = excluded.sender_access_policy,
          responsible_member_id = excluded.responsible_member_id,
          revision = excluded.revision,
@@ -690,6 +697,7 @@ export class FeishuBotRepo {
       hint,
       domain,
       input.enabled ? 1 : 0,
+      wakeWordsJson,
       senderAccessPolicy,
       responsibleMemberId,
       revision,
@@ -844,7 +852,7 @@ export class FeishuBotRepo {
     const row = this.rawConfigRow(workspaceId);
     if (!row) return null;
     if (String(row.runtime_id ?? "") !== runtimeId) return null;
-    const directive = this.directiveForRuntime(workspaceId, runtimeId);
+    const directive = this.directiveFromRow(workspaceId, runtimeId, row);
     if (!directive || !directive.config_available) return null;
     return {
       workspace_id: workspaceId,
@@ -859,6 +867,8 @@ export class FeishuBotRepo {
         field: "app_secret",
       }),
       domain: normalizeDomain(row.domain),
+      wake_words: directive.wake_words,
+      no_mention_chat_ids: directive.no_mention_chat_ids,
       recovery_chats: this.ctx.db.query(`SELECT chat_id, MAX(is_group) AS is_group FROM (
         SELECT chat_id, CASE WHEN thread_id IS NOT NULL OR reply_to_message_id IS NOT NULL THEN 1 ELSE 0 END AS is_group
         FROM multiremi_feishu_bot_chat_bindings
@@ -3884,10 +3894,22 @@ export class FeishuBotRepo {
     log.warn(`Feishu receipt delivery ${deliveryId} failed after ${attempts} attempt(s)`);
   }
 
+  authorizeSender(workspaceId: string, runtimeId: string, input: Pick<SubmitFeishuBotMessageInput, "externalSessionKey" | "senderOpenId" | "senderUserId" | "senderUnionId" | "senderTenantKey" | "senderName"> & { revision: number }): { allowed: boolean } {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const config = this.getConfig(workspaceId);
+      if (!config?.enabled || config.runtimeId !== runtimeId || config.revision !== input.revision) {
+        throw new FeishuBotConfigError("feishu bot assignment is stale", 409, "stale_revision");
+      }
+      requiredBoundedString(input.externalSessionKey, "external_session_key", 1_024);
+      return { allowed: this.resolveSender(workspaceId, config.appId, input, config.senderAccessPolicy).allowed };
+    })();
+  }
+
   private resolveSender(
     workspaceId: string,
     appId: string,
-    input: SubmitFeishuBotMessageInput,
+    input: Pick<SubmitFeishuBotMessageInput, "externalSessionKey" | "senderOpenId" | "senderUserId" | "senderUnionId" | "senderTenantKey" | "senderName">,
     accessPolicy: MultiremiFeishuBotConfig["senderAccessPolicy"],
   ): ResolvedFeishuSender {
     const unionId = optionalBoundedString(input.senderUnionId, "sender_union_id", 512);
@@ -4162,7 +4184,10 @@ export class FeishuBotRepo {
    * makes a Runtime switch a handover rather than a double-run.
    */
   directiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {
-    const row = this.rawConfigRow(workspaceId);
+    return this.directiveFromRow(workspaceId, runtimeId, this.rawConfigRow(workspaceId));
+  }
+
+  private directiveFromRow(workspaceId: string, runtimeId: string, row: Row | null): MultiremiFeishuBotDirective | null {
     if (!row) {
       // No config: a Runtime that still reports a live connector (because the
       // config was just deleted) must be told to stop. One that already
@@ -4196,6 +4221,7 @@ export class FeishuBotRepo {
     const topics = readWorkspaceIssueTopicsForDelivery(
       this.ctx.workspaces().getWorkspace(workspaceId)?.settings ?? {});
     return { revision, desired_state: "running", config_available: true,
+      wake_words: JSON.parse(String(row.wake_words_json ?? "[]")),
       no_mention_chat_ids: this.botId === "default" && topics.enabled && topics.chatId ? [topics.chatId] : [],
     };
   }
@@ -4658,6 +4684,7 @@ function mapConfig(row: Row): MultiremiFeishuBotConfig {
     appId: String(row.app_id ?? ""),
     domain: normalizeDomain(row.domain),
     enabled: Boolean(Number(row.enabled ?? 0)),
+    wakeWords: JSON.parse(String(row.wake_words_json ?? "[]")),
     senderAccessPolicy: row.sender_access_policy === "agent" ? "agent" : "allowlist",
     responsibleMemberId:nullableString(row.responsible_member_id),
     revision: Number(row.revision ?? 0),

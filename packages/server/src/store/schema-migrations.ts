@@ -16,4 +16,8 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
   id: '20261119_planned_restarts', phase: 'expand', level: 3,
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { ensureDaemonDrainIdentity(db); ensurePlannedRestarts(db); },
+}, {
+  id: '20261124_feishu_bot_wake_words', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { db.exec("ALTER TABLE multiremi_feishu_bot_configs ADD COLUMN wake_words_json TEXT NOT NULL DEFAULT '[]'"); },
 }];

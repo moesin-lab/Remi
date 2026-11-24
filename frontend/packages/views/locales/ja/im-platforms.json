@@ -246,6 +246,7 @@
       }
     },
     "concierge": {
+      "wake_words": "グループの呼びかけワード（1 行に 1 つ）",
       "title": "Feishu コンシェルジュ Bot",
       "description": "このボットの応答 Agent、ホスト Runtime、飛書アプリの認証情報を設定します。設定、起動と停止、会話ルートはボットごとに独立しています。",
       "member_available": "{{name}} はオンラインです。Feishu で DM するとこの workspace に届きます。",

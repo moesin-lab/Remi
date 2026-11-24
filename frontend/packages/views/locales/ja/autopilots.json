@@ -1,4 +1,21 @@
 {
+  "delivery": {
+    "denied": "配信先にアクセスする権限がありません。",
+    "heading": "レポートの配信",
+    "unbound": "内部セッションにのみ保存されます。ユーザーのチャットには配信されません。",
+    "unknown": "配信設定は不明です",
+    "unavailable": "配信先を利用できません",
+    "read_error": "配信先を読み込めません",
+    "loading": "配信先を読み込み中",
+    "choose": "配信先チャットを選択",
+    "clear": "配信先を解除",
+    "empty": "一致するチャットはありません",
+    "retry": "再試行",
+    "clear_first": "モードを変更する前に配信先を解除してください。",
+    "web_chat": "Web チャット",
+    "feishu": "飛書",
+    "unknown_channel": "不明なチャネル"
+  },
   "schedule_targets": {
     "previous": "前の実行記録",
     "next": "次の実行記録",

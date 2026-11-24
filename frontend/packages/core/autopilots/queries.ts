@@ -17,6 +17,14 @@ export const autopilotKeys = {
     [...autopilotKeys.all(wsId), "deliveries", autopilotId, deliveryId] as const,
 };
 
+export function deliveryTargetsOptions(wsId: string) {
+  return queryOptions({
+    queryKey: [...autopilotKeys.all(wsId), "delivery-targets"],
+    queryFn: () => api.listAutopilotDeliveryTargets(wsId),
+    retry: false,
+  });
+}
+
 export function autopilotListOptions(wsId: string) {
   return queryOptions({
     queryKey: autopilotKeys.list(wsId),

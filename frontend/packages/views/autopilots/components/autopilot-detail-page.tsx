@@ -70,6 +70,7 @@ import type {
   ScheduleTargets,
 } from "@multiremi/core/types";
 import { ReadonlyContent } from "../../editor";
+import { DeliveryTarget } from "./delivery-target";
 import { AutopilotDialog } from "./autopilot-dialog";
 import { RunRow, formatDate } from "./run-row";
 import { WebhookDeliveriesSection } from "./webhook-deliveries-section";
@@ -869,6 +870,10 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
                   {t(($) => $.execution_mode[autopilot.execution_mode as AutopilotExecutionMode])}
                 </div>
               </div>
+              {autopilot.execution_mode === "run_only" && <div className="col-span-2">
+                <div className="text-xs text-muted-foreground">{t(($) => $.delivery.heading)}</div>
+                <DeliveryTarget value={autopilot.delivery_chat_session_id} />
+              </div>}
               {autopilot.execution_mode === "trigger_issue" && (
                 <>
                   <div>
@@ -1030,6 +1035,7 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
             project_id: autopilot.project_id ?? null,
             assignee_type: autopilot.assignee_type,
             assignee_id: autopilot.assignee_id,
+            delivery_chat_session_id: autopilot.delivery_chat_session_id,
             execution_mode: autopilot.execution_mode as AutopilotExecutionMode,
             session_policy: autopilot.session_policy ?? "new",
             workspace_policy: autopilot.workspace_policy ?? "reuse_issue",

@@ -67,7 +67,15 @@ export type AutopilotEventConfig =
   | AutopilotSystemEventConfig
   | AutopilotScmEventConfig;
 
+export interface AutopilotDeliveryTarget {
+  id: string;
+  title: string;
+  channel: string;
+}
+
 export interface Autopilot {
+  delivery_chat_session_id?: string | null;
+  warnings?: { code: string; message: string }[];
   id: string;
   workspace_id: string;
   title: string;
@@ -167,6 +175,7 @@ export interface AutopilotRun {
 }
 
 export interface CreateAutopilotRequest {
+  delivery_chat_session_id?: string | null;
   title: string;
   description?: string;
   project_id?: string | null;
@@ -181,6 +190,7 @@ export interface CreateAutopilotRequest {
 }
 
 export interface UpdateAutopilotRequest {
+  delivery_chat_session_id?: string | null;
   title?: string;
   description?: string | null;
   project_id?: string | null;

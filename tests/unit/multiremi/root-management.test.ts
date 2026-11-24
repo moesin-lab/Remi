@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { constants, createHash, generateKeyPairSync, privateDecrypt, sign } from 'node:crypto';
 import { beginMachineChallenge,machineSignaturePayload,verifyMachineChallenge,requireCurrentMachine,bindMachineConnection,releaseMachineConnection,type MachineConnection } from '@multiremi/store/machine-proof.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -232,8 +232,8 @@ test('explicit grant checks the target and actor and preserves generation and cu
   const subject = { type: 'user',id: 'usr_second' } as const;
   const use = { action: 'root.grant.create',use: 'management',actualTarget: subject };
   const input = { subject,reason: 'fixture grant',expected_revision: 0,idempotency_key: 'grant-request' };
-  const create = (expected_revision: number, idempotency_key: string, issuer = proof) => withSecurityWrite(db,undefined,service.plan(issuer,use),tx =>
-    service.grant(tx,service.authorizeWrite(tx,issuer,use),{ ...input,expected_revision,idempotency_key }));
+  const create = (expected_revision: number, idempotency_key: string, expires_at?: string) => withSecurityWrite(db,undefined,service.plan(proof,use),tx =>
+    service.grant(tx,service.authorizeWrite(tx,proof,use),{ ...input,expected_revision,idempotency_key,expires_at }));
   expect(() => create(0,'unknown')).toThrow('Management target not found');
   db.run("INSERT INTO multiremi_users(id,name,email,created_at,updated_at) VALUES('usr_second','test','second@example.invalid','now','now')");
   expect(() => create(0,'unverified')).toThrow('root_required');
@@ -258,12 +258,14 @@ test('explicit grant checks the target and actor and preserves generation and cu
     FROM multiremi_authority_nodes WHERE node_id=?`).run(second.authority_node_id);
   db.query('UPDATE multiremi_authority_nodes SET continuous_parent_count=continuous_parent_count+1 WHERE node_id=?').run(second.authority_node_id);
   db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='family-node'");
-  const third = create(3,'independent-reauthorization').grant;
+  const expiry = new Date(Date.now()+10_000).toISOString();
+  const third = create(3,'independent-reauthorization',expiry).grant;
   expect(third).toMatchObject({generation:3,effective:true});
   expect(third.authority_node_id).not.toBe(second.authority_node_id);
   expect(create(2,'second-grant')).toMatchObject({replayed:true,grant:{id:second.id,effective:false}});
   expect(create(0,'grant-request').grant.id).toBe(created.grant.id);
-  db.query('UPDATE multiremi_root_grants SET created_at_ms=1,expires_at_ms=2 WHERE grant_id=?').run(third.id);
+  using clock = spyOn(Date,'now').mockReturnValue(Date.parse(expiry));
+  expect(create(3,'independent-reauthorization',expiry).grant).toMatchObject({id:third.id,status:'expired',effective:false});
   db.exec("CREATE TRIGGER reject_replacement BEFORE INSERT ON multiremi_root_management_events BEGIN SELECT RAISE(ABORT,'audit rejected'); END");
   expect(()=>create(4,'expiry-replacement')).toThrow();
   expect(db.query('SELECT generation_counter,active_grant_id FROM multiremi_root_subject_state WHERE subject_id=?').get(subject.id))
@@ -272,7 +274,7 @@ test('explicit grant checks the target and actor and preserves generation and cu
   db.exec('DROP TRIGGER reject_replacement');
   const fourth = create(4,'expiry-replacement').grant;
   expect(fourth).toMatchObject({generation:4,effective:true});
-  expect(create(3,'independent-reauthorization')).toMatchObject({replayed:true,grant:{id:third.id,effective:false}});
+  expect(create(3,'independent-reauthorization',expiry)).toMatchObject({replayed:true,grant:{id:third.id,effective:false}});
 });
 function revoke(use: AuthorityUse, input: RevokeCredentialFamilyRequest = request) {
   return withSecurityWrite(db, undefined, service.plan(proof, use), tx => {

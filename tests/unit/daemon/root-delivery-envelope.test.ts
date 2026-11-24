@@ -1,10 +1,11 @@
 import { beforeAll, expect, test } from 'bun:test';
 import { compactDecrypt, CompactEncrypt } from 'jose';
 import { createHash } from 'node:crypto';
-import { sealRootDelivery, openRootDelivery } from '../../../packages/server/src/worker/root-delivery-envelope.js';
+import { sealRootDelivery, openRootDelivery, recipientFingerprint } from '../../../packages/server/src/worker/root-delivery-envelope.js';
+import type { RootDeliveryTuple } from '@multiremi/contracts/root-delivery.js';
 import { fixtureDeliveryTuple, fixtureDeliveryStatusResponse } from '../../fixtures/root-authority.js';
 
-const tuple = { ...fixtureDeliveryTuple, material_expires_at: new Date(Date.now() + 600_000).toISOString() };
+let tuple: RootDeliveryTuple;
 const createKeys = (modulusLength: number) => crypto.subtle.generateKey({ name: 'RSA-OAEP', hash: 'SHA-256',
   modulusLength, publicExponent: new Uint8Array([1, 0, 1]) }, false, ['encrypt', 'decrypt']);
 let keys: CryptoKeyPair;
@@ -13,6 +14,7 @@ const status = () => ({ ...fixtureDeliveryStatusResponse, tuple, envelope_digest
 
 beforeAll(async () => {
   keys = await createKeys(3072);
+  tuple = { ...fixtureDeliveryTuple, recipient_key_fingerprint: recipientFingerprint(keys.publicKey), material_expires_at: new Date(Date.now() + 600_000).toISOString() };
   sealed = await sealRootDelivery(tuple, 'test-material', keys.publicKey);
 });
 
@@ -44,5 +46,6 @@ test('rejects weak and incorrect recipient keys', async () => {
   const weak = await createKeys(2048);
   await expect(sealRootDelivery(tuple, 'test-material', weak.publicKey)).rejects.toThrow();
   const other = await createKeys(3072);
+  await expect(sealRootDelivery(tuple, 'test-material', other.publicKey)).rejects.toThrow();
   await expect(openRootDelivery(sealed.envelope, tuple, status(), other.privateKey)).rejects.toThrow();
 });

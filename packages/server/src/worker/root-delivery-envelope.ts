@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, KeyObject } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { CompactEncrypt, compactDecrypt } from 'jose';
 import {
@@ -44,9 +44,14 @@ function checkKey(key: CryptoKey, type: 'private' | 'public'): void {
 
 function digest(envelope: string): string { return `sha256:${createHash('sha256').update(envelope).digest('hex')}`; }
 
-export async function sealRootDelivery(tuple: RootDeliveryTuple, raw: string, publicKey: CryptoKey) {
+export function recipientFingerprint(publicKey: CryptoKey): string {
   checkKey(publicKey, 'public');
-  if (!raw || !(Date.parse(tuple.material_expires_at) > Date.now())) reject();
+  const spki = KeyObject.from(publicKey).export({ type: 'spki', format: 'der' });
+  return `sha256:${createHash('sha256').update(spki).digest('hex')}`;
+}
+
+export async function sealRootDelivery(tuple: RootDeliveryTuple, raw: string, publicKey: CryptoKey) {
+  if (recipientFingerprint(publicKey) !== tuple.recipient_key_fingerprint || !raw || !(Date.parse(tuple.material_expires_at) > Date.now())) reject();
   const protectedHeader = header(tuple);
   const bytes = new TextEncoder().encode(JSON.stringify({ tuple, raw }));
   try {

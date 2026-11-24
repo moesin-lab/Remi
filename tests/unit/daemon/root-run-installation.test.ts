@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
-import { sealRootDelivery } from '@multiremi/worker/root-delivery-envelope.js';
+import { sealRootDelivery, recipientFingerprint } from '@multiremi/worker/root-delivery-envelope.js';
 import { prepareRunInstallation } from '@multiremi/worker/root-run-installation.js';
 import { rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
 import { fixtureDeliveryActivationResponse, fixtureDeliveryTuple, fixtureDeliveryStatusResponse } from '../../fixtures/root-authority.js';
@@ -9,7 +9,7 @@ test('requires the isolated child to acknowledge the exact material installed in
   const key = await crypto.subtle.generateKey({ name: 'RSA-OAEP', hash: 'SHA-256', modulusLength: 3072,
     publicExponent: new Uint8Array([1,0,1]) }, false, ['encrypt','decrypt']);
   const business = { turn_id: 'integration-turn' };
-  const tuple = { ...fixtureDeliveryTuple, material_expires_at: new Date(Date.now() + 120000).toISOString(),
+  const tuple = { ...fixtureDeliveryTuple, recipient_key_fingerprint: recipientFingerprint(key.publicKey), material_expires_at: new Date(Date.now() + 120000).toISOString(),
     business_payload_digest: rootBusinessPayloadDigest(business) };
   const envelope = await sealRootDelivery(tuple, 'short-lived-synthetic-material', key.publicKey);
   const delivery = { ...fixtureDeliveryActivationResponse, ...envelope, tuple, frozen_business_payload: business, start_deadline: tuple.material_expires_at };

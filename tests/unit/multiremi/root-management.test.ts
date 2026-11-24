@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { constants, createHash, generateKeyPairSync, privateDecrypt, sign } from 'node:crypto';
-import { beginMachineChallenge,machineSignaturePayload,verifyMachineChallenge,requireCurrentMachine } from '@multiremi/store/machine-proof.js';
+import { beginMachineChallenge,machineSignaturePayload,verifyMachineChallenge,requireCurrentMachine,bindMachineConnection,releaseMachineConnection,type MachineConnection } from '@multiremi/store/machine-proof.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -60,6 +60,7 @@ test('trust grant binds live daemon credential, enrollment, two key proofs and s
   const signer = generateKeyPairSync('ed25519');
   const bearer = 'synthetic-daemon-material';
   const expiry = Date.now()+600_000;
+  db.run("INSERT INTO multiremi_workspaces(id,name,slug,created_at,updated_at) VALUES('local','fixture','fixture','now','now')");
   db.run("INSERT INTO multiremi_runtimes(id,name,provider,daemon_id,workspace_id,created_at,updated_at) VALUES('rt_test','fixture','test','daemon-test','local','now','now')");
   db.query(`INSERT INTO multiremi_access_tokens(id,workspace_id,daemon_id,name,type,token_hash,token_prefix,created_at)
     VALUES('daemon-credential','local','daemon-test','test','daemon',?,'test','now')`).run(checksum(bearer));
@@ -69,13 +70,18 @@ test('trust grant binds live daemon credential, enrollment, two key proofs and s
   const targets = ['authority:registration','machine:rt_test'];
   const plan = {expectedRevision:0,workspaceIds:[],numberKeys:[],domainTargets:targets};
   const action = 'root.runtime-trust.grant';
-  const challenge = withSecurityWrite(db,undefined,plan,tx=>beginMachineChallenge(db,tx,bearer,'rt_test',action,'rt_test'));
+  const owner = {};
+  expect(bindMachineConnection(db,owner,'synthetic-task-material')).toBeNull();
+  const connection = bindMachineConnection(db,owner,bearer);
+  if (!connection) throw new Error('Fixture daemon connection was not bound');
+  const challenge = withSecurityWrite(db,undefined,plan,tx=>beginMachineChallenge(db,tx,connection,'rt_test',action,'rt_test'));
   const nonce = privateDecrypt({ key:receiver.privateKey,oaepHash:'sha256',padding:constants.RSA_PKCS1_OAEP_PADDING },Buffer.from(challenge.encryptedNonce,'base64url')).toString('base64url');
   const signedAt = new Date().toISOString();
   const machine = { consumer_id:'consumer',runtime_id:'rt_test',daemon_id:'daemon-test',incarnation:'incarnation',recipient_key_id:'key-id',
     recipient_key_fingerprint:`sha256:${createHash('sha256').update(receiver.publicKey.export({type:'spki',format:'der'})).digest('hex')}`,
     nonce,signature:sign(null,machineSignaturePayload(challenge,nonce,signedAt),signer.privateKey).toString('base64url'),signed_at:signedAt };
-  const verify = (presented: typeof machine,token=bearer) => withSecurityWrite(db,undefined,plan,tx=>verifyMachineChallenge(db,tx,token,challenge.id,action,'rt_test',presented));
+  const verify = (presented: typeof machine,token: string | MachineConnection=connection) => withSecurityWrite(db,undefined,plan,tx=>verifyMachineChallenge(db,tx,token,challenge.id,action,'rt_test',presented));
+  expect(()=>verify(machine,bindMachineConnection(db,{},bearer)!)).toThrow('root_authority_revoked');
   expect(()=>verify(machine,'synthetic-task-material')).toThrow('root_authority_revoked');
   expect(()=>verify({...machine,signature:'invalid'})).toThrow('root_authority_revoked');
   expect(()=>verify({...machine,incarnation:'another'})).toThrow('root_authority_revoked');
@@ -83,6 +89,8 @@ test('trust grant binds live daemon credential, enrollment, two key proofs and s
   expect(withSecurityWrite(db,undefined,plan,tx=>requireCurrentMachine(db,tx,verified,action,'rt_test'))).toBe(verified);
   expect(()=>withSecurityWrite(db,undefined,plan,tx=>requireCurrentMachine(db,tx,verified,'receipt.replay','rt_test'))).toThrow('root_authority_revoked');
   expect(()=>verify(machine)).toThrow('root_authority_revoked');
+  releaseMachineConnection(owner);
+  expect(()=>withSecurityWrite(db,undefined,plan,tx=>requireCurrentMachine(db,tx,verified,action,'rt_test'))).toThrow('root_authority_revoked');
   const request = {runtime_id:'rt_test',daemon_id:machine.daemon_id,incarnation:machine.incarnation,recipient_key_id:machine.recipient_key_id,
     recipient_key_fingerprint:machine.recipient_key_fingerprint,reason:'fixture trust',expected_revision:0,idempotency_key:'trust',challenge_id:challenge.id,challenge_response:verified.proofDigest};
   const use = {action,actualTarget:{type:'runtime',id:'rt_test'},use:'management'};

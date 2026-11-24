@@ -12,11 +12,48 @@ export type VerifiedMachine = MachineBrand & Readonly<{
   runtimeId: string; daemonId: string; incarnation: string; consumerId: string; keyId: string; fingerprint: string;
   challengeId: string; proofDigest: string; authorityNodeId: string; generation: number;
 }>;
-const verifiedMachines = new WeakMap<MachineBrand, { db: SqlDatabase; credentialDigest: string; purpose: string; targetId: string; binding: string; handle: VerifiedMachine }>();
+const verifiedMachines = new WeakMap<MachineBrand, { db: SqlDatabase; credentialDigest: string; purpose: string; targetId: string; binding: string; handle: VerifiedMachine; connection?: MachineConnection }>();
+
+declare const connectionBrand: unique symbol;
+export interface MachineConnection { readonly [connectionBrand]: true }
+const connections = new WeakMap<object, MachineConnection>();
+const connectionProofs = new WeakMap<MachineConnection, { db: SqlDatabase; owner: object; credentialDigest: string; id: string }>();
+
+export function bindMachineConnection(db: SqlDatabase, owner: object, bearer: string): MachineConnection | null {
+  if (connections.has(owner)) return reject();
+  if (!bearer) return null;
+  const credentialDigest = hash(bearer);
+  const token = db.query(`SELECT t.expires_at FROM multiremi_access_tokens t JOIN multiremi_workspaces w ON w.id=t.workspace_id
+    WHERE t.token_hash=? AND t.type='daemon' AND t.daemon_id IS NOT NULL AND t.revoked_at IS NULL AND NOT EXISTS
+    (SELECT 1 FROM multiremi_daemon_retirements d WHERE d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id)`).get(credentialDigest);
+  if (!token || token.expires_at!==null && !(Date.parse(token.expires_at)>Date.now())) return null;
+  const connection = Object.freeze({}) as MachineConnection;
+  connections.set(owner,connection);
+  connectionProofs.set(connection,{db,owner,credentialDigest,id:randomUUID()});
+  return connection;
+}
+
+export function releaseMachineConnection(owner: object): void {
+  const connection = connections.get(owner);
+  if (connection) connectionProofs.delete(connection);
+  connections.delete(owner);
+}
+
+function currentConnectionDigest(db: SqlDatabase, connection: string | MachineConnection): string {
+  if (typeof connection==='string') return hash(connection);
+  const proof = connectionProofs.get(connection);
+  if (!proof || proof.db!==db || connections.get(proof.owner)!==connection) return reject();
+  return proof.credentialDigest;
+}
+
+function nonceDigest(connection: string | MachineConnection, nonce: string): string {
+  return typeof connection==='string' ? hash(nonce) : hash(JSON.stringify([connectionProofs.get(connection)!.id,nonce]));
+}
 
 function enrollment(db: SqlDatabase, runtimeId: string, credentialDigest: string) {
   const row = db.query(`SELECT e.*,r.workspace_id,t.expires_at FROM multiremi_machine_enrollments e
     JOIN multiremi_runtimes r ON r.id=e.runtime_id AND r.daemon_id=e.daemon_id
+    JOIN multiremi_workspaces w ON w.id=r.workspace_id
     JOIN multiremi_access_tokens t ON t.id=e.credential_id AND t.token_hash=e.credential_digest AND t.type='daemon'
       AND t.daemon_id=e.daemon_id AND t.workspace_id=r.workspace_id AND t.revoked_at IS NULL
     JOIN multiremi_authority_nodes n ON n.node_id=e.authority_node_id AND n.generation=e.generation AND n.kind='machine_registration'
@@ -46,28 +83,29 @@ export function machineSignaturePayload(challenge: Omit<MachineChallenge,'encryp
     challenge.expiresAtMs,nonce,signedAt]));
 }
 
-export function beginMachineChallenge(db: SqlDatabase, tx: SecurityTx, bearer: string, runtimeId: string, purpose: string, targetId: string): MachineChallenge {
+export function beginMachineChallenge(db: SqlDatabase, tx: SecurityTx, connection: string | MachineConnection, runtimeId: string, purpose: string, targetId: string): MachineChallenge {
   return withSecurityTarget(db,tx,`machine:${runtimeId}`,() => {
-    const {row,recipientKey,binding} = enrollment(db,runtimeId,hash(bearer));
+    const {row,recipientKey,binding} = enrollment(db,runtimeId,currentConnectionDigest(db,connection));
     assertUnrevokedAncestry(db,tx,{ nodeId: row.authority_node_id,generation: Number(row.generation) });
     const id = randomUUID();
     const nonce = randomBytes(32);
     const expiresAtMs = Math.min(Date.now()+60_000,Number(row.key_expires_at_ms));
     const encryptedNonce = publicEncrypt({ key: recipientKey,oaepHash: 'sha256',padding: constants.RSA_PKCS1_OAEP_PADDING },nonce).toString('base64url');
     db.query(`INSERT INTO multiremi_machine_challenges(challenge_id,incarnation,purpose,target_id,nonce_digest,binding_digest,expires_at_ms)
-      VALUES(?,?,?,?,?,?,?)`).run(id,row.incarnation,purpose,targetId,hash(nonce.toString('base64url')),binding,expiresAtMs);
+      VALUES(?,?,?,?,?,?,?)`).run(id,row.incarnation,purpose,targetId,nonceDigest(connection,nonce.toString('base64url')),binding,expiresAtMs);
     nonce.fill(0);
     return { id,encryptedNonce,binding,purpose,targetId,expiresAtMs };
   });
 }
 
-export function verifyMachineChallenge(db: SqlDatabase, tx: SecurityTx, bearer: string, challengeId: string, purpose: string, targetId: string,
+export function verifyMachineChallenge(db: SqlDatabase, tx: SecurityTx, connection: string | MachineConnection, challengeId: string, purpose: string, targetId: string,
   proof: RootDeliveryMachineProof): VerifiedMachine {
   return withSecurityTarget(db,tx,`machine:${proof.runtime_id}`,() => {
-    const {row,fingerprint,binding,signingKey} = enrollment(db,proof.runtime_id,hash(bearer));
+    const credentialDigest = currentConnectionDigest(db,connection);
+    const {row,fingerprint,binding,signingKey} = enrollment(db,proof.runtime_id,credentialDigest);
     assertUnrevokedAncestry(db,tx,{ nodeId: row.authority_node_id,generation: Number(row.generation) });
     const challenge = db.query(`SELECT expires_at_ms FROM multiremi_machine_challenges WHERE challenge_id=? AND incarnation=? AND purpose=?
-      AND target_id=? AND nonce_digest=? AND binding_digest=? AND consumed_at_ms IS NULL`).get(challengeId,row.incarnation,purpose,targetId,hash(proof.nonce),binding);
+      AND target_id=? AND nonce_digest=? AND binding_digest=? AND consumed_at_ms IS NULL`).get(challengeId,row.incarnation,purpose,targetId,nonceDigest(connection,proof.nonce),binding);
     if (!challenge || proof.consumer_id !== row.consumer_id || proof.daemon_id !== row.daemon_id || proof.incarnation !== row.incarnation
       || proof.recipient_key_id !== row.recipient_key_id || proof.recipient_key_fingerprint !== fingerprint) return reject();
     const now = Date.now();
@@ -80,7 +118,7 @@ export function verifyMachineChallenge(db: SqlDatabase, tx: SecurityTx, bearer: 
       AND consumed_at_ms IS NULL RETURNING challenge_id`).get(now,proofDigest,challengeId,Date.now())) return reject();
     const handle = Object.freeze({ runtimeId: proof.runtime_id,daemonId: proof.daemon_id,incarnation: proof.incarnation,consumerId: proof.consumer_id,
       keyId: proof.recipient_key_id,fingerprint,challengeId,proofDigest,authorityNodeId: String(row.authority_node_id),generation: Number(row.generation) }) as VerifiedMachine;
-    verifiedMachines.set(handle,{db,credentialDigest:hash(bearer),purpose,targetId,binding,handle});
+    verifiedMachines.set(handle,{db,credentialDigest,purpose,targetId,binding,handle,...(typeof connection==='string'?{}:{connection})});
     return handle;
   });
 }
@@ -90,6 +128,7 @@ export function requireCurrentMachine(db: SqlDatabase, tx: SecurityTx, proof: Ma
   if (!evidence || evidence.db!==db || evidence.purpose!==purpose || evidence.targetId!==targetId) return reject();
   const handle = evidence.handle;
   return withSecurityTarget(db,tx,`machine:${handle.runtimeId}`,() => {
+    if (evidence.connection) currentConnectionDigest(db,evidence.connection);
     if (!db.query(`SELECT challenge_id FROM multiremi_machine_challenges WHERE challenge_id=? AND proof_digest=? AND binding_digest=?
       AND consumed_at_ms IS NOT NULL AND expires_at_ms>?`).get(handle.challengeId,handle.proofDigest,evidence.binding,Date.now())) return reject();
     const current = enrollment(db,handle.runtimeId,evidence.credentialDigest);

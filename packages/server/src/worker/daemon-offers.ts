@@ -34,12 +34,14 @@ export type OfferRejection = "disk_critical" | "capacity" | "claims_paused" | "d
 
 export function registerDaemonOfferHandler(client: DaemonProtocolClient, options: {
   runtimeId(): string | null;
-  adoption?: { workspace(): string; daemon(): string; outbox(): MultiremiTaskReportOutbox; held(attemptId:string): boolean };
+  adoption?: { workspace(): string; daemon(): string; lane(): string; outbox(): MultiremiTaskReportOutbox; held(attemptId:string): boolean };
   /** Why this offer is refused, or null; it sees the task (PR 6 §2.5: a parked lane's offer skips `capacity`). */
-  rejection(task: DaemonTurnTask): OfferRejection | null;
+  rejection(task: DaemonTurnTask, preparing: number): OfferRejection | null;
   run(task: DaemonTurnTask): void;
 }): void {
-  const pending = new Set<string>();
+  const pending = new Map<string,number>();
+  let connection = 0;
+  client.onWelcome(() => { connection++; pending.clear(); });
   client.registerFrameHandler("task.offer", async (frame: DaemonParsedFrame) => {
     if (!frame.rt || frame.rt !== options.runtimeId() || frame.seq === null) return;
     let task: DaemonTurnTask;
@@ -64,7 +66,9 @@ export function registerDaemonOfferHandler(client: DaemonProtocolClient, options
       const scope = {workspace_id:policy.workspaceId,daemon_id:adoption.daemon(),runtime_id:frame.rt,attempt_id:task.id};
       const desired = {...scope,offer_generation:generation,content_hash:policy.contentHash};
       const outbox = adoption.outbox();
-      pending.add(task.id);
+      if (!outbox.canProveNewAttempt(task.createdAt)) { respond(false,'restart_policy_unverifiable'); return; }
+      const owner = connection;
+      pending.set(task.id,owner);
       try {
         let local = outbox.policyReceipt(scope);
         if (local && !samePolicyOffer(local, {...desired,receipt_id:local.receipt_id})) {
@@ -75,17 +79,22 @@ export function registerDaemonOfferHandler(client: DaemonProtocolClient, options
           }
           local = null;
         }
-        const reason = options.rejection(task);
+        if (connection !== owner) return;
+        const reason = options.rejection(task,pending.size - 1);
         if (reason && local?.state !== 'launch_claimed') { respond(false,reason); return; }
         const receipt: PolicyOfferIdentity = local ?? outbox.preparePolicyReceipt(desired);
         if (!samePolicyOffer(receipt,{...desired,receipt_id:receipt.receipt_id})) { respond(false,'policy_offer_mismatch'); return; }
         const accepted = await client.rpc('task.offer_adopt',receipt,frame.rt);
-        if (accepted.state !== 'adopted' || !samePolicyOffer(receipt,accepted) || !client.sharesCap('prompt.policy.adopt.v1') || adoption.held(task.id)) return;
-        if (outbox.transitionPolicyReceipt(receipt,'launch')) options.run(task);
+        if (connection !== owner || accepted.state !== 'adopted' || !samePolicyOffer(receipt,accepted) || !client.sharesCap('prompt.policy.adopt.v1') || adoption.held(task.id)) return;
+        if (outbox.transitionPolicyReceipt(receipt,'launch')) {
+          outbox.recordNewAttempt(receipt,task.createdAt,adoption.lane());
+          options.run(task);
+        }
         respond(true);
-      } finally { pending.delete(task.id); }
+      } finally { if (pending.get(task.id) === owner) pending.delete(task.id); }
       return;
     }
+    if (adoption && adoption.outbox().uncertainHandoffs().length) { respond(false,'restart_policy_unverifiable'); return; }
     if (adoption && (frame.payload.offer_generation || (policy && (policy.mode !== 'default'
       || policy.defaultRevision !== LEGACY_BASELINE_DEFAULT_REVISION || hashSystemPromptContent(policy.content) !== LEGACY_BASELINE_DEFAULT_REVISION)))) {
       respond(false,'policy_offer_mismatch'); return;
@@ -94,7 +103,7 @@ export function registerDaemonOfferHandler(client: DaemonProtocolClient, options
       client.send({ t: "res", re: String(frame.seq), p: { ok: true } });
       return;
     }
-    const code = options.rejection(task);
+    const code = options.rejection(task,pending.size);
     if (code) {
       client.dedupe.release(key, task.id);
       client.send({ t: "res", re: String(frame.seq), p: { ok: false, code } });

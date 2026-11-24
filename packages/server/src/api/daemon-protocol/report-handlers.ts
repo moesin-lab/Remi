@@ -360,9 +360,12 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           return { ok: true };
         };
         // Accepted usage runs retain accounting authority after execution handoff.
-        return frame.type === "task.usage" || frame.type === "task.fail" ? apply()
+        return store.systemPromptsRepo().withReportPolicy(authority.workspaceId, () => {
+          if (!store.systemPromptsRepo().acceptsReport(taskId,authority,p)) reject('policy_offer_mismatch');
+          return frame.type === "task.usage" || frame.type === "task.fail" ? apply()
           : store.plannedRestarts().withExecution(taskId, p.generation, authority, apply,
             frame.type === "task.start" && typeof p.usage_run_id === "string" ? p.usage_run_id : undefined);
+        });
       }
       const runtimeId = frame.rt ?? string(p.runtime_id);
       authorizeReportRuntime(store, session, runtimeId);

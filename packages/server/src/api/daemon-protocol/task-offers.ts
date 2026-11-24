@@ -103,6 +103,10 @@ export class DaemonTaskOffers {
         const p = frame.payload;
         if (this.stopped || !frame.rt || this.session(frame.rt) !== session || !session.supportsPromptPolicy) return { ok:false, code:'authority_revoked' };
         authorizeReportRuntime(options.store, session, frame.rt);
+        if (method === 'task.offer_status' && p.inspect_handoff === true && session.supportsPlannedRestart && typeof p.handoff_id === 'string' && p.handoff_id.length <= 256) {
+          const scope = {workspaceId:options.store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local',runtimeId:frame.rt,daemonId:session.daemonId};
+          return withBackgroundTerm(this.generation.term, () => ({ok:true,...options.store.plannedRestarts().inspectHandoff(p.handoff_id,scope)}));
+        }
         if (typeof p.attempt_id !== 'string' || typeof p.content_hash !== 'string' || typeof p.offer_generation !== 'string'
           || typeof p.receipt_id !== 'string' || !p.receipt_id || p.receipt_id.length > 128) return { ok:false, code:'invalid_report' };
         const identity = {workspace_id: options.store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local', daemon_id: session.daemonId, runtime_id:frame.rt,
@@ -197,7 +201,8 @@ export class DaemonTaskOffers {
       if (this.stopped) return;
       for (const session of this.options.layer.registry.listSessions()) {
         for (const rt of session.runtimeIds) {
-          this.options.store.plannedRestarts().recoverExpiredResumes(rt);
+          const owner = this.session(rt);
+          if (owner === session) this.options.store.plannedRestarts().recoverExpiredResumes(rt, new Set(this.validatedHolds(owner,rt)));
           this.kick(rt, true);
         }
       }
@@ -365,7 +370,7 @@ export class DaemonTaskOffers {
     // heartbeat write when this workspace has no queued or offered turn.
     if (!runtime || !store.hasPendingTaskOffers(runtime.workspaceId ?? "local")) return;
     const generation = crypto.randomUUID();
-    const connected = session.supportsPromptPolicy ? [] : this.options.layer.registry.listSessions()
+    const connected = this.options.layer.registry.listSessions()
       .flatMap(peer => peer.runtimeIds).filter(id => this.session(id));
     const task = store.claimTask(runtimeId, { offerGeneration: generation, supportsBinarySkillFiles: true,
       policyProtocol: session.supportsPromptPolicy ? 'adopt' : 'legacy',
@@ -510,6 +515,13 @@ export class DaemonTaskOffers {
     }
   }
 
+  private validatedHolds(session: DaemonProtocolSession,runtimeId:string): string[] {
+    const store = this.options.store;
+    return (session.heldRestartAttempts.get(runtimeId) ?? []).flatMap(entry => {
+      return store.plannedRestarts().ownsHandoff(entry.attempt_id,entry.handoff_id,runtimeId,session.daemonId) ? [entry.attempt_id] : [];
+    });
+  }
+
   private async ready(frame: DaemonParsedFrame, session: DaemonProtocolSession): Promise<void> {
     const runtimeId = frame.rt;
     const ids = frame.payload.active_task_ids;
@@ -545,12 +557,8 @@ export class DaemonTaskOffers {
       }
     }
     const holds = Array.isArray(frame.payload.held_restart_attempts) ? frame.payload.held_restart_attempts : [];
-    const held = holds.flatMap(entry => {
-      if (!entry || typeof entry.attempt_id !== 'string' || typeof entry.handoff_id !== 'string') return [];
-      const handoff = store.plannedRestarts().get(entry.attempt_id);
-      return handoff?.handoff_id === entry.handoff_id && store.getTaskIdentity(entry.attempt_id)?.runtimeId === runtimeId ? [entry.attempt_id] : [];
-    });
-    this.options.store.recoverOrphans(runtimeId, [...ids as string[],...held]);
+    session.heldRestartAttempts.set(runtimeId,holds.filter(entry => entry && typeof entry.attempt_id === 'string' && typeof entry.handoff_id === 'string'));
+    this.options.store.recoverOrphans(runtimeId, [...ids as string[],...this.validatedHolds(session,runtimeId)]);
     this.kick(runtimeId);
   }
 }

@@ -16,13 +16,16 @@ const shared = new WeakMap<DaemonProtocolClient, { outbox: MultiremiTaskReportOu
 export function acquireDaemonOutbox(protocol: DaemonProtocolClient, options: MultiremiTaskReportOutboxOptions): MultiremiTaskReportOutbox {
   let entry = shared.get(protocol);
   if (!entry) {
-    const outbox = new MultiremiTaskReportOutbox({ ...options,
+    const outbox: MultiremiTaskReportOutbox = new MultiremiTaskReportOutbox({ ...options,
       canSend: () => protocol.connectionState() === "connected" && !protocol.uplinkPaused(),
       deliver: async record => {
         if (record.kind === "messages") return options.deliver(record);
-        await deliverCompletionReceipt(protocol, record);
+        const checkHold = () => { if (outbox.isHeld(record.taskId)) throw new DaemonProtocolRpcError('restart_policy_unverifiable', true); };
+        checkHold();
+        await deliverCompletionReceipt(protocol, record, checkHold);
+        checkHold();
         const reply = await protocol.event(outboxRecordFrame(record) as ReturnType<typeof outboxRecordFrame> & { seq: number });
-        if (record.terminal) {
+        if (record.terminal && !outbox.isHeld(record.taskId)) {
           const trace = daemonTraceTransport(protocol);
           if (trace.store.head(record.taskId)) {
             trace.close(record.taskId, record.kind === "turn.complete" ? "completed" : "failed", terminalError(record.payload));
@@ -68,18 +71,19 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
   return {
     async report(type, partition, payload, wait = false) {
       const runtimeId = runtime();
-      const terminal = type === "turn.complete" || type === "task.fail";
+      const identity = outbox().reportIdentity(partition,runtimeId);
+      const terminal = !outbox().classifyReport(partition,payload.receipt_id ?? identity.receipt_id) && (type === "turn.complete" || type === "task.fail");
       const status = type === "turn.complete" ? "completed" : "failed";
       // The fields describe the close below; the trace is sealed only after the
       // report is queued (or accepted), so a rejected completion can continue the turn.
       const generation = executionGeneration(partition);
-      const p = { ...(generation ? { generation } : {}), ...payload, runtime_id: payload.runtime_id ?? runtimeId,
+      const p = { ...identity, ...(generation ? { generation } : {}), ...payload, runtime_id: payload.runtime_id ?? runtimeId,
         ...(terminal ? trace?.completion(partition, status) : {}) };
       const kind = (type.startsWith("task.") ? type.slice(5) : type) as MultiremiOutboxKind;
       if (wait) {
         const reply = await outbox().enqueueAndWait(partition, kind, p,
           typeof wait === "object" ? wait.timeoutMs : waitTimeoutMs, waitSignal?.());
-        if (terminal) trace?.close(partition, status, terminalError(payload));
+        if (terminal && !outbox().isHeld(partition)) trace?.close(partition, status, terminalError(payload));
         return reply;
       }
       outbox().enqueue(partition, kind, p);
@@ -91,6 +95,7 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
     bestEffort(type, payload) {
       if (protocol.connectionState() !== "connected") return;
       const taskId = typeof payload.task_id === "string" ? payload.task_id : null;
+      if (taskId && outbox().classifyReport(taskId,payload.receipt_id ?? outbox().reportIdentity(taskId,runtime()).receipt_id)) return;
       const generation = taskId ? executionGeneration(taskId) : 0;
       try { protocol.send({ t: type, rt: runtime() ?? undefined,
         p: { ...(taskId ? outbox().reportIdentity(taskId,runtime()) : {}), ...(generation ? { generation } : {}), ...payload } }); }
@@ -100,12 +105,14 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
 }
 
 /** The durable completion owns its receipt; transport failures retry delivery, never execution. */
-async function deliverCompletionReceipt(protocol: DaemonProtocolClient, record: MultiremiOutboxRecord): Promise<void> {
+async function deliverCompletionReceipt(protocol: DaemonProtocolClient, record: MultiremiOutboxRecord, checkHold: () => void): Promise<void> {
   if (record.kind !== "turn.complete" || !record.payload.input_receipt) return;
   const { messages } = record.payload.input_receipt as { messages: Array<{ id: string; seq: number }> };
-  const input = { turn_id: record.payload.turn_id, attempt_id: record.taskId, input_to_seq: record.payload.input_to_seq, ...(record.payload.generation !== undefined ? { generation: record.payload.generation } : {}) };
+  const { offer_generation, content_hash, receipt_id } = record.payload;
+  const input = { turn_id: record.payload.turn_id, attempt_id: record.taskId, input_to_seq: record.payload.input_to_seq,
+    offer_generation, content_hash, receipt_id, ...(record.payload.generation !== undefined ? { generation: record.payload.generation } : {}) };
   const runtimeId = record.payload.runtime_id as string;
-  const receipt = (ids: string[]) => protocol.rpc("turn.input", { ...input, message_ids: ids }, runtimeId);
+  const receipt = (ids: string[]) => { checkHold(); return protocol.rpc("turn.input", { ...input, message_ids: ids }, runtimeId); };
   try {
     await receipt(messages.map(message => message.id));
   } catch (error) {
@@ -113,6 +120,7 @@ async function deliverCompletionReceipt(protocol: DaemonProtocolClient, record: 
     // receipt is then stale; replay the terminal report to obtain its idempotent ACK.
     if (error instanceof DaemonProtocolRpcError && error.code === "stale_attempt") return;
     if (!(error instanceof DaemonProtocolRpcError) || error.code !== "input_gap") throw error;
+    checkHold();
     const result = await protocol.rpc("turn.input", { ...input, message_ids: [], resync: true }, runtimeId);
     const aligned = result.input as { attempt_id: string; turn_id: string; input_from_seq: number } | undefined;
     if (!aligned || aligned.attempt_id !== record.taskId || aligned.turn_id !== input.turn_id) throw error;

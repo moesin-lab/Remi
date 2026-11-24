@@ -241,6 +241,7 @@ interface PendingAck {
 const unknownFrameType = "unknown_frame";
 
 export class DaemonProtocolSession {
+  readonly heldRestartAttempts = new Map<string,Array<{attempt_id:string;handoff_id:string}>>();
   readonly sessionId: string;
   /** Set once `hello` is accepted; empty before that. */
   daemonId = "";
@@ -751,6 +752,7 @@ export class DaemonProtocolSession {
     }
 
     this.daemonId = parsed.hello.daemon_id;
+    for (const runtime of parsed.hello.runtimes) this.heldRestartAttempts.set(runtime.runtime_id,runtime.held_restart_attempts ?? []);
     this.supportsWikiFetch = hasDaemonCapability(parsed.hello.caps, "wiki.fetch");
     const welcomeCaps = negotiateWelcomeCaps(parsed.hello.caps, this.options.welcomeCaps);
     this.supportsLaneBackground = hasDaemonCapability(welcomeCaps, "lane.background");

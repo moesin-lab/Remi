@@ -1421,3 +1421,7 @@ checkpoint/report 应答后，删除本地 handoff journal、trace identity 和�
 临时失败及 `resume_fenced` 使用 1、2、4 秒递增至最多 60 秒的退避，最多 24 次且总时限
 30 分钟。预算和下一次时间在 RPC 前写入本地 SQLite，daemon 重启不重置预算。
 预算耗尽时停止续接并保留 journal 供诊断；不会把该记录当作执行授权。
+
+损坏的旧 journal 可能只剩 handoff 标识。共享 outbox 在启动恢复前枚举同一 server、workspace、daemon 的 provider 库，记录每个 handoff 的候选分区、已有行和旧库来源。多个 handoff 可同时保留同一分区。报告使用原上行序号等待对应 `res`。跨分区成功回执只确认本批行，隔离期间的迟到回执另存为投递证据。压缩、终态替换和启动时的未读输入恢复均保留隔离原件。
+
+在双向协商 `turn.restart` 和 `prompt.policy.adopt.v1` 后，daemon 可通过只读 `task.offer_status` 核对 handoff 归属。查询同时读取 workspace 现有 attempt 的最大创建时间。首次观察的上界持久化后，服务端创建时间严格超过该上界的独立 attempt 可带自己的采用收据运行。时间相等或缺少证据的旧分区仍需核验。映射到具体 attempt 只缩小隔离范围；恢复执行仍需原 journal 收据及 `resume_bound` 授权。

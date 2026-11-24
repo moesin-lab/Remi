@@ -1627,7 +1627,8 @@ export class MultiremiDaemon {
       log,
       ...options.protocolClientOptions,
     });
-    this.taskDownlinks = new DaemonTaskDownlinks(this.protocolClient, () => this.options.runtimeId ?? undefined);
+    this.taskDownlinks = new DaemonTaskDownlinks(this.protocolClient, () => this.options.runtimeId ?? undefined,
+      attempt => this.ensureOutbox().reportIdentity(attempt,this.options.runtimeId));
     if (this.options.provider === "codex" && typeof process.getuid === "function") {
       this.externalChats = registerDaemonExternalChats(this.protocolClient,
         () => this.stopped ? undefined : this.options.runtimeId ?? undefined,
@@ -1678,7 +1679,10 @@ export class MultiremiDaemon {
         runtime_id: this.options.runtimeId,
         provider: this.options.provider,
         max_concurrency: this.options.maxConcurrency,
-        active_task_ids: [...new Set([...this.activeTaskIds, ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId) ?? [])])],
+        active_task_ids: [...new Set([...this.activeTaskIds, ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId).filter(id => !this.outbox?.isHeld(id)) ?? [])])],
+        held_restart_attempts: [...(this.outbox?.mappedHandoffs(this.restartJournalPath()) ?? []), ...(this.restartJournal?.entries().filter(entry => entry.execution.runtime_id === this.options.runtimeId &&
+          this.restartRecoveryCandidates.has(entry.execution.handoff_id) && !this.resumedRestartIds.has(entry.execution.handoff_id))
+          .map(({execution}) => ({attempt_id:execution.attempt_id,handoff_id:execution.handoff_id})) ?? [])],
         active_question_waits: this.taskDownlinks.activeQuestionWaits(),
         capabilities: this.runtimeCapabilities(),
         // PR 6 §5.2: the lanes whose process lives, so the server settles the others' rows.
@@ -1728,7 +1732,7 @@ export class MultiremiDaemon {
       },
       onStateChange: () => { this.taskDownlinks.connectionChanged(); this.wakeClaim(); },
       readyToConnect: () => this.supervisorReady(),
-      onConnected: () => {
+      onConnected: async () => {
         // welcome follows the server's authenticated target-version hello transition.
         this.updateConfirmation ??= this.confirmRuntimeUpdate().catch(error => {
           log.warn(`Update confirmation deferred: ${error instanceof Error ? error.message : String(error)}`);
@@ -1737,10 +1741,18 @@ export class MultiremiDaemon {
         this.parkedLanes?.resendAll();
         const runtime = this.protocolLane.runtime();
         if (runtime) {
-          const held = this.restartJournal?.entries().filter(entry => entry.execution.runtime_id === runtime.runtime_id && this.restartRecoveryCandidates.has(entry.execution.handoff_id)) ?? [];
-          this.protocolClient.send({ t: "runtime.ready", rt: runtime.runtime_id, p: { active_task_ids: this.protocolClient.sharesCap('prompt.policy.adopt.v1') ? runtime.active_task_ids
-            : [...runtime.active_task_ids, ...held.map(entry => entry.execution.attempt_id)],
-            held_restart_attempts: held.map(({execution}) => ({attempt_id:execution.attempt_id,handoff_id:execution.handoff_id})),
+          const outbox = this.ensureOutbox();
+          for (const incident of outbox.uncertainHandoffs()) {
+            if (!this.protocolClient.sharesCap('turn.restart') || !this.protocolClient.sharesCap('prompt.policy.adopt.v1')) break;
+            try {
+              const result = await this.protocolClient.rpc('task.offer_status',{inspect_handoff:true,handoff_id:incident.handoff},runtime.runtime_id);
+              if (result.handoff_id !== incident.handoff || typeof result.created_through !== 'string') continue;
+              const ownSource = incident.source === this.restartJournalPath();
+              outbox.recordHandoffEvidence(incident.source,incident.handoff,ownSource && typeof result.attempt_id === 'string' ? result.attempt_id : null,result.created_through);
+            } catch { return; }
+          }
+          this.protocolClient.send({ t: "runtime.ready", rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids,
+            held_restart_attempts: this.protocolLane.runtime()?.held_restart_attempts,
             prepared_offers: this.ensureOutbox().preparedOffers(runtime.runtime_id),
             active_question_waits: runtime.active_question_waits ?? [] } });
         }
@@ -1782,9 +1794,9 @@ export class MultiremiDaemon {
     this.protocolClient.addLane(this.protocolLane);
     registerDaemonOfferHandler(this.protocolClient, {
       runtimeId: () => this.options.runtimeId,
-      adoption: { workspace: () => this.options.workspaceId ?? 'local', daemon: () => this.options.daemonId ?? this.options.runtimeName,
-        outbox: () => this.ensureOutbox(), held: id => Boolean(this.restartJournal?.entries().some(entry => entry.execution.attempt_id === id)) },
-      rejection: (task) => {
+      adoption: { workspace: () => this.options.workspaceId ?? 'local', daemon: () => this.options.daemonId ?? this.options.runtimeName,lane: () => this.restartJournalPath(),
+        outbox: () => this.ensureOutbox(), held: id => this.ensureOutbox().isHeld(id) || Boolean(this.restartJournal?.entries().some(entry => entry.execution.attempt_id === id)) },
+      rejection: (task, preparing) => {
         if (this.diskMonitor.critical) return "disk_critical";
         if (this.options.once && this.onceTaskAccepted) return "draining";
         if (this.serverDrainActive) return "draining";
@@ -1792,7 +1804,7 @@ export class MultiremiDaemon {
         // PR 6 D5: an offer for a parked lane takes no new slot's worth of work; its process already runs.
         const lane = this.backgroundLaneOf(task as MultiremiTaskWithAgent);
         const parked = lane !== null && this.parkedLanes.isParked(laneKeyOf(lane));
-        if ((!parked && this.activeTaskCount >= this.options.maxConcurrency) || (this.options.once && this.onceTaskAccepted)) return "capacity";
+        if ((!parked && this.activeTaskCount + preparing >= this.options.maxConcurrency) || (this.options.once && (this.onceTaskAccepted || preparing > 0))) return "capacity";
         return null;
       },
       run: task => {
@@ -2298,7 +2310,7 @@ export class MultiremiDaemon {
   }
 
   private async canRecoverOrphans(outbox: MultiremiTaskReportOutbox): Promise<boolean> {
-    if (this.restartRecoveryCandidates.size || outbox.preparedOffers(this.options.runtimeId ?? '').length) return false;
+    if (this.restartRecoveryCandidates.size || outbox.hasRestartIncident() || outbox.preparedOffers(this.options.runtimeId ?? '').length) return false;
     const pending = outbox.taskIdsWithPendingTerminal(this.options.runtimeId ?? undefined);
     if (!pending.length) return true;
     if (this.protocolClient.connectionState() === "connected") {
@@ -3821,11 +3833,12 @@ export class MultiremiDaemon {
    * never unwinds the agent's provider session.
    */
   private enqueueTaskReport(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>): void {
-    const terminal = kind === "complete" || kind === "fail";
+    const identity = this.ensureOutbox().reportIdentity(taskId,this.options.runtimeId);
+    const terminal = !this.ensureOutbox().classifyReport(taskId,payload.receipt_id ?? identity.receipt_id) && (kind === "complete" || kind === "fail");
     const status = kind === "complete" ? "completed" : "failed";
     if (terminal && this.options.runtimeId) this.ensureTrace().track(taskId, this.options.runtimeId);
     // The completion fields describe the close that follows the enqueue.
-    this.ensureOutbox().enqueue(taskId, kind, { ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
+    this.ensureOutbox().enqueue(taskId, kind, { ...identity, ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
       ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) });
     if (terminal) {
       this.attemptSlashCommands.delete(taskId);
@@ -3889,6 +3902,8 @@ export class MultiremiDaemon {
       this.outboxAbort ??= new AbortController();
       this.outbox = acquireDaemonOutbox(this.protocolClient, {
         path: this.outboxPath ?? ":memory:",
+        discoverRestartHolds: () => PlannedRestartJournal.discover({server:this.options.serverUrl,workspace:this.options.workspaceId ?? 'local',
+          daemon:this.options.daemonId ?? this.options.runtimeName,provider:this.options.provider,legacyPath:this.legacyOutboxPath}),
         deliver: (record) => this.deliverOutboxRecord(record),
         ...(this.outboxBackoffMs ? { backoffScheduleMs: this.outboxBackoffMs } : {}),
         ...(this.outboxMaxBytes ? { maxBytes: this.outboxMaxBytes } : {}),
@@ -4300,6 +4315,7 @@ export class MultiremiDaemon {
       const startSignal = AbortSignal.any([abort.signal, this.pollAbort.signal]);
       startSignal.throwIfAborted();
       const startReply = await this.ensureOutbox().enqueueAndWait(task.id, "start", {
+        ...this.ensureOutbox().reportIdentity(task.id, this.options.runtimeId),
         usage_run_id: usageRunId, runtime_id: this.options.runtimeId, ...(this.executionGenerations.has(task.id) ? { generation: this.executionGenerations.get(task.id) } : {}),
       }, this.options.requestTimeoutMs, startSignal);
       if (startReply.execution_authorized !== true) throw new Error("Task execution start does not authorize this run to execute");
@@ -4555,10 +4571,13 @@ export class MultiremiDaemon {
     }
   }
 
+  private restartJournalPath(): string {
+    return this.outboxPath === ':memory:' ? ':memory:' : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash('sha256').update(this.legacyOutboxPath).digest('hex').slice(0, 16)}.db`);
+  }
+
   private plannedRestartTransfer(): PlannedRestartTransfer {
     if (this.restartTransfer) return this.restartTransfer;
-    this.restartJournal ??= new PlannedRestartJournal(this.outboxPath === ":memory:" ? ":memory:"
-      : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash("sha256").update(this.legacyOutboxPath).digest("hex").slice(0, 16)}.db`));
+    this.restartJournal ??= new PlannedRestartJournal(this.restartJournalPath());
     return this.restartTransfer = new PlannedRestartTransfer(this.restartJournal, {
       preflight: entry => this.preflightRestart(entry),
       suspend: async entry => {

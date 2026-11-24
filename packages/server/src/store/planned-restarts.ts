@@ -6,7 +6,7 @@ import { PlatformMaintenanceRepo } from "./repos/platform-maintenance-repo.js";
 import { lockLane } from "./inbox/lane-machine.js";
 import { nowIso } from "@multiremi/ids.js";
 
-import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+import { isRestartPolicyReceipt, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 export type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 
 // Fixed grace from the resume CAS, never extended by retries or heartbeat activity.
@@ -49,6 +49,21 @@ export class PlannedRestarts {
   get(attemptId: string): PlannedRestartHandoff | null {
     const row = this.ctx.db.query("SELECT * FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
     return row ? decode(row) : null;
+  }
+
+  ownsHandoff(attempt: string, handoff: string, runtime: string, daemon: string): boolean {
+    return Boolean(this.ctx.db.query('SELECT 1 FROM multiremi_planned_restarts WHERE attempt_id=? AND handoff_id=? AND runtime_id=? AND daemon_id=?')
+      .get(attempt,handoff,runtime,daemon));
+  }
+
+  inspectHandoff(handoff: string, scope: PlannedRestartScope) {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
+      const rows = this.ctx.db.query(`SELECT attempt_id FROM multiremi_planned_restarts WHERE handoff_id=? AND workspace_id=? AND runtime_id=? AND daemon_id=? LIMIT 2`)
+        .all(handoff,scope.workspaceId,scope.runtimeId,scope.daemonId);
+      const boundary = this.ctx.db.query(`SELECT MAX(a.created_at) AS high FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id WHERE t.workspace_id=?`).get(scope.workspaceId);
+      return {handoff_id:handoff,attempt_id:rows.length === 1 ? String(rows[0]!.attempt_id) : null,created_through:String(boundary?.high ?? '')};
+    })();
   }
 
   pendingForRuntime(runtimeId: string): Map<string, PlannedRestartHandoff> {
@@ -266,7 +281,7 @@ export class PlannedRestarts {
 
   /** The offer safety sweep also handles a replacement that connected once
    * without a usable journal and will never issue another runtime.ready. */
-  recoverExpiredResumes(runtimeId: string): void {
+  recoverExpiredResumes(runtimeId: string, held: ReadonlySet<string> = new Set()): void {
     const runtime = this.ctx.runtimes().getRuntimeLite(runtimeId);
     if (!runtime) return;
     this.ctx.db.transaction(() => {
@@ -284,7 +299,7 @@ export class PlannedRestarts {
         WHERE p.runtime_id=? AND p.state='resuming' AND p.updated_at<=?
         AND a.status IN ('running','waiting_local_directory','awaiting_human')`)
         .all(runtimeId, new Date(Date.now() - PLANNED_RESTART_START_GRACE_MS).toISOString());
-      for (const row of expired) this.ctx.tasks().recoverOrphanAttempt(runtimeId, row.attempt_id);
+      for (const row of expired) if (!held.has(row.attempt_id)) this.ctx.tasks().recoverOrphanAttempt(runtimeId, row.attempt_id);
     })();
   }
 
@@ -329,6 +344,7 @@ export class PlannedRestarts {
   private validateCheckpoint(value: PlannedRestartCheckpoint, attempt: any): PlannedRestartCheckpoint {
     const nonnegative = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0;
     if (!value || value.version !== 1 || !nonnegative(value.trace_head) || !nonnegative(value.input_ack_seq)
+      || (value.policy_receipt !== undefined && !isRestartPolicyReceipt(value.policy_receipt))
       || value.input_ack_seq !== Number(attempt.input_ack_seq ?? 0)
       || value.session_id !== (attempt.session_id ?? null) || value.work_dir !== (attempt.work_dir ?? null)
       || !Array.isArray(value.delivered_message_ids) || value.delivered_message_ids.length > 1024

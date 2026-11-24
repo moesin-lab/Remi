@@ -363,6 +363,7 @@ export interface DaemonHelloRuntime {
   max_concurrency: number;
   /** Tasks this process is executing right now; used to reconcile after a reconnect. */
   active_task_ids: string[];
+  held_restart_attempts?: Array<{attempt_id:string;handoff_id:string}>;
   /** Only provider callbacks still held by this process; durable outbox tasks are excluded. */
   active_question_waits?: DaemonQuestionWait[];
   /** Missing fields explicitly mean unsupported, including after a restart. */

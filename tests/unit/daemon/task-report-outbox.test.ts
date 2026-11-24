@@ -53,6 +53,41 @@ function httpError(status: number, path = "/api/daemon/tasks/x"): MultiremiDaemo
 }
 
 describe("MultiremiTaskReportOutbox", () => {
+  it('retains incident evidence through compaction, restart and overlapping handoff mappings', async () => {
+    const path = tempPath();
+    const sent: string[] = [];
+    const sources = ['handoff-a','handoff-b'].map(handoff => ({source:'lane',handoff,attempt:null as string|null,legacyPaths:[]}));
+    const open = (discover = true) => track(new MultiremiTaskReportOutbox({path, maxBytes:1,
+      canSend:() => discover, discoverRestartHolds:() => discover ? sources : [], deliver:async record => {sent.push(record.taskId);} }));
+    const first = open(false);
+    first.enqueue('P','progress',{summary:'first'});
+    first.enqueue('Q','progress',{summary:'second'});
+    await first.close();
+    const db = openSqliteDatabase(path);
+    const original = () => db.query('SELECT * FROM outbox_events WHERE id IN (1,2) ORDER BY id').all();
+    const before = original();
+    try {
+      const held = open();
+      held.enqueue('P','progress',{summary:'new'});
+      held.enqueue('rt:healthy','runtime.command_result',{});
+      expect(held.purgeTask('P')).toBe(0);
+      expect(await held.waitForTaskDrain('rt:healthy')).toBe('delivered');
+      expect(sent).toEqual(['rt:healthy']);
+      expect(original()).toEqual(before);
+      await held.close();
+      sources[0]!.attempt = 'P';
+      const overlapping = open();
+      expect(overlapping.isHeld('Q')).toBe(true);
+      await overlapping.close();
+      sources[1]!.attempt = 'P';
+      const narrowed = open();
+      expect(narrowed.isHeld('P')).toBe(true);
+      expect(narrowed.isHeld('Q')).toBe(false);
+      narrowed.pumpAll();
+      expect(await narrowed.waitForTaskDrain('Q')).toBe('delivered');
+      expect(original()).toEqual(before.slice(0,1));
+    } finally { db.close(); }
+  });
   it('retains the same receipt and consumes one launch grant across reopened SQLite connections', async () => {
     const path = tempPath();
     const open = (file:string) => track(new MultiremiTaskReportOutbox({path:file,deliver:async()=>({ok:true})}));

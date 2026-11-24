@@ -229,13 +229,8 @@ for (const confirmed of [false, true]) {
       const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "inert recovery", maxAttempts: 1 });
       await waitFor(() => droppedStart && h.client.connectionState() === "disconnected", "first start disconnected", 5_000);
       expect(runs).toBe(0);
-      if (confirmed) {
-        expect(h.store.getTask(task.id)?.acceptedAt).not.toBeNull();
-        expect(h.store.getTask(task.id)?.status).toBe("dispatched");
-      } else {
-        await waitFor(() => h.store.getTask(task.id)?.status === "queued", "actual offer-close requeue", 5_000);
-        expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
-      }
+      expect(h.store.getTask(task.id)?.acceptedAt).not.toBeNull();
+      expect(h.store.getTask(task.id)?.status).toBe("dispatched");
       // Recovery must not wait for a new offer: drain deliberately gates dispatch.
       h.store.beginPlatformDrain({ operationId: "report-recovery", ttlMs: 120_000 });
       await h.reconnect();
@@ -337,8 +332,8 @@ test("a new Issue message during offer recovery is consumed in the same turn", a
     const initial = send("First immutable input", "initial-input");
     const oldTaskId = initial.task!.id;
     await waitFor(() => droppedStart && h.client.connectionState() === "disconnected"
-      && h.store.getTask(oldTaskId)?.status === "queued" && prompts.length === 0,
-    "real Issue offer disconnect and requeue", 5_000);
+      && h.store.getTask(oldTaskId)?.status === "dispatched" && prompts.length === 0,
+    "adopted Issue offer survives disconnect", 5_000);
     const oldTask = h.store.getTask(oldTaskId)!;
     const oldBound = h.store.getBoundIssueLogToSeq(oldTaskId);
     const oldOffer = h.received.find(frame => frame.t === "task.offer" && frame.p.attempt_id === oldTaskId)!;
@@ -410,9 +405,10 @@ test("duplicate completion does not repeat delegation wakeups, comments or count
     const reports = h.store.listMessages(source.issueSessionId!).filter(message => message.dedupe_key === `delegation_terminal:${task.id}`);
     expect(reports).toHaveLength(1);
     expect(reports[0]!.metadata.message_source).toMatchObject({ taskId: task.id });
+    const actual = h.ledger.find(entry => entry.type === 'turn.complete' && entry.partition === task.id)!.frame.p;
     for (const seq of [100_000, 100_001]) {
       await expect(h.client.event({ t: "turn.complete", seq, rt: runtimeId,
-        p: turnCompletion(h.store, task.id, "fixture", {  }) })).resolves.toMatchObject({ ok: true });
+        p: actual })).resolves.toMatchObject({ ok: true });
     }
     expect(h.store.listIssueComments(child.id)).toEqual(comments);
     expect(h.store.listSessionEvents(source.issueSessionId!)).toEqual(sessionEvents);
@@ -460,7 +456,7 @@ for (const replacement of ["cancelled", "assigned elsewhere"] as const) {
       const agent = h.store.createAgent({ name: "late report guard", provider: "claude", runtimeId, workspaceId: "local" });
       const task = h.store.createTask({ agentId: agent.id, prompt: "inert late report", maxAttempts: 1 });
       await waitFor(() => droppedStart && h.client.connectionState() === "disconnected"
-        && h.store.getTask(task.id)?.status === "queued", "actual requeue before authority changes", 5_000);
+        && h.store.getTask(task.id)?.status === "dispatched", "adopted offer before authority changes", 5_000);
       let reportTaskId = task.id;
       if (replacement === "cancelled") h.store.cancelTask(task.id);
       else {
@@ -481,7 +477,7 @@ for (const replacement of ["cancelled", "assigned elsewhere"] as const) {
         p: { task_id: reportTaskId } })).rejects.toMatchObject({ code: "authority_revoked", retryable: false });
       const completion = h.client.event({ t: "turn.complete", seq: 100_000, rt: runtimeId,
         p: turnCompletion(h.store, reportTaskId, "late result", {  }) });
-      await expect(completion).rejects.toMatchObject({ code: replacement === "assigned elsewhere" ? "stale_attempt" : "invalid_report", retryable: false });
+      await expect(completion).rejects.toMatchObject({ code: replacement === "assigned elsewhere" ? "stale_attempt" : "policy_offer_mismatch", retryable: false });
       expect(h.store.getTask(reportTaskId)).toMatchObject({
         status: authoritative.status, runtimeId: authoritative.runtimeId,
         startedAt: authoritative.startedAt, result: authoritative.result, completedAt: authoritative.completedAt,
@@ -497,7 +493,7 @@ for (const replacement of ["cancelled", "assigned elsewhere"] as const) {
 
 for (const terminalReport of ["complete", "fail"] as const) {
 for (const accepted of [true, false]) {
-test(`a real ${accepted ? "accepted" : "requeued"} offer accepts legacy ${terminalReport} while a modern daemon waits for its lost start`, async () => {
+test(`an adopted offer with ${accepted ? "delivered" : "lost"} final response checks receipt on ${terminalReport} before start`, async () => {
   let finish!: () => void;
   const finishing = new Promise<void>(resolve => { finish = resolve; });
   let droppedStart = false;
@@ -535,27 +531,30 @@ test(`a real ${accepted ? "accepted" : "requeued"} offer accepts legacy ${termin
     const task = h.store.createTask({ agentId: agent.id, prompt: "Inert accepted completion", maxAttempts: 1 });
     await waitFor(() => droppedStart && runs === 0
       && (accepted ? h.store.getTask(task.id)?.acceptedAt != null
-        : h.client.connectionState() === "disconnected" && h.store.getTask(task.id)?.status === "queued"),
+        : h.client.connectionState() === "disconnected" && h.store.getTask(task.id)?.status === "dispatched"),
       "real offer received, provider gated, start absent", 5_000);
-    expect(h.store.getTask(task.id)).toMatchObject({ status: accepted ? "dispatched" : "queued", startedAt: null });
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "dispatched", startedAt: null });
     if (!accepted) {
       h.store.beginPlatformDrain({ operationId: `terminal-${terminalReport}`, ttlMs: 120_000 });
       h.clock.advance(1_000);
       await waitFor(() => h.client.connectionState() === "connected", "welcome while start remains unsent", 5_000);
     }
     expect(h.ledger.filter(entry => entry.partition === task.id && entry.type === "task.start")).toHaveLength(0);
+    const {offer_generation, content_hash, receipt_id} = h.ledger.find(entry => entry.type === 'task.offer_adopt' && entry.partition === task.id)!.frame.p;
     if (terminalReport === "complete") {
       const offer = h.received.find(frame => frame.t === "task.offer" && frame.p.attempt_id === task.id)!.p;
-      expect(await h.client.rpc("turn.input", { turn_id: offer.turn_id, attempt_id: task.id,
+      expect(await h.client.rpc("turn.input", { offer_generation,content_hash,receipt_id,turn_id: offer.turn_id, attempt_id: task.id,
         input_to_seq: offer.input_to_seq, message_ids: offer.input_messages.map((message: { id: string }) => message.id) }, runtimeId))
         .toEqual({ ok: true, input_to_seq: offer.input_to_seq });
     }
     const expected = terminalReport === "complete"
       ? { status: "completed", result: "accepted completion" }
       : { status: "failed", error: "synthetic provider failure" };
-    await expect(h.client.event({ t: terminalReport === "complete" ? "turn.complete" : "task.fail", seq: 100_000, rt: runtimeId,
-      p: terminalReport === "complete" ? turnCompletion(h.store, task.id, "accepted completion")
-        : { task_id: task.id, error: "synthetic provider failure" } })).resolves.toMatchObject({ ok: true });
+    const terminal = terminalReport === 'complete' ? 'turn.complete' : 'task.fail';
+    const body = terminalReport === 'complete' ? turnCompletion(h.store,task.id,'accepted completion') : {task_id:task.id,error:'synthetic provider failure'};
+    await expect(h.client.event({t:terminal,seq:99_999,rt:runtimeId,p:body})).rejects.toMatchObject({code:'policy_offer_mismatch'});
+    expect(h.store.getTask(task.id)?.status).toBe('dispatched');
+    await expect(h.client.event({t:terminal,seq:100_000,rt:runtimeId,p:{...body, offer_generation,content_hash,receipt_id}})).resolves.toMatchObject({ok:true});
     expect(h.store.getTask(task.id)).toMatchObject(expected);
     terminalSent = true;
     // Expire the unsent start exchange through the harness's clock; the real

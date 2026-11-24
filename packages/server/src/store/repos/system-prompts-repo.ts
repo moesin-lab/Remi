@@ -219,6 +219,19 @@ export class SystemPromptsRepo {
 
   dispatchPolicy(taskId: string) { return this.storedAttempt(taskId)?.dispatch; }
 
+  acceptsReport(taskId: string, scope: {workspaceId:string;runtimeId:string;daemonId:string}, payload: Record<string,unknown>): boolean {
+    const dispatch = this.dispatchPolicy(taskId);
+    if (dispatch?.protocol !== 'adopt') return payload.receipt_id === undefined && payload.offer_generation === undefined && payload.content_hash === undefined;
+    if (dispatch.state !== 'adopted' || typeof payload.receipt_id !== 'string' || typeof payload.offer_generation !== 'string' || typeof payload.content_hash !== 'string') return false;
+    const status = this.offerStatus({attempt_id:taskId,workspace_id:scope.workspaceId,runtime_id:scope.runtimeId,daemon_id:scope.daemonId,
+      offer_generation:payload.offer_generation,content_hash:payload.content_hash,receipt_id:payload.receipt_id});
+    return status === 'adopted' || status === 'terminal';
+  }
+
+  withReportPolicy<T>(workspace: string, action: () => T): T {
+    return this.ctx.db.transaction(() => { this.ctx.lockWorkspaceRuntimeLifecycle(workspace); return action(); })();
+  }
+
   revokeOffer(taskId: string, generation?: string): boolean {
     const stored = this.storedAttempt(taskId);
     if (!stored?.dispatch) return this.matchesOffer(taskId, generation);

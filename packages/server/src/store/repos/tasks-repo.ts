@@ -3409,12 +3409,17 @@ export class TasksRepo {
       // including stale offers, so an old daemon never enters claim/rescind churn.
       const workspaceId = lockedRuntime.workspaceId ?? "local";
       const policy = this.ctx.systemPrompts().getSystemPrompt(workspaceId);
-      const policyBlocked = !options.supportsPromptPolicy && requiresPromptPolicyCapability(policy.document.mode, policy.currentDefault.revision);
+      const requiresPolicy = requiresPromptPolicyCapability(policy.document.mode, policy.currentDefault.revision);
+      const policyBlocked = !options.supportsPromptPolicy && requiresPolicy;
       this.recoverExpiredPolicyProposals(runtimeId);
 
       if (policyBlocked) {
-        this.diagnosePolicyWaits(lockedRuntime, options);
+        this.diagnosePolicyWaits(lockedRuntime, options, true);
         return null;
+      }
+      if (options.policyProtocol && this.ctx.db.query(`SELECT 1 FROM multiremi_turn_execution_records
+        WHERE workspace_id=? AND status='queued' AND wait_reason IN (?,?) LIMIT 1`).get(workspaceId,PROMPT_POLICY_WAIT_REASON,LEGACY_PROMPT_POLICY_WAIT_REASON)) {
+        this.diagnosePolicyWaits(lockedRuntime,options,requiresPolicy,true);
       }
 
       this.resetStaleChatWorkspaceTasks(lockedRuntime.workspaceId ?? "local");
@@ -4710,7 +4715,7 @@ ${placementAfter.sql}
     return { sql, params };
   }
 
-  private diagnosePolicyWaits(runtime: MultiremiRuntime, options: ClaimTaskOptions): void {
+  private diagnosePolicyWaits(runtime: MultiremiRuntime, options: ClaimTaskOptions, requiresPolicy: boolean, existingOnly = false): void {
     const workspace = runtime.workspaceId ?? 'local';
     const previous = this.policyScanPositions.get(runtime.id);
     const through = previous?.through ?? this.ctx.db.query(`SELECT created_at AS "createdAt", id
@@ -4723,9 +4728,9 @@ ${placementAfter.sql}
     const page = this.ctx.db.query(`SELECT id,created_at,wait_reason,wake_seq FROM multiremi_turn_execution_records
       WHERE workspace_id=? AND status='queued' AND (created_at,id) <= (?,?)
       ${after ? 'AND (created_at,id) > (?,?)' : ''}
-      AND (wait_reason IN (?,?) OR id IN (${executionClaimBaseSql(selection.sql)}))
+      AND (wait_reason IN (?,?) ${existingOnly ? '' : `OR id IN (${executionClaimBaseSql(selection.sql)})`})
       ORDER BY created_at,id LIMIT 32`).all(workspace, through.createdAt, through.id,
-      ...(after ? [after.createdAt, after.id] : []), reason, LEGACY_PROMPT_POLICY_WAIT_REASON, ...selection.params);
+      ...(after ? [after.createdAt, after.id] : []), reason, LEGACY_PROMPT_POLICY_WAIT_REASON, ...(existingOnly ? [] : selection.params));
     const peers = (ids: readonly string[]) => [...new Set(ids)].flatMap(id => {
       const peer = this.ctx.runtimes().getRuntimeForDispatch(id);
       if (!peer || peer.status !== 'online' || (peer.workspaceId ?? 'local') !== workspace || this.ctx.runtimes().hasCliUpdateDrainForRuntime(id)) return [];
@@ -4733,7 +4738,7 @@ ${placementAfter.sql}
       return [{ peer, params: query.params, test: this.ctx.db.query(executionClaimBaseSql(`${query.sql} AND t.id=?`)) }];
     });
     const capable = peers(options.policyCapableRuntimeIds ?? []);
-    const legacy = peers([runtime.id, ...(options.policyLegacyRuntimeIds ?? [])]);
+    const legacy = peers([...(options.supportsPromptPolicy ? [] : [runtime.id]), ...(options.policyLegacyRuntimeIds ?? [])]);
     for (const row of page) {
       if (row.wait_reason != null && row.wait_reason !== reason && row.wait_reason !== LEGACY_PROMPT_POLICY_WAIT_REASON) continue;
       const task = this.getTaskWithAgent(String(row.id));
@@ -4742,7 +4747,7 @@ ${placementAfter.sql}
       const eligible = ({ peer, params, test }: typeof legacy[number]) => Boolean(test.get(...params, task.id))
         && this.runtimeCanRunTaskAgent(peer, agent, task)
         && (Boolean(task.executionFingerprint) || this.runtimeHasReadyExecutionGroup(peer, agent));
-      const desired = this.coveredWakeCursor(task, Number(row.wake_seq)) === null && legacy.some(eligible) && !capable.some(eligible) ? reason : null;
+      const desired = requiresPolicy && this.coveredWakeCursor(task, Number(row.wake_seq)) === null && legacy.some(eligible) && !capable.some(eligible) ? reason : null;
       if (desired === row.wait_reason) continue;
       runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET wait_reason=?,updated_at=?
         WHERE id=? AND status='queued' AND (wait_reason IS NULL OR wait_reason IN (?,?))`, [desired, nowIso(), task.id, reason, LEGACY_PROMPT_POLICY_WAIT_REASON]);
@@ -5926,6 +5931,7 @@ ${placementAfter.sql}
       if (!runtime || (runtime.workspaceId ?? "local") !== workspaceId) {
         throw new Error(`Runtime not found: ${runtimeId}`);
       }
+      this.recoverExpiredPolicyProposals(runtimeId);
       const orphanRows = this.ctx.db.query(
         `SELECT * FROM multiremi_turn_execution_records WHERE runtime_id = ?
          AND status IN (${activeTaskIds ? "'running', 'waiting_local_directory', 'awaiting_human'" : "'dispatched', 'running', 'waiting_local_directory', 'awaiting_human'"})
@@ -5934,6 +5940,8 @@ ${placementAfter.sql}
       ).all(runtimeId, ...(onlyAttemptId !== undefined ? [onlyAttemptId] : []), ...(activeTaskIds ?? [])) as Row[];
       const restarts = new PlannedRestarts(this.ctx);
       const recoverableRows = orphanRows.filter(row => {
+        if (row.status === 'dispatched' && this.ctx.systemPrompts().dispatchPolicy(String(row.id))?.state === 'proposed'
+          && this.ctx.systemPrompts().dispatchPolicy(String(row.id))?.protocol === 'adopt') return false;
         restarts.expireUnstartedResumeWithinTransaction(String(row.id));
         return !restarts.protectsFromOrphanRecovery(String(row.id));
       });

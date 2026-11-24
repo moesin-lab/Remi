@@ -91,6 +91,13 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
         const questions = (checkpoint.question_ids ?? []).map(id => store.getMessage(id)).filter(Boolean);
         reply = fitRestartResumeToBudget({ ...offer, ...turns.offerInput(task) }, questions, generation, frame.rt!);
         if (!reply) throw new PlannedRestartError("capacity");
+        if (bound) {
+          const proof = checkpoint.policy_receipt;
+          const fitted = reply.task;
+          const policy = fitted?.system_prompt_policy as SystemPromptPolicyBinding | undefined;
+          if (!proof || fitted.attempt_id !== proof.attempt_id || fitted.turn_id !== proof.turn_id || !policy || policy.workspaceId !== proof.workspace_id
+            || policy.contentHash !== proof.content_hash || hashSystemPromptContent(policy.content) !== proof.content_hash) throw new PlannedRestartError('restart_policy_mismatch');
+        }
       };
       const receipt = store.plannedRestarts().resume(task.id, p.handoff_id, p.consumer_id, scope, (generation, checkpoint) => {
         // Check the complete, current package under the CAS locks. A capacity
@@ -106,6 +113,7 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
           || proof.runtime_id !== scope.runtimeId || proof.daemon_id !== scope.daemonId || !policy || policy.workspaceId !== proof.workspace_id
           || policy.contentHash !== proof.content_hash || hashSystemPromptContent(policy.content) !== proof.content_hash
           || store.systemPromptsRepo().offerStatus(proof) !== 'adopted') throw new PlannedRestartError('restart_policy_mismatch');
+        if (['resuming','running'].includes(current.state) && current.consumer_id === p.consumer_id) delivery(current.generation,current.checkpoint!);
       } : undefined);
       if (!store.isTaskUsageExecutionAuthorized(task.id, p.consumer_id, frame.rt!)) return denied("stale_execution");
       // The idempotent path does not execute authorize. Rebuild current inputs

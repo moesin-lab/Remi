@@ -74,6 +74,8 @@ export function parseDaemonHello(payload: Record<string, unknown>): DaemonHelloP
       runtime_id: runtimeId,
       provider: readString(runtime.provider) ?? "any",
       max_concurrency: readInteger(runtime.max_concurrency) ?? 1,
+      ...(Array.isArray(runtime.held_restart_attempts) ? {held_restart_attempts:runtime.held_restart_attempts.filter(entry =>
+        entry && typeof entry.attempt_id === 'string' && typeof entry.handoff_id === 'string')} : {}),
       active_task_ids: Array.isArray(runtime.active_task_ids)
         ? runtime.active_task_ids.filter((id): id is string => typeof id === "string" && Boolean(id.trim())).map((id) => id.trim())
         : [],

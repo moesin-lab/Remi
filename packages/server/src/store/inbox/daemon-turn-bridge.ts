@@ -198,6 +198,7 @@ export class DaemonTurnBridge {
     try{return this.transaction(events=>{
       const turn=this.authorized(String(payload.turn_id),String(payload.attempt_id),{...scope,generation:payload.generation as number|undefined},false,type==='turn.input');
       if(type==='turn.input'){
+        if (!this.ctx.systemPrompts().acceptsReport(String(payload.attempt_id),scope,payload)) return {ok:false,code:'policy_offer_mismatch',retryable:false};
         // Re-project under the same current-attempt authority; never advance a receipt.
         if(payload.resync===true)return {ok:true,input:this.offerInput(this.ctx.tasks().getTaskWithAgent(turn.current_attempt_id)!)};
         const to=Number(payload.input_to_seq),from=this.cursor(turn);
@@ -265,14 +266,18 @@ export class DaemonTurnBridge {
   complete(input:{payload:DaemonTurnCompletePayload;completionFields:DaemonTaskCompletionFields|null;traceEventCount?:number},scope:DaemonTurnScope):Record<string,unknown> {
     const p=input.payload;
     try{
+      return this.ctx.systemPrompts().withReportPolicy(scope.workspaceId, () => {
+      if (!this.ctx.systemPrompts().acceptsReport(p.attempt_id,scope,{...p})) return {ok:false,code:'policy_offer_mismatch',retryable:false};
       this.ctx.tasks().completeTask(p.attempt_id,{output:p.reply.body_md,sessionId:p.session_id,workDir:p.work_dir,completionFields:input.completionFields,traceEventCount:input.traceEventCount,
         expectedTurnId:p.turn_id,turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope);
       const turn=this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE id=?').get(p.turn_id);
       return {ok:true,turn_id:p.turn_id,reply_message_id:turn?.reply_message_id??null};
+      });
     }catch(error){
       // A second completion can pass the initial check while the first is committing.
       // Recheck the binding under the same locks before returning its committed result.
       try{const replay=this.transaction(()=>{const turn=this.authorized(p.turn_id,p.attempt_id,scope,true);
+        if (!this.ctx.systemPrompts().acceptsReport(p.attempt_id,scope,{...p})) return {ok:false,code:'policy_offer_mismatch',retryable:false};
         return turn.status==='completed'?{ok:true,turn_id:turn.id,reply_message_id:turn.reply_message_id}:null;});if(replay)return replay;}catch(replayError){
         if(turnRejectionCode(replayError,p.attempt_id,scope.runtimeId)===null)throw replayError;
       }

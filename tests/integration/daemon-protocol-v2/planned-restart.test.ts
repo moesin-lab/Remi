@@ -18,12 +18,14 @@ useMigratedIntegrationDatabases();
 for (const kind of ["task", "autopilot", "lost response", "large context"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
   let entered = false;
   let resumed = false;
+  let resumeRuns = 0;
   let providerClosed = false;
   let releaseClose!: () => void;
   const closed = new Promise<void>(resolve => { releaseClose = resolve; });
   const h = await DaemonProtocolHarness.create({ outboxBackoffMs: [5], providerFactory: () => ({
     async *sendStream(_message, options) {
       if (providerClosed) {
+        resumeRuns++;
         resumed = true;
         yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "complete resumed answer" }] } as any;
         return;
@@ -44,6 +46,12 @@ for (const kind of ["task", "autopilot", "lost response", "large context"] as co
     const runtimeId = h.store.listRuntimes()[0]!.id;
     const daemonId = h.store.getRuntimeLite(runtimeId)!.daemonId!;
     const agent = h.store.createAgent({ name: "Planned stop", provider: "claude", runtimeId });
+    const edit = (common:string) => {
+      const state = h.store.getSystemPrompt('local');
+      h.store.editSystemPrompt('local',{expectedRevision:state.document.revision,requestId:common,content:{...state.content,common}},
+        {type:'human',operatorId:'local',userId:'local',displayName:'Fixture'});
+    };
+    if (kind === 'lost response') edit('Checkpoint A');
     const autopilot = kind === "autopilot" ? h.store.createAutopilot({ title: "Planned automation", assigneeId: agent.id, executionMode: "run_only" }) : null;
     const run = autopilot ? h.store.runAutopilot(autopilot.id, { prompt: "Long synthetic round" }) : null;
     const task = run ? h.store.getTask(run.taskId!)! : h.store.createTask({ agentId: agent.id, runtimeId, prompt: "Long synthetic round", maxAttempts: 1 });
@@ -74,11 +82,30 @@ for (const kind of ["task", "autopilot", "lost response", "large context"] as co
     expect(h.ledger.some(e => e.type === "turn.restart.checkpoint")).toBe(true);
     expect(h.ledger.some(e => e.type === "turn.restart.suspend")).toBe(true);
     await h.stopDaemon();
+    if (kind === 'lost response') edit('Current B');
     const originalResume = (h.layer as any).rpcHandlers.get("turn.restart.resume_bound");
     let dropped = false;
     let fenced = false;
     let failed = false;
+    let rejectedMismatch = false;
     h.layer.registerRpcHandler("turn.restart.resume_bound", async (frame, session) => {
+      if (kind === 'lost response' && !rejectedMismatch) {
+        const snapshot = () => ({handoff:h.store.plannedRestarts().get(task.id),usage:h.db.query('SELECT * FROM multiremi_usage_task_scopes WHERE task_id=?').all(task.id),
+          questions:h.store.listIssueComments(task.issueId ?? '').map(row => row.id)});
+        const before = snapshot();
+        for (const fields of [{receipt_id:'other-receipt'},{offer_generation:'other-generation'},{content_hash:'other-hash'}]) {
+          expect(await originalResume({...frame,payload:{...frame.payload,...fields}},session)).toMatchObject({ok:false,code:'restart_policy_mismatch'});
+          expect(snapshot()).toEqual(before);
+        }
+        const binding = h.db.query('SELECT binding_json FROM multiremi_attempt_system_prompts WHERE task_id=?').get(task.id) as {binding_json:string};
+        const changed = {...JSON.parse(binding.binding_json),content:h.store.getSystemPrompt('local').content};
+        h.db.run('UPDATE multiremi_attempt_system_prompts SET binding_json=? WHERE task_id=?',[JSON.stringify(changed),task.id]);
+        try {
+          expect(await originalResume(frame,session)).toMatchObject({ok:false,code:'restart_policy_mismatch'});
+          expect(snapshot()).toEqual(before);
+        } finally { h.db.run('UPDATE multiremi_attempt_system_prompts SET binding_json=? WHERE task_id=?',[binding.binding_json,task.id]); }
+        rejectedMismatch = true;
+      }
       const reply = await originalResume(frame, session);
       if (reply.code === "resume_fenced") fenced = true;
       if (kind === "lost response" && reply.ok && dropped && !failed) {
@@ -110,7 +137,13 @@ for (const kind of ["task", "autopilot", "lost response", "large context"] as co
     await waitFor(() => h.store.getTask(task.id)?.status === "completed", "same attempt finished after replacement", 10_000);
     expect(h.store.plannedRestarts().get(task.id)?.state).toBe("running");
     expect(resumed).toBe(true);
-    if (kind === "lost response") expect(failed).toBe(true);
+    if (kind === "lost response") {
+      expect(failed && rejectedMismatch).toBe(true);
+      expect(resumeRuns).toBe(1);
+      expect(h.store.getAttemptSystemPrompt(task.id)?.content.common).toBe('Checkpoint A');
+      expect(h.ledger.filter(entry => entry.type === 'task.prompt').at(-1)?.frame.p.system_prompt_policy.content.common).toBe('Checkpoint A');
+      expect(h.store.getSystemPrompt('local').content.common).toBe('Current B');
+    }
     if (run) expect(h.store.getAutopilotRun(run.id)?.status).toBe("completed");
     expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, maxAttempts, result: "complete resumed answer" });
     expect(h.ledger.some(e => e.type === "turn.restart.resume_bound")).toBe(true);

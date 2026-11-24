@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from 'node:crypto';
+import { MultiremiTaskReportOutbox } from '@multiremi/worker/outbox.js';
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution,
   RESTART_RECOVERY_LIMIT_MS, RESTART_RECOVERY_MAX_ATTEMPTS, type PlannedRestartRemote } from "@multiremi/worker/planned-restart-journal.js";
@@ -21,6 +23,44 @@ afterEach(() => {
 function root() { const path = mkdtempSync(join(tmpdir(), "planned-restart-journal-")); roots.push(path); return path; }
 function journal(path = ":memory:") { const value = new PlannedRestartJournal(path); journals.push(value); return value; }
 const remote = (): PlannedRestartRemote => ({ suspend: async () => {}, resume: async entry => ({ generation: entry.execution.generation + 1 }) });
+
+it('pre-scans a co-resident damaged journal before recovering unread input or sending imported reports', async () => {
+  const directory = root();
+  const hash = (value:string) => createHash('sha256').update(value).digest('hex').slice(0,16);
+  const scope = {server:'isolated',workspace:execution.workspace_id,daemon:execution.daemon_id,provider:'codex'};
+  const legacyPath = (provider:string) => join(directory,`${provider}-${hash([scope.server,scope.workspace,scope.daemon,provider].join('|'))}.db`);
+  const source = legacyPath('claude');
+  const journalPath = join(directory,`restart-claude-${hash(source)}.db`);
+  const restart = journal(journalPath);
+  const entry = restart.prepare(execution,checkpoint);
+  const evidence = openSqliteDatabase(journalPath);
+  evidence.run("UPDATE planned_restart_journal SET payload='{}' WHERE handoff_id=?",[execution.handoff_id]);
+  const discoverRestartHolds = () => PlannedRestartJournal.discover({...scope,legacyPath:legacyPath('codex')});
+  const shared = join(directory,'shared.db');
+  const seed = async (path:string,task:string,kind:'progress'|'turn.complete') => {
+    const outbox = new MultiremiTaskReportOutbox({path,canSend:()=>false,deliver:async()=>{}});
+    outbox.enqueue(task,kind,{value:task,runtime_id:execution.runtime_id});
+    await outbox.close();
+  };
+  await seed(shared,execution.attempt_id,'turn.complete');
+  await seed(source,'other-attempt','progress');
+  const db = openSqliteDatabase(shared);
+  db.run("UPDATE outbox_events SET status='input_unread'");
+  const original = db.query('SELECT * FROM outbox_events WHERE id=1').get();
+  const sent:string[] = [];
+  const outbox = new MultiremiTaskReportOutbox({path:shared,discoverRestartHolds,deliver:async record => {sent.push(record.taskId);}});
+  try {
+    expect(outbox.isHeld('other-attempt')).toBe(true);
+    outbox.importLegacy(source,'different-registration');
+    outbox.enqueue('rt:healthy','runtime.command_result',{});
+    expect(await outbox.waitForTaskDrain('rt:healthy')).toBe('delivered');
+    expect(sent).toEqual(['rt:healthy']);
+    expect(db.query('SELECT * FROM outbox_events WHERE id=1').get()).toEqual(original);
+    expect(db.query('SELECT COUNT(*) AS n FROM restart_source_rows').get()).toEqual({n:2});
+    restart.entries(); restart.remove(execution.handoff_id);
+    expect(evidence.query('SELECT payload,consumer_id FROM planned_restart_journal').get()).toEqual({payload:'{}',consumer_id:entry.consumer_id});
+  } finally {await outbox.close(); db.close(); evidence.close();}
+});
 
 it("journals only after provider/report/trace quiescence, and only acknowledges a committed remote checkpoint", async () => {
   const path = join(root(), "journal.db"), local = journal(path);

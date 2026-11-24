@@ -379,6 +379,81 @@ describe("MUL-1 §10.1 public contracts and fixtures", () => {
       code: "root_runtime_untrusted",
       downgrade_allowed: false,
     });
+
+    // Omitted, undefined, or non-boolean truthy/malformed trust flags MUST fail closed.
+    const { consumer_trusted: _omittedConsumer, ...withoutConsumerTrusted } = fixtureRootDeliveryNegotiationInput;
+    const { runtime_trusted: _omittedRuntime, ...withoutRuntimeTrusted } = fixtureRootDeliveryNegotiationInput;
+    const malformedTrustValues: readonly unknown[] = [undefined, null, "true", 1, {}, []];
+
+    expect(
+      evaluateRootDeliveryNegotiation(withoutConsumerTrusted as unknown as typeof fixtureRootDeliveryNegotiationInput),
+    ).toMatchObject({
+      eligible: false,
+      code: "root_runtime_untrusted",
+      downgrade_allowed: false,
+    });
+    expect(
+      evaluateRootDeliveryNegotiation(withoutRuntimeTrusted as unknown as typeof fixtureRootDeliveryNegotiationInput),
+    ).toMatchObject({
+      eligible: false,
+      code: "root_runtime_untrusted",
+      downgrade_allowed: false,
+    });
+
+    for (const badTrust of malformedTrustValues) {
+      expect(
+        evaluateRootDeliveryNegotiation({
+          ...fixtureRootDeliveryNegotiationInput,
+          consumer_trusted: badTrust as unknown as boolean,
+        }),
+      ).toMatchObject({
+        eligible: false,
+        code: "root_runtime_untrusted",
+        downgrade_allowed: false,
+      });
+      expect(
+        evaluateRootDeliveryNegotiation({
+          ...fixtureRootDeliveryNegotiationInput,
+          runtime_trusted: badTrust as unknown as boolean,
+        }),
+      ).toMatchObject({
+        eligible: false,
+        code: "root_runtime_untrusted",
+        downgrade_allowed: false,
+      });
+    }
+
+    // Malformed top-level or capability structures fail closed without throwing.
+    for (const malformedInput of [
+      null,
+      undefined,
+      "bad",
+      [],
+      { ...fixtureRootDeliveryNegotiationInput, hello_caps: null },
+      { ...fixtureRootDeliveryNegotiationInput, welcome_caps: "root.delivery" },
+      { ...fixtureRootDeliveryNegotiationInput, runtime_capabilities: "invalid" },
+    ]) {
+      expect(
+        evaluateRootDeliveryNegotiation(malformedInput as unknown as typeof fixtureRootDeliveryNegotiationInput),
+      ).toMatchObject({
+        eligible: false,
+        code: "root_delivery_unsupported",
+        downgrade_allowed: false,
+      });
+    }
+
+    expect(
+      compileExampleRouteOfferFrame(
+        fixtureRootTaskOfferPayload,
+        withoutConsumerTrusted as unknown as typeof fixtureRootDeliveryNegotiationInput,
+      ),
+    ).toMatchObject({ branch: "reject", code: "root_runtime_untrusted" });
+    expect(
+      compileExampleRouteResumeReply(
+        fixtureRootRestartResumeReply,
+        withoutConsumerTrusted as unknown as typeof fixtureRootDeliveryNegotiationInput,
+      ),
+    ).toMatchObject({ branch: "reject", code: "root_runtime_untrusted" });
   });
 
   it("discriminates initial root task.offer and blocks downgrade into normalizeDaemonTurnOffer / handleTask", () => {

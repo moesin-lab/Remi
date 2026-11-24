@@ -69,6 +69,8 @@ test('direct retry invocation binds the fresh actor and primary turn to one prop
   const target = {turnId:'turn_fixture',previousAttemptId:'tsk_previous',attemptId:'tsk_new'};
   const base = service.planDirectRetry(proof,target);
   const plan = {...base,domainTargets:[...base.domainTargets,'attempt:tsk_other'].sort()};
+  expect(()=>withSecurityWrite(db,undefined,plan,tx=>service.authorizeWrite(tx,proof,
+    {action:'turn.retry',use:'invocation',actualTarget:{type:'turn',id:target.turnId}}))).toThrow('root_required');
   const handle = withSecurityWrite(db,undefined,plan,tx=>{
     const verified = service.verifyDirectRetryInvocation(tx,proof,target);
     expect(service.requireDirectRetryInvocation(tx,verified,target)).toMatchObject({actorId:'usr_test',agentId:'agt_fixture',

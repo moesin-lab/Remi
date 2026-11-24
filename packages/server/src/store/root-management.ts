@@ -152,9 +152,9 @@ export class RootManagement {
     assertUnrevokedAncestry(this.db, tx, { nodeId: evidence.node, generation: evidence.version });
   }
 
-  private check(tx: SecurityTx, proof: CredentialProof, request: AuthorityUse): CurrentAuthority {
+  private check(tx: SecurityTx, proof: CredentialProof, request: AuthorityUse, directRetry = false): CurrentAuthority {
     const target = request.actualTarget;
-    const retry = request.action === 'turn.retry' && request.use === 'invocation' && target.type === 'turn';
+    const retry = directRetry && request.action === 'turn.retry' && request.use === 'invocation' && target.type === 'turn';
     if (!target.id || !(retry || request.use === 'management' && (request.action === grantAction && target.type === 'grant'
       || request.action === createAction && target.type === 'user'
       || request.action === trustAction && target.type === 'runtime' || request.action === untrustAction && target.type === 'runtime_trust'
@@ -208,7 +208,7 @@ export class RootManagement {
 
   private retryOrigin(tx: SecurityTx, proof: CredentialProof, target: RetryTarget): Readonly<RetryOrigin> {
     return withSecurityTarget(this.db,tx,`management:turn:${target.turnId}`,()=>onPrimary(()=>{
-      const actor = this.check(tx,proof,{action:'turn.retry',use:'invocation',actualTarget:{type:'turn',id:target.turnId}});
+      const actor = this.check(tx,proof,{action:'turn.retry',use:'invocation',actualTarget:{type:'turn',id:target.turnId}},true);
       if (!actor.effectiveRoot || !actor.subject || !actor.recordedGrant) throw new SecurityAbort('root_required');
       const source = this.evidence(proof);
       if (!this.db.query(`UPDATE multiremi_turns SET current_attempt_id=current_attempt_id WHERE id=? AND current_attempt_id=? RETURNING id`)

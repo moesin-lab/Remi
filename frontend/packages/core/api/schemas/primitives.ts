@@ -54,6 +54,11 @@ export const OptionalStringSchema = z.preprocess(
   z.string().optional(),
 );
 
+export const OptionalBooleanSchema = z.preprocess(
+  (value) => (typeof value === "boolean" ? value : undefined),
+  z.boolean().optional(),
+);
+
 export const BooleanWithDefaultSchema = (fallback: boolean) =>
   z.preprocess(
     (value) => (typeof value === "boolean" ? value : undefined),

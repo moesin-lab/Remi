@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AttachmentSchema,
   BooleanWithDefaultSchema,
+  OptionalBooleanSchema,
   OptionalStringSchema,
   ReactionSchema,
 } from "./primitives";
@@ -17,6 +18,19 @@ describe("OptionalStringSchema", () => {
   it("drops non-strings to undefined instead of failing", () => {
     for (const value of [42, null, undefined, {}, []]) {
       expect(OptionalStringSchema.parse(value)).toBeUndefined();
+    }
+  });
+});
+
+describe("OptionalBooleanSchema", () => {
+  it("passes exact booleans through", () => {
+    expect(OptionalBooleanSchema.parse(true)).toBe(true);
+    expect(OptionalBooleanSchema.parse(false)).toBe(false);
+  });
+
+  it("drops non-booleans to undefined instead of defaulting to false", () => {
+    for (const value of ["false", "true", 0, 1, null, undefined, {}, []]) {
+      expect(OptionalBooleanSchema.parse(value)).toBeUndefined();
     }
   });
 });

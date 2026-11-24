@@ -159,6 +159,30 @@ describe("ApiClient schema fallback", () => {
       expect(config.cdn_domain).toBe("cdn.example.com");
       expect(config.allow_signup).toBe(true);
       expect(config.daemon_server_url).toBeUndefined();
+      expect(config.jwt_registration_required).toBeUndefined();
+    });
+
+    it("preserves exact boolean jwt_registration_required values without defaulting missing or malformed values to false", async () => {
+      const client = new ApiClient("https://api.example.test");
+
+      stubFetchJson({ cdn_domain: "", allow_signup: true, jwt_registration_required: true });
+      expect((await client.getConfig()).jwt_registration_required).toBe(true);
+
+      stubFetchJson({ cdn_domain: "", allow_signup: true, jwt_registration_required: false });
+      expect((await client.getConfig()).jwt_registration_required).toBe(false);
+
+      for (const badValue of [undefined, null, "false", "true", 0, 1, {}]) {
+        stubFetchJson(
+          badValue === undefined
+            ? { cdn_domain: "", allow_signup: true }
+            : { cdn_domain: "", allow_signup: true, jwt_registration_required: badValue },
+        );
+        const config = await client.getConfig();
+        expect(config.jwt_registration_required).toBeUndefined();
+      }
+
+      stubFetchJson(null);
+      expect((await client.getConfig()).jwt_registration_required).toBeUndefined();
     });
   });
 

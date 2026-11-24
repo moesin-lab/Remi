@@ -56,6 +56,10 @@ export function AuthInitializer({
           // Old servers omit this field — treat that as "creation allowed"
           // (the managed-cloud default) rather than blocking the UI.
           workspaceCreationDisabled: cfg.workspace_creation_disabled === true,
+          jwtRegistrationRequired:
+            typeof cfg.jwt_registration_required === "boolean"
+              ? cfg.jwt_registration_required
+              : undefined,
         });
         configStore.getState().setDaemonConfig({
           daemonServerUrl: cfg.daemon_server_url,

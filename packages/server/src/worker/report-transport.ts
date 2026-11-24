@@ -64,7 +64,8 @@ export async function releaseDaemonOutbox(protocol: DaemonProtocolClient): Promi
 }
 
 export function daemonOutboxHasPriority(protocol: DaemonProtocolClient): boolean {
-  return (shared.get(protocol)?.outbox.stats().pending ?? 0) > 0;
+  const outbox = shared.get(protocol)?.outbox;
+  return outbox?.pendingTaskIds().some(taskId => !outbox.isHeld(taskId)) ?? false;
 }
 
 /** The turn error a failed terminal report records on the trace. */

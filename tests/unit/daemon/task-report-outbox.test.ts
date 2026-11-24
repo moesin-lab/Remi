@@ -53,6 +53,81 @@ function httpError(status: number, path = "/api/daemon/tasks/x"): MultiremiDaemo
 }
 
 describe("MultiremiTaskReportOutbox", () => {
+  it('identifies a worker which exited between its launch CAS and the provider start', async () => {
+    const path = tempPath();
+    const module = new URL('../../../packages/server/src/worker/outbox.ts',import.meta.url).href;
+    const child = Bun.spawn([process.execPath,'-e',`
+      const {MultiremiTaskReportOutbox} = await import(Bun.argv.at(-2));
+      const outbox = new MultiremiTaskReportOutbox({path:Bun.argv.at(-1),deliver:async()=>{}});
+      const proof = outbox.preparePolicyReceipt({workspace_id:'w',daemon_id:'d',runtime_id:'r',attempt_id:'a',offer_generation:'g',content_hash:'hash'});
+      if (!outbox.transitionPolicyReceipt(proof,'launch')) process.exit(1);
+      console.log('claimed'); setInterval(()=>{},1000);
+    `,module,path],{stdout:'pipe',stderr:'pipe'});
+    try {
+      expect(new TextDecoder().decode((await child.stdout.getReader().read()).value)).toContain('claimed');
+      const observer = track(new MultiremiTaskReportOutbox({path,canSend:()=>false,deliver:async()=>{}}));
+      expect(observer.exitedLaunches('r')).toEqual([]);
+      child.kill(); await child.exited;
+      const [proof] = observer.exitedLaunches('r');
+      expect(proof?.attempt_id).toBe('a');
+      expect(observer.transitionPolicyReceipt(proof!,'launch')).toBe(false);
+      observer.enqueue('a','progress',{...proof});
+      expect(observer.exitedLaunches('r')).toEqual([]);
+    } finally { if (child.exitCode === null) child.kill(); await child.exited; }
+  });
+  it('resumes a failed second discovery page at its original source boundary before delivering', async () => {
+    const path = tempPath();
+    const legacy = tempPath();
+    const options = {canSend:() => false,deliver:async () => {}};
+    const pending = track(new MultiremiTaskReportOutbox({path:legacy,...options}));
+    for (let index = 1; index <= 130; index++) pending.enqueue(`old-${index}`,'progress',{index});
+    await pending.close();
+    const initial = track(new MultiremiTaskReportOutbox({path,...options}));
+    initial.enqueue('shared','progress',{});
+    await initial.close();
+    const inspect = openSqliteDatabase(path);
+    const discoverRestartHolds = () => [{source:'lane',handoff:'broken',attempt:null,legacyPaths:[legacy]}];
+    try {
+      inspect.exec(`CREATE TRIGGER fail_scan BEFORE INSERT ON restart_source_rows WHEN NEW.task_id='old-129'
+        BEGIN SELECT RAISE(ABORT,'scan interrupted'); END`);
+      expect(() => new MultiremiTaskReportOutbox({path,...options,discoverRestartHolds})).toThrow('scan interrupted');
+      expect(inspect.query('SELECT cursor,high_id FROM restart_scan_sources WHERE store_id=?').get(legacy)).toEqual({cursor:128,high_id:130});
+      const later = track(new MultiremiTaskReportOutbox({path:legacy,...options}));
+      later.enqueue('later','progress',{});
+      await later.close();
+      inspect.exec('DROP TRIGGER fail_scan');
+      const resumed = track(new MultiremiTaskReportOutbox({path,...options,discoverRestartHolds}));
+      expect(resumed.isHeld('old-130')).toBe(true);
+      expect(resumed.isHeld('later')).toBe(false);
+      expect(inspect.query('SELECT cursor,high_id FROM restart_scan_sources WHERE store_id=?').get(legacy)).toEqual({cursor:130,high_id:130});
+      resumed.importLegacy(legacy,'fixture-runtime');
+      expect(resumed.isHeld('later')).toBe(true);
+      expect(inspect.query("SELECT 1 FROM restart_members WHERE task_id='later'").get()).toBeNull();
+      expect(inspect.query("SELECT COUNT(*) AS count FROM restart_source_rows WHERE store_id=?").get(legacy)).toEqual({count:130});
+    } finally { inspect.close(); }
+  });
+
+  it('retains a held unread reply byte for byte and releases its original id before later reports', async () => {
+    const path = tempPath();
+    const live = track(new MultiremiTaskReportOutbox({path,deliver:async () => { throw new DaemonProtocolRpcError('input_unread',false); }}));
+    await expect(live.enqueueAndWait('Q','turn.complete',{reply:{body_md:'original'}})).rejects.toMatchObject({code:'input_unread'});
+    await live.close();
+    const inspect = openSqliteDatabase(path);
+    try {
+      const original = inspect.query('SELECT * FROM outbox_events WHERE id=1').get();
+      const delivered:MultiremiOutboxRecord[] = [];
+      const held = track(new MultiremiTaskReportOutbox({path,discoverRestartHolds:()=>[{source:'lane',handoff:'bad',attempt:null,legacyPaths:[]}],
+        deliver:async record => { delivered.push(record); }}));
+      held.enqueue('Q','progress',{summary:'later'});
+      held.enqueue('Q','complete',{output:'new terminal'});
+      expect(inspect.query('SELECT * FROM outbox_events WHERE id=1').get()).toEqual(original);
+      held.recordHandoffEvidence('lane','bad','P','2020-01-02');
+      await held.waitForTaskDrain('Q');
+      expect(delivered.map(record=>record.id)).toEqual([1,2,3]);
+      expect(delivered[0]?.payload).toEqual({reply:{body_md:'original'},input_unread_fallback:true});
+      expect(held.isHeld('P')).toBe(true);
+    } finally { inspect.close(); }
+  });
   it('records late delivery evidence while serving another lane and a verified post-boundary attempt', async () => {
     const path = tempPath();
     const response = deferred<void>();

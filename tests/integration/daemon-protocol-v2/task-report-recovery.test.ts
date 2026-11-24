@@ -9,6 +9,7 @@ import { MultiremiTaskReportOutbox } from "@multiremi/worker/outbox.js";
 import { outboxRecordFrame } from "@multiremi/worker/report-frames.js";
 import { migrateLegacyUsage } from "@multiremi/store/usage-accounting.js";
 import { join } from "node:path";
+import { readFileSync } from 'node:fs';
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
 import { useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
 
@@ -16,8 +17,13 @@ useMigratedIntegrationDatabases();
 
 for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only the adopted policy after reconnect with lost ${loss}`, async () => {
   let providerRuns = 0;
-  const h = await DaemonProtocolHarness.create({database:'sqlite',manualOfferClock:true,providerFactory: () => ({
-    async *sendStream() { providerRuns++; yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:'finished'}]} as any; },
+  let providerInstructions = '';
+  const h = await DaemonProtocolHarness.create({database:'sqlite',manualOfferClock:true,providerFactory: options => ({
+    async *sendStream() {
+      providerRuns++;
+      providerInstructions = readFileSync(join(options.env!.CLAUDE_CONFIG_DIR!, 'AGENTS.md'), 'utf8');
+      yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:'finished'}]} as any;
+    },
     getLastResponse: () => ({text:'finished',sessionId:'policy-test',usage:[],toolCalls:[]} as any),close:async()=>{},
   })});
   try {
@@ -38,7 +44,8 @@ for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only 
       dropped = true;
       return session.deferReply(frame.id!,new Promise(() => {}));
     });
-    const task = h.store.createTask({agentId:agent.id,prompt:'Exercise durable policy adoption'});
+    const chat = h.store.createChatSession({agentId:agent.id});
+    const {task} = h.store.sendChatMessage(chat.id,{body:'Exercise durable policy adoption'});
     await waitFor(()=>dropped,'first adoption reached the transport',5000);
     expect(providerRuns).toBe(0);
     edit('POLICY B');
@@ -47,8 +54,18 @@ for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only 
     await waitFor(()=>h.store.getTask(task.id)?.status === 'completed','same attempt completed',45_000);
     expect(providerRuns).toBe(1);
     const expected = loss === 'adopt_response' ? 'POLICY A' : 'POLICY B';
-    expect(h.store.getAttemptSystemPrompt(task.id)?.content.common).toBe(expected);
+    const binding = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(binding.content.common).toBe(expected);
+    expect(providerInstructions).toContain(expected);
     expect(h.ledger.filter(entry=>entry.type === 'task.prompt').at(-1)?.frame.p.system_prompt_policy.content.common).toBe(expected);
+    const cli = Bun.spawn([process.execPath,'apps/remi/main.ts','workspace','system-prompt','get','local',
+      '--attempt',task.id,'--content-hash',binding.contentHash,'--output','json'],{
+      env:{...process.env,MULTIREMI_SERVER_URL:h.url,MULTIREMI_TOKEN:'fixture-master',MULTIREMI_CONFIG:join(h.root,'cli.json')},
+      stdout:'pipe',stderr:'pipe',
+    });
+    const [exit,output,errors] = await Promise.all([cli.exited,new Response(cli.stdout).text(),new Response(cli.stderr).text()]);
+    expect({exit,errors}).toEqual({exit:0,errors:''});
+    expect(JSON.parse(output)).toMatchObject({contentHash:binding.contentHash,content:{common:expected}});
   } finally { await h.dispose(); }
 },60_000);
 
@@ -516,7 +533,7 @@ test(`an adopted offer with ${accepted ? "delivered" : "lost"} final response ch
         droppedAcceptance = true;
         return false;
       }
-      if (frame.t === "task.start" && !terminalSent) {
+      if (frame.t === "task.start" && !terminalSent && frame.p.usage_run_id !== 'wrong-policy') {
         if (!accepted && !droppedStart) socket.close(4001);
         droppedStart = true;
         return false;
@@ -541,6 +558,26 @@ test(`an adopted offer with ${accepted ? "delivered" : "lost"} final response ch
     }
     expect(h.ledger.filter(entry => entry.partition === task.id && entry.type === "task.start")).toHaveLength(0);
     const {offer_generation, content_hash, receipt_id} = h.ledger.find(entry => entry.type === 'task.offer_adopt' && entry.partition === task.id)!.frame.p;
+    if (accepted && terminalReport === 'complete') {
+      const offer = h.received.find(frame=>frame.t === 'task.offer' && frame.p.attempt_id === task.id)!.p;
+      const snapshot = () => ({task:h.store.getTask(task.id),actual:h.store.getTaskPrompt(task.id),
+        attempts:h.store.listTurnAttempts(offer.turn_id),runs:h.db.query('SELECT * FROM multiremi_usage_runs WHERE task_id=?').all(task.id)});
+      const before = snapshot();
+      let sequence = 80_000;
+      for (const difference of [{offer_generation:'older'},{receipt_id:'foreign'}]) {
+        const proof = {offer_generation,content_hash,receipt_id,...difference};
+        const input = {turn_id:offer.turn_id,attempt_id:task.id,input_to_seq:offer.input_to_seq,message_ids:offer.input_messages.map((message:{id:string})=>message.id)};
+        await expect(h.client.rpc('turn.input',{...input,...proof},runtimeId)).rejects.toMatchObject({code:'policy_offer_mismatch'});
+        for (const [type,fields] of [
+          ['task.start',{usage_run_id:'wrong-policy'}],['task.prompt',{prompt:'wrong',instructions:'wrong'}],
+          ['task.session_pin',{session_id:'wrong'}],['task.usage',{usage:[]}],['task.fail',{error:'wrong'}],
+          ['turn.complete',turnCompletion(h.store,task.id,'wrong')],
+        ] as const) {
+          await expect(h.client.event({t:type,seq:sequence++,rt:runtimeId,p:{task_id:task.id,...fields,...proof}})).rejects.toMatchObject({code:'policy_offer_mismatch'});
+        }
+        expect(snapshot()).toEqual(before);
+      }
+    }
     if (terminalReport === "complete") {
       const offer = h.received.find(frame => frame.t === "task.offer" && frame.p.attempt_id === task.id)!.p;
       expect(await h.client.rpc("turn.input", { offer_generation,content_hash,receipt_id,turn_id: offer.turn_id, attempt_id: task.id,

@@ -67,6 +67,8 @@ offer 输入与会话投影的范围记录都为 complete 时什么也不加；�
 [共享契约](../packages/contracts/src/system-prompt-policy.ts)。服务端在 claim 同一事务冻结版本、默认 revision、
 完整五槽快照与内容哈希；offer 准备阶段不重读最新配置。未 accept 的 rescind/requeue/stale reclaim 可以重绑，
 running 尝试保持原快照。`prompt.policy.adopt.v1` 单独协商。daemon 校验完整五槽与内容哈希，在本地 outbox 数据库登记收据，通过 `task.offer_adopt` 取得同一代次、哈希及收据的授权，再以条件更新消费启动权。`task.offer_status` 用于只读对账。裸成功回执只说明传输结果。
+
+启动权与执行者 PID 在同一个本地事务登记。冷启动可对已退出进程的收据逐一对账。daemon 保留仍有未确认上报、隔离或 planned restart 的分区。对已采用、原进程已退出的执行，`runtime.ready.exited_launches` 携带准确收据，服务端在 workspace 生命周期锁内重核归属、活跃状态与 handoff，按原重试规则结束该 attempt。PID 仍在使用或进程状态无法验证时继续保留。
 当 mode 为 custom，或当前服务端默认不等于首版 `LEGACY_BASELINE_DEFAULT_REVISION` 时，claim 前必须具备此能力，
 否则等待并提供升级诊断。仅 default 且默认仍等价于基线时允许旧 daemon 兼容执行；reset 不绕过未来默认升级的能力门禁。
 整个 `system_prompt_policy` 属于执行绑定，预算降级不得删除或截短其字符串。

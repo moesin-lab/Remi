@@ -1751,11 +1751,23 @@ export class MultiremiDaemon {
               if (result.handoff_id !== incident.handoff || typeof result.created_through !== 'string') continue;
               const ownSource = incident.source === this.restartJournalPath();
               outbox.recordHandoffEvidence(incident.source,incident.handoff,ownSource && typeof result.attempt_id === 'string' ? result.attempt_id : null,result.created_through);
-            } catch { return; }
+            } catch { continue; }
+          }
+          const exited = [];
+          if (this.protocolClient.sharesCap('prompt.policy.adopt.v1')) {
+            for (const proof of outbox.exitedLaunches(runtime.runtime_id)) {
+              try {
+                const status = await this.protocolClient.rpc('task.offer_status',proof,runtime.runtime_id);
+                if (!samePolicyOffer(proof,status)) continue;
+                if (status.state === 'terminal') outbox.transitionPolicyReceipt(proof,'terminal');
+                if (status.state === 'adopted') exited.push(proof);
+              } catch { continue; }
+            }
           }
           this.protocolClient.send({ t: "runtime.ready", rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids,
             held_restart_attempts: this.protocolLane.runtime()?.held_restart_attempts,
             prepared_offers: this.ensureOutbox().preparedOffers(runtime.runtime_id),
+            exited_launches: exited,
             active_question_waits: runtime.active_question_waits ?? [] } });
         }
         if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
@@ -4598,24 +4610,24 @@ export class MultiremiDaemon {
         const generation = Number(result.generation);
         if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
         this.pendingResumedTasks.set(entry.execution.handoff_id, () => {
-        this.executionGenerations.set(task.id, generation);
-        if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
-        this.resumedUsageRuns.set(task.id, entry.consumer_id);
-        this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
-        this.taskDownlinks.bindTurn({ ...task, generation });
-        const prior = foldStoredTrace(this.ensureTrace().store, task.id).fold.state();
-        const replay = new Set(prior.items.flatMap(item => item.type === "user_message" && item.steer && !item.steer.consumed ? [item.steer.steer_id] : []));
-        let firstReplay = true;
-        task.input_messages = task.input_messages.map(message => {
-          if (!replay.has(message.id)) return message;
-          const notice = firstReplay ? "以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。\n" : "";
-          firstReplay = false;
-          return { ...message, body_md: withSteerIdentity(message.body_md, message.id, notice) };
-        });
-        const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
-        this.restartQuestions.set(task.id, questions);
-        for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
-        return task;
+          this.executionGenerations.set(task.id, generation);
+          if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
+          this.resumedUsageRuns.set(task.id, entry.consumer_id);
+          this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
+          this.taskDownlinks.bindTurn({ ...task, generation });
+          const prior = foldStoredTrace(this.ensureTrace().store, task.id).fold.state();
+          const replay = new Set(prior.items.flatMap(item => item.type === "user_message" && item.steer && !item.steer.consumed ? [item.steer.steer_id] : []));
+          let firstReplay = true;
+          task.input_messages = task.input_messages.map(message => {
+            if (!replay.has(message.id)) return message;
+            const notice = firstReplay ? "以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。\n" : "";
+            firstReplay = false;
+            return { ...message, body_md: withSteerIdentity(message.body_md, message.id, notice) };
+          });
+          const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
+          this.restartQuestions.set(task.id, questions);
+          for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
+          return task;
         });
         return { generation };
       },

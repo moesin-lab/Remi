@@ -59,7 +59,7 @@ test('an unmapped damaged co-resident journal retains both legacy partitions acr
   } finally {await h.dispose();}
 },45_000);
 
-for (const oldServer of [true,false]) test(`unproved prepared journal survives reconnect and cold start with ${oldServer ? 'legacy' : 'adopt'} welcome`, async () => {
+for (const state of ['prepared','acknowledged','resumed'] as const) for (const oldServer of [true,false]) test(`unproved ${state} journal survives reconnect and cold start with ${oldServer ? 'legacy' : 'adopt'} welcome`, async () => {
   let calls = 0;
   const h = await DaemonProtocolHarness.create({database:'sqlite',outboxBackoffMs:[5],providerFactory:()=>({
     async *sendStream() { calls++; yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:'healthy'}]} as any; },
@@ -81,6 +81,8 @@ for (const oldServer of [true,false]) test(`unproved prepared journal survives r
     const path = join(h.root,readdirSync(h.root).find(name=>name.startsWith('restart-') && name.endsWith('.db'))!);
     const journal = new PlannedRestartJournal(path);
     journal.prepare({runtime_id:runtime.id,daemon_id:scope.daemonId,workspace_id:'local',attempt_id:task.id,turn_id:handoff.turn_id,handoff_id:handoff.handoff_id,generation:0},checkpoint);
+    if (state !== 'prepared') journal.acknowledge(handoff.handoff_id);
+    if (state === 'resumed') journal.resumed(handoff.handoff_id,1);
     journal.close();
     const evidence = openSqliteDatabase(path);
     try {
@@ -108,7 +110,7 @@ for (const oldServer of [true,false]) test(`unproved prepared journal survives r
 
 // Real daemon/provider lifetime, disk outbox/journal and authenticated v2 RPCs.
 // Candidate update acceptance is exercised separately with the MUL-27 harness.
-for (const kind of ["task", "autopilot", "lost response", "large context"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
+for (const kind of ["task", "autopilot", "lost response", "large context", "legacy welcome"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
   let entered = false;
   let resumed = false;
   let resumeRuns = 0;
@@ -175,6 +177,24 @@ for (const kind of ["task", "autopilot", "lost response", "large context"] as co
     expect(h.ledger.some(e => e.type === "turn.restart.checkpoint")).toBe(true);
     expect(h.ledger.some(e => e.type === "turn.restart.suspend")).toBe(true);
     await h.stopDaemon();
+    if (kind === 'legacy welcome') {
+      const journalDb = openSqliteDatabase(join(h.root,journalPath));
+      const snapshot = () => ({journal:journalDb.query('SELECT * FROM planned_restart_journal').all(),retry:journalDb.query('SELECT * FROM planned_restart_retries').all(),
+        handoff:h.store.plannedRestarts().get(task.id),usage:h.db.query('SELECT * FROM multiremi_usage_task_scopes WHERE task_id=?').all(task.id)});
+      try {
+        const before = snapshot();
+        const start = h.ledger.length;
+        (h.layer as any).welcomeCaps = ['offer','turn.restart'];
+        await h.recreateDaemon(); await h.settleHeartbeat();
+        await (h.daemon as any).resumePlannedRestarts();
+        await h.disconnect(); await h.reconnect();
+        await h.recreateDaemon(); await h.settleHeartbeat();
+        await (h.daemon as any).resumePlannedRestarts();
+        expect(h.ledger.slice(start).filter(e=>['turn.restart.resume','turn.restart.resume_bound','turn.restart.suspend','task.start'].includes(e.type))).toHaveLength(0);
+        expect(snapshot()).toEqual(before);
+      } finally { journalDb.close(); }
+      return;
+    }
     if (kind === 'lost response') edit('Current B');
     const originalResume = (h.layer as any).rpcHandlers.get("turn.restart.resume_bound");
     let dropped = false;

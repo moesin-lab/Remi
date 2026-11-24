@@ -5936,14 +5936,16 @@ ${placementAfter.sql}
       this.recoverExpiredPolicyProposals(runtimeId);
       const orphanRows = this.ctx.db.query(
         `SELECT * FROM multiremi_turn_execution_records WHERE runtime_id = ?
-         AND status IN (${activeTaskIds ? "'running', 'waiting_local_directory', 'awaiting_human'" : "'dispatched', 'running', 'waiting_local_directory', 'awaiting_human'"})
+         AND status IN (${activeTaskIds && onlyAttemptId === undefined ? "'running', 'waiting_local_directory', 'awaiting_human'" : "'dispatched', 'running', 'waiting_local_directory', 'awaiting_human'"})
          ${onlyAttemptId !== undefined ? "AND id = ?" : ""}
          ${activeTaskIds?.length ? `AND id NOT IN (${activeTaskIds.map(() => "?").join(", ")})` : ""}`,
       ).all(runtimeId, ...(onlyAttemptId !== undefined ? [onlyAttemptId] : []), ...(activeTaskIds ?? [])) as Row[];
       const restarts = new PlannedRestarts(this.ctx);
       const recoverableRows = orphanRows.filter(row => {
-        if (row.status === 'dispatched' && this.ctx.systemPrompts().dispatchPolicy(String(row.id))?.state === 'proposed'
-          && this.ctx.systemPrompts().dispatchPolicy(String(row.id))?.protocol === 'adopt') return false;
+        if (row.status === 'dispatched') {
+          const policy = this.ctx.systemPrompts().dispatchPolicy(String(row.id));
+          if (policy?.protocol === 'adopt' && (policy.state === 'proposed' || (policy.state === 'adopted' && onlyAttemptId === undefined))) return false;
+        }
         restarts.expireUnstartedResumeWithinTransaction(String(row.id));
         return !restarts.protectsFromOrphanRecovery(String(row.id));
       });

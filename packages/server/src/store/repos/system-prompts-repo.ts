@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createId, nowIso } from "@multiremi/ids.js";
 import type { StoreContext } from "../context.js";
 import { runTurnExecutionMutation } from "../turn-execution-records.js";
-import { LEGACY_PROMPT_POLICY_WAIT_REASON, PROMPT_POLICY_WAIT_REASON } from "../task-wait-reason.js";
+import { PROMPT_POLICY_WAIT_REASON } from "../task-wait-reason.js";
 import {
   MAX_SYSTEM_PROMPT_CODE_POINTS, normalizeSystemPromptContent, serializeSystemPromptContent, samePolicyOffer, type PolicyOfferIdentity,
   type SystemPromptActor, type SystemPromptContent, type SystemPromptDefault, type SystemPromptEditInput,
@@ -169,11 +169,6 @@ export class SystemPromptsRepo {
       }
       const version = this.append(document, operation, operation === "reset" ? "default" : "custom",
         edited ?? restored?.content ?? currentDefault.content, baseDefault, actor, changeNote, input.requestId, requestHash, restored?.id ?? null);
-      if (!requiresPromptPolicyCapability(version.mode, currentDefault.revision)) {
-        runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET wait_reason = NULL, updated_at = ?
-          WHERE workspace_id = ? AND status IN ('queued', 'dispatched') AND wait_reason IN (?,?)`,
-        [nowIso(), workspaceId, PROMPT_POLICY_WAIT_REASON, LEGACY_PROMPT_POLICY_WAIT_REASON]);
-      }
       this.ctx.emitWorkspaceEvent({ type: "workspace:updated", workspaceId, actorType: actor.type === "human" ? "member" : "system",
         actorId: actor.operatorId, payload: { id: workspaceId } });
       this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId, actorType: "system", actorId: null,

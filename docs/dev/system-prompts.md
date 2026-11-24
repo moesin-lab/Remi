@@ -43,6 +43,10 @@ task hard deny 与 CLI parity deny 同步维护。原 appendix 的既有权限�
 offer 的 system_prompt_policy 对象完整发送。指令预算截短时，全文入口携带 attempt ID 和内容 SHA-256，从绑定读取五槽正文。
 新 daemon 经 provider home AGENTS.md 消费，最终指令纳入驻留启动指纹；内容变化按既有 config_changed 流程重建。
 当 custom 或服务端默认偏离首版等价基线时，claim 前要求 `prompt.policy.adopt.v1`。当前连接协商的能力、数据库内领取资格和设备等待原因共同决定排队诊断。诊断每次按创建时间与 ID 检查最多 32 项，正常领取沿用任务优先级。
+
+重置默认触发调度条件更新。调度器在原有分页扫描中清理自身的等候原因，设备等候和延迟重试沿用各自的规则。首轮上界在分页期间固定，新入队任务进入后续扫描。
+
+丢失采用请求、丢失成功回包、实际 provider 指令文件与 CLI 的同 attempt 读回见 `tests/integration/daemon-protocol-v2/task-report-recovery.test.ts`。`tests/integration/daemon-protocol-v2/planned-restart.test.ts` 覆盖升级前后 journal、双向能力协商、真实 socket 重连及冻结策略的续接。旧库发现水位、分区原件、上行回执与执行进程退出分别在 `tests/unit/daemon/task-report-outbox.test.ts` 验证。
 用户文字优先让出指令预算；只读协议自身超限必须显式失败。
 
 查看和修改入口为工作区设置的 Prompts 页，以及 `remi workspace system-prompt` 的

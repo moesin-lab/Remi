@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { chmodSync, existsSync, mkdirSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { openSqliteDatabase } from "../store/db/sqlite.js";
 import type { PolicyOfferIdentity } from "@multiremi/contracts/system-prompt-policy.js";
 import { dirname } from "node:path";
@@ -155,10 +155,22 @@ export class MultiremiTaskReportOutbox {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS policy_launch_owners(receipt_id TEXT PRIMARY KEY,pid INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS restart_incidents(source TEXT, handoff TEXT, high_id INTEGER NOT NULL, PRIMARY KEY(source,handoff));
       CREATE TABLE IF NOT EXISTS restart_members(source TEXT, handoff TEXT, task_id TEXT, PRIMARY KEY(source,handoff,task_id));
       CREATE INDEX IF NOT EXISTS restart_member_tasks ON restart_members(task_id);
+      CREATE TABLE IF NOT EXISTS restart_scan_sources(source TEXT,handoff TEXT,store_id TEXT,high_id INTEGER NOT NULL,
+        cursor INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(source,handoff,store_id));
+      CREATE TABLE IF NOT EXISTS restart_legacy_inventory(source TEXT,handoff TEXT,store_id TEXT,file_identity TEXT,
+        id INTEGER,task_id TEXT,idempotency_key TEXT,PRIMARY KEY(source,handoff,store_id,id));
+      CREATE TRIGGER IF NOT EXISTS restart_scan_preserve_delete BEFORE DELETE ON outbox_events
+        WHEN EXISTS(SELECT 1 FROM restart_scan_sources WHERE cursor<high_id) BEGIN SELECT RAISE(IGNORE); END;
+      CREATE TRIGGER IF NOT EXISTS restart_scan_preserve_update BEFORE UPDATE ON outbox_events
+        WHEN EXISTS(SELECT 1 FROM restart_scan_sources WHERE cursor<high_id) BEGIN SELECT RAISE(IGNORE); END;
       CREATE TABLE IF NOT EXISTS restart_delivery_evidence(event_id INTEGER PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS recovered_input_replies(event_id INTEGER PRIMARY KEY);
+      CREATE TRIGGER IF NOT EXISTS recovered_input_cleanup AFTER DELETE ON outbox_events
+        BEGIN DELETE FROM recovered_input_replies WHERE event_id=OLD.id; END;
       CREATE TABLE IF NOT EXISTS restart_uncertain(source TEXT,handoff TEXT,server_high TEXT,PRIMARY KEY(source,handoff));
       CREATE TABLE IF NOT EXISTS restart_mappings(source TEXT,handoff TEXT,task_id TEXT,PRIMARY KEY(source,handoff,task_id));
       CREATE TABLE IF NOT EXISTS unverified_report_origins(task_id TEXT PRIMARY KEY);
@@ -191,18 +203,22 @@ export class MultiremiTaskReportOutbox {
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
     this.onTaskBlocked = options.onTaskBlocked ?? null;
     this.deliveryBatchSize = Math.max(1, Math.floor(options.deliveryBatchSize ?? DEFAULT_TASK_MESSAGE_BATCH_COUNT));
+    const incidents = options.discoverRestartHolds?.() ?? [];
     this.db.transaction(() => {
-      for (const incident of options.discoverRestartHolds?.() ?? []) {
+      for (const incident of incidents) {
         if (incident.awaitingGrant && incident.attempt) this.db.run("INSERT OR IGNORE INTO restart_members VALUES('pending-grant',?,?)",[incident.handoff,incident.attempt]);
         else if (incident.awaitingGrant === false && incident.attempt) this.db.run("DELETE FROM restart_members WHERE source='pending-grant' AND handoff=? AND task_id=?",[incident.handoff,incident.attempt]);
-        else this.freezeIncident(incident);
+        else this.discoverIncident(incident);
       }
-    })();
+    }).immediate();
+    try { this.finishIncidentScans(); }
+    catch (error) { this.closeDatabase(); throw error; }
+    for (const incident of incidents) {
+      if (incident.awaitingGrant === undefined && incident.attempt) this.mapIncident(incident.source,incident.handoff,incident.attempt);
+    }
     // A paused completion belonged to the previous process's executor. Recover
     // its original reply directly; no provider remains to act on the reminder.
-    this.db.run(`UPDATE outbox_events SET status='pending', next_attempt_at=NULL,
-      payload=json_set(payload, '$.input_unread_fallback', json('true'))
-      WHERE status='input_unread' AND kind='turn.complete'`);
+    this.recoverInputs();
     this.db.run("UPDATE outbox_events SET next_attempt_at = NULL WHERE status = 'pending'");
     // Older versions parked late usage behind a rejected execution report.
     // Recovered usage must still pass the server's immutable-run AND current
@@ -210,6 +226,7 @@ export class MultiremiTaskReportOutbox {
     const revoked = this.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value='authority_revoked'").all() as Array<{ key: string }>;
     for (const row of revoked) {
       const taskId = row.key.slice("blocked-code:".length);
+      if (this.isHeld(taskId)) continue;
       if (!this.query("SELECT id FROM outbox_events WHERE task_id=? AND kind='usage' LIMIT 1").get(taskId)) continue;
       this.purgeTask(taskId, { keepUsage: true });
       this.db.run("UPDATE outbox_events SET status='pending',last_error=NULL,next_attempt_at=NULL WHERE task_id=? AND kind='usage'", [taskId]);
@@ -221,6 +238,7 @@ export class MultiremiTaskReportOutbox {
     this.db.transaction(() => {
       for (const row of rejectedUpdates) {
         const taskId = row.key.slice("blocked-code:".length);
+        if (this.isHeld(taskId)) continue;
         this.db.run("DELETE FROM outbox_events WHERE task_id=? AND status='blocked' AND kind='runtime.update_result' AND json_extract(payload,'$.status')='running'", [taskId]);
         this.db.run("UPDATE outbox_events SET status='pending',last_error=NULL,next_attempt_at=NULL WHERE task_id=? AND status='blocked'", [taskId]);
         this.db.run("DELETE FROM outbox_meta WHERE key IN (?,?)", [`blocked:${taskId}`, `blocked-code:${taskId}`]);
@@ -229,6 +247,7 @@ export class MultiremiTaskReportOutbox {
     const invalid = this.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value='invalid_report'").all() as Array<{ key: string }>;
     for (const row of invalid) {
       const taskId = row.key.slice("blocked-code:".length);
+      if (this.isHeld(taskId)) continue;
       // Older generic HTTP authority failures used the same fallback code.
       // Only an explicit payload-validation RPC rejection proves this upgrade
       // can reopen the partition; HTTP/global authority barriers stay intact.
@@ -245,52 +264,77 @@ export class MultiremiTaskReportOutbox {
 
   private readonly heldAttempts = new Set<string>();
 
-  private freezeIncident(incident: { source: string; handoff: string; attempt: string | null; legacyPaths: string[] }): void {
-    const { source, handoff, attempt } = incident;
+  private mapIncident(source: string, handoff: string, attempt: string): void {
     this.db.transaction(() => {
-      const created = this.db.run(`INSERT OR IGNORE INTO restart_incidents SELECT ?,?,COALESCE(MAX(id),0) FROM outbox_events`, [source,handoff]);
-      if (attempt) {
-        this.db.run('INSERT OR IGNORE INTO restart_mappings VALUES(?,?,?)',[source,handoff,attempt]);
-        this.db.run('INSERT OR IGNORE INTO restart_members VALUES(?,?,?)', [source,handoff,attempt]);
-        if (this.query('SELECT 1 FROM restart_mappings WHERE source=? AND handoff=? AND task_id<>? LIMIT 1').get(source,handoff,attempt)) {
-          this.db.run('INSERT OR IGNORE INTO restart_members SELECT source,handoff,task_id FROM restart_source_rows WHERE source=? AND handoff=?',[source,handoff]);
-          this.db.run('INSERT OR IGNORE INTO restart_uncertain(source,handoff) VALUES(?,?)',[source,handoff]);
-          return;
-        }
+      const added = this.db.run('INSERT OR IGNORE INTO restart_mappings VALUES(?,?,?)',[source,handoff,attempt]);
+      this.db.run('INSERT OR IGNORE INTO restart_members VALUES(?,?,?)', [source,handoff,attempt]);
+      const conflict = this.query('SELECT 1 FROM restart_mappings WHERE source=? AND handoff=? AND task_id<>? LIMIT 1').get(source,handoff,attempt);
+      if (conflict) {
+        this.db.run('INSERT OR IGNORE INTO restart_members SELECT source,handoff,task_id FROM restart_source_rows WHERE source=? AND handoff=?',[source,handoff]);
+        this.db.run('INSERT OR IGNORE INTO restart_uncertain(source,handoff) VALUES(?,?)',[source,handoff]);
+      } else {
         this.db.run('DELETE FROM restart_members WHERE source=? AND handoff=? AND task_id<>?', [source,handoff,attempt]);
         this.db.run('DELETE FROM restart_uncertain WHERE source=? AND handoff=?',[source,handoff]);
-        return;
       }
+      if (added.changes) log.info('Restart handoff mapping recorded',{handoff,attempt,conflict:Boolean(conflict)});
+    }).immediate();
+  }
+
+  private discoverIncident(incident: { source: string; handoff: string; legacyPaths: string[] }): void {
+      const {source,handoff} = incident;
+      const created = this.db.run(`INSERT OR IGNORE INTO restart_incidents SELECT ?,?,COALESCE(MAX(id),0) FROM outbox_events`, [source,handoff]);
       if (!created.changes) return;
       this.db.run('INSERT INTO restart_uncertain(source,handoff) VALUES(?,?)',[source,handoff]);
-      this.db.run(`INSERT OR IGNORE INTO restart_members SELECT ?,?,e.task_id FROM outbox_events e WHERE e.task_id NOT LIKE 'rt:%' AND NOT EXISTS (
-        SELECT 1 FROM policy_execution_lanes l JOIN policy_offer_receipts p ON p.attempt_id=l.task_id AND p.receipt_id=l.receipt_id
-        WHERE l.task_id=e.task_id AND l.lane<>? AND json_valid(e.payload) AND json_extract(e.payload,'$.receipt_id')=l.receipt_id
-        AND json_extract(e.payload,'$.offer_generation')=p.offer_generation AND json_extract(e.payload,'$.content_hash')=p.content_hash
-        AND json_extract(e.payload,'$.runtime_id')=p.runtime_id AND p.state IN ('launch_claimed','terminal'))`, [source,handoff,source]);
-      this.db.run(`INSERT OR IGNORE INTO restart_source_rows SELECT ?,?,'shared',id,idempotency_key,task_id FROM outbox_events
-        WHERE task_id IN (SELECT task_id FROM restart_members WHERE source=? AND handoff=?)`,[source,handoff,source,handoff]);
+      this.db.run(`INSERT INTO restart_scan_sources(source,handoff,store_id,high_id)
+        SELECT source,handoff,'shared',high_id FROM restart_incidents WHERE source=? AND handoff=?`,[source,handoff]);
       for (const path of incident.legacyPaths) {
         if (!existsSync(path)) continue;
         const legacy = openSqliteDatabase(path, { readonly: true });
         try {
-          let cursor = 0;
-          for (;;) {
-            const rows = legacy.query('SELECT id,task_id,idempotency_key FROM outbox_events WHERE id>? ORDER BY id LIMIT 128').all(cursor) as Array<{id:number;task_id:string;idempotency_key:string}>;
-            for (const row of rows) if (!row.task_id.startsWith('rt:')) {
-              this.db.run('INSERT OR IGNORE INTO restart_members VALUES(?,?,?)',[source,handoff,row.task_id]);
-              this.db.run('INSERT OR IGNORE INTO restart_source_rows VALUES(?,?,?,?,?,?)',[source,handoff,path,row.id,row.idempotency_key,row.task_id]);
+          legacy.transaction(() => {
+            const file = statSync(path,{bigint:true});
+            const fileIdentity = `${file.dev}:${file.ino}:${file.birthtimeNs}`;
+            const {high} = legacy.query('SELECT COALESCE(MAX(id),0) AS high FROM outbox_events').get() as {high:number};
+            this.db.run('INSERT OR IGNORE INTO restart_scan_sources(source,handoff,store_id,high_id) VALUES(?,?,?,?)',[source,handoff,path,high]);
+            const rows = legacy.query("SELECT id,task_id,idempotency_key FROM outbox_events WHERE task_id NOT LIKE 'rt:%' ORDER BY id");
+            for (const row of rows.iterate() as Iterable<{id:number;task_id:string;idempotency_key:string}>) {
+              this.db.run('INSERT OR IGNORE INTO restart_legacy_inventory VALUES(?,?,?,?,?,?,?)',[source,handoff,path,fileIdentity,row.id,row.task_id,row.idempotency_key]);
             }
-            if (rows.length < 128) break;
-            cursor = rows[rows.length-1]!.id;
-          }
+          })();
         } finally { legacy.close(); }
       }
-    }).immediate();
+  }
+
+  private finishIncidentScans(): void {
+    const scans = this.query('SELECT * FROM restart_scan_sources WHERE cursor<high_id').all() as Array<{source:string;handoff:string;store_id:string;high_id:number;cursor:number}>;
+    for (const scan of scans) {
+      const shared = scan.store_id === 'shared';
+      {
+        const related = shared ? `AND NOT EXISTS (SELECT 1 FROM policy_execution_lanes l JOIN policy_offer_receipts p
+          ON p.attempt_id=l.task_id AND p.receipt_id=l.receipt_id WHERE l.task_id=e.task_id AND l.lane<>?
+          AND json_valid(e.payload) AND json_extract(e.payload,'$.receipt_id')=l.receipt_id
+          AND json_extract(e.payload,'$.offer_generation')=p.offer_generation AND json_extract(e.payload,'$.content_hash')=p.content_hash
+          AND json_extract(e.payload,'$.runtime_id')=p.runtime_id AND p.state IN ('launch_claimed','terminal'))` : '';
+        const page = this.query(shared ? `SELECT id,task_id,idempotency_key FROM outbox_events e WHERE id>? AND id<=? AND task_id NOT LIKE 'rt:%' ${related} ORDER BY id LIMIT 128`
+          : 'SELECT id,task_id,idempotency_key FROM restart_legacy_inventory WHERE id>? AND id<=? AND source=? AND handoff=? AND store_id=? ORDER BY id LIMIT 128');
+        while (scan.cursor < scan.high_id) {
+          this.db.transaction(() => {
+            const rows = page.all(scan.cursor,scan.high_id,...(shared ? [scan.source] : [scan.source,scan.handoff,scan.store_id])) as Array<{id:number;task_id:string;idempotency_key:string}>;
+            for (const row of rows) {
+              this.db.run('INSERT OR IGNORE INTO restart_source_rows VALUES(?,?,?,?,?,?)',[scan.source,scan.handoff,scan.store_id,row.id,row.idempotency_key,row.task_id]);
+              this.db.run('INSERT OR IGNORE INTO restart_members VALUES(?,?,?)',[scan.source,scan.handoff,row.task_id]);
+            }
+            scan.cursor = rows.length === 128 ? rows[rows.length-1]!.id : scan.high_id;
+            this.db.run('UPDATE restart_scan_sources SET cursor=MAX(cursor,?) WHERE source=? AND handoff=? AND store_id=?',[scan.cursor,scan.source,scan.handoff,scan.store_id]);
+          }).immediate();
+        }
+      }
+    }
   }
 
   isHeld(taskId: string): boolean {
-    return this.heldAttempts.has(taskId) || Boolean(this.query('SELECT 1 FROM restart_members WHERE task_id=? UNION ALL SELECT 1 FROM unverified_report_origins WHERE task_id=? LIMIT 1').get(taskId,taskId));
+    return this.heldAttempts.has(taskId) || Boolean(this.query(`SELECT 1 FROM restart_scan_sources WHERE cursor<high_id
+      UNION ALL SELECT 1 FROM restart_members WHERE task_id=? UNION ALL SELECT 1 FROM unverified_report_origins WHERE task_id=? LIMIT 1`).get(taskId,taskId));
   }
 
   uncertainHandoffs() {
@@ -308,8 +352,23 @@ export class MultiremiTaskReportOutbox {
   }
 
   recordHandoffEvidence(source: string, handoff: string, attempt: string | null, high: string): void {
-    if (attempt) this.freezeIncident({source,handoff,attempt,legacyPaths:[]});
+    if (attempt) {
+      this.mapIncident(source,handoff,attempt);
+      this.recoverInputs(true);
+      this.ensurePump('');
+    }
     else this.db.run('UPDATE restart_uncertain SET server_high=COALESCE(server_high,?) WHERE source=? AND handoff=?',[high,source,handoff]);
+  }
+
+  private recoverInputs(incidentOnly = false): void {
+    const selection = `status='input_unread' AND kind='turn.complete' ${incidentOnly ? `AND EXISTS(SELECT 1 FROM restart_source_rows r
+      WHERE r.task_id=outbox_events.task_id AND r.original_key=outbox_events.idempotency_key)` : ''}
+      AND NOT EXISTS(SELECT 1 FROM restart_members WHERE task_id=outbox_events.task_id)
+      AND NOT EXISTS(SELECT 1 FROM unverified_report_origins WHERE task_id=outbox_events.task_id)`;
+    this.db.transaction(() => {
+      this.db.run(`INSERT OR IGNORE INTO recovered_input_replies SELECT id FROM outbox_events WHERE ${selection}`);
+      this.db.run(`UPDATE outbox_events SET status='pending',next_attempt_at=NULL WHERE ${selection}`);
+    }).immediate();
   }
 
   canProveNewAttempt(createdAt: unknown): boolean {
@@ -341,14 +400,18 @@ export class MultiremiTaskReportOutbox {
   classifyReport(taskId: string, receipt: unknown): boolean {
     if (taskId.startsWith('rt:')) return false;
     if (this.isHeld(taskId)) return true;
-    if (!this.query('SELECT 1 FROM restart_uncertain LIMIT 1').get()) return false;
-    const known = this.query('SELECT created_at FROM verified_new_attempts WHERE task_id=? AND receipt_id=?').get(taskId,String(receipt ?? '')) as {created_at:string}|null;
-    if (known && this.canProveNewAttempt(known.created_at)) return false;
-    const otherLane = this.query(`SELECT 1 FROM policy_execution_lanes l WHERE task_id=? AND receipt_id=?
-      AND NOT EXISTS(SELECT 1 FROM restart_uncertain WHERE source=l.lane)`).get(taskId,String(receipt ?? ''));
-    if (otherLane) return false;
+    if (this.provesIndependentExecution(taskId,receipt)) return false;
     this.db.run('INSERT OR IGNORE INTO unverified_report_origins VALUES(?)',[taskId]);
     return true;
+  }
+
+  private provesIndependentExecution(taskId:string, receipt:unknown): boolean {
+    if (!this.query('SELECT 1 FROM restart_uncertain LIMIT 1').get()) return true;
+    const known = this.query('SELECT created_at FROM verified_new_attempts WHERE task_id=? AND receipt_id=?').get(taskId,String(receipt ?? '')) as {created_at:string}|null;
+    if (known && this.canProveNewAttempt(known.created_at)) return true;
+    const otherLane = this.query(`SELECT 1 FROM policy_execution_lanes l WHERE task_id=? AND receipt_id=?
+      AND NOT EXISTS(SELECT 1 FROM restart_uncertain WHERE source=l.lane)`).get(taskId,String(receipt ?? ''));
+    return Boolean(otherLane);
   }
 
   preparedOffers(runtimeId: string): PolicyOfferIdentity[] {
@@ -383,10 +446,26 @@ export class MultiremiTaskReportOutbox {
   transitionPolicyReceipt(identity: PolicyOfferIdentity, operation: 'launch'|'forget_revoked'|'terminal'): boolean {
     const sql = operation === 'forget_revoked' ? 'DELETE FROM policy_offer_receipts' :
       `UPDATE policy_offer_receipts SET state='${operation === 'launch' ? 'launch_claimed' : 'terminal'}'`;
-    return this.db.run(`${sql} WHERE workspace_id=? AND daemon_id=? AND runtime_id=? AND attempt_id=?
+    return this.db.transaction(() => {
+      const changed = this.db.run(`${sql} WHERE workspace_id=? AND daemon_id=? AND runtime_id=? AND attempt_id=?
       AND offer_generation=? AND content_hash=? AND receipt_id=? AND state=?`, [identity.workspace_id, identity.daemon_id,
       identity.runtime_id, identity.attempt_id, identity.offer_generation, identity.content_hash, identity.receipt_id,
       operation === 'terminal' ? 'launch_claimed' : 'prepared']).changes === 1;
+      if (changed && operation === 'launch') this.db.run('INSERT INTO policy_launch_owners VALUES(?,?)',[identity.receipt_id,process.pid]);
+      return changed;
+    }).immediate();
+  }
+
+  exitedLaunches(runtime: string): PolicyOfferIdentity[] {
+    const receipts = this.query(`SELECT p.*,o.pid FROM policy_offer_receipts p JOIN policy_launch_owners o USING(receipt_id)
+      WHERE p.runtime_id=? AND p.state='launch_claimed' AND NOT EXISTS(SELECT 1 FROM outbox_events WHERE task_id=p.attempt_id)`)
+      .all(runtime) as Array<PolicyOfferIdentity & {pid:number;state:string}>;
+    return receipts.flatMap(({pid,state,...identity}) => {
+      if (pid<=0 || pid===process.pid || this.isHeld(identity.attempt_id) || !this.provesIndependentExecution(identity.attempt_id,identity.receipt_id)) return [];
+      try { process.kill(pid,0); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return [identity]; }
+      return [];
+    });
   }
 
   /** Persist a report and wake the task's delivery pump. Never throws on queue pressure. */
@@ -477,12 +556,22 @@ export class MultiremiTaskReportOutbox {
         for (const row of rows.iterate() as Iterable<Record<string,unknown>>) {
           const key = `imported:${prefix}:${row.idempotency_key}`;
           if (this.readMeta(key)) continue;
+          const collision = this.query('SELECT task_id FROM outbox_events WHERE idempotency_key=?').get(String(row.idempotency_key)) as {task_id:string}|null;
+          if (collision) {
+            this.db.run('INSERT OR IGNORE INTO unverified_report_origins VALUES(?)',[collision.task_id]);
+            this.db.run('INSERT OR IGNORE INTO unverified_report_origins VALUES(?)',[String(row.task_id)]);
+          }
           this.classifyReport(String(row.task_id),toRecord(row).payload.receipt_id);
           const inserted = this.db.run(`INSERT INTO outbox_events(idempotency_key,task_id,kind,payload,seq,terminal,status,attempts,next_attempt_at,last_error,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[String(row.idempotency_key),String(row.task_id),String(row.kind),String(row.payload),Number(row.seq),Number(row.terminal),
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[collision ? randomUUID() : String(row.idempotency_key),String(row.task_id),String(row.kind),String(row.payload),Number(row.seq),Number(row.terminal),
               String(row.status),Number(row.attempts),row.next_attempt_at == null ? null : Number(row.next_attempt_at),row.last_error == null ? null : String(row.last_error),String(row.created_at)]);
           this.db.run('INSERT INTO legacy_outbox_origins VALUES(?,?,?,?,?)',[Number(inserted.lastInsertRowid),path,Number(row.id),String(row.idempotency_key),runtimeId ?? null]);
           if (row.status === 'blocked' && !this.isHeld(String(row.task_id))) this.blockPartition(String(row.task_id), 'legacy permanent delivery error');
+          if (row.status === 'input_unread' && row.kind === 'turn.complete' && !this.isHeld(String(row.task_id))) {
+            const eventId = Number(inserted.lastInsertRowid);
+            this.db.run('INSERT OR IGNORE INTO recovered_input_replies VALUES(?)',[eventId]);
+            this.db.run("UPDATE outbox_events SET status='pending',next_attempt_at=NULL WHERE id=?",[eventId]);
+          }
           this.writeMeta(key, "1");
         }
       })())();
@@ -633,6 +722,10 @@ export class MultiremiTaskReportOutbox {
     this.recordWaiters.clear();
     for (const [taskId] of this.drainWaiters) this.settleDrainWaiters(taskId, "aborted");
     await Promise.allSettled([...this.inFlight.values()].map(item => item.done));
+    this.closeDatabase();
+  }
+
+  private closeDatabase(): void {
     // Bun 1.3.14 only caches the first 20 db.query() statements. Statements
     // beyond that limit survive db.close() until GC, retaining Windows locks.
     for (const statement of this.statements.values()) statement.finalize();
@@ -853,6 +946,7 @@ export class MultiremiTaskReportOutbox {
   }
 
   private blockPartition(taskId: string, error: string, code = "protocol_violation"): void {
+    if (this.isHeld(taskId)) return;
     const first = this.readMeta(`blocked:${taskId}`) === null;
     this.writeMeta(`blocked:${taskId}`, error.slice(0, 2_000));
     this.writeMeta(`blocked-code:${taskId}`, code);
@@ -871,12 +965,17 @@ export class MultiremiTaskReportOutbox {
 
   private nextDelivery(taskId: string): OutboxDelivery | null {
     const rows = this.query(
-      "SELECT e.*,l.route_runtime FROM outbox_events e LEFT JOIN legacy_outbox_origins l ON l.event_id=e.id WHERE e.task_id = ? AND e.status = 'pending' ORDER BY e.id ASC LIMIT ?",
+      `SELECT e.*,l.route_runtime FROM outbox_events e LEFT JOIN legacy_outbox_origins l ON l.event_id=e.id WHERE e.task_id = ?
+       AND (e.status='pending' OR EXISTS(SELECT 1 FROM restart_source_rows r WHERE r.task_id=e.task_id AND r.original_key=e.idempotency_key))
+       ORDER BY e.id ASC LIMIT ?`,
     ).all(taskId, this.deliveryBatchSize) as Array<Record<string, unknown>>;
     const firstRow = rows[0];
     if (!firstRow) return null;
     const first = toRecord(firstRow);
-    if (String(firstRow.status) === "blocked") {
+    if (first.kind === 'turn.complete' && this.query('SELECT 1 FROM recovered_input_replies WHERE event_id=?').get(first.id)) {
+      first.payload = {...first.payload,input_unread_fallback:true};
+    }
+    if (firstRow.status !== 'pending') {
       return { record: first, recordIds: [first.id], blocked: true };
     }
     if (first.kind !== "messages") {
@@ -886,7 +985,7 @@ export class MultiremiTaskReportOutbox {
     const records: MultiremiOutboxRecord[] = [];
     const messages: TaskMessageInput[] = [];
     for (const row of rows) {
-      if (String(row.status) === "blocked") break;
+      if (row.status !== 'pending') break;
       const record = toRecord(row);
       if (record.kind !== "messages") break;
       const recordMessages = Array.isArray(record.payload.messages)

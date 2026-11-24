@@ -71,6 +71,30 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  it('recovers an adopted dispatch only for the exited executor receipt, with a new attempt for retry', async () => {
+    const h = fixture();
+    const agentId = h.agentIds[0]!;
+    const issue = createResponsibleTestIssue(h.store,{title:'Lost executor',assigneeType:'agent',assigneeId:agentId});
+    const task = h.store.createTask({agentId,issueId:issue.id,prompt:'crash before provider start',maxAttempts:2});
+    await h.hello(['offer','prompt.policy.adopt.v1']);
+    const offer = h.offered()[0]!;
+    await h.accept(offer);
+    const proof = {workspace_id:'local',daemon_id:'dmn_offer',runtime_id:offer.rt,attempt_id:task.id,offer_generation:offer.p.offer_generation,
+      receipt_id:`receipt-${offer.seq}`,content_hash:h.store.getAttemptSystemPrompt(task.id)!.contentHash};
+    const ready = async (receipt:typeof proof,active:string[]) => {
+      await h.send('runtime.ready',{active_task_ids:active,exited_launches:[receipt]},{rt:offer.rt});
+      await h.layer.drain();
+    };
+    await ready({...proof,receipt_id:'unrelated'},[]);
+    await ready(proof,[task.id]);
+    expect(h.store.getTask(task.id)?.status).toBe('dispatched');
+    await ready(proof,[]);
+    expect(h.store.getTask(task.id)?.failureReason).toBe('runtime_recovery');
+    const attempts = h.store.listTurnAttempts(offer.p.turn_id);
+    expect(attempts).toHaveLength(2);
+    await ready(proof,[]);
+    expect(h.store.listTurnAttempts(offer.p.turn_id)).toHaveLength(2);
+  });
   it('fences a superseded term, rolls back adoption and races two SQLite writers', async () => {
     const h = fixture(undefined,1,undefined,false,false);
     const task = h.task();
@@ -809,6 +833,14 @@ describe("System Prompt policy claim and offer", () => {
     expect(h.store.claimTask(runtime)).toBeNull();
     expect(marked()).toBe(65);
     expect(h.store.getTask(later.id)?.waitReason).toBeNull();
+    mutateExecutionFixture(db!,"UPDATE multiremi_turn_execution_records SET next_retry_at=? WHERE workspace_id=? AND status='queued'",['2099-01-01T00:00:00Z','local']);
+    h.store.resetSystemPrompt('local',{expectedRevision:2,requestId:'bounded-reset'},actor);
+    expect(marked()).toBe(65);
+    for (const remaining of [33,1,0]) {
+      expect(h.store.claimTask(runtime,{policyProtocol:'legacy'})).toBeNull();
+      expect(marked()).toBe(remaining);
+    }
+    mutateExecutionFixture(db!,"UPDATE multiremi_turn_execution_records SET next_retry_at=NULL WHERE workspace_id=? AND status='queued'",['local']);
     expect(h.store.claimTask(runtime, { supportsPromptPolicy: true })?.id).toBe(ids.at(-1)!);
   });
 

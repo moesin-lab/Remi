@@ -561,7 +561,20 @@ export class DaemonTaskOffers {
     }
     const holds = Array.isArray(frame.payload.held_restart_attempts) ? frame.payload.held_restart_attempts : [];
     session.heldRestartAttempts.set(runtimeId,holds.filter(entry => entry && typeof entry.attempt_id === 'string' && typeof entry.handoff_id === 'string'));
-    this.options.store.recoverOrphans(runtimeId, [...ids as string[],...this.validatedHolds(session,runtimeId)]);
+    const protectedIds = [...ids as string[],...this.validatedHolds(session,runtimeId)];
+    if (session.supportsPromptPolicy && Array.isArray(frame.payload.exited_launches)) {
+      const workspace = store.getRuntimeLite(runtimeId)?.workspaceId ?? 'local';
+      for (const proof of frame.payload.exited_launches) {
+        if (!proof || proof.runtime_id !== runtimeId || proof.daemon_id !== session.daemonId || proof.workspace_id !== workspace
+          || typeof proof.attempt_id !== 'string' || protectedIds.includes(proof.attempt_id)) continue;
+        store.systemPromptsRepo().withReportPolicy(workspace,() => {
+          if (store.systemPromptsRepo().offerStatus(proof) === 'adopted' && !store.plannedRestarts().get(proof.attempt_id)) {
+            store.recoverOrphanAttempt(runtimeId,proof.attempt_id);
+          }
+        });
+      }
+    }
+    this.options.store.recoverOrphans(runtimeId, protectedIds);
     this.kick(runtimeId);
   }
 }

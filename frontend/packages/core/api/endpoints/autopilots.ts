@@ -13,7 +13,7 @@ import type {
   UpdateAutopilotTriggerRequest,
   WebhookDelivery,
 } from "../../types";
-import type { HttpClient } from "../http";
+import { ApiError, type HttpClient } from "../http";
 import { ApiContractError, parseStrictResponse, parseWithFallback } from "../schema";
 import {
   AutopilotRunSchema,
@@ -34,7 +34,7 @@ import {
 } from "../schemas/autopilots";
 
 export class UnconfirmedAutopilotCreateError extends ApiContractError {
-  constructor(readonly autopilotId: string | null) {
+  constructor(readonly autopilotId: string | null, readonly outcome: "accepted" | "unknown" = "accepted") {
     super("POST /api/autopilots");
   }
 }
@@ -74,8 +74,13 @@ export class AutopilotsEndpoints {
       extraHeaders: { "Content-Type": "application/json" },
       method: "POST",
       body: JSON.stringify(data),
+    }).catch((error: unknown) => {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) throw error;
+      throw new UnconfirmedAutopilotCreateError(null, "unknown");
     });
-    const raw: unknown = await response.json().catch(() => null);
+    const raw: unknown = await response.json().catch(() => {
+      throw new UnconfirmedAutopilotCreateError(null, "unknown");
+    });
     const id = raw && typeof raw === "object" && "id" in raw && typeof raw.id === "string" && /^[\w-]+$/.test(raw.id) ? raw.id : null;
     if (!id) throw new UnconfirmedAutopilotCreateError(null);
     try {

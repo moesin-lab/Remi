@@ -165,6 +165,18 @@ describe("ApiClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["headers", "body", "server error", "forbidden"])("distinguishes uncertain create from rejection at %s", async outcome => {
+    const create = vi.fn(async () => {
+      if (outcome === "headers") throw new TypeError("Connection lost");
+      if (outcome === "body") return new Response(new ReadableStream({ start(controller) { controller.error(new Error("Disconnected")); } }), { status: 201 });
+      return Response.json({ error: "Request failed" }, { status: outcome === "forbidden" ? 403 : 502 });
+    });
+    vi.stubGlobal("fetch", create);
+    const result = new ApiClient("https://api.example.test").createAutopilot({ title: "Report", assignee_id: "agent", execution_mode: "run_only" });
+    await expect(result).rejects.toMatchObject(outcome === "forbidden" ? { status: 403 } : { autopilotId: null, outcome: "unknown" });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
   it("fetches workspace-scoped delivery targets and rejects a malformed list", async () => {
     const target = { id: "chat", title: "Daily", channel: "feishu" };
     const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ targets: [target] })).mockResolvedValueOnce(Response.json({}));

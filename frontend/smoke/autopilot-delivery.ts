@@ -42,7 +42,7 @@ portProbe.stop(true);
 const frontend = `http://127.0.0.1:${port}`;
 const next = Bun.spawn(["node", require.resolve("next/dist/bin/next"), "dev", "--webpack", "--hostname", "127.0.0.1", "--port", String(port)], {
   cwd: resolve(import.meta.dir, "../apps/web"), stdout: "ignore", stderr: "inherit",
-  env: { ...process.env, NODE_ENV: "development", NEXT_TELEMETRY_DISABLED: "1", REMOTE_API_URL: `http://127.0.0.1:${server.port}`, NEXT_PUBLIC_API_URL: "", NEXT_PUBLIC_WS_URL: "" },
+  env: { ...process.env, NODE_ENV: "development", NEXT_TELEMETRY_DISABLED: "1", REMOTE_API_URL: `http://127.0.0.1:${server.port}`, NEXT_PUBLIC_API_URL: "", NEXT_PUBLIC_WS_URL: `ws://127.0.0.1:${server.port}/ws` },
 });
 let browser;
 try {
@@ -62,6 +62,14 @@ try {
   ]);
   await context.addInitScript(value => localStorage.setItem("multimira_token", value), token);
   const page = await context.newPage();
+  const migrationSignals: unknown[] = [];
+  page.on("websocket", socket => {
+    if (new URL(socket.url()).pathname !== "/ws") return;
+    socket.on("framereceived", ({ payload }) => {
+      const frame = JSON.parse(payload.toString());
+      if (frame.type === "autopilot:delivery_targets_changed") migrationSignals.push(frame.payload);
+    });
+  });
   page.setDefaultTimeout(30_000);
   const unbound = "Reports are saved only in the internal session. No report is sent to a user Chat.";
   await page.goto(`${frontend}/${workspace.slug}/autopilots`, { timeout: 120_000 });
@@ -120,7 +128,7 @@ try {
   await dialog.waitFor({ state: "hidden" });
   await page.reload();
   await page.getByRole("link", { name: /Created in browser/ }).getByText(`${second.title} · Feishu · ${second.id}`).waitFor();
-  for (const scenario of ["missing target", "different target", "missing ID"]) {
+  for (const scenario of ["missing target", "different target", "missing ID", "lost headers", "explicit rejection"]) {
     let posts = 0;
     let committedId = "";
     const path = "**/api/autopilots";
@@ -128,10 +136,12 @@ try {
       if (route.request().method() !== "POST") return route.continue();
       posts++;
       assert.equal(route.request().postDataJSON().delivery_chat_session_id, second.id);
+      if (scenario === "explicit rejection" && posts === 1) return route.fulfill({ status: 403, json: { error: "Forbidden" } });
       const response = await route.fetch();
       assert.equal(response.status(), 201);
       const body = await response.json();
       committedId = body.id;
+      if (scenario === "lost headers") return route.abort("connectionreset");
       if (scenario === "missing ID") delete body.id;
       if (scenario === "missing target") delete body.delivery_chat_session_id;
       if (scenario === "different target") {
@@ -147,12 +157,25 @@ try {
     await dialog.getByRole("button", { name: /^Run only/ }).click();
     await choose(second.id);
     await dialog.getByRole("button", { name: "Create autopilot", exact: true }).click();
+    if (scenario === "explicit rejection") {
+      await dialog.getByRole("alert").waitFor();
+      assert(await dialog.getByLabel("Autopilot name").isEditable());
+      await dialog.getByRole("button", { name: "Create autopilot", exact: true }).click();
+      await dialog.waitFor({ state: "hidden" });
+      assert.equal(posts, 2);
+      assert.equal(store.listAutopilotTriggers(committedId).length, 1);
+      await page.unroute(path);
+      continue;
+    }
     const resume = dialog.getByRole("button", { name: "Verify and continue" });
     await resume.waitFor();
     assert.equal(store.listAutopilotTriggers(committedId).length, 0);
-    if (scenario === "missing ID") {
+    if (scenario === "missing ID" || scenario === "lost headers") {
       assert(await resume.isDisabled());
       await dialog.getByText(/Check the autopilot list/).waitFor();
+      if (scenario === "lost headers") await dialog.getByText(/Could not confirm whether this autopilot was created/).waitFor();
+      await resume.click({ force: true });
+      assert.equal(store.listAutopilotTriggers(committedId).length, 0);
       await dialog.getByRole("button", { name: "Cancel" }).click();
     } else {
       await dialog.getByText(new RegExp(committedId)).waitFor();
@@ -165,6 +188,25 @@ try {
     assert.deepEqual(store.listAutopilots(workspace.id).filter(item => item.title === scenario).map(item => item.id), [committedId]);
     await page.unroute(path);
   }
+  await page.getByRole("link", { name: /Created in browser/ }).click();
+  await edit();
+  await dialog.getByRole("button", { name: "Choose delivery Chat" }).click();
+  const candidate = page.getByRole("button", { name: new RegExp(second.id) });
+  await candidate.waitFor();
+  const destination = store.createWorkspace({ name: "Migration destination" }, user.id);
+  const refresh = page.waitForResponse(response => new URL(response.url()).pathname === "/api/autopilot-delivery-targets" && response.ok());
+  const moved = await page.request.put(`${frontend}/api/agents/${bot.agent.id}`, {
+    headers: { Authorization: `Bearer ${token}` }, data: { workspace_id: destination.id },
+  });
+  assert.equal(moved.status(), 200);
+  assert(!(await (await refresh).json()).targets.some((target: { id: string }) => target.id === second.id));
+  await dialog.getByText(`Target unavailable · ${second.id}`).waitFor();
+  assert.deepEqual(migrationSignals, [{ workspace_id: workspace.id }]);
+  assert(await page.getByPlaceholder("Choose delivery Chat").isVisible());
+  assert.equal(await candidate.count(), 0);
+  assert.equal(await dialog.getByText(new RegExp(second.title)).count(), 0);
+  assert.equal(store.getAutopilot(createdId)?.deliveryChatSessionId, second.id);
+  console.log("PASS response loss after commit, explicit rejection retry, live Agent migration in open picker");
   console.log("PASS accepted create recovery, original ID and single trigger, missing ID blocks resubmission");
   console.log("PASS list, create, bind, change, reload, rejected archived target, retained draft, mode guard and explicit clear");
 } finally {

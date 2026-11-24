@@ -1,5 +1,6 @@
 {
   "delivery": {
+    "create_unknown": "Could not confirm whether this autopilot was created. Check the autopilot list before trying again.",
     "committed": "Autopilot created. Verify delivery and continue configuring this autopilot.",
     "resume": "Verify and continue",
     "inspect": "Creation was accepted. Check the autopilot list before making further changes.",

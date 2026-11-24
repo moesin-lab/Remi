@@ -6,7 +6,7 @@ import { issueKeys } from "../../issues/queries";
 import { projectKeys } from "../../projects/queries";
 import { projectDocKeys } from "../../project-docs/queries";
 import { pinKeys } from "../../pins/queries";
-import { autopilotKeys } from "../../autopilots/queries";
+import { autopilotKeys, deliveryTargetsOptions } from "../../autopilots/queries";
 import { runtimeKeys } from "../../runtimes/queries";
 import { runtimeModelsKeys } from "../../runtimes/models";
 import {
@@ -221,6 +221,11 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
 
   return {
     onAny: (msg) => {
+      if (msg.type === "autopilot:delivery_targets_changed") {
+        const payload = msg.payload as { workspace_id?: string } | null;
+        if (payload?.workspace_id) void qc.resetQueries({ queryKey: deliveryTargetsOptions(payload.workspace_id).queryKey, exact: true });
+        return;
+      }
       if (msg.type === "daemon:maintenance_changed") {
         void qc.invalidateQueries({ queryKey: platformLifecycleKeys.status() });
         return;

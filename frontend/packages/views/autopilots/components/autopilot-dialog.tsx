@@ -461,7 +461,7 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
   const createTrigger = useCreateAutopilotTrigger();
   const updateAutopilot = useUpdateAutopilot();
   const updateTrigger = useUpdateAutopilotTrigger();
-  const [committed, setCommitted] = useState<{ id: string | null; workspaceId: string } | null>(null);
+  const [committed, setCommitted] = useState<{ id: string | null; workspaceId: string; outcome: UnconfirmedAutopilotCreateError["outcome"] } | null>(null);
   const submitLock = useRef(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -678,7 +678,7 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
       }
     } catch (err) {
       if (isCreate && err instanceof UnconfirmedAutopilotCreateError) {
-        setCommitted({ id: err.autopilotId, workspaceId: wsId });
+        setCommitted({ id: err.autopilotId, workspaceId: wsId, outcome: err.outcome });
         return;
       }
       const message = err instanceof Error && err.message ? err.message
@@ -891,7 +891,8 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
         </div>
 
         {committed && <div role="alert" className="px-5 py-2 text-sm">
-          {committed.id ? `${t(($) => $.delivery.committed)} · ${committed.id}` : t(($) => $.delivery.inspect)}
+          {committed.outcome === "unknown" ? t(($) => $.delivery.create_unknown)
+            : committed.id ? `${t(($) => $.delivery.committed)} · ${committed.id}` : t(($) => $.delivery.inspect)}
           {deliveryError && <p>{deliveryError}</p>}
         </div>}
         {/* Footer */}

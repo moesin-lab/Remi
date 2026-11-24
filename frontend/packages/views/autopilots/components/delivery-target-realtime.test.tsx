@@ -11,7 +11,7 @@ import { DeliveryTarget } from "./delivery-target";
 
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "workspace" }));
 
-it.each(["archive", "delete", "access"])("revalidates the open picker after %s without changing focus", async change => {
+it.each(["archive", "delete", "access", "move"])("revalidates the open picker after %s without changing focus", async change => {
   const client = new ApiClient("/api");
   const targets = [{ id: "chat", title: "Private report", channel: "web_chat" as const }];
   const read = vi.spyOn(client, "listAutopilotDeliveryTargets").mockResolvedValue({ targets });
@@ -24,6 +24,7 @@ it.each(["archive", "delete", "access"])("revalidates the open picker after %s w
   registerAuthStore(authStore);
   const socket = new WSClient("ws://localhost");
   const subscriptions = vi.spyOn(socket, "on");
+  const allEvents = vi.spyOn(socket, "onAny");
   function Editor() {
     useRealtimeSync(socket, { authStore });
     return <DeliveryTarget value="chat" onChange={() => {}} />;
@@ -36,6 +37,10 @@ it.each(["archive", "delete", "access"])("revalidates the open picker after %s w
     let deny!: (reason: Error) => void;
     read.mockImplementationOnce(() => new Promise((resolve, reject) => { respond = resolve; deny = reject; }));
     act(() => {
+      if (change === "move") {
+        allEvents.mock.calls[0]![0]({ type: "autopilot:delivery_targets_changed", payload: { workspace_id: "workspace" } });
+        return;
+      }
       const event = change === "access" ? "member:updated" : change === "archive" ? "chat:session_updated" : "chat:session_deleted";
       const handler = subscriptions.mock.calls.find(([name]) => name === event)?.[1];
       if (!handler) throw new Error(`Missing subscription for ${event}`);
@@ -52,6 +57,7 @@ it.each(["archive", "delete", "access"])("revalidates the open picker after %s w
     }
     expect(screen.queryByRole("button", { name: /Private report/ })).toBeNull();
     expect(qc.getQueryState(otherKey)?.isInvalidated).toBe(false);
+    expect(qc.getQueryData(otherKey)).toEqual({ targets });
   } finally {
     view.unmount();
     qc.clear();

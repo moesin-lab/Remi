@@ -30,6 +30,21 @@ const creationPaths = [
 ];
 
 describe("agent workspace request context", () => {
+  for (const [method, prefix] of [["PUT", "/api/agents"], ["PATCH", "/api/multiremi/agents"]] as const) {
+    it(`${method} migration sends a target invalidation only to the source workspace`, async () => {
+      const { store, workspace, app, headers } = await setup();
+      const agent = store.createAgent({ name: "Moved agent", provider: "codex", workspaceId: "local" });
+      const events: Array<{ type: string; workspaceId: string; payload: unknown }> = [];
+      const unsubscribe = store.onWorkspaceEvent(event => events.push(event));
+      try {
+        const moved = await app.request(`${prefix}/${agent.id}`, { method, headers, body: JSON.stringify({ workspace_id: workspace.id }) });
+        expect(moved.status).toBe(200);
+        expect(events.filter(event => event.type === "autopilot:delivery_targets_changed").map(({ workspaceId, payload }) => ({ workspaceId, payload })))
+          .toEqual([{ workspaceId: "local", payload: { workspace_id: "local" } }]);
+        expect(events.some(event => event.workspaceId === workspace.id && event.type === "agent:status")).toBe(true);
+      } finally { unsubscribe(); }
+    });
+  }
   for (const endpoint of ["agent-task-snapshot", "agent-run-counts", "agent-activity-30d"]) {
     for (const header of ["X-Workspace-ID", "X-Workspace-Slug"]) {
       it(`scopes native ${endpoint} using ${header}`, async () => {

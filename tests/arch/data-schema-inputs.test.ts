@@ -47,6 +47,7 @@ test('legacy inputs or B1 scanner cover transitive migration DDL', () => {
   expect(scanned.has('packages/server/src/store/planned-restart-schema.ts')).toBe(true);
   expect(scanned.has('packages/server/src/store/security-state-schema.ts')).toBe(true);
   expect(scanned.has('packages/server/src/store/authority-provenance-schema.ts')).toBe(true);
+  expect(scanned.has('packages/server/src/store/root-grant-schema.ts')).toBe(true);
   expect(missingMigrationInputs(root, inputs, scanned)).toEqual([]);
 });
 test('detects a missing DDL helper through a re-export', () => {

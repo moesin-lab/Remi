@@ -7,6 +7,10 @@ import { runtimeKeys } from "./queries";
 export type SystemProtocol = "openai-chat-completions" | "anthropic-messages";
 const maxAge = 5 * 60 * 1000;
 
+function delayUntilRefresh(lastCheckedAt: number) {
+  return Math.min(maxAge, Math.max(0, lastCheckedAt + maxAge - Date.now()));
+}
+
 export function useSystemModelCatalog(workspaceId: string, endpoint: ExecutionEndpoint | undefined, protocol: SystemProtocol) {
   const client = useQueryClient();
   const enabled = !!endpoint && endpoint.connection.options?.fetch_models !== false;
@@ -27,10 +31,11 @@ export function useSystemModelCatalog(workspaceId: string, endpoint: ExecutionEn
       if (latest?.status === "error" && latest.fetchStatus === "idle" && latest.errorUpdatedAt === readFailedAt) {
         void reread({ cancelRefetch: false });
       }
-    }, Math.max(0, readFailedAt + maxAge - Date.now()));
+    }, delayUntilRefresh(readFailedAt));
     return () => clearTimeout(timer);
   }, [enabled, readFailed, reading, readFailedAt, client, key, reread]);
-  const checkedAt = row && row.revision === endpoint?.revision ? Date.parse(row.last_checked_at) || 0 : 0;
+  const checkedAt = row && row.revision === endpoint?.revision
+    ? Math.min(Date.parse(row.last_checked_at) || 0, snapshot.dataUpdatedAt) : 0;
   const expired = checkedAt + maxAge <= Date.now();
   const refresh = useQuery({ ...options, queryKey: [...key, "refresh"], enabled: false,
     queryFn: async () => {
@@ -41,7 +46,7 @@ export function useSystemModelCatalog(workspaceId: string, endpoint: ExecutionEn
       if (current) client.setQueryData(key, current);
       const confirmed = persisted && current?.revision === endpoint!.revision && current.last_checked_at >= inspection.checked_at;
       return { failed: !confirmed || !result || result.state === "error", code: result?.error_code,
-        checkedAt: confirmed ? Math.max(startedAt, Date.parse(current.last_checked_at)) : 0 };
+        checkedAt: confirmed ? Math.min(Date.now(), Math.max(startedAt, Date.parse(current.last_checked_at))) : 0 };
     },
   });
   const { refetch, dataUpdatedAt, errorUpdatedAt, isFetching } = refresh;
@@ -49,13 +54,12 @@ export function useSystemModelCatalog(workspaceId: string, endpoint: ExecutionEn
   const lastAttempt = confirmedAt > dataUpdatedAt - maxAge ? confirmedAt : dataUpdatedAt;
   useEffect(() => {
     if (!enabled || !snapshot.isSuccess || isFetching) return;
-    const deadline = Math.max(checkedAt, lastAttempt, errorUpdatedAt) + maxAge;
     const run = () => {
       const latest = client.getQueryState([...key, "refresh"]);
       if (latest?.fetchStatus !== "idle" || latest.dataUpdatedAt !== dataUpdatedAt || latest.errorUpdatedAt !== errorUpdatedAt) return;
       void refetch({ cancelRefetch: false });
     };
-    const timer = setTimeout(run, Math.max(0, deadline - Date.now()));
+    const timer = setTimeout(run, delayUntilRefresh(Math.max(checkedAt, lastAttempt, errorUpdatedAt)));
     return () => clearTimeout(timer);
   }, [enabled, snapshot.isSuccess, isFetching, checkedAt, lastAttempt, dataUpdatedAt, errorUpdatedAt, client, key, refetch]);
   const failed = snapshot.isError || refresh.isError || refresh.data?.failed || row?.state === "error";

@@ -206,6 +206,62 @@ it.each(["workspace", "endpoint", "disabled", "unmount"].flatMap(change =>
   } finally { vi.useRealTimers(); }
 });
 
+it.each([1, 720].flatMap(hours => ["initial", "ok", "error"].map(scenario => ({ hours, scenario }))))(
+  "refreshes once per five local minutes with a $scenario snapshot $hours hours ahead", async ({ hours, scenario }) => {
+    vi.useFakeTimers();
+    const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    try {
+      bind("e1", null);
+      const future = () => new Date(Date.now() + hours * 3600000).toISOString();
+      const row = snapshot(chat, "candidate", 2, future());
+      let hasSnapshot = scenario === "initial";
+      let receivedAt = 0;
+      api.getExecutionEndpointCatalog.mockImplementation(async () => {
+        receivedAt = Date.now();
+        return { catalogs: hasSnapshot ? [{ ...row }] : [] };
+      });
+      api.inspectExecutionEndpoint.mockImplementation(async () => {
+        row.last_checked_at = future();
+        row.state = scenario === "error" ? "error" : "ok";
+        hasSnapshot = true;
+        return { persisted: true, inspection: { checked_at: row.last_checked_at, results: [{ protocol: chat, operation: "models", state: row.state }] } };
+      });
+      const view = show();
+      await advance(100);
+      const initialChecks = scenario === "initial" ? 0 : 1;
+      expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(initialChecks);
+      expect(receivedAt).toBeGreaterThan(0);
+      const deadline = receivedAt + 300000;
+      await advance(150000);
+      const input = screen.getByLabelText(enSettings.modelGateway.auto_title_model_label);
+      fireEvent.input(input, { target: { value: "unsaved" } });
+      await advance(deadline - Date.now() - 1);
+      expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(initialChecks);
+      await advance(1);
+      expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(initialChecks + 1);
+      await advance(299999);
+      expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(initialChecks + 1);
+      await advance(1);
+      expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(initialChecks + 2);
+      expect(input).toHaveValue("unsaved");
+      expect(api.updateWorkspace).not.toHaveBeenCalled();
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+it("does not repeatedly inspect a snapshot 30 days ahead on real timers", async () => {
+  bind("e1", null);
+  const row = snapshot(chat, "future", 2, new Date(Date.now() + 30 * 86400000).toISOString());
+  api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [row] });
+  api.inspectExecutionEndpoint.mockResolvedValue({ persisted: true, inspection: { checked_at: row.last_checked_at, results: [{ protocol: chat, operation: "models", state: "ok" }] } });
+  const view = show();
+  await waitFor(() => expect(api.getExecutionEndpointCatalog).toHaveBeenCalled());
+  await act(() => new Promise<void>(resolve => setTimeout(resolve, 180)));
+  expect(api.inspectExecutionEndpoint).not.toHaveBeenCalled();
+  expect(api.getExecutionEndpointCatalog).toHaveBeenCalledTimes(1);
+  view.unmount();
+});
+
 it.each(["ok", "error"])("uses the persisted %s check time for the next deadline even when its response arrives later", async state => {
   vi.useFakeTimers();
   const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));

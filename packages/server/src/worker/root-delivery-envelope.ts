@@ -16,9 +16,22 @@ const bindingFields = {
 
 function reject(): never { throw new Error('Invalid root delivery envelope'); }
 
-function header(tuple: RootDeliveryTuple): RootDeliveryJweProtectedHeader {
+export function serializeRootDeliveryTuple(tuple: RootDeliveryTuple): string {
   if (Object.keys(tuple).length !== Object.keys(bindingFields).length ||
       Object.keys(bindingFields).some(field => !Object.hasOwn(tuple, field))) reject();
+  const fields = Object.keys(bindingFields) as (keyof RootDeliveryTuple)[];
+  for (const field of fields) {
+    const value = tuple[field];
+    if (value === null && ['handoff_id', 'checkpoint_digest', 'grant_id', 'grant_generation'].includes(field)) continue;
+    if (/_(version|generation|revision|epoch)$/.test(field)) {
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) reject();
+    } else if (typeof value !== 'string' || !value || value.length > 512) reject();
+  }
+  return JSON.stringify(Object.fromEntries(fields.map(field => [field, tuple[field]])));
+}
+
+function header(tuple: RootDeliveryTuple): RootDeliveryJweProtectedHeader {
+  serializeRootDeliveryTuple(tuple);
   const { recipient_key_id, ...binding } = tuple;
   return { ...binding, kid: recipient_key_id, v: ROOT_DELIVERY_PROTOCOL_VERSION, alg: ROOT_DELIVERY_JWE_ALG, enc: ROOT_DELIVERY_JWE_ENC };
 }

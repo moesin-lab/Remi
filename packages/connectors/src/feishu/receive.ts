@@ -63,7 +63,7 @@ import { getMessageFeishu, sendMarkdownCardFeishu } from "./send.js";
 import { handleFormSubmission, handleButtonClick, hasPendingAction } from "./card-actions.js";
 import { handleIssueDecisionInteractionEvent, handleTaskInteractionEvent } from "./task-interaction.js";
 import { resolveFeishuCommand, isUnknownFeishuCommand } from "@shared/feishu-commands.js";
-import { FeishuInboundRecovery, feishuRecoveryPath, recoverFeishuHistory } from "./inbound-recovery.js";
+import { FeishuInboundRecovery, feishuRecoveryPath, recoverFeishuHistory, type FeishuInboundDelivery } from "./inbound-recovery.js";
 
 // ── Dedup (persisted across restarts) ────────────────────────
 const DEDUP_TTL_MS = 30 * 60 * 1000;
@@ -529,6 +529,8 @@ export type ParsedFeishuMessage = {
 export type FeishuAdmissionDenialReason = "not_member" | "unavailable";
 
 export interface FeishuMessageAdmissionOptions {
+  onExplicitHistoryDenial?: () => void;
+  denialOnly?: boolean;
   groupPolicy?: GroupPolicy;
   wakeWords?: readonly string[];
   /** Durable Task intake uses the server's external_message_id dedup. */
@@ -627,6 +629,7 @@ export async function processFeishuMessageEvent(
       : null;
   }
   if (!admitted) {
+    if (!monitored && event.recovery_source === "history") admission.onExplicitHistoryDenial?.();
     log.warn("Feishu sender access denied");
     logDroppedGroupMessage(event, "not_member", "warn");
     return shouldNotifyAdmissionDenial
@@ -634,6 +637,7 @@ export async function processFeishuMessageEvent(
       : null;
   }
   log.info("Feishu sender access allowed");
+  if (admission.denialOnly) return null;
 
   // Resolve sender name (best-effort)
   const senderName = await resolveSenderName(client, ctx.senderOpenId);
@@ -804,13 +808,16 @@ export function createFeishuInboundDelivery(options: {
   recovery: FeishuInboundRecovery | null;
   appId: string;
   isStopped?: () => boolean;
-}): (event: FeishuMessageEvent) => Promise<void> {
+}): FeishuInboundDelivery {
   const { client, botIdentity, authorizeSender, onMessage, recovery, appId } = options;
   const isStopped = options.isStopped ?? (() => false);
-  return async (event: FeishuMessageEvent) => {
+  return async (event, liveOnly) => {
     if (isStopped()) throw new Error("Feishu connector stopped before input acknowledgement");
+    let historyDenied = false;
     const msg = await processFeishuMessageEventWithBotIdentity(client, event, botIdentity, {
       authorizeSender,
+      denialOnly: liveOnly === "denial",
+      onExplicitHistoryDenial: () => { historyDenied = true; },
       groupPolicy: options.groupPolicy,
       wakeWords: options.wakeWords,
       durableIntake: Boolean(recovery),
@@ -825,14 +832,15 @@ export function createFeishuInboundDelivery(options: {
       },
     });
     if (isStopped()) throw new Error("Feishu connector stopped during admission");
-    if (!msg) return;
+    if (!msg) return historyDenied ? "denial" : undefined;
     const command = resolveFeishuCommand(msg.rawContent);
     const intercepted = command !== null || isUnknownFeishuCommand(msg.rawContent);
+    if (liveOnly === "command" && !intercepted) return;
     if (intercepted && event.recovery_source === "history") {
       recovery!.skipped(msg.chatId, "history_operational_command", msg.messageId, command?.name ?? msg.rawContent.trim().slice(1));
       log.warn(JSON.stringify({ event: "feishu_recovery_skipped", app_id: appId, chat_id: msg.chatId,
         message_id: msg.messageId, command: command?.name ?? msg.rawContent.trim().slice(1), reason: "history_operational_command" }));
-      return;
+      return "command";
     }
     // Operational commands predate Task intake and have no server delivery row.
     // Keep their existing suppression; history never re-executes old operations.
@@ -992,6 +1000,7 @@ export function startWebSocketListener(
     botOpenIdReady: botIdentity.botOpenIdReady,
     stop() {
       stopped = true;
+      recovery?.close();
       clearTimeout(recoveryTimer);
       wsClient.close({ force: true });
     },

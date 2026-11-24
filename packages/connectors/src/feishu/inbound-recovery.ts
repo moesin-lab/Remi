@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { multiremiStateDir } from "@shared/home-paths.js";
 import type { FeishuMessageEvent } from "./types.js";
 import type { FeishuCommandSemantic } from "@multiremi/contracts/types.js";
@@ -29,6 +30,29 @@ export interface CommandProgress {
 export type FeishuInboundDelivery = (event: FeishuMessageEvent, liveOnly?: LiveFollowup, journal?: FeishuInboundRecovery) => Promise<void | LiveFollowup>;
 const HISTORY_WINDOW_MS = 10 * 60_000;
 const ACK_RETENTION_MS = 30 * 60_000;
+export class FeishuAdmissionUnavailable extends Error {}
+
+function supplementSender(original: FeishuMessageEvent, copy: FeishuMessageEvent): FeishuMessageEvent | undefined {
+  const message = original.message, incoming = copy.message;
+  const mentions = (value: typeof message) => (value.mentions ?? []).map(mention =>
+    [mention.key, mention.name, mention.id.open_id, mention.id.user_id, mention.id.union_id, mention.tenant_key]);
+  if (message.message_id !== incoming.message_id || message.content !== incoming.content || message.message_type !== incoming.message_type
+      || message.chat_id !== incoming.chat_id || message.chat_type !== incoming.chat_type
+      || (message.root_id || "") !== (incoming.root_id || "") || (message.parent_id || "") !== (incoming.parent_id || "")
+      || (message.thread_id || "") !== (incoming.thread_id || "") || !isDeepStrictEqual(mentions(message), mentions(incoming))) return;
+  const sender = original.sender, candidate = copy.sender;
+  if ((sender.sender_type || "user") !== (candidate.sender_type || "user")
+      || (sender.tenant_key && candidate.tenant_key && sender.tenant_key !== candidate.tenant_key)) return;
+  const ids = { ...sender.sender_id };
+  for (const field of ["open_id", "user_id", "union_id"] as const) {
+    const known = ids[field], offered = candidate.sender_id?.[field];
+    if (known && offered && known !== offered) return;
+    if (!known && offered) ids[field] = offered;
+  }
+  const tenant = sender.tenant_key || candidate.tenant_key;
+  if (tenant === sender.tenant_key && isDeepStrictEqual(ids, sender.sender_id ?? {})) return original;
+  return { ...original, sender: { ...sender, sender_id: ids, tenant_key: tenant } };
+}
 interface InboundState {
   version: 2;
   initializedAt: number;
@@ -74,8 +98,12 @@ export class FeishuInboundRecovery {
     }
   }
 
-  private save(): void {
+  private ensureOpen(): void {
     if (this.closed) throw new Error("Feishu inbound journal closed");
+  }
+
+  private save(): void {
+    this.ensureOpen();
     if (!this.path) return;
     mkdirSync(dirname(this.path), { recursive: true });
     const temporary = `${this.path}.tmp`;
@@ -88,7 +116,7 @@ export class FeishuInboundRecovery {
   }
 
   progress(id: string): Readonly<CommandProgress> {
-    if (this.closed) throw new Error("Feishu inbound journal closed");
+    this.ensureOpen();
     const receipt = this.state.acknowledged[id];
     return this.state.progress[id] ?? { digest: receipt?.digest, botId: receipt?.botId };
   }
@@ -112,10 +140,19 @@ export class FeishuInboundRecovery {
   }
 
   chats(): Array<{ id: string; type: ChatType; since: number }> {
+    const awaitingIdentity = new Map<string, number>();
+    const cutoff = this.now() - HISTORY_WINDOW_MS;
+    for (const [id, event] of Object.entries(this.state.pending)) {
+      if (this.progress(id).digest) continue;
+      const timestamp = Number(event.message.create_time) || cutoff;
+      if (timestamp < cutoff) continue;
+      const chat = event.message.chat_id;
+      awaitingIdentity.set(chat, Math.min(timestamp, awaitingIdentity.get(chat) ?? Infinity));
+    }
     return Object.entries(this.state.chats).map(([id, chat]) => ({ id, type: chat.type,
       // Delayed history visibility and equal timestamps need an overlap.
       // A newer live message must not move past an unscanned restart gap.
-      since: Math.max(this.state.initializedAt, Math.min(chat.through, chat.scannedThrough) - 60_000) }));
+      since: Math.max(this.state.initializedAt, Math.min(chat.through, chat.scannedThrough, awaitingIdentity.get(id) ?? Infinity) - 60_000) }));
   }
 
   private pruneAcknowledgements(): void {
@@ -128,18 +165,32 @@ export class FeishuInboundRecovery {
   }
 
   accept(event: FeishuMessageEvent, deliver: FeishuInboundDelivery): Promise<void> {
+    this.ensureOpen();
     const id = event.message.message_id;
     this.pruneAcknowledgements();
     if (event.recovery_source === "history" && Number(event.message.create_time) < this.now() - HISTORY_WINDOW_MS) return Promise.resolve();
     const receipt = this.state.acknowledged[id];
     if (receipt && (!receipt.liveOnly || event.recovery_source === "history")) return Promise.resolve();
-    this.rememberChat(event.message.chat_id, event.message.chat_type);
     // This synchronous write happens before any await, even behind another callback.
     const pending = this.state.pending[id];
-    if (!pending) this.state.pending[id] = event;
-    else if (event.recovery_source !== "history") {
-      if (pending.recovery_source === "history") this.state.liveCopies[id] ??= event;
-      else if (this.progress(id).digest) this.state.pending[id] = event;
+    if (!pending) {
+      this.rememberChat(event.message.chat_id, event.message.chat_type);
+      this.state.pending[id] = event;
+    } else {
+      const progress = this.progress(id);
+      const unbound = !receipt && !progress.digest && !progress.write && !progress.reply && !progress.legacyPending;
+      const supplemented = unbound ? supplementSender(pending, event) : pending;
+      if (!supplemented || (event.recovery_source === "history" && supplemented === pending)) return Promise.resolve();
+      this.state.pending[id] = supplemented;
+      if (event.recovery_source !== "history") {
+        if (pending.recovery_source === "history") this.state.liveCopies[id] ??= event;
+        else if (progress.digest) {
+          this.rememberChat(event.message.chat_id, event.message.chat_type);
+          this.state.pending[id] = event;
+        }
+      }
+      const live = this.state.liveCopies[id];
+      if (unbound && live) this.state.liveCopies[id] = supplementSender(live, supplemented) ?? live;
     }
     this.save();
     return this.serialized(() => this.deliver(id, deliver));
@@ -168,9 +219,20 @@ export class FeishuInboundRecovery {
     if (next) await this.deliver(id, callback);
   }
 
-  replay(callback: FeishuInboundDelivery): Promise<void> {
+  replay(callback: FeishuInboundDelivery, warn?: (chatId: string, reason: string) => void): Promise<void> {
     return this.serialized(async () => {
-      for (const id of Object.keys(this.state.pending)) await this.deliver(id, callback);
+      this.ensureOpen();
+      let deferred: FeishuAdmissionUnavailable | undefined;
+      for (const [id, event] of Object.entries(this.state.pending)) {
+        try { await this.deliver(id, callback); }
+        catch (error) {
+          if (!(error instanceof FeishuAdmissionUnavailable)) throw error;
+          this.ensureOpen();
+          warn?.(event.message.chat_id, error.message);
+          deferred ??= error;
+        }
+      }
+      if (deferred && !warn) throw deferred;
     });
   }
 
@@ -180,10 +242,10 @@ export class FeishuInboundRecovery {
     this.save();
   }
 
-  scanned(chatId: string, before: number): void {
+  scanned(chatId: string, before: number, firstGap = Infinity): void {
     this.pruneAcknowledgements();
     const chat = this.state.chats[chatId]!;
-    chat.scannedThrough = Math.max(chat.scannedThrough, Math.min(chat.through, before));
+    chat.scannedThrough = Math.min(firstGap, Math.max(chat.scannedThrough, Math.min(chat.through, before)));
     this.save();
   }
 
@@ -191,7 +253,7 @@ export class FeishuInboundRecovery {
 
 export interface FeishuHistoryMessage {
   message_id?: string; chat_id?: string; msg_type?: string; create_time?: string;
-  root_id?: string; parent_id?: string; deleted?: boolean;
+  root_id?: string; thread_id?: string; parent_id?: string; deleted?: boolean;
   sender?: { id?: string; id_type?: string; sender_type?: string; tenant_key?: string };
   body?: { content?: string };
   mentions?: Array<{ key?: string; id?: string; id_type?: string; name?: string; tenant_key?: string }>;
@@ -200,14 +262,16 @@ export interface FeishuHistoryMessage {
 /** History API uses a different sender/mention representation from WS events. */
 export function feishuHistoryEvent(item: FeishuHistoryMessage, chatId: string, chatType: ChatType): FeishuMessageEvent | null {
   if (item.deleted || !item.message_id || !item.msg_type || !item.body?.content) return null;
-  if (item.sender?.sender_type !== "user") return null;
-  if (item.sender.id_type !== "open_id" || !item.sender.id) throw new Error("Feishu history sender identity unavailable");
+  if (item.chat_id && item.chat_id !== chatId) throw new Error("Feishu history message chat does not match list container");
+  if (!item.sender?.sender_type) throw new FeishuAdmissionUnavailable("Feishu history sender identity unavailable");
+  if (item.sender.sender_type !== "user") return null;
+  if (item.sender.id_type !== "open_id" || !item.sender.id) throw new FeishuAdmissionUnavailable("Feishu history sender identity unavailable");
   return { recovery_source: "history", sender: { sender_type: "user", sender_id: { open_id: item.sender.id }, tenant_key: item.sender.tenant_key },
     message: { message_id: item.message_id, chat_id: chatId, chat_type: chatType,
       message_type: item.msg_type, content: item.body.content, create_time: item.create_time,
-      root_id: item.root_id, parent_id: item.parent_id,
+      root_id: item.root_id, thread_id: item.thread_id, parent_id: item.parent_id,
       mentions: item.mentions?.map(mention => {
-        if (mention.id_type !== "open_id" || !mention.id || !mention.key) throw new Error("Feishu history mention identity unavailable");
+        if (mention.id_type !== "open_id" || !mention.id || !mention.key) throw new FeishuAdmissionUnavailable("Feishu history mention identity unavailable");
         return { key: mention.key, id: { open_id: mention.id }, name: mention.name ?? "", tenant_key: mention.tenant_key };
       }) } };
 }
@@ -226,7 +290,7 @@ export async function recoverFeishuHistory(options: {
   windowMs?: number;
 }): Promise<void> {
   const { journal, deliver } = options;
-  await journal.replay(deliver);
+  await journal.replay(deliver, options.warn);
   const now = options.now ?? Date.now(), cutoff = now - Math.min(options.windowMs ?? HISTORY_WINDOW_MS, HISTORY_WINDOW_MS);
   const skipped = (chatId: string, reason: string) => { journal.skipped(chatId, reason); options.warn(chatId, reason); };
   for (const chat of journal.chats()) {
@@ -247,15 +311,22 @@ export async function recoverFeishuHistory(options: {
       if (page === (options.maxPages ?? 5) - 1) skipped(chat.id, "history_page_limit");
     }
     items.sort((a, b) => Number(a.create_time) - Number(b.create_time) || String(a.message_id).localeCompare(String(b.message_id)));
+    let firstGap = Infinity;
     for (const item of items) {
       const timestamp = Number(item.create_time);
       if (!Number.isFinite(timestamp) || timestamp < since || timestamp > now) {
         skipped(chat.id, "history_message_outside_window"); continue;
       }
-      const event = feishuHistoryEvent(item, chat.id, chat.type);
-      if (!event) continue;
-      await journal.accept(event, deliver);
+      let event: FeishuMessageEvent | null = null;
+      try {
+        event = feishuHistoryEvent(item, chat.id, chat.type);
+        if (event) await journal.accept(event, deliver);
+      } catch (error) {
+        if (!(error instanceof FeishuAdmissionUnavailable)) throw error;
+        options.warn(chat.id, error.message);
+        if (!event) firstGap = Math.min(firstGap, timestamp);
+      }
     }
-    journal.scanned(chat.id, now);
+    journal.scanned(chat.id, now, firstGap);
   }
 }

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { rollbackPolicy } from './platform-rollback-policy.mjs';
 import { execFileSync, spawn } from 'node:child_process';
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -105,6 +107,7 @@ if (behavior === 'evidence-race') await writeFile(join(ctx.artifactRoot, 'rollba
 import { spawnSync } from 'node:child_process';
 const args = process.argv.slice(2);
 if (${JSON.stringify(behavior)} === 'clone-fail' && args.includes('clone')) process.exit(25);
+if (${JSON.stringify(behavior)} === 'fetch-fail' && args.includes('fetch')) process.exit(28);
 if (${JSON.stringify(behavior)} === 'previous-cleanup-fail' && args.includes('worktree') && args.includes('remove')) process.exit(26);
 const child = spawnSync(${JSON.stringify(gitBinary)}, args, { stdio: 'inherit' });
 process.exit(child.status ?? 1);
@@ -161,9 +164,16 @@ for (const behavior of ['shared-dirty', 'shared-head']) {
     assert.equal(evidence.targetRef, f.ref);
   });
 }
-for (const behavior of ['wrong-bun', 'clone-fail', 'candidate-install-fail', 'prepare-fail', 'previous-install-fail', 'check-fail', 'private-dirty', 'context-replaced', 'final-dirty', 'bad-phase', 'bad-inner-cleanup', 'metadata-missing']) {
+for (const behavior of ['wrong-bun', 'clone-fail', 'fetch-fail', 'candidate-install-fail', 'prepare-fail', 'previous-install-fail', 'check-fail', 'private-dirty', 'context-replaced', 'final-dirty', 'bad-phase', 'bad-inner-cleanup', 'metadata-missing']) {
   test(`${behavior} refuses final evidence and completes independent resource cleanup`, async t => {
-    const f = await fixture(t, behavior), result = await f.run(), diagnostic = await checkFailure(f, result);
+    const f = await fixture(t, behavior), sourceRefs = git(f.source, 'show-ref'), sourceIndex = await readFile(join(f.source, '.git', 'index'));
+    const result = await f.run(), diagnostic = await checkFailure(f, result);
+    assert.equal(git(f.source, 'show-ref'), sourceRefs);
+    assert.deepEqual(await readFile(join(f.source, '.git', 'index')), sourceIndex);
+    if (behavior === 'fetch-fail') {
+      assert.equal((await readdir(f.records)).length, 0, 'Fetch failure must not fall back to install or execution');
+      assert.match(diagnostic.error, /fetch/);
+    }
     assert.equal(diagnostic.cleanup.every(item => item.status === 'passed'), true, JSON.stringify(diagnostic));
     assert.equal(await present(diagnostic.runRoot), false);
     assert.equal(git(f.source, 'rev-parse', 'HEAD'), f.ref);
@@ -261,6 +271,215 @@ test('metadata copy collision preserves competing content and blocks final publi
   const f = await fixture(t, 'metadata-race');
   await checkFailure(f, await f.run());
   assert.equal(await readFile(join(f.artifacts, 'previous-release.json'), 'utf8'), 'competing metadata');
+});
+
+// Complete evidence fields let publication tests ask the real consumer whether
+// any failed launcher left behind a usable success declaration. Bun/PG remain
+// controlled tools here; this proves the publication boundary, not PG support.
+const digest = value => createHash('sha256').update(value).digest('hex');
+const publicationSchema = { expandLevel: 3, contractLevel: 0 };
+const publicationDataSchema = digest(JSON.stringify({ format: 1, ...publicationSchema }));
+async function consumableFixture(t) {
+  const f = await fixture(t), origin = 'https://github.com/moesin-lab/Remi';
+  const previousRelease = { version: '1.1.9', dataSchema: 'b'.repeat(64), ref: 'e'.repeat(40), sourceSha256: 'f'.repeat(64),
+    releaseUrl: `${origin}/releases/tag/v1.1.9`, manifestUrl: `${origin}/releases/download/v1.1.9/platform-release.json`,
+    sourceUrl: `${origin}/releases/download/v1.1.9/platform-systemd-v1.1.9.tar.gz`,
+    apiImage: `ghcr.io/moesin-lab/remi-api@sha256:${'a'.repeat(64)}` };
+  const previousManifest = JSON.stringify(previousRelease, null, 2) + '\n';
+  const extra = { dataSchema: publicationDataSchema, previousRelease, previousManifest,
+    previousIdentity: { format: 1, mode: 'published-archive', publishedRef: previousRelease.ref,
+      actualPreviousRef: previousRelease.ref, observedTagRef: 'b'.repeat(40), tagDrift: true,
+      sourceTree: 'c'.repeat(40), sourceSha256: previousRelease.sourceSha256, manifestSha256: digest(previousManifest),
+      manifestAssetId: 11, sourceAssetId: 12, releaseId: 13,
+      provenance: { model: 'verified-api-image+github-publish-log+exact-git-tree', sourceArchiveAttestation: false,
+        apiImage: previousRelease.apiImage, runId: '101', attempt: 2, jobId: 201,
+        invocation: `${origin}/actions/runs/101/attempts/2`, jobUrl: `${origin}/actions/runs/101/job/201`,
+        publishLogSha256: 'd'.repeat(64), verificationSha256: 'e'.repeat(64) } },
+    schema: publicationSchema, schemaVerification: publicationSchema,
+    phases: ['previous-before-expand', 'candidate-expand', 'previous-after-expand', 'verify-schema-levels']
+      .map(name => ({ name, status: 'passed', exitCode: 0, signalCode: null,
+        stdout: `rollback-logs/${name}.stdout.log`, stderr: `rollback-logs/${name}.stderr.log` })),
+    probes: { before: { probe: 'previous-release-core', pass: true, task: 'before-task', cancelled: 'before-cancelled' },
+      after: { probe: 'previous-release-core', pass: true, task: 'after-task', cancelled: 'after-cancelled' } },
+    checks: ['previous-startup', 'previous-create-start-complete-cancel', 'candidate-expand-startup', 'previous-startup-after-expand', 'previous-create-start-complete-cancel-after-expand'],
+    rollbackSafeFrom: [previousRelease.dataSchema] };
+  const bunPath = join(f.base, 'bin', 'bun'), bun = await readFile(bunPath, 'utf8');
+  await writeFile(bunPath, bun.replace('const staged = { format: 2,', `const staged = { ...${JSON.stringify(extra)}, format: 2,`));
+  return f;
+}
+function consumerAccepts(f, bytes) {
+  try { return rollbackPolicy({ version: '1.2.0', ref: f.ref, dataSchema: publicationDataSchema }, undefined, JSON.parse(bytes)).length === 1; }
+  catch { return false; }
+}
+async function publicationFault(f, mode) {
+  const driver = join(f.bootstrap, 'publication-fault-driver.mjs'), eventPath = join(f.base, 'publication-events.json');
+  await writeFile(driver, `import fs from 'node:fs/promises';
+    import { syncBuiltinESMExports } from 'node:module';
+    const mode = ${JSON.stringify(mode)}, events = [], root = ${JSON.stringify(f.artifacts)};
+    const originalOpen = fs.open, originalWriteFile = fs.writeFile;
+    let lastDiagnostic, closedDiagnostics = false, finalOpened = false, diagnosticCloseFaulted = false;
+    const fault = label => Object.assign(new Error('injected ' + label), { code: 'EIO' });
+    const finishing = async () => {
+      if (!lastDiagnostic?.runRoot) return false;
+      try { await fs.lstat(lastDiagnostic.runRoot); return false; }
+      catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+    };
+    const replaceFinal = async path => {
+      await fs.rename(path, ${JSON.stringify(join(f.base, 'displaced-owned-final.json'))});
+      if (mode.endsWith('symlink')) {
+        await originalWriteFile(${JSON.stringify(join(f.base, 'competitor-target'))}, 'competitor target bytes');
+        await fs.symlink(${JSON.stringify(join(f.base, 'competitor-target'))}, path);
+      } else await originalWriteFile(path, 'competing final writer bytes', { flag: 'wx' });
+    };
+    fs.writeFile = async (path, data, options) => {
+      if (String(path).endsWith('/rollback-evidence.json')) {
+        events.push('final-writeFile');
+        if (mode === 'final-partial-write') { await originalWriteFile(path, String(data).slice(0, 120), options); throw fault(mode); }
+      }
+      return originalWriteFile(path, data, options);
+    };
+    fs.open = async (...args) => {
+      const path = String(args[0]);
+      if (path.endsWith('/rollback-evidence.json')) {
+        events.push('final-open'); finalOpened = true;
+        if (mode === 'final-open-race') await originalWriteFile(path, 'competing final writer bytes', { flag: 'wx' });
+      }
+      const handle = await originalOpen(...args);
+      if (path.endsWith('/launcher-diagnostics.json')) {
+        const truncate = handle.truncate.bind(handle), write = handle.write.bind(handle), close = handle.close.bind(handle);
+        handle.truncate = async (...params) => {
+          if (await finishing()) { events.push('diagnostic-final-truncate'); if (mode === 'diagnostic-truncate') throw fault(mode); }
+          if (finalOpened && mode === 'no-post-publication-io') throw fault('diagnostic truncate after final open');
+          return truncate(...params);
+        };
+        handle.write = async (data, ...params) => {
+          try { lastDiagnostic = JSON.parse(data); } catch {}
+          if (await finishing()) {
+            events.push('diagnostic-final-write');
+            if (mode === 'diagnostic-partial-write') { await write(String(data).slice(0, 30), ...params); throw fault(mode); }
+          }
+          if (finalOpened && mode === 'no-post-publication-io') throw fault('diagnostic write after final open');
+          return write(data, ...params);
+        };
+        handle.close = async () => {
+          events.push('diagnostic-close');
+          if (finalOpened && mode === 'no-post-publication-io') throw fault('diagnostic close after final open');
+          await close(); closedDiagnostics = true;
+          if (mode === 'diagnostic-close' && !diagnosticCloseFaulted) { diagnosticCloseFaulted = true; throw fault(mode); }
+        };
+        if (mode === 'diagnostic-replacement' && closedDiagnostics) events.push('diagnostic-reopened');
+      }
+      if (path.endsWith('/rollback-evidence.json')) {
+        const writeFile = handle.writeFile.bind(handle), close = handle.close.bind(handle);
+        handle.writeFile = async (...params) => {
+          events.push('final-handle-write');
+          if (mode === 'final-replace-after-write') { await writeFile(...params); await replaceFinal(path); return; }
+          if (mode.startsWith('final-partial') || mode.startsWith('final-write-replace')) {
+            await writeFile(String(params[0]).slice(0, 120));
+            if (mode.startsWith('final-write-replace')) await replaceFinal(path);
+            if (mode === 'final-write-replace-diagnostic') {
+              const diagnostic = root + '/launcher-diagnostics.json';
+              await fs.rename(diagnostic, ${JSON.stringify(join(f.base, 'displaced-owned-diagnostic.json'))});
+              await originalWriteFile(diagnostic, 'competing diagnostic writer bytes', { flag: 'wx' });
+            }
+            throw fault(mode);
+          }
+          return writeFile(...params);
+        };
+        let closeFaulted = false;
+        handle.close = async () => {
+          events.push('final-handle-close');
+          if (mode === 'final-replace-after-close' && !closeFaulted) { closeFaulted = true; await close(); await replaceFinal(path); return; }
+          if (mode.startsWith('final-close') && !closeFaulted) {
+            closeFaulted = true;
+            if (mode === 'final-close-replace') await replaceFinal(path);
+            if (mode !== 'final-close-before') await close();
+            throw fault(mode);
+          }
+          return close();
+        };
+      }
+      return handle;
+    };
+    syncBuiltinESMExports();
+    const { runSchemaRollback } = await import(${JSON.stringify(pathToFileURL(f.launcher).href)});
+    try { await runSchemaRollback(${JSON.stringify({ sourceRepo: f.source, candidateRef: f.ref, artifacts: f.artifacts })}); }
+    catch (error) { console.error(String(error)); process.exitCode = 1; }
+    await originalWriteFile(${JSON.stringify(eventPath)}, JSON.stringify(events));
+  `);
+  const result = await new Promise((accept, reject) => {
+    const child = spawn(process.execPath, [driver], { cwd: f.bootstrap, env: f.env });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes);
+    child.once('error', reject); child.once('close', status => accept({ status, stdout, stderr }));
+  });
+  return { ...result, events: JSON.parse(await readFile(eventPath, 'utf8')) };
+}
+
+test('successful publication is consumer-valid and follows all required diagnostic writes and close', async t => {
+  const f = await consumableFixture(t), result = await publicationFault(f, 'no-post-publication-io');
+  assert.equal(result.status, 0, result.stderr);
+  const bytes = await readFile(join(f.artifacts, 'rollback-evidence.json'), 'utf8');
+  assert.equal(consumerAccepts(f, bytes), true);
+  assert(result.events.indexOf('diagnostic-close') < result.events.indexOf('final-open'), JSON.stringify(result.events));
+});
+for (const mode of ['diagnostic-truncate', 'diagnostic-partial-write', 'diagnostic-close', 'final-partial-write', 'final-close-before', 'final-close-after']) {
+  test(`${mode} leaves no final success file or partial publication`, async t => {
+    const f = await consumableFixture(t), result = await publicationFault(f, mode);
+    assert.notEqual(result.status, 0, result.stdout); assert.match(result.stderr, /injected/);
+    assert.equal(await present(join(f.artifacts, 'rollback-evidence.json')), false, JSON.stringify(result.events));
+    if (mode.startsWith('diagnostic-')) assert.equal(result.events.includes('final-open'), false, JSON.stringify(result.events));
+    if (!mode.startsWith('diagnostic-') || mode === 'diagnostic-close') assert.equal((await diagnostics(f)).status, 'failed');
+  });
+}
+for (const mode of ['final-open-race', 'final-write-replace', 'final-write-replace-symlink', 'final-close-replace', 'final-write-replace-diagnostic', 'final-replace-after-write', 'final-replace-after-close']) {
+  test(`${mode} preserves competing writer ownership during failed publication recovery`, async t => {
+    const f = await consumableFixture(t), result = await publicationFault(f, mode);
+    assert.notEqual(result.status, 0, result.stdout);
+    const bytes = await readFile(join(f.artifacts, 'rollback-evidence.json'), 'utf8');
+    assert.equal(bytes, mode.endsWith('symlink') ? 'competitor target bytes' : 'competing final writer bytes');
+    assert.equal(consumerAccepts(f, bytes), false);
+    if (mode.endsWith('symlink')) assert.equal((await lstat(join(f.artifacts, 'rollback-evidence.json'))).isSymbolicLink(), true);
+    if (mode.endsWith('diagnostic')) assert.equal(await readFile(join(f.artifacts, 'launcher-diagnostics.json'), 'utf8'), 'competing diagnostic writer bytes');
+    else assert.equal((await diagnostics(f)).status, 'failed');
+  });
+}
+
+test('selected detached S is explicitly transported after shared HEAD moves away immediately before clone', async t => {
+  const f = await fixture(t), branch = git(f.source, 'symbolic-ref', 'HEAD');
+  await writeFile(join(f.source, 'detached-only'), 'candidate S, no branch');
+  await writeFile(join(f.source, 'source.mjs'), 'export const marker = "selected detached S";\n');
+  git(f.source, 'add', '.'); git(f.source, 'commit', '-qm', 'detached S');
+  const selected = git(f.source, 'rev-parse', 'HEAD'), selectedTree = git(f.source, 'rev-parse', 'HEAD^{tree}');
+  git(f.source, 'checkout', '--detach', selected); git(f.source, 'update-ref', branch, f.ref);
+  assert.equal(git(f.source, 'for-each-ref', '--contains', selected), '');
+  const refsBefore = git(f.source, 'show-ref'), indexBefore = await readFile(join(f.source, '.git', 'index'));
+  const wrapperPath = join(f.base, 'bin', 'git'), wrapper = await readFile(wrapperPath, 'utf8');
+  await writeFile(wrapperPath, wrapper.replace('const child = spawnSync(', `
+    if (args.includes('clone')) {
+      // This call occurs after the launcher read S/T. Simulate only the other
+      // writer's checkout; leave S in source objects and touch no refs.
+      const moved = spawnSync(${JSON.stringify(gitBinary)}, ${JSON.stringify(['-C', f.source, 'checkout', branch.replace('refs/heads/', '')])}, { stdio: 'pipe' });
+      if (moved.status !== 0) process.exit(91);
+      const advertised = spawnSync(${JSON.stringify(gitBinary)}, ${JSON.stringify(['-C', f.source, 'ls-remote', f.source])}, { encoding: 'utf8' });
+      if (advertised.stdout.includes(${JSON.stringify(selected)})) process.exit(92);
+    }
+    if (args.includes('fetch')) {
+      const resolved = spawnSync(${JSON.stringify(gitBinary)}, ${JSON.stringify(['-C', f.source, 'rev-parse', `${selected}^{commit}`])}, { encoding: 'utf8' });
+      if (resolved.stdout.trim() !== ${JSON.stringify(selected)}) process.exit(93);
+    }
+    const child = spawnSync(`));
+  f.args[3] = selected;
+  const result = await f.run(); assert.equal(result.status, 0, result.stderr);
+  const evidence = JSON.parse(await readFile(join(f.artifacts, 'rollback-evidence.json'), 'utf8'));
+  assert.equal(evidence.targetRef, selected); assert.equal(evidence.candidateExecution.finalTree, selectedTree);
+  assert.equal(git(f.source, 'rev-parse', 'HEAD'), f.ref); assert.equal(git(f.source, 'show-ref'), refsBefore);
+  assert.equal(git(f.source, 'rev-parse', `${selected}^{commit}`), selected);
+  // The other writer changed its checkout/index to the branch; compare that
+  // state to the branch tree rather than to the original detached index.
+  assert.equal(git(f.source, 'status', '--porcelain=v1'), '');
+  assert.notDeepEqual(await readFile(join(f.source, '.git', 'index')), indexBefore);
+  assert.equal((await records(f)).find(event => event.stage === 'check').source, 'export const marker = "selected detached S";\n');
 });
 
 test('two concurrent runs at the same S have distinct clones, run IDs, installation homes and artifacts', async t => {

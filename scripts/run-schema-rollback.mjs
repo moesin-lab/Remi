@@ -263,9 +263,10 @@ export async function runSchemaRollback(options) {
   let ownedRun = false, ctx, staged, failure;
   const candidate = join(runRoot, 'candidate'), previousInput = join(runRoot, 'previous-input');
   const staging = join(artifactRoot, 'rollback-staged-result.json');
-  let stagingIdentity;
+  let stagingIdentity, diagnosticIdentity;
   const save = async () => { await diagnosticFile.truncate(0); await diagnosticFile.write(JSON.stringify(diagnostic, null, 2) + '\n', 0, 'utf8'); };
   try {
+    diagnosticIdentity = await diagnosticFile.stat({ bigint: true });
     await mkdir(runRoot, { mode: 0o700 }); ownedRun = true;
     diagnostic.runRoot = runRoot;
     const control = join(runRoot, 'control');
@@ -281,6 +282,11 @@ export async function runSchemaRollback(options) {
     diagnostic.stage = 'clone'; await save();
     await command('git', ['-c', 'core.hooksPath=/dev/null', 'clone', '--no-local', '--no-checkout', '--', source, candidate], runRoot, env, join(artifactRoot, 'clone.log'));
     candidateGit(candidate, 'remote', 'set-url', 'origin', OFFICIAL_ORIGIN);
+    // A detached S can stop being advertised after preflight. Request its
+    // object closure explicitly, without pinning or mutating any source ref.
+    await command('git', ['-c', 'core.hooksPath=/dev/null', '-C', candidate, 'fetch', '--no-tags', '--no-write-fetch-head', '--', source, ref], runRoot, env, join(artifactRoot, 'candidate-fetch.log'));
+    assert.equal(gitText(candidate, 'rev-parse', `${ref}^{commit}`), ref, 'Transported candidate commit differs');
+    assert.equal(gitText(candidate, 'rev-parse', `${ref}^{tree}`), tree, 'Transported candidate tree differs');
     candidateGit(candidate, 'checkout', '--detach', ref);
     const bunVersion = execFileSync('bun', ['--version'], { cwd: runRoot, env, encoding: 'utf8' }).trim();
     assert.equal(bunVersion, '1.3.14', 'Bun 1.3.14 is required');
@@ -360,16 +366,61 @@ export async function runSchemaRollback(options) {
       await rm(runRoot, { recursive: true });
     });
     assert.deepEqual(diagnostic.cleanup.map(item => item.name), CLEANUPS);
-    try {
-      if (!failure) {
-        assert(staged && ctx, 'Missing successful staged result');
-        staged.candidateExecution.cleanup = diagnostic.cleanup;
-        await writeFile(join(artifactRoot, 'rollback-evidence.json'), JSON.stringify(staged, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-      }
-    } catch (error) { failure = error; diagnostic.error = String(error); }
+    // All mandatory diagnostic I/O precedes publication. In particular a
+    // diagnostic save/close error must never leave usable success evidence.
     diagnostic.status = failure ? 'failed' : 'passed';
     if (failure && !diagnostic.error) diagnostic.error = String(failure);
-    try { await save(); } finally { await diagnosticFile.close(); }
+    try { await save(); } catch (error) { failure ??= error; }
+    try { await diagnosticFile.close(); }
+    catch (error) {
+      failure ??= error;
+      try { await diagnosticFile.close(); } catch { /* Preserve the original close failure. */ }
+    }
+    if (!failure) {
+      const output = join(artifactRoot, 'rollback-evidence.json');
+      let outputFile, outputIdentity;
+      try {
+        assert(staged && ctx, 'Missing successful staged result');
+        staged.candidateExecution.cleanup = diagnostic.cleanup;
+        outputFile = await open(output, 'wx', 0o600);
+        outputIdentity = await outputFile.stat({ bigint: true });
+        await outputFile.writeFile(JSON.stringify(staged, null, 2) + '\n');
+        await outputFile.close();
+        const current = await lstat(output, { bigint: true });
+        assert(current.isFile() && current.dev === outputIdentity.dev && current.ino === outputIdentity.ino,
+          'Final evidence ownership changed during publication');
+        // No required diagnostic or other resource I/O follows this success.
+      } catch (error) {
+        failure = error;
+        if (outputFile) {
+          // Invalidate only our open inode, even if another writer has moved
+          // it elsewhere. Never truncate a replacement reached through output.
+          try { await outputFile.truncate(0); } catch { /* The close may have already completed. */ }
+          try { await outputFile.close(); } catch { /* Still attempt owned-path recovery. */ }
+          try {
+            const current = await lstat(output, { bigint: true });
+            if (outputIdentity && current.dev === outputIdentity.dev && current.ino === outputIdentity.ino) await rm(output);
+          } catch (cleanupError) {
+            if (cleanupError.code !== 'ENOENT') diagnostic.publicationCleanupError = String(cleanupError);
+          }
+        }
+      }
+    }
+    if (failure) {
+      // Updating diagnostics is best effort only on failure, including an
+      // earlier diagnostic close error. Reopening does not establish ownership.
+      diagnostic.status = 'failed'; diagnostic.error ??= String(failure);
+      let report;
+      try {
+        report = await open(join(artifactRoot, 'launcher-diagnostics.json'), constants.O_RDWR | constants.O_NOFOLLOW);
+        const current = await report.stat({ bigint: true });
+        assert(diagnosticIdentity && current.isFile() && current.dev === diagnosticIdentity.dev && current.ino === diagnosticIdentity.ino,
+          'Diagnostic ownership changed after close');
+        await report.truncate(0);
+        await report.write(JSON.stringify(diagnostic, null, 2) + '\n', 0, 'utf8');
+      } catch { /* Keep the original failure and preserve competing writer content. */ }
+      finally { if (report) { try { await report.close(); } catch { /* Best effort only. */ } } }
+    }
   }
   if (failure) throw failure;
   return join(artifactRoot, 'rollback-evidence.json');
@@ -385,6 +436,6 @@ function parseArguments(argv) {
   return result;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { console.log(await runSchemaRollback(parseArguments(process.argv.slice(2)))); }
+  try { await runSchemaRollback(parseArguments(process.argv.slice(2))); }
   catch (error) { console.error(String(error)); process.exitCode = 1; }
 }

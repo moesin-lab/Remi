@@ -132,8 +132,9 @@ API 不可用、签名失败、来源缺失或源码不符均阻断，不回退�
 发布/实际运行 ref、observed tag、来源验证结果及每阶段 stdout/stderr 路径。
 
 生产入口是 [run-schema-rollback.mjs](../../scripts/run-schema-rollback.mjs)。调用方明确提供完整候选 SHA，
-launcher 在唯一私有目录创建独立 Git clone；共享 checkout 仅提供该提交的 Git 对象，不读取其可变源码、
-依赖或 `ci-schema`，不修改共享分支、refs 或 index。launcher 自身也应从该 SHA 的 Git 对象导出到独立
+launcher 在唯一私有目录创建独立 Git clone，并只读显式传输所选 SHA 的对象闭包后核对 SHA/tree；
+即使共享 HEAD 已移离不再 advertised 的 detached 提交，也不依赖当前分支位置获取候选。
+共享 checkout 仅提供该提交的 Git 对象，不读取其可变源码、依赖或 `ci-schema`，不修改共享分支、refs 或 index。launcher 自身也应从该 SHA 的 Git 对象导出到独立
 bootstrap 目录后执行；启动 Node 前清除 `NODE_OPTIONS`、`NODE_PATH` 和 Git root/index/object/config 覆盖。
 私有 clone 的 origin 指向官方 GitHub；候选完整 workspace 与实际发布前版各自
 用 Bun 1.3.14、公共 registry、各自 lockfile 和 `--frozen-lockfile --ignore-scripts` 独立安装，不复用
@@ -152,9 +153,10 @@ bootstrap 目录后执行；启动 Node 前清除 `NODE_OPTIONS`、`NODE_PATH` �
 资源。checker 先写 `rollback-staged-result.json`，保留四阶段 stdout/stderr、失败诊断和旧探针/测试库/
 管理连接/临时 HOME 四项独立清理结果；该 staging 文件不是可发布证据，也不进入上传白名单。
 launcher 最终复核源码和 staged 身份，将必要元数据留存后，依序独立清理 `previous-input`、
-`candidate-checkout`、`staged-result`、`run-root`。全部内外清理通过后，才以 `wx` 独占创建
-`rollback-evidence.json`。任一阶段、复核、清理或文件竞争失败均不产生本轮成功证据；另一 writer 创建的
-内容保留。`launcher-diagnostics.json`、`preparation-diagnostics.json`、`rollback-diagnostics.json`
+`candidate-checkout`、`staged-result`、`run-root`。全部内外清理及必要诊断的持久化/关闭通过后，才以 `wx`
+独占创建 `rollback-evidence.json`，持有文件句柄及 inode/device 所有权；写入或关闭失败只回收本轮文件，
+路径已被其他 writer 替换则保留其内容。最终发布后不再执行必需的诊断 I/O。
+任一阶段、复核、清理或文件竞争失败均不产生本轮成功证据；另一 writer 创建的内容保留。`launcher-diagnostics.json`、`preparation-diagnostics.json`、`rollback-diagnostics.json`
 和日志保存本轮失败及清理结果，诊断不产生 `rollbackSafeFrom`。重跑选择全新产物目录，不从失败 CI 或
 旧文件推断成功。应用下述 workflow 补丁后，CI 以 `always()` 上传明确列出的证据/元数据/日志，不上传
 staging、归档、源码、HOME 或依赖。有 contract 的 schema 不生成自动回退声明。核心探针不能替代所有产品行为的兼容验证。

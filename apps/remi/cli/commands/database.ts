@@ -1,10 +1,11 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { isIP } from 'node:net';
+import type { PgDirectTarget, PostgresSyncDatabase, SqlDatabase } from "@multiremi/store/db/postgres.js";
 import type { CommandSpec } from '../core/command-registry.js';
 
 /** Local maintenance commands: DB credentials, never platform/task API auth. */
-export function databaseCommandSpecs(): CommandSpec[] {
+export function databaseCommandSpecs(adoptInventory: (file: string) => Promise<unknown> = adoptPostgresInventory): CommandSpec[] {
   return [{
     id: 'db.schema', path: ['db', 'schema'],
     description: 'Read PostgreSQL expand/contract levels and this code compatibility interval',
@@ -55,8 +56,8 @@ export function databaseCommandSpecs(): CommandSpec[] {
       const classify = (db: SqlDatabase, sqliteTarget?: string) => {
         if (options['export-inventory']) result = legacyInventory(db);
         else if (options['adopt-inventory']) {
-          const target = sqliteTarget ?? postgresAuditTarget();
-          const pin = historicalInventoryPin(target);
+          if (!sqliteTarget) throw new Error('Missing SQLite inventory target');
+          const pin = historicalInventoryPin(sqliteTarget);
           result = adoptLegacyInventory(db, readFileSync(String(options['adopt-inventory'])), pin.sha256, pin.continuousIsolation === true);
         } else if (options['hold-for-rollback']) result = holdScmWritersForReview(db);
         else if (options['review-page']) result = auditScmRollback(db, { review: JSON.parse(readFileSync(String(options['review-page']), 'utf8')) });
@@ -66,6 +67,8 @@ export function databaseCommandSpecs(): CommandSpec[] {
       };
       if (options['sqlite-file']) {
         await withOfflineSqlite(String(options['sqlite-file']), classify);
+      } else if (options['adopt-inventory']) {
+        result = await adoptInventory(String(options['adopt-inventory']));
       } else {
         const db = await openDatabase();
         try {
@@ -94,10 +97,66 @@ export function databaseCommandSpecs(): CommandSpec[] {
     },
   }];
 }
-function postgresAuditTarget(): string {
-  const target = new URL(process.env.MULTIREMI_DATABASE_URL!);
-  if (target.search || target.hash) throw new Error('Use a direct target database URL without overrides for historical provenance');
-  return `postgres://${target.hostname}:${target.port || '5432'}${target.pathname}`;
+function canonicalAddress(address: unknown): string | undefined {
+  if (typeof address !== 'string' || address.includes('%')) return undefined;
+  if (isIP(address) === 4) return address;
+  if (isIP(address) === 6) return new URL(`http://[${address}]`).hostname.slice(1, -1);
+}
+
+export function postgresInventoryTarget(env: NodeJS.ProcessEnv) {
+  for (const name of ['PGDATABASE','PG_DATABASE','PGPORT','PG_PORT','PGHOST','PG_HOST','PGHOSTADDR','PG_HOSTADDR','PGSERVICE','PGSERVICEFILE','PGOPTIONS']) {
+    if (env[name]) throw new Error(`Unset ${name} before adopting a PostgreSQL inventory`);
+  }
+  const url = env.MULTIREMI_DATABASE_URL ?? '';
+  const invalid = () => new Error('Use the pinned direct PostgreSQL TCP IP, explicit port and exact database name without overrides');
+  const parts = /^postgres(?:ql)?:\/\/(?:[^@/?#\\\s]+@)?(\[[0-9a-fA-F:.]+\]|[0-9.]+):([1-9]\d{0,4})\/([^/?#\\\s]+)$/u.exec(url);
+  if (!parts || /[\x00-\x20\x7f]/u.test(url)) throw invalid();
+  const hostname = canonicalAddress(parts[1].replace(/^\[|\]$/gu, ''));
+  const port = Number(parts[2]);
+  if (!hostname || port > 65535) throw invalid();
+  let database: string;
+  try {
+    const parsed = new URL(url);
+    decodeURIComponent(parsed.username);
+    decodeURIComponent(parsed.password);
+    database = decodeURIComponent(parts[3]);
+  } catch { throw invalid(); }
+  if (/[%/\\\x00-\x1f\x7f]/u.test(database) || database === '.' || database === '..') throw invalid();
+  const target: PgDirectTarget = Object.freeze({ hostname, port, database });
+  const host = isIP(hostname) === 6 ? `[${hostname}]` : hostname;
+  const sslMode = env.PGSSLMODE;
+  if (sslMode && !['disable','prefer','require','verify-ca','verify-full'].includes(sslMode)) {
+    throw new Error('Unsupported PGSSLMODE for PostgreSQL inventory adoption');
+  }
+  const requireTls = sslMode && ['require','verify-ca','verify-full'].includes(sslMode);
+  return Object.freeze({ url: requireTls ? `${url}?sslmode=${sslMode}` : url, target,
+    key: `postgres://${host}:${port}/${encodeURIComponent(database)}` });
+}
+
+export async function adoptPostgresInventory(file: string, env = process.env, lookup = historicalInventoryPin,
+  open?: (url: string, target: PgDirectTarget) => PostgresSyncDatabase) {
+  const { url, target, key } = postgresInventoryTarget(env);
+  const pin = lookup(key);
+  const bytes = readFileSync(file);
+  const { PostgresSyncDatabase } = await import('@multiremi/store/db/postgres.js');
+  const { MIGRATION_ADVISORY_LOCK_KEY } = await import('@multiremi/store/advisory-locks.js');
+  const { assertSchemaContractClientsOffline } = await import('@multiremi/store/schema-contracts.js');
+  const { adoptLegacyInventory } = await import('@multiremi/store/scm-rollback-audit.js');
+  let db: PostgresSyncDatabase;
+  try { db = open ? open(url, target) : new PostgresSyncDatabase(url, undefined, target); }
+  catch { throw new Error('Unable to open the pinned PostgreSQL endpoint. Check its direct address, authentication and TLS configuration.'); }
+  try {
+    return db.transaction(() => {
+      db.advisoryXactLock(MIGRATION_ADVISORY_LOCK_KEY);
+      assertSchemaContractClientsOffline(db, 'classify-scm-links');
+      const actual = db.query(`SELECT pg_catalog.current_database() AS database,
+        pg_catalog.host(pg_catalog.inet_server_addr()) AS address, pg_catalog.inet_server_port() AS port`).get();
+      if (actual?.database !== target.database || canonicalAddress(actual.address) !== target.hostname || actual.port !== target.port) {
+        throw new Error('PostgreSQL backend identity mismatch. Keep writers isolated and verify the pinned direct TCP endpoint.');
+      }
+      return adoptLegacyInventory(db, bytes, pin.sha256, pin.continuousIsolation === true);
+    })();
+  } finally { db.close(); }
 }
 
 function historicalInventoryPin(target: string): { sha256: string; continuousIsolation?: boolean } {

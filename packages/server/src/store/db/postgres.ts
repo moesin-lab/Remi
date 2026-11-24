@@ -28,6 +28,12 @@ import {
   lockOrderSentinelTransactionEnd,
 } from "@multiremi/store/lock-order-sentinel.js";
 
+export interface PgDirectTarget {
+  readonly hostname: string;
+  readonly port: number;
+  readonly database: string;
+}
+
 export interface SqlStatement {
   get(...params: unknown[]): any;
   all(...params: unknown[]): any[];
@@ -401,15 +407,15 @@ class PgBridge {
   private readonly worker: Worker;
   private unavailableUntil = 0;
 
-  constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES) {
+  constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES, expectedTarget?: PgDirectTarget) {
     this.data = new SharedArrayBuffer(resultBufferBytes);
     this.buf = new Uint8Array(this.data);
     this.worker = new Worker(new URL("./pg-worker.ts", import.meta.url).href);
-    try { this.request({ init: url }); }
+    try { this.request({ init: url, expectedTarget }); }
     catch (error) { this.worker.terminate(); throw error; }
   }
 
-  private request(msg: { init?: string; sql?: string; params?: unknown[]; timeoutMs?: number }): any {
+  private request(msg: { init?: string; expectedTarget?: PgDirectTarget; sql?: string; params?: unknown[]; timeoutMs?: number }): any {
     if (this.closed) throw new Error("postgres bridge is closed");
     const cleanup = msg.sql !== undefined && TRANSACTION_CLEANUP.test(msg.sql);
     // A healthy bridge has no cooldown to check. Avoid reading the wall clock
@@ -590,8 +596,8 @@ export class PostgresSyncDatabase implements SqlDatabase {
   private afterCommitFrames: Array<Array<() => void>> = [];
   private peakTransactionDepth = 0;
   private savepointSequence = 0;
-  constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES) {
-    this.bridge = new PgBridge(url, resultBufferBytes);
+  constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES, expectedTarget?: PgDirectTarget) {
+    this.bridge = new PgBridge(url, resultBufferBytes, expectedTarget);
   }
   get connectionUnavailable(): boolean { return this.bridge.connectionUnavailable; }
 

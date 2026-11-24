@@ -2,6 +2,10 @@ import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { workspaceKeys } from "@multiremi/core/workspace/queries";
+import { WSClient } from "@multiremi/core/api/ws-client";
+import { createAuthStore, registerAuthStore } from "@multiremi/core/auth";
+import { defaultStorage } from "@multiremi/core/platform";
+import { useRealtimeSync } from "@multiremi/core/realtime";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -53,7 +57,7 @@ vi.mock("@multiremi/core/api", () => {
 vi.mock("sonner", () => ({ toast: toastMocks }));
 vi.mock("@multiremi/ui/lib/clipboard", () => ({ copyText }));
 
-import { ApiError } from "@multiremi/core/api";
+import { api, ApiError } from "@multiremi/core/api";
 import { PromptsTab } from "./prompts-tab";
 
 const TEST_RESOURCES = { en: { common: enCommon, settings: enSettings } };
@@ -133,7 +137,7 @@ function makeVersionDetail(
   };
 }
 
-function renderPromptsTab() {
+function renderPromptsTab(companion?: ReactNode) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -146,7 +150,7 @@ function renderPromptsTab() {
       </QueryClientProvider>
     );
   }
-  return { ...render(<PromptsTab />, { wrapper: Wrapper }), queryClient };
+  return { ...render(<>{companion}<PromptsTab /></>, { wrapper: Wrapper }), queryClient };
 }
 
 describe("PromptsTab", () => {
@@ -267,6 +271,44 @@ describe("PromptsTab", () => {
       content: { ...DEFAULT_SLOTS, common: "my edit" }, expectedRevision: 1,
       baseDefaultRevision: beforeEdit ? "B" : reset.currentDefault.revision,
     })));
+  });
+
+  it.each([false, true])("refetches policy and history for edit/reset/restore events with a dirty editor=%s", async dirty => {
+    const ws = new WSClient("ws://localhost");
+    const subscriptions = vi.spyOn(ws, "on");
+    const authStore = createAuthStore({ api, storage: defaultStorage });
+    registerAuthStore(authStore);
+    function Sync() {
+      useRealtimeSync(ws, { authStore });
+      return null;
+    }
+    renderPromptsTab(<Sync />);
+    const box = await screen.findByLabelText("General behavior");
+    const receive = subscriptions.mock.calls.find(([event]) => event === "workspace:updated")![1];
+    await waitFor(() => expect(apiMocks.listWorkspaceSystemPromptVersions).toHaveBeenCalledTimes(1));
+    if (dirty) fireEvent.change(box, { target: { value: "unsaved local draft" } });
+    for (const [index, operation] of (["edit", "reset", "rollback"] as const).entries()) {
+      const version = makeVersionSummary(index + 2, { operation, mode: operation === "reset" ? "default" : "custom",
+        isCurrent: true, changeNote: `remote ${operation}` });
+      const state = makeState();
+      state.document = { ...state.document, id: "doc-1", revision: version.versionNumber, currentVersionId: version.id, mode: version.mode };
+      state.content = { ...DEFAULT_SLOTS, common: `content after ${operation}` };
+      state.currentDefault = { ...state.currentDefault, revision: "catalog-B" };
+      state.baseDefault = state.currentDefault;
+      apiMocks.getWorkspaceSystemPrompt.mockResolvedValue(state);
+      apiMocks.listWorkspaceSystemPromptVersions.mockResolvedValue({ versions: [version], nextCursor: null });
+      await act(async () => { receive({ id: "workspace-1" }, "local", "member"); });
+      expect(await screen.findByText(`remote ${operation}`)).toBeInTheDocument();
+      await waitFor(() => expect(box).toHaveValue(dirty ? "unsaved local draft" : state.content.common));
+      expect(apiMocks.getWorkspaceSystemPrompt).toHaveBeenCalledTimes(index + 2);
+      expect(apiMocks.listWorkspaceSystemPromptVersions).toHaveBeenCalledTimes(index + 2);
+    }
+    if (dirty) {
+      fireEvent.click(screen.getByRole("button", { name: "Save new version" }));
+      await waitFor(() => expect(apiMocks.updateWorkspaceSystemPrompt).toHaveBeenCalledWith("workspace-1", expect.objectContaining({
+        expectedRevision: 0, baseDefaultRevision: makeState().currentDefault.revision, content: { ...DEFAULT_SLOTS, common: "unsaved local draft" },
+      })));
+    }
   });
 
   it("enforces the 8,000 Unicode code point limit across all five slots", async () => {

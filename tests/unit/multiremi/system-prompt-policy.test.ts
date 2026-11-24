@@ -24,6 +24,22 @@ const MASTER = { Authorization: "Bearer MASTER", "content-type": "application/js
 afterEach(resetMultiremiTestEnv);
 
 describe("System Prompt version domain", () => {
+  it("publishes the sparse workspace invalidation after each policy mutation", () => {
+    const store = createLocalStore();
+    const events: unknown[] = [];
+    const unsubscribe = store.onWorkspaceEvent(event => {
+      if (event.type === "workspace:updated") events.push(event.payload);
+    });
+    try {
+      const edit = store.editSystemPrompt("local", { expectedRevision: 0, requestId: "edit", content: content("remote") }, actor);
+      expect(events).toEqual([{ id: "local" }]);
+      store.resetSystemPrompt("local", { expectedRevision: 2, requestId: "reset" }, actor);
+      expect(events).toHaveLength(2);
+      store.restoreSystemPrompt("local", { expectedRevision: 3, requestId: "restore", versionId: edit.version.id }, actor);
+      expect(events).toEqual([{ id: "local" }, { id: "local" }, { id: "local" }]);
+    } finally { unsubscribe(); }
+  });
+
   it("reads a virtual default without writes and leaves the old appendix independent", () => {
     const store = createLocalStore();
     store.updateWorkspace("local", { settings: { prompt_appendix: "Existing appendix" } });

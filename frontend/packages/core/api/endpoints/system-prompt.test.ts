@@ -215,6 +215,21 @@ describe("System Prompt API endpoints and schemas", () => {
     expect(malformedPolicy.input?.system_prompt_policy).toBeNull();
   });
 
+  it("invalidates document and history for the sparse policy event without replacing workspace data", () => {
+    const qc = new QueryClient();
+    const workspace = { id: "local", name: "Existing", issue_prefix: "MUL" };
+    qc.setQueryData(workspaceKeys.list(), [workspace]);
+    const document = workspaceKeys.systemPrompt("local");
+    const history = workspaceKeys.systemPromptVersions("local");
+    const foreign = workspaceKeys.systemPrompt("other");
+    for (const key of [document, history, foreign]) qc.setQueryData(key, {});
+    applyWorkspaceUpdatedToCache(qc, { id: "local" });
+    expect(qc.getQueryState(document)?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(history)?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(foreign)?.isInvalidated).toBe(false);
+    expect(qc.getQueryData(workspaceKeys.list())).toEqual([workspace]);
+  });
+
   it("invalidates workspace systemPrompt queries on workspace:updated realtime events", () => {
     const qc = new QueryClient();
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");

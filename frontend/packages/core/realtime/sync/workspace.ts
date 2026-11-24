@@ -35,8 +35,8 @@ export function applyWorkspaceUpdatedToCache(
   qc: QueryClient,
   payload: WorkspaceUpdatedPayload,
 ): void {
-  const next = payload.workspace;
-  const workspaceId = next?.id ?? (payload as { workspace_id?: string }).workspace_id;
+  const next = "workspace" in payload ? payload.workspace : undefined;
+  const workspaceId = "workspace_id" in payload ? payload.workspace_id : "id" in payload ? payload.id : next?.id;
   if (next?.id) {
     const cached =
       qc

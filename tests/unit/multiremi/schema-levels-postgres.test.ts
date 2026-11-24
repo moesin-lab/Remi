@@ -1,8 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { MultiremiStore } from "@multiremi/store.js";
 import { SCHEMA_MIGRATIONS } from "@multiremi/store/schema-migrations.js";
-import type { SystemPromptWriteResult } from "@multiremi/contracts/system-prompt-policy.js";
-import type { SystemPromptPgJob } from "../../fixtures/system-prompt-pg-worker.js";
+import { DEFAULT_SYSTEM_PROMPT_CONTENT, type SystemPromptWriteResult } from "@multiremi/contracts/system-prompt-policy.js";
+import type { SystemPromptPgJob, SystemPromptPgWrite } from "../../fixtures/system-prompt-pg-worker.js";
 import { verifyPlannedRestartSchemaUpgrade } from "../../fixtures/planned-restart-schema-upgrade.js";
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -158,10 +158,12 @@ describe.skipIf(!adminUrl)("System Prompt atomicity on real PostgreSQL (requires
     finally { await admin?.close(); }
   });
 
-  async function race(workspaceId: string, writers: [{ requestId: string; common: string }, { requestId: string; common: string }]): Promise<WorkerResult[]> {
+  const actor = { type: "human" as const, operatorId: "local", userId: "local", displayName: "Tester" };
+
+  async function race(workspaceId: string, writers: [SystemPromptPgWrite, SystemPromptPgWrite], expectedRevision = 0): Promise<WorkerResult[]> {
     const batch = crypto.randomUUID();
     const children = writers.map((writer, index) => {
-      const job: SystemPromptPgJob = { workspaceId, batch, participant: String(index), expectedRevision: 0, ...writer };
+      const job: SystemPromptPgJob = { workspaceId, batch, participant: String(index), expectedRevision, ...writer };
       return Bun.spawn([process.execPath, workerPath], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe",
         env: { ...process.env, SYSTEM_PROMPT_TEST_URL: databaseUrl, SYSTEM_PROMPT_TEST_JOB: JSON.stringify(job), MULTIREMI_TEST_LOCK_ORDER_SENTINEL: "1" } });
     });
@@ -232,6 +234,64 @@ describe.skipIf(!adminUrl)("System Prompt atomicity on real PostgreSQL (requires
     expect(loser.body).toMatchObject({ code: "system_prompt_conflict", currentRevision: 2 });
     expect(store.getSystemPrompt(workspace.id).content.common).toBe(winner.body.content!.common);
     assertCoherentFirstEdit(workspace.id);
+  }, 60_000);
+
+  it.each(["edit", "restore"] as const)("serializes %s against reset at the same existing revision", async operation => {
+    const workspace = store.createWorkspace({ name: `PG ${operation}/reset` });
+    const seed = store.editSystemPrompt(workspace.id, { requestId: "seed", expectedRevision: 0,
+      content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common: "seed snapshot" } }, actor);
+    const prior = store.listSystemPromptVersions(workspace.id).versions;
+    const rival: SystemPromptPgWrite = operation === "edit" ? { operation, requestId: operation, common: "edited snapshot" }
+      : { operation, requestId: operation, versionId: seed.version.id };
+    const results = await race(workspace.id, [rival, { operation: "reset", requestId: "reset" }], seed.document.revision);
+    expect(results.map(result => result.status).sort()).toEqual([200, 409]);
+    const winner = results.find(result => result.status === 200)!;
+    const loser = results.find(result => result.status === 409)!;
+    const won = winner.participant === "0" ? operation : "reset";
+    expect(loser.body).toMatchObject({ code: "system_prompt_conflict", currentRevision: 3 });
+    const state = store.getSystemPrompt(workspace.id);
+    const history = store.listSystemPromptVersions(workspace.id).versions;
+    expect(history.map(version => version.id)).toEqual([winner.body.version!.id, ...prior.map(version => version.id)]);
+    expect(history.map(version => version.isCurrent)).toEqual([true, false, false]);
+    expect(history[0]).toMatchObject({ versionNumber: 3, parentVersionId: seed.version.id,
+      requestId: won, operation: won === "restore" ? "rollback" : won, restoredFromVersionId: won === "restore" ? seed.version.id : null });
+    expect(state.document).toMatchObject({ revision: 3, currentVersionId: history[0]!.id, mode: won === "reset" ? "default" : "custom" });
+    expect(state.content).toEqual(won === "reset" ? DEFAULT_SYSTEM_PROMPT_CONTENT : won === "restore" ? seed.content : { ...seed.content, common: "edited snapshot" });
+    expect(history.some(version => version.requestId === (won === "reset" ? operation : "reset"))).toBe(false);
+  }, 60_000);
+
+  it("paginates version numbers and deletes the workspace's document, versions and claimed binding", () => {
+    const workspace = store.createWorkspace({ name: "PG policy lifecycle" });
+    for (let revision = 0; revision < 11; revision++) {
+      store.resetSystemPrompt(workspace.id, { expectedRevision: revision, requestId: `reset-${revision}` }, actor);
+    }
+    const head = store.getSystemPrompt(workspace.id).document;
+    const versions = [];
+    let cursor: string | undefined;
+    for (const size of [4, 4, 3]) {
+      const page = store.listSystemPromptVersions(workspace.id, { limit: 4, cursor });
+      expect(page.versions).toHaveLength(size);
+      versions.push(...page.versions);
+      cursor = page.nextCursor ?? undefined;
+      expect(Boolean(cursor)).toBe(size === 4);
+    }
+    expect(versions.map(version => version.versionNumber)).toEqual([11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(versions.filter(version => version.isCurrent).map(version => version.id)).toEqual([head.currentVersionId!]);
+    const runtime = store.registerRuntime({ id: "rt_pg_policy", name: "PG policy runtime", workspaceId: workspace.id,
+      daemonId: "dmn_pg_policy", provider: "claude", ownerId: "local", status: "online", maxConcurrency: 1 });
+    const agent = store.createAgent({ name: "PG policy agent", workspaceId: workspace.id, provider: "claude", runtimeId: runtime.id });
+    const task = store.createTask({ workspaceId: workspace.id, agentId: agent.id, prompt: "capture binding" });
+    expect(store.claimTask(runtime.id, { supportsPromptPolicy: true })?.id).toBe(task.id);
+    expect(store.getAttemptSystemPrompt(task.id)?.versionId).toBe(head.currentVersionId);
+    store.startTask(task.id);
+    store.completeTask(task.id, { output: "done" });
+    const plan = store.getDaemonRetirementPlan(workspace.id, "dmn_pg_policy");
+    expect(store.retireDaemon(workspace.id, "dmn_pg_policy", plan.snapshot, "local").status).toBe("retired");
+    const counts = () => ["multiremi_system_prompt_documents", "multiremi_system_prompt_versions", "multiremi_attempt_system_prompts"].map(table =>
+      Number(db.query(`SELECT count(*) AS n FROM ${table} WHERE workspace_id=?`).get(workspace.id)?.n));
+    expect(counts()).toEqual([1, 11, 1]);
+    expect(store.deleteWorkspace(workspace.id)).toBe(true);
+    expect(counts()).toEqual([0, 0, 0]);
   }, 60_000);
 
   it("replays a simultaneous identical request before the now-stale CAS without appending versions", async () => {

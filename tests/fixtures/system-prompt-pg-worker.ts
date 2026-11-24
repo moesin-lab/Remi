@@ -4,14 +4,16 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
 
-export interface SystemPromptPgJob {
+export type SystemPromptPgWrite = { requestId: string } & (
+  { operation?: "edit"; common: string } | { operation: "reset" } | { operation: "restore"; versionId: string }
+);
+
+export type SystemPromptPgJob = SystemPromptPgWrite & {
   workspaceId: string;
   batch: string;
   participant: string;
   expectedRevision: number;
-  requestId: string;
-  common: string;
-}
+};
 
 if (import.meta.main) {
   const url = process.env.SYSTEM_PROMPT_TEST_URL;
@@ -33,10 +35,14 @@ if (import.meta.main) {
       await Bun.sleep(10);
     }
     if (!ready) throw new Error("System Prompt PostgreSQL process barrier timed out");
-    const response = await app.request(`/api/workspaces/${job.workspaceId}/system-prompt`, {
-      method: "PUT", headers: { Authorization: "Bearer SYSTEM_PROMPT_TEST_MASTER", "content-type": "application/json" },
-      body: JSON.stringify({ content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common: job.common },
-        expectedRevision: job.expectedRevision, requestId: job.requestId }),
+    const path = `/api/workspaces/${job.workspaceId}/system-prompt`;
+    const edit = job.operation === undefined || job.operation === "edit";
+    const body = { expectedRevision: job.expectedRevision, requestId: job.requestId,
+      ...(edit ? { content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common: job.common } } : {}),
+      ...(job.operation === "restore" ? { versionId: job.versionId } : {}) };
+    const response = await app.request(edit ? path : `${path}/${job.operation}`, {
+      method: edit ? "PUT" : "POST", headers: { Authorization: "Bearer SYSTEM_PROMPT_TEST_MASTER", "content-type": "application/json" },
+      body: JSON.stringify(body),
     });
     const result = { participant: job.participant, status: response.status, body: await response.json() };
     console.log(`SYSTEM_PROMPT_TEST_RESULT:${JSON.stringify(result)}`);

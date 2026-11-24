@@ -753,6 +753,53 @@ API changes:
 - Internal daemon task wire removes `chat_bootstrap_transcript`; cold conversation
   history continues through the existing session projection.
 
+## Autopilot report delivery (MUL-32)
+
+A `run_only` Autopilot with no `delivery_chat_session_id` saves reports only in
+its internal Chat. Create, update, get and list responses include
+`warnings: [{"code":"autopilot_delivery_unbound","message":"Reports are saved only in the internal Chat. Open the Autopilot details to configure delivery."}]`
+for that state. Text output shows the warning and its Autopilot ID, including
+when several tasks are listed. JSON and JSONL preserve each task's warnings.
+A bound report or an Autopilot that creates Issues has no unbound-delivery warning.
+
+Humans can discover eligible destinations with the registered command
+`remi autopilot delivery-targets --workspace <workspace> --json`. It calls
+`GET /api/autopilot-delivery-targets?workspace_id=<workspace>` and returns
+`{"targets":[{"id":"chat_id","title":"Report Chat","channel":"web_chat"}]}`;
+`channel` is `web_chat` or `feishu`. Text output includes all three fields.
+Target discovery and delivery binding changes are human-only; listing a target does
+not authorize a task credential to bind it. Existing task access to create/update
+without a delivery target is preserved.
+
+Human CLI examples:
+
+```bash
+remi autopilot delivery-targets --workspace <workspace>
+remi autopilot create --data '{"title":"Progress report","assignee_id":"agt_reporter","execution_mode":"run_only","delivery_chat_session_id":"chat_current"}'
+remi autopilot update <autopilot> --data '{"delivery_chat_session_id":"chat_current"}'
+remi autopilot update <autopilot> --data '{"delivery_chat_session_id":null}'
+remi autopilot get <autopilot> --json
+```
+
+The create example shows delivery fields; provide any other required task fields
+through `--data` or `--file`. On update, omitting `delivery_chat_session_id` preserves
+the saved binding, a Chat ID sets/replaces it, and explicit JSON `null` clears it.
+HTTP errors retain a nonzero exit status and their server details. A rejected
+binding must not be retried with the delivery field removed.
+
+When an Agent creates a report through its authorized tool and receives
+`autopilot_delivery_unbound`, it must relay the warning and Autopilot ID in the
+original Chat. Tell the user to open **Autopilots -> task details -> choose current
+Chat and save**. Do not invent a trusted URL or claim that reports will reach the
+user before delivery is configured. The Web details page lets a human select,
+change or clear the destination; clearing it restores internal-Chat-only reporting
+and the warning for `run_only` tasks. The CLI does not silently infer or bind the
+current Chat.
+
+Regression coverage for text/JSON output, discovery scope and channels, binding
+states, and rejected writes is in
+[CLI operations tests](../tests/unit/remi/cli-operations.test.ts).
+
 ## Autopilot run must not read as a query (MUL-468)
 
 `remi autopilot run <autopilot>` shares its prefix with the read-only

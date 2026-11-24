@@ -95,6 +95,7 @@ const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
   "message.question.continue",
   "agent.role.set",
   "agent.supervisor.set",
+  "autopilot.delivery-targets",
   "autopilot.trigger.rotate-token",
   "autopilot.trigger.set-secret",
   "daemon.retire",

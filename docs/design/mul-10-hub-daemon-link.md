@@ -43,7 +43,7 @@ Hub 持有 workspace、授权、路由、任务意图和审计。daemon 是设�
 
 **拓扑。** 星型便于统一审批，但中心失联影响所有辐条；全网状可直接互通，但每对节点都要维护授权；按需双边联邦仅为明确的合作关系建边，可呈星状。建议首版限一跳，不设中转 Hub 或全局调度器。请求目的地必须是连接对端，来源须匹配认证身份，跳数限一，禁止再导出远程目录。未知目的地、回环和过期请求均在派活前拒绝。
 
-**写入与恢复。** 发起方作为任务 owner Hub，唯一推进业务状态；目标 Hub 是执行收据、目标端准入与其 daemon 租约的权威。引用使用 `(owner_hub_id, workspace_id, object_id)`。owner 先在本地事务写入任务与待发命令；目标事务以 `(source_hub, grant_id, operation_id)` 去重并记录参数摘要、状态及本地 attempt 绑定，之后才 ACK。ACK 表示目标已持久接收，完成须回传独立结果。取消也有持久收据；终态以 owner 的版本条件更新，迟到结果保留审计。目标先核对 fence，再派本地 daemon。outbox 重送直至确认或截止；保留收据至最大重试窗之后，过期消息永不重新执行。若撤销发生在开始之后，取消尽力投递，已发生的外部效果单列对账。
+**写入与恢复。** 发起方作为任务 owner Hub，唯一推进业务状态；目标 Hub 是执行收据、目标端准入与其 daemon 租约的权威。业务归属引用使用 `(owner_hub_id, workspace_id, owner_kind, object_id)`，其中 `object_id` 是所属 Issue 或独立 Chat 的 ID；下钻执行记录沿用该引用，定位方式见阶段 0。owner 先在本地事务写入任务与待发命令；目标事务以 `(source_hub, grant_id, operation_id)` 去重并记录参数摘要、状态及本地 attempt 绑定，之后才 ACK。ACK 表示目标已持久接收，完成须回传独立结果。取消也有持久收据；终态以 owner 的版本条件更新，迟到结果保留审计。目标先核对 fence，再派本地 daemon。outbox 重送直至确认或截止；保留收据至最大重试窗之后，过期消息永不重新执行。若撤销发生在开始之后，取消尽力投递，已发生的外部效果单列对账。
 
 **同步与隔离。** 默认只交换不含内容的授权能力摘要、容量档位及过期时间，只读目录仅作候选，接单时再验容量。远程执行须另授最小任务输入和结果字段；原始 trace 默认留执行端，仅经有权限的按需流读取。不转发原始 daemon/用户 token、仓库凭据、完整日志或 workspace 镜像。投影携 owner revision 和水位；缺号从 owner 补读，过期重取授权范围内快照。owner 不可达时投影显示过期时间，只允许已授权的有限本地善后；无人自动提升为 owner。单 Hub 事故恢复使用同身份备份并隔离旧实例，确认唯一写者和新 fence 后才开放写入。无法证明旧实例停写则保持只读。各 peer 按 workspace 限速、限流和独立熔断，审计关联两端 request、grant、attempt、结果及拒绝原因，日志省略正文和秘密。
 
@@ -55,9 +55,14 @@ Hub 持有 workspace、授权、路由、任务意图和审计。daemon 是设�
 
 |关联提案与依据|同一任务的样例及预期判定|
 |---|---|
-|MUL-9 跨设备视图，`sres_1f1vvqvnk312`|Hub A 的 workspace W 中，Issue、Session、Turn、Attempt 各有 owner 三元引用，例如 `(A,W,issue-7)` → `(A,W,session-2)` → `(A,W,turn-5)` → `(A,W,attempt-1)`。最后一项映射到实际位置 `(Hub B,daemon D1,runtime R1,adapter E1,local attempt X1)`。Issue 的业务进度、X1 的执行结果、D1 的 link 连接代次 L1 及最后在线时间分别记录。D1 失联仅改变连接观测。若事后获准换机重试，在同一 Turn 下新建 attempt-2 并记录 D2 的实际位置，保留原 attempt 及组织归属；冷启动时 provider 原生会话、进程和本地文件可能无法恢复。|
-|MUL-11 扩展一期，`sres_3vri7yo01qy4`，[PR #171](https://github.com/moesin-lab/Remi/pull/171)|既有受信渠道及执行适配器沿既有授权路径接入。第三方 adapter 一期仅可在一个 workspace 运行经审核的进程外异步订阅。例如 W 内获审订阅器请求该 Turn 的已授权事件：manifest 授予订阅、inventory 声明支持、本地 ACL 允许且租约有效时才投递。缺 manifest、ACL 拒绝或租约过期均拒绝，即使 inventory 宣称支持。请求向 B 订阅或执行 X1 时，一期直接拒绝。若后续阶段获批跨 Hub，除上述交集还须双方 grant 同时覆盖源、目标、操作和数据；一端仅授目录读取即拒绝远程执行。登记能力不会授予权限。|
-|MUL-12 后端评估，`sres_vkb3t7lprhqr`，[PR #169](https://github.com/moesin-lab/Remi/pull/169) 审阅 SHA `5af687a2ee5a0ff46561a833badf5a4844537db8`|先在现栈记录基线，再以语言无关样例冻结引用、权限拒绝、收据版本及回放结果。只有现栈优化后仍有瓶颈且测量证据支持，才评估单批试点。同一组样例供候选实现复验；协议冻结本身不触发语言迁移或一期扩展远程执行。|
+|MUL-9 跨设备视图，`sres_4is6l3qcei3u`|Hub A 的 workspace W 中，Issue 的归属引用为 `R=(A,W,issue,7)`。其 Session 定位为 `(R, session_id=2)`，Turn 为 `(R, session_id=2, turn_id=5)`，Attempt 为 `(R, session_id=2, turn_id=5, attempt_id=1)`；验证父子归属后，最后一项映射到实际位置 `(Hub B,daemon D1,runtime R1,adapter E1,local attempt X1)`。Issue 的业务进度、X1 的执行结果、D1 的 link 连接代次 L1 及最后在线时间分别记录。D1 失联仅改变连接观测。若事后获准换机重试，在同一 Turn 下新建 attempt-2 并记录 D2 的实际位置，保留原 attempt 及组织归属；冷启动时 provider 原生会话、进程和本地文件可能无法恢复。|
+|MUL-11 扩展一期，`sres_1h5e0oqnthyk`，[PR #171](https://github.com/moesin-lab/Remi/pull/171)|既有受信渠道及执行适配器沿既有授权路径接入。第三方 adapter 一期仅限单 Hub、单 workspace 的一种已提交只读事件，由受管 daemon 经 stdio 异步投递给经审核的独立进程。例如 W 内获审订阅器请求该类事件：manifest 授予订阅、inventory 声明支持、本地 ACL 允许且租约有效时才投递。缺 manifest、ACL 拒绝或租约过期均拒绝，即使 inventory 宣称支持。请求向 B 订阅或执行 X1 时，一期直接拒绝。若后续阶段获批跨 Hub，除上述交集还须双方 grant 同时覆盖源、目标、操作和数据；一端仅授目录读取即拒绝远程执行。登记能力不会授予权限。|
+|MUL-12 后端评估，`sres_k0vyr6i2y1qa`，[PR #169](https://github.com/moesin-lab/Remi/pull/169) 审阅 SHA `c8b05e0a3fa808ed472d838f73eee3ccdc9f24f5`|先在现栈记录基线，再以语言无关样例冻结引用、权限拒绝、收据版本及回放结果。只有现栈优化后仍有可归因的传输瓶颈且测量证据支持，才另行申请单批、无业务写入的 Go 传输试点。同一组样例供候选实现复验；协议冻结本身不触发语言迁移或一期扩展远程执行。|
+
+**引用编码验收。** MUL-9 v0.3 第 59、159 行把业务工作项限定为 Issue 或独立 Chat。`owner_kind` 取 `issue` 或 `chat`，用于选择工作项命名空间。Session 的 `owner_type` 描述该 Session 与其所有者的关系；解码时须显式读取引用的 `owner_kind`，不能用 Session 字段或 ID 前缀补全。下钻记录不增加工作项类型。
+
+- 共同正例：MUL-9 本地工作项 `(W,issue,7)` 在其权威 Hub A 导出时，两稿应产生相同的四字段 `{"owner_hub_id":"A","workspace_id":"W","owner_kind":"issue","object_id":"7"}`；本地 `owner_id` 原值进入 `object_id`。同 ID 的独立 Chat 编为 `(A,W,chat,7)`，查找、去重和授权均按完整引用区分。
+- 拒绝例：即使 `object_id` 带有 `issue-` 前缀，缺失 `owner_kind` 或传入未知值（如 `session`）都拒绝解析，不进行对象查询或派活。此项是冻结前的跨稿编码样例，本地键及存量数据无需迁移；对照结果仅说明本稿采用的规则。
 
 ### 阶段 3 · 取消与完成如何裁决
 

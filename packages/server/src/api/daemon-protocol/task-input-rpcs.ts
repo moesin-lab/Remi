@@ -88,17 +88,17 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
         reply = fitRestartResumeToBudget({ ...offer, ...turns.offerInput(task) }, questions, generation, frame.rt!);
         if (!reply) throw new PlannedRestartError("capacity");
       };
-      const receipt = store.plannedRestarts().resume(task.id, p.handoff_id, p.consumer_id, scope, (generation, checkpoint) => {
+      const consumerId = p.consumer_id;
+      store.plannedRestarts().resume(task.id, p.handoff_id, consumerId, scope, (generation, checkpoint, phase) => {
         // Check the complete, current package under the CAS locks. A capacity
         // failure rolls back Q preparation and generation before any run grant.
         delivery(generation, checkpoint);
-        store.reportTaskUsageSnapshot(task.id, { version: 2, runId: p.consumer_id as string,
-          revision: 0, complete: false, units: [] }, scope);
+        if (phase === 'activate') {
+          store.reportTaskUsageSnapshot(task.id, { version: 2, runId: consumerId,
+            revision: 0, complete: false, units: [] }, scope);
+        }
+        if (!store.isTaskUsageExecutionAuthorized(task.id, consumerId, scope.runtimeId)) throw new PlannedRestartError('stale_execution');
       });
-      if (!store.isTaskUsageExecutionAuthorized(task.id, p.consumer_id, frame.rt!)) return denied("stale_execution");
-      // The idempotent path does not execute authorize. Rebuild current inputs
-      // and questions as they can change while a committed reply is lost.
-      if (!reply) delivery(receipt.generation, receipt.checkpoint!);
       return reply;
     } catch (error) {
       // Completion can win while asynchronous offer preparation is in flight.

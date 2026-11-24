@@ -167,7 +167,7 @@ export class PlannedRestarts {
    * A duplicate response for the same consumer returns its committed generation.
    */
   resume(attemptId: string, handoffId: string, consumerId: string, scope: PlannedRestartScope,
-    authorize: (generation: number, checkpoint: PlannedRestartCheckpoint) => void): PlannedRestartHandoff {
+    deliver: (generation: number, checkpoint: PlannedRestartCheckpoint, phase: 'activate' | 'replay') => void): PlannedRestartHandoff {
     if (this.reconcileTerminal(attemptId, scope, handoffId)) throw new PlannedRestartError("stale_execution");
     return this.ctx.db.transaction(() => {
       const attempt = this.lock(attemptId, scope);
@@ -176,16 +176,20 @@ export class PlannedRestarts {
       const handoff = this.get(attemptId);
       if (!handoff || handoff.handoff_id !== handoffId) throw new PlannedRestartError("stale_execution");
       if (handoff.state === "resuming" && this.resumeExpired(attemptId)) throw new PlannedRestartError("stale_execution");
-      if (["resuming", "running"].includes(handoff.state) && handoff.consumer_id === consumerId) return handoff;
-      if (handoff.state !== "suspended") throw new PlannedRestartError("stale_execution");
+      const replay = ["resuming", "running"].includes(handoff.state) && handoff.consumer_id === consumerId;
+      if (!replay && handoff.state !== "suspended") throw new PlannedRestartError("stale_execution");
       // Manual fences survive replacement. Undrain is explicit; a CLI owner
       // must finish candidate verification before any resumed execution.
       if (this.drain(scope) || new PlatformMaintenanceRepo(this.ctx.db).get().mode === "draining") throw new PlannedRestartError("resume_fenced");
+      if (replay) {
+        deliver(handoff.generation, handoff.checkpoint!, 'replay');
+        return handoff;
+      }
       const generation = handoff.generation + 1;
       this.ctx.db.run(`UPDATE multiremi_planned_restarts SET state='resuming',consumer_id=?,generation=?,updated_at=?
         WHERE attempt_id=? AND handoff_id=? AND state='suspended'`, [consumerId, generation, nowIso(), attemptId, handoffId]);
       new Questions(this.ctx).preparePlannedRestartResume(attemptId, handoff.handoff_id, generation, handoff.checkpoint?.question_ids ?? []);
-      authorize(generation, handoff.checkpoint!);
+      deliver(generation, handoff.checkpoint!, 'activate');
       return this.get(attemptId)!;
     })();
   }

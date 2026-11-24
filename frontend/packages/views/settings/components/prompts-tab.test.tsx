@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { workspaceKeys } from "@multiremi/core/workspace/queries";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -145,7 +146,7 @@ function renderPromptsTab() {
       </QueryClientProvider>
     );
   }
-  return render(<PromptsTab />, { wrapper: Wrapper });
+  return { ...render(<PromptsTab />, { wrapper: Wrapper }), queryClient };
 }
 
 describe("PromptsTab", () => {
@@ -248,6 +249,24 @@ describe("PromptsTab", () => {
 
     expect(await screen.findByText("Customized (Custom)")).toBeInTheDocument();
     expect(screen.getByText("Explicitly empty")).toBeInTheDocument();
+  });
+
+  it.each([true, false])("pairs the saved draft with the catalog visible when editing began (upgrade before edit=%s)", async (beforeEdit) => {
+    const reset = makeState();
+    reset.document = { ...reset.document, id: "doc-1", revision: 1, currentVersionId: "reset-A" };
+    const slots = { ...DEFAULT_SLOTS, common: "catalog B" };
+    const upgraded = makeState({ ...reset, content: slots, currentDefault: { revision: "B", contentHash: "b".repeat(64), content: slots }, defaultUpdated: true });
+    apiMocks.getWorkspaceSystemPrompt.mockResolvedValue(beforeEdit ? upgraded : reset);
+    const { queryClient } = renderPromptsTab();
+    const box = await screen.findByLabelText("General behavior");
+    expect(box).toHaveValue(beforeEdit ? "catalog B" : "");
+    fireEvent.change(box, { target: { value: "my edit" } });
+    if (!beforeEdit) await act(async () => { queryClient.setQueryData(workspaceKeys.systemPrompt("workspace-1"), upgraded); });
+    fireEvent.click(screen.getByRole("button", { name: "Save new version" }));
+    await waitFor(() => expect(apiMocks.updateWorkspaceSystemPrompt).toHaveBeenCalledWith("workspace-1", expect.objectContaining({
+      content: { ...DEFAULT_SLOTS, common: "my edit" }, expectedRevision: 1,
+      baseDefaultRevision: beforeEdit ? "B" : reset.currentDefault.revision,
+    })));
   });
 
   it("enforces the 8,000 Unicode code point limit across all five slots", async () => {

@@ -1,6 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createId, nowIso } from "@multiremi/ids.js";
 import type { StoreContext } from "../context.js";
+import { runTurnExecutionMutation } from "../turn-execution-records.js";
+import { PROMPT_POLICY_WAIT_REASON } from "../task-wait-reason.js";
 import {
   MAX_SYSTEM_PROMPT_CODE_POINTS, normalizeSystemPromptContent, serializeSystemPromptContent,
   type SystemPromptActor, type SystemPromptContent, type SystemPromptDefault, type SystemPromptEditInput,
@@ -166,6 +168,11 @@ export class SystemPromptsRepo {
       }
       const version = this.append(document, operation, operation === "reset" ? "default" : "custom",
         edited ?? restored?.content ?? currentDefault.content, baseDefault, actor, changeNote, input.requestId, requestHash, restored?.id ?? null);
+      if (!requiresPromptPolicyCapability(version.mode, currentDefault.revision)) {
+        runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET wait_reason = NULL, updated_at = ?
+          WHERE workspace_id = ? AND status IN ('queued', 'dispatched') AND wait_reason = ?`,
+        [nowIso(), workspaceId, PROMPT_POLICY_WAIT_REASON]);
+      }
       this.ctx.emitWorkspaceEvent({ type: "workspace:updated", workspaceId, actorType: actor.type === "human" ? "member" : "system",
         actorId: actor.operatorId, payload: { id: workspaceId } });
       this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId, actorType: "system", actorId: null,
@@ -192,9 +199,31 @@ export class SystemPromptsRepo {
     return this.getSystemPromptVersion(document.workspace_id, id)!;
   }
 
-  getAttemptSystemPrompt(taskId: string): SystemPromptPolicyBinding | null {
+  private storedAttempt(taskId: string): (SystemPromptPolicyBinding & { offerGeneration?: string; confirmed?: boolean }) | null {
     const row = this.ctx.db.query("SELECT binding_json FROM multiremi_attempt_system_prompts WHERE task_id=?").get(taskId) as { binding_json: string } | null;
     return row ? JSON.parse(row.binding_json) : null;
+  }
+
+  getAttemptSystemPrompt(taskId: string): SystemPromptPolicyBinding | null {
+    const stored = this.storedAttempt(taskId);
+    if (!stored) return null;
+    const { offerGeneration, confirmed, ...binding } = stored;
+    return binding;
+  }
+
+  matchesOffer(taskId: string, generation: string | undefined): boolean {
+    return generation === undefined || this.storedAttempt(taskId)?.offerGeneration === generation;
+  }
+
+  canResendToLegacy(taskId: string): boolean {
+    const previous = this.storedAttempt(taskId);
+    return !previous || previous.legacyCompatible || (previous.offerGeneration !== undefined && !previous.confirmed);
+  }
+
+  confirmOffer(taskId: string): void {
+    const stored = this.storedAttempt(taskId);
+    if (stored && !stored.confirmed) this.ctx.db.run("UPDATE multiremi_attempt_system_prompts SET binding_json=? WHERE task_id=?",
+      [JSON.stringify({ ...stored, confirmed: true }), taskId]);
   }
 
   validateAttemptSystemPrompt(taskId: string, reported: unknown): void {
@@ -209,14 +238,18 @@ export class SystemPromptsRepo {
   }
 
   /** Caller owns the claim transaction and already holds W; no post-accept mutation is permitted. */
-  bindAttemptSystemPrompt(taskId: string, workspaceId: string, options: { legacyCompatible: boolean }): SystemPromptPolicyBinding {
+  bindAttemptSystemPrompt(taskId: string, workspaceId: string, options: { legacyCompatible: boolean; offerGeneration?: string }): SystemPromptPolicyBinding {
     if (!this.ctx.db.inTransaction) throw new Error("System Prompt binding requires the claim transaction");
     const task = this.ctx.tasks().getTask(taskId);
     if (!task || task.workspaceId !== workspaceId) throw new Error("System Prompt binding task/workspace mismatch");
-    const previous = this.getAttemptSystemPrompt(taskId);
-    // The legacy dispatched_at projection also uses accepted_at before an offer exists.
-    if ((task.acceptedAt && task.offeredAt) || task.status === "running" || ["completed", "failed", "cancelled"].includes(task.status)) {
-      if (previous) return previous;
+    const previous = this.storedAttempt(taskId);
+    const generation = options.offerGeneration ?? randomUUID();
+    if (previous?.confirmed || (previous && !previous.offerGeneration && task.acceptedAt && task.offeredAt) || !["queued", "dispatched"].includes(task.status)) {
+      if (previous) {
+        this.ctx.db.run("UPDATE multiremi_attempt_system_prompts SET binding_json=? WHERE task_id=?",
+          [JSON.stringify({ ...previous, offerGeneration: generation, confirmed: true }), taskId]);
+        return this.getAttemptSystemPrompt(taskId)!;
+      }
       throw new Error("Accepted attempt System Prompt binding is immutable");
     }
     const state = this.getSystemPrompt(workspaceId);
@@ -230,7 +263,7 @@ export class SystemPromptsRepo {
     this.ctx.db.run(`INSERT INTO multiremi_attempt_system_prompts (task_id,workspace_id,document_id,version_id,binding_json,created_at)
       VALUES (?,?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET workspace_id=excluded.workspace_id,document_id=excluded.document_id,
       version_id=excluded.version_id,binding_json=excluded.binding_json,created_at=excluded.created_at`,
-      [taskId, workspaceId, binding.documentId, binding.versionId, JSON.stringify(binding), nowIso()]);
+      [taskId, workspaceId, binding.documentId, binding.versionId, JSON.stringify({ ...binding, offerGeneration: generation, confirmed: false }), nowIso()]);
     return binding;
   }
 }

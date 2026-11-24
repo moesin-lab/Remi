@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
+import type { SystemPromptPolicyBinding } from "@multiremi/contracts/system-prompt-policy.js";
 import { SYSTEM_PROMPT_SLOTS as SLOTS, normalizeSystemPromptContent, type SystemPromptContent as Content, type SystemPromptState, type SystemPromptVersion, type SystemPromptVersionList, type SystemPromptVersionSummary, type SystemPromptWriteInput, type SystemPromptWriteResult } from "@multiremi/contracts/system-prompt-policy.js";
 import { CliError, CliRenderer, type CliOptionSpec, type CommandInvocation, type CommandSpec } from "../core/index.js";
 import { clientFor, commandOptions, encodePath, integerOption, outputMode, PAGE_OPTIONS, positional, renderResource, requestBody, stringOption } from "./resource-common.js";
@@ -18,8 +20,23 @@ const WRITE_OPTIONS: readonly CliOptionSpec[] = [
 
 export function workspaceSystemPromptCommandSpecs(): CommandSpec[] {
   return [
-    spec("get", "Read the full workspace System Prompt and current default", "read", [], async (i) => {
+    spec("get", "Read the workspace System Prompt or a frozen attempt snapshot", "read", [
+      { name: "attempt", type: "string", description: "Read this attempt's frozen policy" },
+      { name: "content-hash", type: "string", description: "Expected SHA-256 of the attempt policy" },
+    ], async (i) => {
+      const attempt = stringOption(i, "attempt");
+      const contentHash = stringOption(i, "content-hash");
+      if (Boolean(attempt) !== Boolean(contentHash) || (contentHash && !/^[a-f0-9]{64}$/.test(contentHash))) throw new CliError("usage", "Supply --attempt with --content-hash SHA256");
       const { client, path } = await scope(i);
+      if (attempt && contentHash) {
+        const response = await client.request<SystemPromptPolicyBinding>({ method: "GET", path, query: { attempt, contentHash } });
+        if (response.data?.format !== 1 || response.data.contentHash !== contentHash || hashSystemPromptContent(response.data.content) !== contentHash) {
+          throw new CliError("conflict", "Attempt snapshot does not match the expected content hash");
+        }
+        if (outputMode(i) === "table") console.log(JSON.stringify(response.data, null, 2));
+        else renderResource(i, response.data);
+        return;
+      }
       const response = await client.request<SystemPromptState>({ method: "GET", path });
       renderState(i, response.data);
     }),

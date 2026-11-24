@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MultiremiStore } from "@multiremi/store.js";
+import { buildAgentInstructions } from "@daemon/agent-runtime/prompts/ephemeral.js";
+import type { AgentTask } from "@daemon/contracts/types.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import type { StoreContext } from "@multiremi/store/context.js";
 import { SystemPromptsRepo } from "@multiremi/store/repos/system-prompts-repo.js";
@@ -183,6 +185,58 @@ describe("System Prompt version domain", () => {
 });
 
 describe("System Prompt HTTP permissions and validation", () => {
+  it.each([true, false])("records the exact catalog snapshot chosen at editor load (upgrade before edit=%s)", async beforeEdit => {
+    const store = createLocalStore();
+    store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "reset-A" }, actor);
+    const app = createMultiremiApp({ store, authToken: "MASTER" });
+    const path = "/api/workspaces/local/system-prompt";
+    const load = async () => (await app.request(path, { headers: MASTER })).json();
+    const original = await load();
+    const slots = content("catalog B");
+    const hash = hashSystemPromptContent(slots);
+    const catalog = { revision: hash, contentHash: hash, content: slots };
+    const upgraded = spyOn(store.systemPromptsRepo() as unknown as { catalog(): typeof catalog }, "catalog").mockReturnValue(catalog);
+    try {
+      const loaded = beforeEdit ? await load() : original;
+      const response = await app.request(path, { method: "PUT", headers: MASTER, body: JSON.stringify({
+        content: { ...loaded.content, common: "edit" }, expectedRevision: loaded.document.revision,
+        baseDefaultRevision: loaded.currentDefault.revision, requestId: "edit",
+      }) });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ defaultUpdated: !beforeEdit, version: {
+        baseDefaultRevision: loaded.currentDefault.revision, baseDefaultSnapshot: loaded.content,
+      } });
+    } finally { upgraded.mockRestore(); }
+  });
+
+  it.each([false, true])("reads the exact omitted tail through the rendered attempt pointer (reset before upgrade=%s)", async reset => {
+    const store = createLocalStore();
+    if (reset) store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "reset-A" }, actor);
+    const slots = { common: "😀".repeat(7900) + "frozen-tail", code_delivery: "", issue_delivery: "", chat_delivery: "", finishing: "" };
+    const hash = hashSystemPromptContent(slots);
+    const repo = new SystemPromptsRepo(ctx(store), () => ({ revision: hash, contentHash: hash, content: slots }));
+    const agent = store.createAgent({ name: "Worker", provider: "codex" });
+    const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "test" });
+    const binding = ctx(store).db.transaction(() => {
+      ctx(store).lockWorkspaceRuntimeLifecycle("local");
+      return repo.bindAttemptSystemPrompt(task.id, "local", { legacyCompatible: false });
+    })();
+    expect(binding.versionId === null).toBe(!reset);
+    store.editSystemPrompt("local", { content: content("latest-tail"), expectedRevision: reset ? 1 : 0, requestId: "edit" }, actor);
+    const instructions = buildAgentInstructions({ id: task.id, workspaceId: "local", agent, issueId: "issue", systemPromptPolicy: binding } as unknown as AgentTask, { instructionsMaxBytes: 24000 });
+    expect(instructions).not.toContain("frozen-tail");
+    const match = instructions.match(/remi workspace system-prompt get (\S+) --attempt (\S+) --content-hash ([a-f0-9]{64})/);
+    expect(match?.slice(1)).toEqual(["local", task.id, hash]);
+    const token = await store.createAccessToken({ workspaceId: "local", type: "task", taskId: task.id, agentId: agent.id, name: "read own snapshot" });
+    const app = createMultiremiApp({ store, authToken: "MASTER" });
+    const read = (attempt: string, contentHash: string) => app.request(`/api/workspaces/${match![1]}/system-prompt?attempt=${attempt}&contentHash=${contentHash}`, { headers: { Authorization: `Bearer ${token.token}` } });
+    const response = await read(match![2]!, match![3]!);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(binding);
+    expect((await read(task.id, "0".repeat(64))).status).toBe(409);
+    expect((await read("another-attempt", hash)).status).toBe(403);
+  });
+
   it("audits the authenticated human account and ignores client actor/current markers", async () => {
     const store = createLocalStore();
     const user = store.getOrCreateUser({ name: "Alice", email: "alice@example.test", externalId: "alice-open" });

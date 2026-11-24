@@ -39,7 +39,8 @@ Agent、Project、小队和宿主机本地指令沿用各自入口，不纳入�
 幂等请求和当前指针，冲突 409 且不留半写历史。actor 来自鉴权，区分共享 operator 与真实登录账号；新资源写操作仅人类管理员，
 task hard deny 与 CLI parity deny 同步维护。原 appendix 的既有权限不变。
 
-保存对后续新 claim 生效；运行中尝试保持已绑定快照。offer 整个 system_prompt_policy 对象不允许预算压缩静默截断。
+保存对后续新 claim 生效。每次 claim 持久化 offer 代次，发送、回执及收回按代次校验。未接受的 offer 再次领取时重绑，已确认或运行中的尝试保留原快照。
+offer 的 system_prompt_policy 对象完整发送。指令预算截短时，全文入口携带 attempt ID 和内容 SHA-256，从绑定读取五槽正文。
 新 daemon 经 provider home AGENTS.md 消费，最终指令纳入驻留启动指纹；内容变化按既有 config_changed 流程重建。
 当 custom 或服务端默认偏离首版等价基线时，claim 前要求 prompt.policy.v1；无合格 daemon 时应提供可诊断等待原因。
 用户文字优先让出指令预算；只读协议自身超限必须显式失败。

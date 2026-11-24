@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type SystemPromptContent, type SystemPromptState, type SystemPromptVersion } from "@multiremi/contracts/system-prompt-policy.js";
 import { CliError, CommandRegistry } from "../../../apps/remi/cli/core/index.js";
+import { hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 import { workspaceCommandSpecs } from "../../../apps/remi/cli/commands/workspace.js";
 
 const repoRoot = resolve(dirname(import.meta.path), "../../..");
@@ -58,6 +59,7 @@ beforeEach(() => {
     requests.push(observed);
     if (url.pathname === "/api/workspaces/ws_1") return Response.json({ id: "ws_1", name: "Workspace" });
     const base = "/api/workspaces/ws_1/system-prompt";
+    if (url.pathname === base && observed.query.attempt === "attempt-A") return Response.json({ format: 1, contentHash: observed.query.contentHash, content });
     if (url.pathname === base && request.method === "GET") return Response.json(state);
     if (url.pathname === `${base}/versions`) {
       const { content: _content, baseDefaultSnapshot: _base, ...summary } = oldVersion;
@@ -112,6 +114,16 @@ async function shippedCli(args: string[], stdin?: string) {
 }
 
 describe("workspace System Prompt canonical CLI over real HTTP", () => {
+  it("reads the requested attempt, verifies body bytes and rejects a latest-state fallback", async () => {
+    const hash = hashSystemPromptContent(content);
+    const args = ["get", "ws_1", "--attempt", "attempt-A", "--content-hash"];
+    expect(JSON.parse(await execute([...args, hash]))).toMatchObject({ content, contentHash: hash });
+    expect(resourceRequests().at(-1)?.query).toEqual({ attempt: "attempt-A", contentHash: hash });
+    await expect(execute([...args, "f".repeat(64)])).rejects.toMatchObject({ code: "conflict" });
+    await expect(execute(["get", "ws_1", "--attempt", "old-server", "--content-hash", hash])).rejects.toMatchObject({ code: "conflict" });
+    await expect(execute(["get", "ws_1", "--attempt", "attempt-A"])).rejects.toMatchObject({ code: "usage" });
+  });
+
   it("registers generated help and excludes all three human writes from task parity", () => {
     expect(registry.renderHelp(["workspace", "system-prompt"])).toContain("workspace system-prompt preview");
     expect(registry.renderHelp(["workspace", "system-prompt", "restore"])).toContain("new custom version");

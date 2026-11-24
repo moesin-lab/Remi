@@ -124,7 +124,7 @@ export function buildAgentInstructions(task: AgentTask, opts: BuildTaskPromptOpt
   const privateChat = isPrivateChatTask(task);
   const platform = opts.platform ?? process.platform;
   const policy = taskSystemPromptContent(task);
-  const policyRest = `read the rest with \`remi workspace system-prompt get ${task.workspaceId}\``;
+  const policyRest = `read the rest with \`remi workspace system-prompt get ${task.workspaceId} --attempt ${task.attempt_id ?? task.id} --content-hash ${hashSystemPromptContent(policy)}\``;
   const pieces: InstructionPiece[] = [];
   const fixed = (...lines: string[]) => { for (const line of lines) pieces.push(line); };
   const variable = (body: string | null | undefined, rest: string) => { if (body?.trim()) pieces.push({ body: body.trim(), rest }); };

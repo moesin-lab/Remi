@@ -65,8 +65,8 @@ interface RuntimePump {
   cooldownUntil: number;
   cooldownReason: string | null;
   cooldownTimer: DaemonProtocolTimer | null;
-  preparing: string | null;
-  pending: { taskId: string; agentId: string; inlineRead: { sessionId: string; seqs: number[]; toSeq: number; coldStart: boolean } | null;
+  preparing: { taskId: string; generation: string } | null;
+  pending: { taskId: string; generation: string; agentId: string; inlineRead: { sessionId: string; seqs: number[]; toSeq: number; coldStart: boolean } | null;
     session: DaemonProtocolSession; seq: number; timer: DaemonProtocolTimer } | null;
   accepted: Set<string>;
   sweep: boolean;
@@ -328,23 +328,27 @@ export class DaemonTaskOffers {
     // Status/input notifications do not create work. Avoid a locked claim and
     // heartbeat write when this workspace has no queued or offered turn.
     if (!runtime || !store.hasPendingTaskOffers(runtime.workspaceId ?? "local")) return;
-    const task = store.claimTask(runtimeId, { supportsBinarySkillFiles: true, supportsPromptPolicy: session.supportsPromptPolicy });
+    const generation = crypto.randomUUID();
+    const policyCapableRuntimeIds = session.supportsPromptPolicy ? undefined : this.options.layer.registry.listSessions()
+      .flatMap(peer => peer.runtimeIds).filter(id => this.session(id)?.supportsPromptPolicy);
+    const task = store.claimTask(runtimeId, { offerGeneration: generation, supportsBinarySkillFiles: true,
+      supportsPromptPolicy: session.supportsPromptPolicy, policyCapableRuntimeIds });
     if (!task) return;
-    pump.preparing = task.id;
+    pump.preparing = { taskId: task.id, generation };
     try {
       const payload = await this.options.prepare(task, session.supportsWikiFetch);
       if (this.stopped || this.generation.term !== currentBackgroundTerm()) return;
       currentBackgroundTerm()?.assertCurrent();
       invalidateRequestReadCache();
       const current = store.getTaskIdentity(task.id);
-      if (current?.status !== "dispatched" || current.runtimeId !== runtimeId) return;
+      if (current?.status !== "dispatched" || current.runtimeId !== runtimeId || !store.systemPromptsRepo().matchesOffer(task.id, generation)) return;
       if (!payload) {
         // Preparation can decline an offer after claiming it. No frame was
         // sent, so release the claim rather than strand an unoffered dispatch.
-        this.rescind(runtimeId, pump, task.id);
+        this.rescind(runtimeId, pump, task.id, generation);
         return;
       }
-      if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id); return; }
+      if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id, generation); return; }
       const budgeted = fitTaskOfferToBudget(payload, runtimeId, undefined, session.supportsWikiFetch);
       console.info(JSON.stringify({ event: "daemon_offer_budget", task_id: task.id, runtime_id: runtimeId, ...budgeted.report }));
       let report = budgeted.report;
@@ -363,19 +367,19 @@ export class DaemonTaskOffers {
       }
       if (!sent.ok) {
         if (sent.reason === "too_large") failSize();
-        else if (sent.reason === "closed") this.rescind(runtimeId, pump, task.id);
+        else if (sent.reason === "closed") this.rescind(runtimeId, pump, task.id, generation);
         else {
           pump.waiting = true;
-          store.requeueTaskOffer(task.id, runtimeId);
+          store.requeueTaskOffer(task.id, runtimeId, "unknown", generation);
         }
         return;
       }
-      store.recordTaskOffered(task.id, runtimeId, new Date(this.clock.now()).toISOString());
+      if (!store.recordTaskOffered(task.id, runtimeId, new Date(this.clock.now()).toISOString(), generation)) return;
       if (fromSweep) {
         console.warn(JSON.stringify({ event: "daemon_offer_sweep_recovered", runtime_id: runtimeId, task_id: task.id }));
         this.options.layer.recordOfferSweepRecovery();
       }
-      const timer = this.clock.setTimeout(this.bindGeneration(() => this.rescind(runtimeId, pump, task.id)), DAEMON_OFFER_TIMEOUT_MS);
+      const timer = this.clock.setTimeout(this.bindGeneration(() => this.rescind(runtimeId, pump, task.id, generation)), DAEMON_OFFER_TIMEOUT_MS);
       (timer as ReturnType<typeof setTimeout>).unref?.();
       const projection = payload.session_projection as { session_id?: string; to_seq: number; jsonl?: string; mode?: string } | undefined;
       const inlineRead = projection?.session_id && projection.jsonl ? { sessionId: projection.session_id, toSeq: projection.to_seq,
@@ -383,11 +387,11 @@ export class DaemonTaskOffers {
         seqs: projection.jsonl.split("\n").filter(Boolean).map(line => JSON.parse(line))
           .filter(entry => entry.type === "triggering_message" && !entry.body_folded && !entry.body_omitted_chars)
           .map(entry => Number(entry.seq)) } : null;
-      pump.pending = { taskId: task.id, agentId: task.agentId, inlineRead, session, seq: sent.seq, timer };
+      pump.pending = { taskId: task.id, generation, agentId: task.agentId, inlineRead, session, seq: sent.seq, timer };
     } catch (error) {
       if (error instanceof StaleLiveTermError || isDatabaseConnectionError(error)) throw error;
       const current = store.getTaskIdentity(task.id);
-      if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id);
+      if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id, generation);
       throw error;
     } finally { pump.preparing = null; }
   }
@@ -399,12 +403,12 @@ export class DaemonTaskOffers {
       if (!pump || !pending || pending.session !== session || String(pending.seq) !== frame.re) continue;
       if (frame.payload.ok !== true) {
         const reason = frame.payload.reason ?? frame.payload.code;
-        this.rescind(runtimeId, pump, pending.taskId, typeof reason === "string" ? reason : null, frame.payload.ok === false);
+        this.rescind(runtimeId, pump, pending.taskId, pending.generation, typeof reason === "string" ? reason : null, frame.payload.ok === false);
         return;
       }
       this.clock.clearTimeout(pending.timer);
       pump.pending = null;
-      if (this.options.store.acceptTaskOffer(pending.taskId, runtimeId, new Date(this.clock.now()).toISOString())) {
+      if (this.options.store.acceptTaskOffer(pending.taskId, runtimeId, new Date(this.clock.now()).toISOString(), pending.generation)) {
         pump.accepted.add(pending.taskId);
         if (pending.inlineRead) {
           try { this.options.store.recordSessionAgentInlineRead(pending.inlineRead.sessionId, pending.agentId,
@@ -417,9 +421,10 @@ export class DaemonTaskOffers {
     }
   }
 
-  private rescind(runtimeId: string, pump: RuntimePump, taskId: string, reason: string | null = null, rejected = false): void {
+  private rescind(runtimeId: string, pump: RuntimePump, taskId: string, generation: string, reason: string | null = null, rejected = false): void {
     currentBackgroundTerm()?.assertCurrent();
-    if (pump.pending?.taskId === taskId) {
+    if (generation !== (pump.pending ?? pump.preparing)?.generation) return;
+    if (pump.pending?.generation === generation) {
       this.clock.clearTimeout(pump.pending.timer);
       pump.pending = null;
     }
@@ -432,7 +437,7 @@ export class DaemonTaskOffers {
       this.kick(runtimeId);
     }), DAEMON_OFFER_COOLDOWN_MS);
     (pump.cooldownTimer as ReturnType<typeof setTimeout>).unref?.();
-    this.options.store.requeueTaskOffer(taskId, runtimeId, rejected ? "rejected" : "unknown");
+    this.options.store.requeueTaskOffer(taskId, runtimeId, rejected ? "rejected" : "unknown", generation);
   }
 
   private resume(session: DaemonProtocolSession): void {
@@ -450,8 +455,8 @@ export class DaemonTaskOffers {
       const pump = this.pumps.get(runtimeId);
       if (!pump) continue;
       pump.waiting = false;
-      const taskId = pump.pending?.session === session ? pump.pending.taskId : pump.preparing;
-      if (taskId) this.rescind(runtimeId, pump, taskId);
+      const offer = pump.pending?.session === session ? pump.pending : pump.preparing;
+      if (offer) this.rescind(runtimeId, pump, offer.taskId, offer.generation);
       for (const id of pump.accepted) {
         this.options.store.releaseTaskOfferLease(id);
         const task = this.options.store.getTask(id);

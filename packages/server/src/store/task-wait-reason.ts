@@ -14,6 +14,7 @@ const CAPABILITY_ALERT_SUFFIX = "；任务创建已达 15 分钟，请检查 Run
 // binding. Same ownership contract as the prefix above: only this observer may
 // write or clear it (MUL-449).
 export const DEVICE_ROUTING_WAIT_PREFIX = "等待项目设备：";
+export const PROMPT_POLICY_WAIT_REASON = "daemon_capability_required:prompt.policy.v1";
 
 /**
  * No registered machine satisfies ALL of a Task's hard placement constraints.
@@ -27,6 +28,7 @@ export const PLACEMENT_WAIT_PREFIX = "等待任务落点：";
 export function isQueuedObserverWaitReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
   return reason.startsWith(CAPABILITY_WAIT_PREFIX)
+    || reason === PROMPT_POLICY_WAIT_REASON
     || reason.startsWith(DEVICE_ROUTING_WAIT_PREFIX)
     || reason.startsWith(PLACEMENT_WAIT_PREFIX)
     || reason.startsWith("model_blocked_by_policy:")

@@ -5,6 +5,7 @@ import { fitTaskOfferToBudget } from "@multiremi/api/daemon-protocol/offer-budge
 import { currentBackgroundTerm, withBackgroundTerm, StaleLiveTermError } from "@shared/db/live-term.js";
 import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { createResponsibleTestIssue } from './helpers.js';
+import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
 import { DAEMON_OFFER_SWEEP_MS, DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
@@ -44,8 +45,8 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return sendStatus ?? text.length; }, close() {} },
     { accessToken: null, masterToken: true });
   const send = (t: string, p: unknown, fields: Record<string, unknown> = {}) => session.handleMessage(JSON.stringify({ v: 2, t, p, ...fields }));
-  const hello = async () => {
-    await send("hello", { protocol: 2, daemon_id: "dmn_offer", cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer"],
+  const hello = async (caps = ["offer"]) => {
+    await send("hello", { protocol: 2, daemon_id: "dmn_offer", cli_version: DAEMON_MIN_CLI_VERSION, caps,
       runtimes: runtimeIds.map(runtime_id => ({ runtime_id, provider: "claude", max_concurrency: 1, active_task_ids: [] })) });
     await layer.drain();
   };
@@ -714,6 +715,51 @@ describe("System Prompt policy claim and offer", () => {
       content: expect.objectContaining({ common: "CUSTOM POLICY" }) });
   });
 
+  it("preserves device waits, diagnoses only eligible tasks, and clears its own wait on reset even while retry is deferred", () => {
+    const h = fixture(undefined, 2, undefined, false, false);
+    const device = h.task(0);
+    const other = h.task(1);
+    edit(h.store, "CUSTOM", "policy");
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET wait_reason = ? WHERE id = ?", ["等待项目设备：review", device.id]);
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyCapableRuntimeIds: [h.runtimeIds[1]!] })).toBeNull();
+    expect(h.store.getTask(device.id)?.waitReason).toBe("等待项目设备：review");
+    expect(h.store.getTask(other.id)?.waitReason).toBeNull();
+    expect(h.store.claimTask(h.runtimeIds[1]!)).toBeNull();
+    expect(h.store.getTask(other.id)?.waitReason).toBe("daemon_capability_required:prompt.policy.v1");
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET next_retry_at = ? WHERE id = ?", ["2099-01-01T00:00:00Z", other.id]);
+    h.store.resetSystemPrompt("local", { expectedRevision: 2, requestId: "reset" }, actor);
+    expect(h.store.claimTask(h.runtimeIds[1]!)).toBeNull();
+    expect(h.store.getTask(other.id)).toMatchObject({ status: "queued", waitReason: null });
+    expect(h.store.getTask(device.id)?.waitReason).toBe("等待项目设备：review");
+  });
+
+  it("leaves a shared queue free of capability warnings when another eligible runtime supports policy", () => {
+    const h = fixture(undefined, 2, undefined, false, false);
+    const agent = h.store.createAgent({ name: "shared", provider: "claude", workspaceId: "local" });
+    const task = h.store.createTask({ agentId: agent.id, prompt: "shared" });
+    edit(h.store, "CUSTOM", "edit");
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyCapableRuntimeIds: [h.runtimeIds[1]!] })).toBeNull();
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: null });
+    expect(h.store.claimTask(h.runtimeIds[1]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+  });
+
+  it("rebinds after transport timeout and ignores the previous sequence's late receipt", async () => {
+    const h = fixture();
+    const task = h.task();
+    await h.hello(["offer", "prompt.policy.v1"]);
+    const first = h.offered()[0]!;
+    expect(h.store.getTask(task.id)?.offeredAt).toBeString();
+    edit(h.store, "timeout rebind", "new");
+    h.clock.advance(DAEMON_OFFER_TIMEOUT_MS); await h.layer.drain();
+    h.clock.advance(DAEMON_OFFER_COOLDOWN_MS); await h.layer.drain();
+    expect(h.offered()).toHaveLength(2);
+    expect(h.store.getAttemptSystemPrompt(task.id)?.content.common).toBe("timeout rebind");
+    await h.accept(first);
+    expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
+    await h.accept();
+    expect(h.store.getTask(task.id)?.acceptedAt).toBeString();
+  });
+
   it("freezes atomically at claim, rebinds the same rejected offer id, and preserves accepted/running snapshots", () => {
     const h = fixture(undefined, 1, undefined, false, false);
     const task = h.task();
@@ -734,17 +780,34 @@ describe("System Prompt policy claim and offer", () => {
     expect(daemonTaskClaimResponse(h.store, h.store.getTaskWithAgent(task.id)!).system_prompt_policy).toEqual(rebound);
   });
 
-  it("rebinds a stale preaccept dispatch with the same task id", () => {
+  it.each(["stale", "unknown", "rejected"] as const)("rebinds a sent preaccept dispatch after %s and fences late responses", outcome => {
     const h = fixture(undefined, 1, undefined, false, false);
     const task = h.task();
-    h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true });
+    const runtime = h.runtimeIds[0]!;
+    h.store.claimTask(runtime, { offerGeneration: "first" });
+    expect(h.store.recordTaskOffered(task.id, runtime, undefined, "first")).toBe(true);
     const first = h.store.getAttemptSystemPrompt(task.id)!;
     edit(h.store, "STALE RECLAIM POLICY", "stale-edit");
-    db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
-    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+    if (outcome === "stale") db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
+    else expect(h.store.requeueTaskOffer(task.id, runtime, outcome, "first")).toBe(true);
+    expect(h.store.claimTask(runtime, { supportsPromptPolicy: true, offerGeneration: "second" })?.id).toBe(task.id);
+    expect(h.store.recordTaskOffered(task.id, runtime, undefined, "second")).toBe(true);
+    expect(h.store.acceptTaskOffer(task.id, runtime, undefined, "first")).toBe(false);
+    expect(h.store.requeueTaskOffer(task.id, runtime, "unknown", "first")).toBe(false);
     const rebound = h.store.getAttemptSystemPrompt(task.id)!;
     expect(rebound.content.common).toBe("STALE RECLAIM POLICY");
     expect(rebound).not.toEqual(first);
+    expect(rebound.legacyCompatible).toBe(false);
+    expect(h.store.acceptTaskOffer(task.id, runtime, undefined, "second")).toBe(true);
+    edit(h.store, "AFTER RECEIPT", "accepted");
+    h.store.releaseTaskOfferLease(task.id);
+    db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
+    expect(h.store.claimTask(runtime, { supportsPromptPolicy: true })?.id).toBe(task.id);
+    expect(h.store.getAttemptSystemPrompt(task.id)).toEqual(rebound);
+    h.store.resetSystemPrompt("local", { expectedRevision: 3, requestId: "reset" }, actor);
+    db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
+    expect(h.store.claimTask(runtime)).toBeNull();
+    expect(h.store.getAttemptSystemPrompt(task.id)).toEqual(rebound);
   });
 
   it("rolls back both the claim and its binding if binding persistence fails", () => {

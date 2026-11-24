@@ -78,6 +78,7 @@ import {
   DEVICE_ROUTING_WAIT_PREFIX,
   deviceRoutingWaitReason,
   PLACEMENT_WAIT_PREFIX,
+  PROMPT_POLICY_WAIT_REASON,
   placementWaitReason,
   isQueuedCapabilityAlert,
   isQueuedObserverWaitReason,
@@ -715,6 +716,8 @@ export interface RedispatchTaskResult {
 class AgentPluginReadinessChangedError extends Error {}
 
 export interface ClaimTaskOptions {
+  policyCapableRuntimeIds?: readonly string[];
+  offerGeneration?: string;
   supportsBinarySkillFiles?: boolean;
   supportsPromptPolicy?: boolean;
 }
@@ -1188,18 +1191,31 @@ export class TasksRepo {
     }
   }
 
-  recordTaskOffered(taskId: string, runtimeId: string, at = nowIso()): boolean {
-    return Boolean(turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records SET offered_at = ?, accepted_at = NULL
-       WHERE id = ? AND runtime_id = ? AND status = 'dispatched' RETURNING id`,
-    ).get(at, taskId, runtimeId));
+  private withOfferGeneration(taskId: string, generation: string | undefined, mutate: () => boolean): boolean {
+    const run = () => {
+      this.ctx.db.run(`UPDATE multiremi_workspaces SET updated_at = updated_at
+        WHERE id = (SELECT workspace_id FROM multiremi_turn_execution_records WHERE id = ?)`, [taskId]);
+      return this.ctx.systemPrompts().matchesOffer(taskId, generation) && mutate();
+    };
+    return this.ctx.db.inTransaction ? run() : this.ctx.db.transaction(run)();
   }
 
-  acceptTaskOffer(taskId: string, runtimeId: string, at = nowIso()): boolean {
-    const row = turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records SET accepted_at = COALESCE(accepted_at, ?)
-       WHERE id = ? AND runtime_id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory') RETURNING id`,
-    ).get(at, taskId, runtimeId);
-    if (row) this.acceptedOfferLeases.add(taskId);
-    return Boolean(row);
+  recordTaskOffered(taskId: string, runtimeId: string, at = nowIso(), generation?: string): boolean {
+    return this.withOfferGeneration(taskId, generation, () => Boolean(turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records SET offered_at = ?, accepted_at = NULL
+       WHERE id = ? AND runtime_id = ? AND status = 'dispatched' RETURNING id`,
+    ).get(at, taskId, runtimeId)));
+  }
+
+  acceptTaskOffer(taskId: string, runtimeId: string, at = nowIso(), generation?: string): boolean {
+    const accepted = this.withOfferGeneration(taskId, generation, () => {
+      const row = turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records SET accepted_at = COALESCE(accepted_at, ?)
+        WHERE id = ? AND runtime_id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory') RETURNING id`,
+      ).get(at, taskId, runtimeId);
+      if (row) this.ctx.systemPrompts().confirmOffer(taskId);
+      return Boolean(row);
+    });
+    if (accepted) this.acceptedOfferLeases.add(taskId);
+    return accepted;
   }
 
   releaseTaskOfferLease(taskId: string): void {
@@ -1246,15 +1262,15 @@ export class TasksRepo {
     return true;
   }
 
-  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown"): boolean {
-    this.acceptedOfferLeases.delete(taskId);
+  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown", generation?: string): boolean {
     const run = () => {
       // No pre-lock read snapshot on SQLite, no recover-after-UNIQUE on PG.
       this.ctx.db.run(`UPDATE multiremi_workspaces SET updated_at = updated_at
         WHERE id = (SELECT workspace_id FROM multiremi_turn_execution_records WHERE id = ? AND runtime_id = ?)`, [taskId, runtimeId]);
       const offered = this.ctx.db.query(`SELECT id FROM multiremi_turn_execution_records WHERE id = ?
         AND runtime_id = ? AND status = 'dispatched' AND started_at IS NULL`).get(taskId, runtimeId);
-      if (!offered) return false;
+      if (!offered || !this.ctx.systemPrompts().matchesOffer(taskId, generation)) return false;
+      this.acceptedOfferLeases.delete(taskId);
       if (this.coalesceDispatchedTurnWithinTransaction(taskId)) return true;
       // Preserve a sent offer when the receipt is unknown. An explicit refusal
       // proves this offer did not authorize execution and restores an editable queue.
@@ -3378,21 +3394,13 @@ export class TasksRepo {
       // including stale offers, so an old daemon never enters claim/rescind churn.
       const workspaceId = lockedRuntime.workspaceId ?? "local";
       const policy = this.ctx.systemPrompts().getSystemPrompt(workspaceId);
-      if (!options.supportsPromptPolicy && requiresPromptPolicyCapability(policy.document.mode, policy.currentDefault.revision)) {
-        const reason = "daemon_capability_required:prompt.policy.v1";
-        runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
-          SET wait_reason = ?, updated_at = ?
-          WHERE workspace_id = ? AND status IN ('queued', 'dispatched')
-            AND (runtime_id IS NULL OR runtime_id = ?) AND (wait_reason IS NULL OR wait_reason != ?)`,
-        [reason, nowIso(), workspaceId, runtimeId, reason]);
-        return null;
-      }
+      const policyBlocked = !options.supportsPromptPolicy && requiresPromptPolicyCapability(policy.document.mode, policy.currentDefault.revision);
 
       this.resetStaleChatWorkspaceTasks(lockedRuntime.workspaceId ?? "local");
       // Recovery must examine stale dispatches even when their Agent can no
       // longer run here. It rechecks eligibility and requeues incompatible
       // work instead of leaving it permanently dispatched on the old member.
-      const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds]);
+      const stale = policyBlocked ? null : this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds], Boolean(options.supportsPromptPolicy));
       // Group membership and reported model capabilities can change while work
       // is queued. Skip incompatible Agents before selecting, so they cannot
       // block another runnable task at the head of the queue.
@@ -3470,6 +3478,7 @@ export class TasksRepo {
           [...excludedAgentIds],
           [...excludedTargets.values()],
           excludedTaskIds,
+          policyBlocked ? options.policyCapableRuntimeIds ?? [] : undefined,
         );
       if (!candidate) return null;
       // One hydration for the selected task. `snapshotTaskExecution` re-reads the Agent row
@@ -3481,6 +3490,7 @@ export class TasksRepo {
         this.snapshotTaskExecution(hydrated, lockedRuntime, deferredEvents),
       );
       this.ctx.systemPrompts().bindAttemptSystemPrompt(task.id, workspaceId, {
+        offerGeneration: options.offerGeneration,
         legacyCompatible: !options.supportsPromptPolicy,
       });
       this.ctx.taskTraces().markTaskTraceDaemon(task.id, runtimeId);
@@ -4156,6 +4166,7 @@ ${routing.sql}
     reason: string | null,
     now: number,
   ): boolean {
+    if (row.wait_reason === PROMPT_POLICY_WAIT_REASON && reason === null) return false;
     const updatedRow = turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records SET wait_reason = ?, updated_at = ?
        WHERE id = ? AND status = 'queued'
          AND ${row.wait_reason === null ? "wait_reason IS NULL" : "wait_reason = ?"}
@@ -4282,7 +4293,7 @@ ${routing.sql}
       && this.runtimePassesProjectDeviceRouting(runtime, task.id);
   }
 
-  private reclaimStaleDispatchedTaskForRuntime(runtimeId: string, excludedAgentIds: string[] = []): MultiremiTaskWithAgent | null {
+  private reclaimStaleDispatchedTaskForRuntime(runtimeId: string, excludedAgentIds: string[], supportsPromptPolicy: boolean): MultiremiTaskWithAgent | null {
     const leases = [...this.acceptedOfferLeases];
     const cutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
     const now = nowIso();
@@ -4298,6 +4309,7 @@ ${routing.sql}
       ${this.ctx.db.dialect === "postgres" ? "FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED" : ""}
     `)).get(runtimeId, cutoff, ...leases, ...excludedAgentIds) as Row | null;
     if (!candidate) return null;
+    if (!supportsPromptPolicy && !this.ctx.systemPrompts().canResendToLegacy(String(candidate.id))) return null;
     const row = turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
        SET dispatched_at = ?, updated_at = ?
        WHERE id = ? AND status = 'dispatched' AND started_at IS NULL RETURNING *`
@@ -4521,6 +4533,7 @@ ${routing.sql}
     excludedAgentIds: string[] = [],
     excludedTargets: ExecutionTargetExclusion[] = [],
     excludedTaskIds: string[] = [],
+    policyCapableRuntimeIds?: readonly string[],
   ): MultiremiTask | null {
     const now = nowIso();
     const daemonAliases = runtimeDaemonAliases(runtime);
@@ -4668,6 +4681,25 @@ ${placementAfter.sql}
     const claimOne = (): Row | null => {
       const candidate = selectCandidate.get(...params.slice(5)) as Row | null;
       if (!candidate) return null;
+      if (policyCapableRuntimeIds) {
+        const taskId = String(candidate.id);
+        const alternative = policyCapableRuntimeIds.some(id => {
+          const other = this.ctx.runtimes().getRuntimeForDispatch(id);
+          if (!other || other.workspaceId !== runtime.workspaceId) return false;
+          const placement = this.runtimePlacementForTask(other, taskId);
+          const task = placement?.placementOk && placement.routingOk && this.getTaskWithAgent(taskId);
+          return Boolean(task && this.runtimeMeetsTaskClaimEligibility(other, task));
+        });
+        const reason = PROMPT_POLICY_WAIT_REASON;
+        if (alternative) {
+          runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET wait_reason = NULL, updated_at = ?
+            WHERE id = ? AND status = 'queued' AND wait_reason = ?`, [nowIso(), taskId, reason]);
+        } else {
+          runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET wait_reason = ?, updated_at = ?
+            WHERE id = ? AND status = 'queued' AND wait_reason IS NULL`, [reason, nowIso(), taskId]);
+        }
+        return null;
+      }
       return turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
         SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
             accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,

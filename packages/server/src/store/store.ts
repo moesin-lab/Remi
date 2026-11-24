@@ -6033,18 +6033,18 @@ runMigrations(this.db);
     return this.tasks.claimTask(runtimeId, options);
   }
 
-  recordTaskOffered(taskId: string, runtimeId: string, at?: string): boolean {
-    return this.tasks.recordTaskOffered(taskId, runtimeId, at);
+  recordTaskOffered(taskId: string, runtimeId: string, at?: string, generation?: string): boolean {
+    return this.tasks.recordTaskOffered(taskId, runtimeId, at, generation);
   }
 
-  acceptTaskOffer(taskId: string, runtimeId: string, at?: string): boolean {
-    return this.tasks.acceptTaskOffer(taskId, runtimeId, at);
+  acceptTaskOffer(taskId: string, runtimeId: string, at?: string, generation?: string): boolean {
+    return this.tasks.acceptTaskOffer(taskId, runtimeId, at, generation);
   }
 
   releaseTaskOfferLease(taskId: string): void { this.tasks.releaseTaskOfferLease(taskId); }
 
-  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown"): boolean {
-    return this.tasks.requeueTaskOffer(taskId, runtimeId, outcome);
+  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown", generation?: string): boolean {
+    return this.tasks.requeueTaskOffer(taskId, runtimeId, outcome, generation);
   }
 
   startTask(taskId: string, usageRunId?: string, expectedRuntimeId?: string): MultiremiTask {

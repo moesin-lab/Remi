@@ -175,6 +175,10 @@ function toSystemPromptState(result: SystemPromptState): SystemPromptState {
   };
 }
 
+function editingBaseRevision(state: SystemPromptState): string {
+  return state.document.mode === "default" ? state.currentDefault.revision : state.baseDefault.revision;
+}
+
 function SystemPromptPolicySection({
   workspaceId,
   serverState,
@@ -195,7 +199,7 @@ function SystemPromptPolicySection({
   const [draftBaselineContent, setDraftBaselineContent] = useState<SystemPromptSlots>(() => serverState.content);
   const [draftRevision, setDraftRevision] = useState<number>(() => serverState.document.revision);
   const [draftBaseDefaultRevision, setDraftBaseDefaultRevision] = useState<string>(
-    () => serverState.baseDefault.revision,
+    () => editingBaseRevision(serverState),
   );
   const [changeNote, setChangeNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -231,12 +235,12 @@ function SystemPromptPolicySection({
     if (
       serverState.document.revision !== draftRevision ||
       !areSystemPromptSlotsEqual(serverState.content, draftBaselineContent) ||
-      serverState.baseDefault.revision !== draftBaseDefaultRevision
+      editingBaseRevision(serverState) !== draftBaseDefaultRevision
     ) {
       setDraft(serverState.content);
       setDraftBaselineContent(serverState.content);
       setDraftRevision(serverState.document.revision);
-      setDraftBaseDefaultRevision(serverState.baseDefault.revision);
+      setDraftBaseDefaultRevision(editingBaseRevision(serverState));
     }
   }, [serverState, dirty, conflictRevision, draftRevision, draftBaselineContent, draftBaseDefaultRevision]);
 
@@ -281,7 +285,7 @@ function SystemPromptPolicySection({
     setDraft(next.content);
     setDraftBaselineContent(next.content);
     setDraftRevision(next.document.revision);
-    setDraftBaseDefaultRevision(next.baseDefault.revision);
+    setDraftBaseDefaultRevision(editingBaseRevision(next));
     setChangeNote("");
     setConflictRevision(null);
     clearPendingRequest();

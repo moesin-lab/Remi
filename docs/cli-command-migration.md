@@ -354,7 +354,7 @@ read-only. These are new canonical commands; the existing appendix commands are
 not renamed or deprecated.
 
 ```text
-remi workspace system-prompt get <workspace> [--output json]
+remi workspace system-prompt get <workspace> [--attempt <attempt-id> --content-hash <sha256>] [--output json]
 remi workspace system-prompt set <workspace> --file policy.json --expected-revision <n>
     [--request-id <id>] [--change-note <text>] [--base-default-revision <revision>]
 remi workspace system-prompt reset <workspace> --expected-revision <n> [--request-id <id>] [--change-note <text>]
@@ -376,10 +376,11 @@ slots; they do not select default mode. `--file -` also reads stdin. For example
 
 Use `get --output json` to load `document.revision`, `currentDefault.revision`,
 `baseDefault`, and `defaultUpdated`. Extract `.content` to a file for editing;
-pass the originally loaded current default revision as `--base-default-revision`
-when retaining that editing baseline. Saves apply to subsequent runs; resident
-sessions may restart when necessary. The complete default text output of `get`
-also serves the runtime read-back pointer `remi workspace system-prompt get <workspace>`.
+pass the revision at the start of editing as `--base-default-revision`. For default mode
+use `currentDefault.revision`; for custom mode use `baseDefault.revision`. Saves apply
+to subsequent claims. Runtime omission markers supply `--attempt` and `--content-hash`
+to read the frozen binding, including a virtual default or a default upgraded after reset.
+Task credentials can read their own attempt. Both server and CLI verify the snapshot hash.
 
 All writes require `--expected-revision` (including `0` for a virtual default).
 They accept `--request-id`, generating one UUID per invocation when omitted.

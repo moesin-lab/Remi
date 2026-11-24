@@ -2,7 +2,8 @@ import type { Context, Hono } from "hono";
 import type { RouterDeps } from "./deps.js";
 import type { SystemPromptActor, SystemPromptContent, SystemPromptEditInput, SystemPromptRestoreInput, SystemPromptWriteInput } from "@multiremi/contracts/system-prompt-policy.js";
 import { denyCurrentUserWorkspaceAccess, requireHumanWorkspaceAdmin, readJsonStrict, isJsonApiError } from "../helpers.js";
-import { authenticatedRequestUserId, currentRequestUserId } from "../wire/context.js";
+import { authenticatedRequestUserId, currentRequestUserId, currentTaskAccessToken } from "../wire/context.js";
+import { hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 import { SystemPromptError } from "../../store/repos/system-prompts-repo.js";
 import { buildSystemPromptPolicyPreview } from "../../prompts/platform-template.js";
 
@@ -25,7 +26,18 @@ export function registerSystemPromptRoutes(app: Hono, { store }: RouterDeps): vo
   }
   app.get("/api/workspaces/:id/system-prompt", c => {
     const denied = access(c);
-    return denied ?? c.json(store.getSystemPrompt(c.req.param("id")));
+    if (denied) return denied;
+    const attempt = c.req.query("attempt");
+    const hash = c.req.query("contentHash");
+    const workspaceId = c.req.param("id");
+    if (attempt === undefined && hash === undefined) return c.json(store.getSystemPrompt(workspaceId));
+    if (!attempt || !hash || !/^[a-f0-9]{64}$/.test(hash)) return c.json({ error: "Expected attempt and SHA-256 contentHash" }, 400);
+    const token = currentTaskAccessToken(c);
+    if (token && token.taskId !== attempt) return c.json({ error: "Attempt access denied" }, 403);
+    const binding = store.getAttemptSystemPrompt(attempt);
+    if (!binding || binding.workspaceId !== workspaceId) return c.json({ error: "Attempt snapshot not found" }, 404);
+    if (hash !== binding.contentHash || hash !== hashSystemPromptContent(binding.content)) return c.json({ error: "Attempt content hash mismatch" }, 409);
+    return c.json(binding);
   });
   app.put("/api/workspaces/:id/system-prompt", async c => {
     const denied = access(c, true);

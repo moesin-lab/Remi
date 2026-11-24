@@ -109,6 +109,7 @@ daemon 以服务端既有 `multiremi_feishu_bot_chat_bindings.chat_id`（含话�
 
 命令与拒绝卡以版本、域名、应用、消息 ID 和用途生成 UUID，发送前持久化正文、目的地和首次尝试时间。结果卡再次发送前复核当前权限。飞书官方 SDK 的 `CreateMessageReqBodyBuilder.Uuid` 和 `ReplyMessageReqBodyBuilder.Uuid` 均注明相同 UUID 的有效去重窗口为一小时。送达不明时，daemon 在首次尝试后 55 分钟内沿用原 UUID 重试，超过此窗口记录 `command_reply_delivery_unknown`。表情回执失败不会重新执行业务。[飞书官方 SDK 字段说明](https://github.com/larksuite/oapi-sdk-go/blob/v3_main/service/im/v1/model.go)
 历史 sender/mention 转为同一接收事件，沿用发送者授权、群准入及附件链路。
+补齐发送者时保留首份消息的 mentions。按顺序核对 mention 数量、占位 key、名称和目标 open_id。历史列表只返回 open_id 时，可省略实时 mention 中的 user_id、union_id 或 tenant_key；双方均提供的这些字段必须相符。
 实时事件缺少发送者身份时，同一 app/domain 内后到的实时或历史副本可补齐原 pending 的身份。仅在尚未绑定摘要且无执行进度时接受补件，要求消息 ID、原文、类型、聊天、话题、回复目标和 mention 上下文一致，已有发送者字段与租户身份无冲突。首次来源保留：真实实时事件经历史补齐后仍须通过当前授权才能执行命令；只有历史副本的命令继续等待实时机会。
 每轮恢复记录暂时不可用的身份或鉴权，保留该项并继续处理其他 pending 和历史页。补扫会回看未分类事件的时间；历史页中尚无法转换并落盘的身份缺口会限制该聊天的扫描水位。下一轮沿用 30 秒轮询和 10 分钟历史窗口；journal 写入、关闭或结构错误仍会使本轮失败。
 历史准入拒绝不发送用户卡片，避免重叠回扫重复通知；实时拒绝提示按域名、应用与 message_id 去重。

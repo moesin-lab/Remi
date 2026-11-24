@@ -32,14 +32,23 @@ const HISTORY_WINDOW_MS = 10 * 60_000;
 const ACK_RETENTION_MS = 30 * 60_000;
 export class FeishuAdmissionUnavailable extends Error {}
 
+function compatibleMentions(original: FeishuMessageEvent["message"]["mentions"] = [], copy: FeishuMessageEvent["message"]["mentions"] = []): boolean {
+  return original.length === copy.length && original.every((mention, index) => {
+    const candidate = copy[index];
+    if (!mention.key || mention.key !== candidate.key || mention.name !== candidate.name
+        || !mention.id.open_id || mention.id.open_id !== candidate.id.open_id) return false;
+    const compatible = (known?: string, offered?: string) => !known || !offered || known === offered;
+    return compatible(mention.id.user_id, candidate.id.user_id) && compatible(mention.id.union_id, candidate.id.union_id)
+      && compatible(mention.tenant_key, candidate.tenant_key);
+  });
+}
+
 function supplementSender(original: FeishuMessageEvent, copy: FeishuMessageEvent): FeishuMessageEvent | undefined {
   const message = original.message, incoming = copy.message;
-  const mentions = (value: typeof message) => (value.mentions ?? []).map(mention =>
-    [mention.key, mention.name, mention.id.open_id, mention.id.user_id, mention.id.union_id, mention.tenant_key]);
   if (message.message_id !== incoming.message_id || message.content !== incoming.content || message.message_type !== incoming.message_type
       || message.chat_id !== incoming.chat_id || message.chat_type !== incoming.chat_type
       || (message.root_id || "") !== (incoming.root_id || "") || (message.parent_id || "") !== (incoming.parent_id || "")
-      || (message.thread_id || "") !== (incoming.thread_id || "") || !isDeepStrictEqual(mentions(message), mentions(incoming))) return;
+      || (message.thread_id || "") !== (incoming.thread_id || "") || !compatibleMentions(message.mentions, incoming.mentions)) return;
   const sender = original.sender, candidate = copy.sender;
   if ((sender.sender_type || "user") !== (candidate.sender_type || "user")
       || (sender.tenant_key && candidate.tenant_key && sender.tenant_key !== candidate.tenant_key)) return;

@@ -3,10 +3,20 @@ import { createId, nowIso } from "@multiremi/ids.js";
 import type { SqlDatabase } from "./db/postgres.js";
 import type { ConversationLogEntry, ConversationLogTurnMetadata } from "@multiremi/contracts/conversation-log.js";
 import type { TurnAttemptStatus } from "@multiremi/contracts/unified-model.js";
-import type { TaskUsageEntry } from "@multiremi/contracts/types.js";
+import type { CreateTaskInput, TaskUsageEntry } from "@multiremi/contracts/types.js";
 import { notifyTurnChanged } from "./turn-execution-records.js";
-import { parseJson } from "./helpers.js";
+import { parseJson, toJson } from "./helpers.js";
 import { turnUsageProjection } from "./usage-projection.js";
+import { insertTurnAttempt } from './attempt-admission.js';
+
+const replacementColumns = {
+  runtimeId: 'runtime_id', provider: 'provider', sessionId: 'session_id', workDir: 'work_dir',
+  codexProfile: 'codex_profile', claudeProfile: 'claude_profile', executionConnection: 'execution_connection',
+  executionFingerprint: 'execution_fingerprint', executionModel: 'execution_model', executionThinkingLevel: 'execution_thinking_level',
+  fallbackSwitched: 'fallback_switched', switchReason: 'switch_reason', nextRetryAt: 'next_retry_at',
+  projectionDegradeLevel: 'projection_degrade_level', pluginSnapshot: 'plugin_snapshot',
+} satisfies Partial<Record<keyof CreateTaskInput, string>>;
+type ReplacementExecution = Partial<Pick<CreateTaskInput, keyof typeof replacementColumns>>;
 
 /**
  * Replace an execution in the caller's transaction. The turn is the mutex and
@@ -16,6 +26,7 @@ export function createReplacementAttemptWithinTransaction(db: SqlDatabase, turnI
   previousStatus: "failed" | "cancelled" | "lost";
   reason: string;
   cold?: boolean;
+  execution?: ReplacementExecution;
   allowCancelledTurn?: boolean;
   /** A member's explicit recovery queues the same work identity for a fresh claim. */
   turnStatus?: "pending";
@@ -44,14 +55,21 @@ export function createReplacementAttemptWithinTransaction(db: SqlDatabase, turnI
   const value: Record<string,unknown>=Object.fromEntries(carry.map(k=>[k,previous[k]]));
   if (input.cold) Object.assign(value,{runtime_id:null,session_id:null,work_dir:null,execution_fingerprint:null,
     plugin_snapshot:"[]",codex_profile:null,claude_profile:null,execution_connection:null});
+  for (const key of Object.keys(replacementColumns) as (keyof ReplacementExecution)[]) {
+    const setting = input.execution?.[key];
+    if (setting === undefined) continue;
+    const column = replacementColumns[key];
+    if (key === 'fallbackSwitched') value[column] = setting ? 1 : 0;
+    else if (setting !== null && ['pluginSnapshot', 'codexProfile', 'claudeProfile', 'executionConnection'].includes(key)) value[column] = toJson(setting);
+    else value[column] = setting;
+  }
   const lane=db.query("SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?").get(turn.session_id,turn.agent_id,turn.execution_scope);
   const cold=input.cold||!previous.session_id;
   const from=cold?0:Number(previous.input_ack_seq??turn.input_to_seq??lane?.cursor_seq??0);
   Object.assign(value,{input_ack_seq:from,input_read_seq:cold?0:Number(previous.input_read_seq??from),
     input_read_offset:cold?0:Number(previous.input_read_offset??0),input_trigger_ack:cold?0:1});
   Object.assign(value,{id,turn_id:turnId,attempt_no:attemptNo,status:"offered" satisfies TurnAttemptStatus,created_at:now,updated_at:now});
-  const keys=Object.keys(value);
-  db.run(`INSERT INTO multiremi_turn_attempts(${keys.join(",")}) VALUES(${keys.map(()=>"?").join(",")})`,keys.map(k=>value[k] ?? null));
+  insertTurnAttempt(db, value);
   db.run(`UPDATE multiremi_turns SET current_attempt_id=?,status=CASE WHEN ?='pending' THEN 'pending'
     WHEN status IN ('failed','cancelled') THEN 'running' ELSE status END,
     ended_at=NULL,ended_reason=NULL WHERE id=?`,[id,input.turnStatus??null,turnId]);

@@ -1,4 +1,5 @@
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+import { insertTurnAttempt } from './attempt-admission.js';
 import { renderMarkdown } from "../render/markdown.js";
 /** Read projection for execution consumers; mutations always target normalized tables. */
 import type { SqlDatabase, SqlStatement } from "./db/postgres.js";
@@ -291,7 +292,7 @@ function insertExecution(db:SqlDatabase,sql:string,params:unknown[]):{changes:nu
   const attempt={...Object.fromEntries(ATTEMPT_FIELDS.filter(k=>input[k]!==undefined).map(k=>[k,input[k]])),turn_id:turnId,
     attempt_no:parent?Number(db.query("SELECT COALESCE(MAX(attempt_no),0)+1 AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(turnId).n):Number(input.attempt??1),
     status:attemptStatus(input.status??"queued")};
-  const keys=Object.keys(attempt);db.run(`INSERT INTO multiremi_turn_attempts(${keys.join(",")}) VALUES(${keys.map(()=>"?").join(",")})`,keys.map(k=>(attempt as any)[k]));
+  insertTurnAttempt(db, attempt);
   db.run("UPDATE multiremi_turns SET current_attempt_id=?,status=CASE WHEN status IN ('failed','cancelled') THEN 'running' ELSE status END,ended_at=NULL,ended_reason=NULL WHERE id=?",[input.id,turnId]);
   notifyTurnChanged(db,turnId,!parent);
   return {changes:1,lastInsertRowid:0,rows:[]};

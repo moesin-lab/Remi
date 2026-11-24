@@ -1,5 +1,7 @@
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
+import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
+import type { SecurityLockPlan } from './security-write.js';
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
@@ -5720,6 +5722,10 @@ runMigrations(this.db);
 
   getChatMessage(id: string): MultiremiChatMessage | null {
     return this.chat.getChatMessage(id);
+  }
+
+  withAttemptAdmission<T>(fence: string | undefined, plan: SecurityLockPlan, write: AttemptWrite, operation: () => T): T {
+    return withAttemptAdmission(this.db, fence, plan, write, operation);
   }
 
   createTask(input: CreateTaskInput, options?: { requireIdleIssue?: boolean }): MultiremiTask {

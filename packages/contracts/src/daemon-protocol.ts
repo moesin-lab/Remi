@@ -48,6 +48,20 @@ import type {
   TraceTurnPage,
 } from "./trace.js";
 import type { MultiremiChatSessionStatus, MultiremiDaemonHeartbeatAck, MultiremiDaemonSshMeshStatus } from "./types.js";
+export type {
+  RootDeliveryActivationResponse,
+  RootDeliveryInstallAckRequest,
+  RootDeliveryInstallAckResponse,
+  RootDeliveryJournalEntry,
+  RootDeliveryJweProtectedHeader,
+  RootDeliveryMachineProof,
+  RootDeliveryReplayRequest,
+  RootDeliveryReplayResponse,
+  RootDeliveryStatusRequest,
+  RootDeliveryStatusResponse,
+  RootDeliveryTuple,
+  RootExecutionLocator,
+} from "./root-delivery.js";
 import type {
   BackgroundLaneReleaseReason,
   BackgroundLaneState,
@@ -166,6 +180,9 @@ export const DAEMON_UPLINK_RPC_FRAMES = [
   "gc.check_task",
   "gc.subject_reclaimed",
   "lane.background_wake",
+  "delivery.receipt.status",
+  "delivery.receipt.replay",
+  "delivery.receipt.install_ack",
 ] as const;
 
 /**
@@ -944,6 +961,11 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   // lane.background_wake (PR 6)
   "lane_moved",
   "session_closed",
+  // root delivery receipts (MUL-1 A2)
+  "receipt_conflict",
+  "root_authority_revoked",
+  "root_runtime_untrusted",
+  "security_state_unavailable",
   // transport
   "ack_timeout",
   "protocol_violation",
@@ -957,6 +979,7 @@ export type DaemonProtocolErrorCode = (typeof DAEMON_PROTOCOL_ERROR_CODES)[numbe
 export const DAEMON_RETRYABLE_ERROR_CODES = [
   "daemon_busy",
   "daemon_timeout",
+  "security_state_unavailable",
   "server_error",
 ] as const satisfies readonly DaemonProtocolErrorCode[];
 
@@ -1079,6 +1102,8 @@ export const DAEMON_PROTOCOL_CAPS = [
    * hold it, and otherwise stops tasks at the attempt's end.
    */
   "lane.background",
+  /** MUL-1 A2: daemon supports recipient-bound JWE delivery receipts and immutable run env carrier. */
+  "root.delivery",
 ] as const;
 
 export type DaemonProtocolCap = (typeof DAEMON_PROTOCOL_CAPS)[number] | import("./daemon-compatibility.js").DaemonCapabilityName;

@@ -254,31 +254,30 @@ export class AccessTokensRepo {
     const nowMs = Date.now();
     const thresholdDays = options.thresholdDays ?? 7;
     const extensionDays = options.extensionDays ?? 90;
-    const now = new Date(nowMs).toISOString();
     const renewThresholdAt = new Date(nowMs + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
     const newExpiresAt = new Date(nowMs + extensionDays * 24 * 60 * 60 * 1000).toISOString();
-    const current = this.getAccessToken(id);
-    if (!current || current.revokedAt) return null;
+    const observed = this.db.query("SELECT * FROM multiremi_access_tokens WHERE id=?").get(id);
+    if (!observed) return null;
+    const current = toAccessToken(observed);
+    if (current.revokedAt) return null;
     if (current.expiresAt && Date.parse(current.expiresAt) <= nowMs) return null;
     if (!current.expiresAt || Date.parse(current.expiresAt) > Date.parse(renewThresholdAt)) {
       return { token: current, renewed: false };
     }
     const rawToken = generateAccessToken(current.type);
     const hash = await hashAccessToken(rawToken);
-    const result = this.db.run(
+    const updated = this.db.query(
       `UPDATE multiremi_access_tokens
        SET token_hash = ?, token_prefix = ?, expires_at = ?
        WHERE id = ?
+         AND token_hash = ? AND expires_at = ? AND type = ?
          AND revoked_at IS NULL
-         AND expires_at IS NOT NULL
          AND expires_at > ?
-         AND expires_at <= ?`,
-      [hash, rawToken.slice(0, 12), newExpiresAt, id, now, renewThresholdAt],
-    );
+       RETURNING *`,
+    ).get(hash, rawToken.slice(0, 12), newExpiresAt, id, observed.token_hash, current.expiresAt, current.type, nowIso());
+    if (updated) return { token: toAccessToken(updated), renewed: true, rawToken };
     const token = this.getAccessToken(id);
-    if (!token || token.revokedAt) return null;
-    if (token.expiresAt && Date.parse(token.expiresAt) <= nowMs) return null;
-    return { token, renewed: result.changes > 0, ...(result.changes > 0 ? { rawToken } : {}) };
+    return token && accessTokenIsValid(token, Date.now()) ? { token, renewed: false } : null;
   }
 
   async verifyAccessToken(rawToken: string, allowedTypes?: MultiremiAccessTokenType[]): Promise<MultiremiAccessToken | null> {

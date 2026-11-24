@@ -6102,19 +6102,10 @@ ${placementAfter.sql}
       }
     }
     const created=createReplacementAttemptWithinTransaction(this.ctx.db,row.turn_id,{
+      execution: input,
       previousStatus:redispatch?(parent.status==='failed'?'failed':'cancelled'):parent.failureReason==='runtime_recovery'?'lost':'failed',
       reason:redispatch?'redispatch':parent.failureReason??'retry',cold:Boolean(input.resetProviderSession),allowCancelledTurn:redispatch,
     });
-    const mapping:Record<string,string>={runtimeId:'runtime_id',provider:'provider',sessionId:'session_id',workDir:'work_dir',
-      codexProfile:'codex_profile',claudeProfile:'claude_profile',executionConnection:'execution_connection',executionFingerprint:'execution_fingerprint',
-      executionModel:'execution_model',executionThinkingLevel:'execution_thinking_level',fallbackSwitched:'fallback_switched',
-      switchReason:'switch_reason',nextRetryAt:'next_retry_at',projectionDegradeLevel:'projection_degrade_level',pluginSnapshot:'plugin_snapshot'};
-    const fields:Record<string,unknown>={};
-    for(const[key,column]of Object.entries(mapping))if((input as any)[key]!==undefined){let value=(input as any)[key];
-      if(['pluginSnapshot','codexProfile','claudeProfile','executionConnection'].includes(key)&&value!=null)value=toJson(value);
-      if(key==='fallbackSwitched')value=value?1:0;fields[column]=value;}
-    const keys=Object.keys(fields);
-    if(keys.length)this.ctx.db.run(`UPDATE multiremi_turn_attempts SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,[...keys.map(k=>fields[k]),created.attempt_id]);
     if(input.maxAttempts)this.ctx.db.run('UPDATE multiremi_turns SET max_attempts=? WHERE id=?',[input.maxAttempts,row.turn_id]);
     if(input.pluginSnapshot)this.replaceTaskPluginSnapshotIndex(created.attempt_id,input.pluginSnapshot,nowIso());
     return this.getTask(created.attempt_id)!;

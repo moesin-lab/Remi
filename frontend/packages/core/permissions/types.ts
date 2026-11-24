@@ -11,6 +11,8 @@ import type { MemberRole } from "../types";
 export interface PermissionContext {
   userId: string | null;
   role: MemberRole | null;
+  /** Server-derived capability (`GET /api/root/context`). Never inferred from workspace owner/admin. */
+  canEditRootExecution?: boolean;
 }
 
 /**
@@ -27,6 +29,7 @@ export type DecisionReason =
   | "not_resource_owner"
   | "last_owner"
   | "private_visibility"
+  | "root_execution_protected"
   | "unknown";
 
 export interface Decision {

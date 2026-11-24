@@ -53,6 +53,7 @@ import { PageHeader } from "../../layout/page-header";
 import { availabilityConfig } from "../presence";
 import { AgentDetailInspector } from "./agent-detail-inspector";
 import { AgentOverviewPane, type DetailTab } from "./agent-overview-pane";
+import { AgentRootBadge } from "./agent-root-badge";
 import { EditAgentDialog } from "./edit-agent-dialog";
 import { useT } from "../../i18n";
 
@@ -401,6 +402,7 @@ function DetailHeader({
       leaf={
         <>
           <h1 className="min-w-0 truncate text-sm font-medium text-foreground">{agent.name}</h1>
+          <AgentRootBadge root={agent.root} />
           {av && presence && (
             <span
               className={`inline-flex shrink-0 items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-xs ${av.textClass}`}

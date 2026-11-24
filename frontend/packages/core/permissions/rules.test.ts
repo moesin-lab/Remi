@@ -116,6 +116,30 @@ describe("canEditAgent", () => {
       true,
     );
   });
+  it("denies ordinary workspace owner/admin from editing a protected root agent without canEditRootExecution", () => {
+    const rootAgent = makeAgent({
+      owner_id: ALICE,
+      root: {
+        granted: true,
+        grant_id: "rgr_1",
+        generation: 1,
+        effective: true,
+        reason_code: "active",
+        scope: "system",
+        expires_at: null,
+        revoked_at: null,
+      },
+    });
+    expect(canEditAgent(rootAgent, { userId: BOB, role: "owner" })).toMatchObject({
+      allowed: false,
+      reason: "root_execution_protected",
+    });
+    expect(canEditAgent(rootAgent, { userId: ALICE, role: "admin", canEditRootExecution: false })).toMatchObject({
+      allowed: false,
+      reason: "root_execution_protected",
+    });
+    expect(canEditAgent(rootAgent, { userId: BOB, role: "member", canEditRootExecution: true }).allowed).toBe(true);
+  });
   it("denies non-owner member", () => {
     const d = canEditAgent(agent, { userId: BOB, role: "member" });
     expect(d.allowed).toBe(false);

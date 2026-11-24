@@ -28,6 +28,7 @@
         "command": { "type": "string", "pattern": "^remi " },
         "aliases": { "type": "array", "items": { "type": "string" } },
         "auth": { "type": "array", "items": { "enum": ["human", "task", "daemon", "share"] } },
+        "root_conditional": { "type": "boolean" },
         "capability": { "type": ["string", "null"] },
         "mutation": { "enum": ["read", "write", "destructive"] },
         "output": { "type": "array", "items": { "enum": ["table", "json", "jsonl"] } },

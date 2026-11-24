@@ -27,6 +27,9 @@ export interface CliErrorOptions {
   exitCode?: number;
   retryable?: boolean;
   status?: number;
+  serverCode?: string;
+  requestId?: string;
+  currentRevision?: number;
   details?: unknown;
   hint?: string;
   cause?: unknown;
@@ -36,6 +39,9 @@ export class CliError extends Error {
   readonly exitCode: number;
   readonly retryable: boolean;
   readonly status?: number;
+  readonly serverCode?: string;
+  readonly requestId?: string;
+  readonly currentRevision?: number;
   readonly details?: unknown;
   readonly hint?: string;
 
@@ -49,6 +55,9 @@ export class CliError extends Error {
     this.exitCode = options.exitCode ?? EXIT_CODES[code];
     this.retryable = options.retryable ?? false;
     this.status = options.status;
+    this.serverCode = options.serverCode;
+    this.requestId = options.requestId;
+    this.currentRevision = options.currentRevision;
     this.details = options.details === undefined ? undefined : sanitizeCliDetails(options.details);
     this.hint = options.hint;
   }
@@ -56,9 +65,12 @@ export class CliError extends Error {
   toJSON(): Record<string, unknown> {
     return {
       code: this.code,
+      ...(this.serverCode === undefined ? {} : { server_code: this.serverCode }),
       message: this.message,
       retryable: this.retryable,
       ...(this.status === undefined ? {} : { status: this.status }),
+      ...(this.requestId === undefined ? {} : { request_id: this.requestId }),
+      ...(this.currentRevision === undefined ? {} : { current_revision: this.currentRevision }),
       ...(this.details === undefined ? {} : { details: this.details }),
       ...(this.hint === undefined ? {} : { hint: this.hint }),
     };

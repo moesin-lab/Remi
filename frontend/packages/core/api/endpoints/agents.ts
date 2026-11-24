@@ -1,3 +1,4 @@
+import { stripRootReadonlyFields } from "@multiremi/contracts/root-authority";
 import type {
   Agent,
   AgentEnvResponse,
@@ -38,7 +39,7 @@ export class AgentsEndpoints {
   async createAgent(data: CreateAgentRequest): Promise<Agent> {
     return this.http.fetch("/api/agents", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify(stripRootReadonlyFields(data as unknown as Record<string, unknown>)),
     });
   }
 
@@ -77,7 +78,7 @@ export class AgentsEndpoints {
   ): Promise<CreateAgentFromTemplateResponse> {
     const raw = await this.http.fetch<unknown>("/api/agents/from-template", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify(stripRootReadonlyFields(data as unknown as Record<string, unknown>)),
     });
     return parseWithFallback(
       raw,
@@ -90,7 +91,7 @@ export class AgentsEndpoints {
   async updateAgent(id: string, data: UpdateAgentRequest): Promise<Agent> {
     return this.http.fetch(`/api/agents/${id}`, {
       method: "PUT",
-      body: JSON.stringify(data),
+      body: JSON.stringify(stripRootReadonlyFields(data as unknown as Record<string, unknown>)),
     });
   }
 

@@ -5,6 +5,9 @@ import { expandAuthorityProvenance } from './authority-provenance-schema.js';
 import { expandRootGrants } from './root-grant-schema.js';
 import { expandRootManagement } from './root-management-schema.js';
 import { expandBootstrapAuthorizations } from './root-bootstrap-schema.js';
+import { expandRuntimeTrust } from './runtime-trust-schema.js';
+import { expandCredentialVersionBindings, expandRootReceipts } from './root-receipt-schema.js';
+import { expandJwtMaterials } from './jwt-material-schema.js';
 import type { SchemaMigration } from './schema-migration-runner.js';
 
 /** Historical bootstrap is frozen at level 0. New DDL belongs in this list;
@@ -36,4 +39,16 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
 }, {
   id: '20261124_bootstrap_authorizations', phase: 'expand', level: 4,
   expandRelease: '0.2.95', release: '0.2.95', run: expandBootstrapAuthorizations,
+}, {
+  id: '20261124_runtime_trust', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandRuntimeTrust,
+}, {
+  id: '20261124_root_receipts', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandRootReceipts,
+}, {
+  id: '20261124_credential_version_bindings', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandCredentialVersionBindings,
+}, {
+  id: '20261124_dashboard_jwt_materials', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandJwtMaterials,
 }];

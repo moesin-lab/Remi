@@ -157,7 +157,19 @@ export function TokensTab() {
               <Card key={token.id}>
                 <CardContent className="flex items-center gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium truncate">{token.name}</div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-sm font-medium truncate">{token.name}</span>
+                      {(token.is_agent_origin || token.authenticated_subject?.type === "agent") && (
+                        <span
+                          data-testid="token-agent-origin-badge"
+                          className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+                        >
+                          {t(($) => $.tokens.agent_origin_badge, {
+                            subject: token.authenticated_subject?.id ?? "agent",
+                          })}
+                        </span>
+                      )}
+                    </div>
                     <div className="text-xs text-muted-foreground">
                       {t(($) => $.tokens.metadata_prefix, {
                         prefix: token.token_prefix,
@@ -171,6 +183,8 @@ export function TokensTab() {
                       {token.expires_at && t(($) => $.tokens.expires_with_date, {
                         date: new Date(token.expires_at!).toLocaleDateString(),
                       })}
+                      {token.family_id && ` · family ${token.family_id}`}
+                      {token.beneficiary_user_id && ` · beneficiary ${token.beneficiary_user_id}`}
                     </div>
                   </div>
                   <Tooltip>

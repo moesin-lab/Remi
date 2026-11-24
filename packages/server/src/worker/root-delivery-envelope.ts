@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, KeyObject } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { CompactEncrypt, compactDecrypt } from 'jose';
 import {
@@ -16,9 +16,22 @@ const bindingFields = {
 
 function reject(): never { throw new Error('Invalid root delivery envelope'); }
 
-function header(tuple: RootDeliveryTuple): RootDeliveryJweProtectedHeader {
+export function serializeRootDeliveryTuple(tuple: RootDeliveryTuple): string {
   if (Object.keys(tuple).length !== Object.keys(bindingFields).length ||
       Object.keys(bindingFields).some(field => !Object.hasOwn(tuple, field))) reject();
+  const fields = Object.keys(bindingFields) as (keyof RootDeliveryTuple)[];
+  for (const field of fields) {
+    const value = tuple[field];
+    if (value === null && ['handoff_id', 'checkpoint_digest', 'grant_id', 'grant_generation'].includes(field)) continue;
+    if (/_(version|generation|revision|epoch)$/.test(field)) {
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) reject();
+    } else if (typeof value !== 'string' || !value || value.length > 512) reject();
+  }
+  return JSON.stringify(Object.fromEntries(fields.map(field => [field, tuple[field]])));
+}
+
+function header(tuple: RootDeliveryTuple): RootDeliveryJweProtectedHeader {
+  serializeRootDeliveryTuple(tuple);
   const { recipient_key_id, ...binding } = tuple;
   return { ...binding, kid: recipient_key_id, v: ROOT_DELIVERY_PROTOCOL_VERSION, alg: ROOT_DELIVERY_JWE_ALG, enc: ROOT_DELIVERY_JWE_ENC };
 }
@@ -31,9 +44,14 @@ function checkKey(key: CryptoKey, type: 'private' | 'public'): void {
 
 function digest(envelope: string): string { return `sha256:${createHash('sha256').update(envelope).digest('hex')}`; }
 
-export async function sealRootDelivery(tuple: RootDeliveryTuple, raw: string, publicKey: CryptoKey) {
+export function recipientFingerprint(publicKey: CryptoKey): string {
   checkKey(publicKey, 'public');
-  if (!raw || !(Date.parse(tuple.material_expires_at) > Date.now())) reject();
+  const spki = KeyObject.from(publicKey).export({ type: 'spki', format: 'der' });
+  return `sha256:${createHash('sha256').update(spki).digest('hex')}`;
+}
+
+export async function sealRootDelivery(tuple: RootDeliveryTuple, raw: string, publicKey: CryptoKey) {
+  if (recipientFingerprint(publicKey) !== tuple.recipient_key_fingerprint || !raw || !(Date.parse(tuple.material_expires_at) > Date.now())) reject();
   const protectedHeader = header(tuple);
   const bytes = new TextEncoder().encode(JSON.stringify({ tuple, raw }));
   try {

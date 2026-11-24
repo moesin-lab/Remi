@@ -19,6 +19,8 @@ Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后
 
 ## 工作区与凭据边界
 
+人类为 `run_only` Autopilot 选择投递 Chat 时，`delivery_authorized_by` 保存该工作区共享 operator 的成员 ID。退出登录或撤销个人 PAT 后，这份工作区授权仍然有效。要撤销单个任务的投递，在编辑页清除投递目标，或向 `PATCH /api/autopilots/:id` 提交 `{"delivery_chat_session_id": null}`。运行完成前清空绑定，本轮也停止投递。若完成前目标 Chat 已归档、目标 Agent 已移出工作区，或授予权限的历史成员已归档，该轮只在 Autopilot 内记录 `skipped`，不会向目标 Chat 写消息或创建飞书出站记录。
+
 | 边界 | 当前行为与源码 |
 |---|---|
 | 人类操作者的工作区权限 | [denyCurrentUserWorkspaceAccess](../../packages/server/src/api/helpers/auth-guards.ts)允许已通过入口鉴权的人类访问所有现存工作区。资源仍必须属于请求所指向的工作区，未知资源返回 404。匿名请求在开启登录保护时仍返回 401。 |

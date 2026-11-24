@@ -1,5 +1,7 @@
 // Access-token minting/verification, extracted verbatim from MultiremiStore (delegated).
 import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { JwtMaterialUnavailable } from "@multiremi/store/jwt-materials.js";
+import { markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import type {
@@ -87,6 +89,7 @@ export class AccessTokensRepo {
     const now = nowIso();
     const expiresAt = normalizeAccessTokenExpiry(input.expiresInDays ?? input.expires_in_days ?? null);
     const insert = (): MultiremiCreatedAccessToken => {
+      if (type !== "task") this.requireLegacyIssuer();
       beforeInsert?.();
       this.db.run(
         `INSERT INTO multiremi_access_tokens (
@@ -99,7 +102,19 @@ export class AccessTokensRepo {
         token,
       };
     };
-    return beforeInsert ? this.db.transaction(insert)() : insert();
+    return type !== "task" || beforeInsert ? this.db.transaction(insert)() : insert();
+  }
+
+  private requireLegacyIssuer(): void {
+    let state;
+    try {
+      state = this.db.query(`UPDATE multiremi_security_state SET security_revision = security_revision
+        WHERE singleton = 1 RETURNING feature_activation`).get();
+    } catch {
+      throw new JwtMaterialUnavailable();
+    }
+    markRequestReadCacheLockTaken();
+    if (state?.feature_activation !== 0) throw new JwtMaterialUnavailable();
   }
 
   async createTaskAccessToken(

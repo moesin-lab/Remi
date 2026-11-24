@@ -1,0 +1,66 @@
+[
+  {
+    "sha": "56ed5dc744b85a00e5f06d1c6ee63def5e921483",
+    "level": 5,
+    "checkpoint": {
+      "cursor_id": "b",
+      "complete": 1
+    },
+    "links": [
+      {
+        "id": "a",
+        "issue_id": "iss_history_strong",
+        "source": "legacy",
+        "active": 1,
+        "attribution": "[\"title\"]"
+      },
+      {
+        "id": "b",
+        "issue_id": "iss_history_weak",
+        "source": "auto",
+        "active": 1,
+        "attribution": "[]"
+      },
+      {
+        "id": "c",
+        "issue_id": "iss_history_tomb",
+        "source": "manual",
+        "active": 0,
+        "attribution": null
+      }
+    ],
+    "archive_sha256": "18227aa885106a6207d0de0fef2271d5b63b970ac82d2dfa01e4d75005e87a61"
+  },
+  {
+    "sha": "b49fc27da598151c2017a5f6dfe0b3bf033f14fd",
+    "level": 4,
+    "checkpoint": {
+      "cursor_id": "b",
+      "complete": 1
+    },
+    "links": [
+      {
+        "id": "a",
+        "issue_id": "iss_history_strong",
+        "source": "legacy",
+        "active": 1,
+        "attribution": "[\"title\"]"
+      },
+      {
+        "id": "b",
+        "issue_id": "iss_history_weak",
+        "source": "auto",
+        "active": 1,
+        "attribution": null
+      },
+      {
+        "id": "c",
+        "issue_id": "iss_history_tomb",
+        "source": "manual",
+        "active": 0,
+        "attribution": null
+      }
+    ],
+    "archive_sha256": "25deb05bc2e0e964f6c7b12141622f0239f68235db3cafb8ef525802a50c9d9b"
+  }
+]

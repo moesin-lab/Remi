@@ -89,7 +89,7 @@ kind 为 workflow_run，保留 status、conclusion 和 runAttempt。同一 run I
 
 ## SCM 归属切换
 
-完成 expand 5 后，停止所有 API slot、后台 writer 和旧交付轮次，排空连接和在途事务，禁用自动重启并隔离旧进程的数据库访问，包括投影及 Issue key 写入。操作员须在整个窗口维持隔离。PG 的 advisory lock 串行维护命令，客户端检查只反映检查时刻。SQLite 入口持有启动迁移锁及目标库排他锁，覆盖所有分页事务；操作员仍须关闭空闲句柄并阻止重连。
+完成 expand 6 后，停止所有 API slot、后台 writer 和旧交付轮次，排空连接和在途事务，禁用自动重启并隔离旧进程的数据库访问，包括投影及 Issue key 写入。操作员须在整个窗口维持隔离。PG 的 advisory lock 串行维护命令，客户端检查只反映检查时刻。SQLite 入口持有启动迁移锁及目标库排他锁，覆盖所有分页事务；操作员仍须关闭空闲句柄并阻止重连。
 
 - PostgreSQL 使用目标库的 `MULTIREMI_DATABASE_URL`，执行 `remi db classify-scm-links`。
 - SQLite 取消设置 `MULTIREMI_DATABASE_URL`，执行 `remi db classify-scm-links --sqlite-file /absolute/path/to/server.sqlite`，指定 Server 实际使用的既有文件。
@@ -97,25 +97,18 @@ kind 为 workflow_run，保留 status、conclusion 和 runAttempt。同一 run I
 
 ### 回滚与重新接管
 
-1. 在已停止所有 writer 的库上，给同一分类命令追加 `--hold-for-rollback`，确认输出 `writersHeld`。回滚前、重新停掉旧 writer 后分别离线导出以下查询结果到受控审计目录。保存排序后的前后文件并用 `diff -u before.tsv after.tsv` 核对 identity、active/source、Issue key 及投影变化。回滚期间保留旧 writer 操作记录和绑定时刻的原始投影。
+1. 从已完成可信首切的新库回滚前，在同一离线命令追加 `--hold-for-rollback`。确认回执给出 `hold_id`、`baseline`、条数和 `writersHeld`，再允许旧 writer 启动。数据库保存独立于业务行的基线，包括未绑定投影、所有关联和墓碑。身份和归属参与比较，分支、标题、正文分别取摘要。普通检查状态刷新不改变归属。
+2. 旧 writer 退出后，重新排空并隔离所有客户端。每次离线命令都重新取得锁。运行普通分类命令获取 `receipt`、`reviewed`、`pending`、`entries` 和 `next`；每页最多 25 条，用 `--after <next>` 查看下一页。退出 0 的 `writersHeld:true` 表示报告可读，仍须保持隔离。新增、删除、身份或归属差异无法核证时保持停写，已观测到的身份异常即使后来消失也阻止本代解锁。
+3. 对 `text` 差异核对前后摘要。将同一页的完整 `receipt` 字段复制到 JSON 顶层，追加本页 `after` 和 `items`。每项只含 `entry_key`、`old_digest`、`new_digest`、`disposition`（`retain-frozen`）。执行 `--review-page <文件>` 顺序登记整页；错误或漏项整页回滚。同页同内容可重复。一条新观测导致快照变化即更新 revision，旧审核回执失效；按新增差异重新核对。CLI 不接受调用者声明的 `proof` 或归属数组。
+4. 将报告的 `receipt` 对象单独保存，执行 `--finalize <receipt文件>`。零差异也需要此步。CLI 在离线锁内复核整库与冻结基线，所有页已审且无未核实身份才原子放行。重复完成仅返回原代回执。确认 `complete:true` 后恢复兼容 writer。维护不重建关联，不修改墓碑、Issue 状态或历史活动。
 
-   ```sql
-   SELECT l.id, l.workspace_id, l.change_request_id, l.issue_id, l.source, l.active,
-          i.issue_key, i.issue_number, p.connection_id, p.repository_id, p.external_id,
-          p.source_branch, p.title, p.body, e.attribution
-   FROM multiremi_scm_issue_links l
-   JOIN multiremi_issues i ON i.id=l.issue_id
-   JOIN multiremi_scm_change_requests p ON p.id=l.change_request_id
-   LEFT JOIN multiremi_scm_link_ownership e ON e.link_id=l.id ORDER BY l.id;
-   ```
+### 旧库的来源核验
 
-2. 再切换前重新排空旧实例并阻止重连。原有强弱证据继续冻结。遇到删除、身份重用、来源变化等无法和审计记录核实的差异，维持 hold 并交人工处理。确认差异范围后运行相同分类命令。它会列出至多 25 条缺证据的 auto/legacy link 并保持门禁。旧 level 4 已完成的库升级时也会进入 hold，缺行可能是历史弱提及。
-3. 对每条缺行核对绑定时刻的可信记录，按 branch、title、声明式 body 顺序记录命中项，确认仅普通提及时记 `[]`。保留原始证据和审核清单。复制命令输出中的完整六个身份与状态字段，追加 `proof` 与 `attribution`，形成 JSON 数组。例如：
+- 从 level 0–3 首次升级且无历史 cutover 记录的库，经显式分类完成。已有 level 4/5 checkpoint 的库，即使当前库空、已有 complete 或强证据，也保持隔离。原 level 4 已处理的弱关系用缺行表示；level 5 无回滚前快照。事后快照不能证明过去的绑定。
+- 具备**独立受控、确认属于目标库的历史快照**时，针对隔离副本使用 `--export-inventory`，保存原始输出字节。需由独立的备份/审计管理方核验来源、版本、快照时间及旧 writer 隔离记录，并从受控副本计算文件 SHA-256。确认这份记录先于旧 writer 重入。level 5 还须确认所有历史强度已有可信依据。若无这样的记录，继续保持停写。
+- 支持主机独立预置的 `/etc/remi/scm-cutover-anchors.json`。`/etc`、`/etc/remi` 和文件必须由 root 持有、禁止组及其他用户写入，路径不得含符号链接。审核操作员不应拥有修改该文件的权限。`targets` 按 `sqlite:<规范绝对路径>` 或 `postgres://<主机>:<端口>/<库名>` 分别列出目标的 `sha256`。有独立连续隔离证明的旧部分分类才可登记 `continuousIsolation:true`。凭据、查询参数和调用者提供的哈希不用于选择信任来源。主机不能提供此来源时保持隔离。
+- 目标离线 CLI 使用 `--adopt-inventory <历史文件>` 校验预置摘要并保存历史完整基线。之后使用同一查询、审核和 `--finalize` 流程。原 level 4 已处理的缺行只能在最终提交时补弱 `[]`；未处理尾页仅在有连续隔离证明且快照一致时续跑。已证强度与 inactive 保留。level 5 无来源的缺行不可恢复。从当前文件自身计算哈希并自行注册会破坏来源证明，维护过程不提供注册命令。
 
-   ```json
-   [{"id":"link_1","workspace_id":"local","issue_id":"iss_example","change_request_id":"cr_1","source":"auto","active":1,"proof":"archived-bind-record:42","attribution":["title"]}]
-   ```
-
-4. 给同一命令追加 `--restore-reviewed /absolute/path/review.json` 导入。身份、来源、active 或既有归属冲突时整批拒绝。重复处理后续候选，直到返回 `complete`。不以当前已改写的文本推测历史；缺可信依据时保持隔离。复查上述清单、inactive/tombstone 和 Issue 活动，确认仅审核缺行获得证据、没有历史 merge 活动新增，再恢复新 writer。需建立新的明确归属时，使用任务上下文内部 Issue ID 对原 URL 显式 bind 并 list 核对。
+捕获中断后继续隔离，再执行 `--hold-for-rollback`。若完整预捕获摘要已落库且仍与现状一致，可以补齐缺页；缺少该摘要或内容已变则维持停写。存储量随基线与差异行数增长，维护锁窗包括全量枚举和重验。前后快照只能证明端点，证明期间行为需可信日志。旧版不识别新门禁，数据库锁及连接清点不能替代进程隔离。
 
 poll、webhook、baseline 和 bind 都不会依据标题、分支或正文新增关联，旧 `scm_auto_link_enabled` 设置仅保留序列化兼容。显式 manual 关联具有归属；已存在的 auto/legacy 关联按切换时可证实的分支、标题、声明式正文保存归属。普通提及保持可见，解绑记录继续隐藏。后续文本更新不改变归属，合并只记录活动。切换前已丢失证据的关联可按原 URL 显式绑定，不补录历史活动。

@@ -1,3 +1,4 @@
+import { auditScmRollback, holdScmWritersForReview } from "@multiremi/store/scm-rollback-audit.js";
 import { ScmRepo } from "@multiremi/store/repos/scm-repo.js";
 import { runStartupMigrations } from "@multiremi/store/migrations.js";
 import { assertScmOwnershipReady, classifyScmLinkBatch, classifyScmLinks } from "@multiremi/store/scm-ownership.js";
@@ -78,6 +79,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       }
       const links = () => db.query("SELECT * FROM multiremi_scm_issue_links ORDER BY id").all();
       const before = links();
+      db.exec("DROP TABLE multiremi_scm_audit_state");
       db.exec("DROP TABLE multiremi_scm_link_ownership");
       db.exec("DROP TABLE multiremi_scm_ownership_cutover");
       db.run("DELETE FROM multiremi_schema_steps WHERE level >= 4");
@@ -133,9 +135,16 @@ for (const backend of ["sqlite", "postgres"] as const) {
             [`link-${number}-${owner.id}`, owner.id, number]);
         }
       }
-      db.run("DELETE FROM multiremi_scm_ownership_cutover");
+      db.run("UPDATE multiremi_scm_audit_state SET phase='initial',hold_id=NULL,initial_digest=NULL");      db.run("DELETE FROM multiremi_scm_ownership_cutover");
       classifyScmLinks(db);
+      holdScmWritersForReview(db);
       db.run("UPDATE multiremi_scm_change_requests SET title='Clean', body=NULL, source_branch=NULL");
+      const audit = auditScmRollback(db);
+      if (!('entries' in audit)) throw new Error('Expected a frozen text-only review page');
+      auditScmRollback(db, { review: { ...audit.receipt, after: '', items: audit.entries.map(row => ({
+        entry_key: row.entry_key, old_digest: row.old_digest, new_digest: row.new_digest, disposition: 'retain-frozen',
+      })) } });
+      auditScmRollback(db, { finalize: audit.receipt });
       if (backend === "sqlite") {
         db.exec("CREATE TRIGGER reject_merge_activity BEFORE INSERT ON multiremi_issue_activity WHEN NEW.type='scm_merge_completed' BEGIN SELECT RAISE(ABORT,'merge activity fault'); END");
       } else {

@@ -41,17 +41,28 @@ export function databaseCommandSpecs(): CommandSpec[] {
     mutation: 'destructive', outputs: ['json'],
     options: [
       { name: 'sqlite-file', type: 'string', valueName: 'absolute-path', description: 'Existing SQLite Server database file for exclusive offline classification' },
-      { name: 'hold-for-rollback', type: 'boolean', conflictsWith: ['restore-reviewed'], description: 'Keep SCM writers gated until offline rollback review completes' },
-      { name: 'restore-reviewed', type: 'string', valueName: 'json-file', description: 'Restore independently reviewed rollback evidence for named links' },
+      { name: 'export-inventory', type: 'boolean', conflictsWith: ['adopt-inventory','hold-for-rollback','after','review-page','finalize'], description: 'Export from an isolated historical level 4/5 snapshot for independent provenance verification' },
+      { name: 'adopt-inventory', type: 'string', valueName: 'archive-file', conflictsWith: ['hold-for-rollback','after','review-page','finalize'], description: 'Compare a historical archive against the independently provisioned target-specific pin' },
+      { name: 'hold-for-rollback', type: 'boolean', conflictsWith: ['after','review-page','finalize'], description: 'Gate writers and capture the immutable pre-rollback inventory' },
+      { name: 'after', type: 'string', conflictsWith: ['review-page','finalize'], description: 'Show the next 25 differences after this stable entry key' },
+      { name: 'review-page', type: 'string', conflictsWith: ['finalize'], valueName: 'json-file', description: 'Stage a complete generation-bound page of text-only reviews' },
+      { name: 'finalize', type: 'string', valueName: 'receipt-file', description: 'Recheck the full inventory and explicitly release this reviewed generation' },
     ],
     run: async ({ options }) => {
-      const { classifyScmLinks, holdScmWritersForReview } = await import('@multiremi/store/scm-ownership.js');
-      const classify = (db: SqlDatabase) => {
-        if (options['hold-for-rollback']) return holdScmWritersForReview(db);
-        if (options['restore-reviewed']) holdScmWritersForReview(db);
-        const reviewed = options['restore-reviewed']
-          ? JSON.parse(readFileSync(String(options['restore-reviewed']), 'utf8')) : undefined;
-        classifyScmLinks(db, reviewed);
+      const { classifyScmLinks } = await import('@multiremi/store/scm-ownership.js');
+      const { holdScmWritersForReview, auditScmRollback, legacyInventory, adoptLegacyInventory } = await import('@multiremi/store/scm-rollback-audit.js');
+      let result: unknown;
+      const classify = (db: SqlDatabase, sqliteTarget?: string) => {
+        if (options['export-inventory']) result = legacyInventory(db);
+        else if (options['adopt-inventory']) {
+          const target = sqliteTarget ?? postgresAuditTarget();
+          const pin = historicalInventoryPin(target);
+          result = adoptLegacyInventory(db, readFileSync(String(options['adopt-inventory'])), pin.sha256, pin.continuousIsolation === true);
+        } else if (options['hold-for-rollback']) result = holdScmWritersForReview(db);
+        else if (options['review-page']) result = auditScmRollback(db, { review: JSON.parse(readFileSync(String(options['review-page']), 'utf8')) });
+        else if (options.finalize) result = auditScmRollback(db, { finalize: JSON.parse(readFileSync(String(options.finalize), 'utf8')) });
+        else if (options.after) result = auditScmRollback(db, { after: String(options.after) });
+        else result = classifyScmLinks(db);
       };
       if (options['sqlite-file']) {
         await withOfflineSqlite(String(options['sqlite-file']), classify);
@@ -67,7 +78,7 @@ export function databaseCommandSpecs(): CommandSpec[] {
           });
         } finally { db.close(); }
       }
-      console.log(JSON.stringify(options['hold-for-rollback'] ? { writersHeld: true } : { complete: true }));
+      console.log(JSON.stringify(result));
     },
   }, {
     id: 'db.contract', path: ['db', 'contract'],
@@ -83,6 +94,23 @@ export function databaseCommandSpecs(): CommandSpec[] {
     },
   }];
 }
+function postgresAuditTarget(): string {
+  const target = new URL(process.env.MULTIREMI_DATABASE_URL!);
+  if (target.search || target.hash) throw new Error('Use a direct target database URL without overrides for historical provenance');
+  return `postgres://${target.hostname}:${target.port || '5432'}${target.pathname}`;
+}
+
+function historicalInventoryPin(target: string): { sha256: string; continuousIsolation?: boolean } {
+  const path = '/etc/remi/scm-cutover-anchors.json';
+  for (const component of ['/etc', '/etc/remi', path]) {
+    const info = statSync(component);
+    if (realpathSync(component) !== component || info.uid !== 0 || (info.mode & 0o022) !== 0) throw new Error('Untrusted historical inventory pin location');
+  }
+  const pin = JSON.parse(readFileSync(path, 'utf8')).targets?.[target];
+  if (!pin || !/^[a-f0-9]{64}$/.test(pin.sha256)) throw new Error('Missing independent historical provenance for this database target');
+  return pin;
+}
+
 async function openDatabase() {
   const url = process.env.MULTIREMI_DATABASE_URL?.trim();
   if (!url || !/^postgres(?:ql)?:\/\//.test(url)) throw new Error('Set MULTIREMI_DATABASE_URL to the PostgreSQL database for this maintenance operation');
@@ -90,7 +118,7 @@ async function openDatabase() {
   return new PostgresSyncDatabase(url);
 }
 
-async function withOfflineSqlite(path: string, classify: (db: SqlDatabase) => void): Promise<void> {
+async function withOfflineSqlite(path: string, classify: (db: SqlDatabase, target: string) => void): Promise<void> {
   if (!isAbsolute(path) || !statSync(path).isFile()) throw new Error('--sqlite-file requires an existing absolute database file');
   if (process.env.MULTIREMI_DATABASE_URL?.trim()) throw new Error('Select one maintenance target: unset MULTIREMI_DATABASE_URL when using --sqlite-file');
   const filename = realpathSync(path);
@@ -103,7 +131,7 @@ async function withOfflineSqlite(path: string, classify: (db: SqlDatabase) => vo
       db.exec('PRAGMA locking_mode=EXCLUSIVE');
       db.exec('BEGIN EXCLUSIVE');
       db.exec('COMMIT');
-      classify(db);
+      classify(db, `sqlite:${filename}`);
     } finally { db.close(); }
   } catch (error) {
     if (error instanceof Error && /SQLITE_(BUSY|LOCKED)|database is locked/i.test(`${error.name}: ${error.message}`)) {

@@ -84,7 +84,7 @@ function recordChange(
 }
 
 function classifyHistoricalLinks(...links: Array<[number, string]>) {
-  db!.run("DELETE FROM multiremi_scm_ownership_cutover");
+  db!.run("UPDATE multiremi_scm_audit_state SET phase='initial',hold_id=NULL,initial_digest=NULL");  db!.run("DELETE FROM multiremi_scm_ownership_cutover");
   for (const [number, issueId] of links) {
     db!.run(`INSERT INTO multiremi_scm_issue_links
       (id, workspace_id, change_request_id, issue_id, source, active, linked_at, created_at, updated_at)

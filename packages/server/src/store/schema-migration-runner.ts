@@ -11,7 +11,7 @@ export interface SchemaMigration {
   expandRelease: string;
   /** First release allowed to execute this step. Contract MUST be later. */
   release: string;
-  run(db: SqlDatabase): void;
+  run(db: SqlDatabase, startingExpandLevel?: number): void;
 }
 
 function releaseParts(value: string): number[] {
@@ -58,7 +58,7 @@ export function runSchemaExpands(db: SqlDatabase, steps: readonly SchemaMigratio
   if (schema.contractLevel > code.maxLevel) assertSchemaCompatible(schema, code);
   ensureSchemaMeta(db);
   for (const step of steps.filter(step => step.phase === 'expand' && compareSchemaReleases(release, step.release) >= 0)) {
-    apply(db, step);
+    apply(db, step, schema.expandLevel);
   }
   assertSchemaCompatible(readSchemaLevels(db), code);
 }
@@ -69,11 +69,11 @@ function applied(db: SqlDatabase, step: SchemaMigration): boolean {
   if (row.phase !== step.phase || Number(row.level) !== step.level || row.release !== step.release) throw new Error(`Applied schema migration was redefined: ${step.id}`);
   return true;
 }
-function apply(db: SqlDatabase, step: SchemaMigration): void {
+function apply(db: SqlDatabase, step: SchemaMigration, startingExpandLevel?: number): void {
   if (applied(db, step)) return;
   db.transaction(() => {
     const before = step.phase === 'expand' ? snapshotSchemaCatalog(db) : undefined;
-    step.run(step.phase === "expand" ? expandOnlyDatabase(db) : db);
+    step.run(step.phase === "expand" ? expandOnlyDatabase(db) : db, startingExpandLevel);
     if (before) assertAdditiveSchemaCatalog(before, snapshotSchemaCatalog(db));
     db.run('INSERT INTO multiremi_schema_steps(id, phase, level, release, applied_at) VALUES(?,?,?,?,?)',
       [step.id, step.phase, step.level, step.release, new Date().toISOString()]);

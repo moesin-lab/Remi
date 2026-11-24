@@ -103,6 +103,31 @@ it("keeps ordinary scheduling and repository reads available across offline clas
   } finally { db.close(); }
 });
 
+it('keeps a valid new CLI baseline held when only the provider identity changes', () => {
+  const db = openSqliteDatabase(filename, { create: true });
+  try {
+    new MultiremiStore(db).ensureLocalWorkspace();
+    db.exec(`INSERT INTO multiremi_scm_connections(id,name,provider,base_url,api_base_url,created_at,updated_at)
+      VALUES ('fixture','fixture','github','https://github.com','https://api.github.com','then','then');
+      INSERT INTO multiremi_scm_change_requests(id,workspace_id,connection_id,repository_id,provider,external_id,number,title,state,created_at,updated_at)
+      VALUES ('pr','local','fixture','repo','github','123',1,'clean','open','then','then')`);
+  } finally { db.close(); }
+  expect(classify().code).toBe(0);
+  expect(classify('--hold-for-rollback').code).toBe(0);
+  const oldWriter = openSqliteDatabase(filename);
+  try { oldWriter.run("UPDATE multiremi_scm_change_requests SET external_id='456' WHERE id='pr'"); }
+  finally { oldWriter.close(); }
+  const result = classify();
+  expect(result.code, result.output).toBe(0);
+  const observed = JSON.parse(result.output);
+  expect(observed).toMatchObject({ writersHeld: true, pending: 1, entries: [{ entry_key: 'projection:pr', kind: 'identity' }] });
+  const receipt = join(directory, 'generation.json');
+  writeFileSync(receipt, JSON.stringify(observed.receipt));
+  expect(classify('--finalize', receipt)).toMatchObject({ code: 1, output: expect.stringContaining('Unresolved') });
+  const verified = openSqliteDatabase(filename);
+  try { expect(scmOwnershipReady(verified)).toBe(false); } finally { verified.close(); }
+}, 30_000);
+
 it("upgrades historical links, then audits old-writer additions without reclassifying frozen evidence", () => {
   const db = openSqliteDatabase(filename, { create: true });
   const addLink = `INSERT INTO multiremi_scm_issue_links(id,workspace_id,change_request_id,issue_id,source,active,linked_at,created_at,updated_at)
@@ -120,7 +145,7 @@ it("upgrades historical links, then audits old-writer additions without reclassi
     db.run(addLink, ["s", strong.id, "legacy", 1]);
     db.run(addLink, ["w", weak.id, "auto", 1]);
     db.run(addLink, ["i", inactive.id, "auto", 0]);
-    db.exec(`DROP TABLE multiremi_scm_rollback_review; DROP TABLE multiremi_scm_link_ownership; DROP TABLE multiremi_scm_ownership_cutover;
+    db.exec(`DROP TABLE multiremi_scm_audit_state; DROP TABLE multiremi_scm_rollback_review; DROP TABLE multiremi_scm_link_ownership; DROP TABLE multiremi_scm_ownership_cutover;
       DELETE FROM multiremi_schema_steps WHERE level>=4; UPDATE multiremi_schema_meta SET expand_level=3`);
     expect(new MultiremiStore(db).scmOwnershipReady()).toBe(false);
   } finally { db.close(); }
@@ -133,25 +158,20 @@ it("upgrades historical links, then audits old-writer additions without reclassi
     writer.run(addLink, ["a", addedIssue, "auto", 1]);
   } finally { writer.close(); }
   const audit = classify();
-  expect(audit.code).toBe(1);
-  expect(audit.output).toContain(addedIssue);
+  expect(audit.code, audit.output).toBe(0);
+  const report = JSON.parse(audit.output);
+  expect(report).toMatchObject({ writersHeld: true, entries: expect.arrayContaining([expect.objectContaining({ entry_key: 'link:a', kind: 'added' })]) });
   const path = join(directory, "review.json");
-  const record = { id: "a", issue_id: addedIssue, workspace_id: "local", change_request_id: "pr", source: "auto", active: 1, proof: "archived-at-bind:fixture", attribution: ["body"] };
-  writeFileSync(path, JSON.stringify([{ ...record, active: 0 }]));
+  writeFileSync(path, JSON.stringify([{ id: 'a', proof: 'unverified', attribution: ['title'] }]));
   expect(classify("--restore-reviewed", path).code).toBe(1);
-  const held = openSqliteDatabase(filename);
-  try {
-    expect(new MultiremiStore(held).scmOwnershipReady()).toBe(false);
-    expect(held.query("SELECT attribution FROM multiremi_scm_link_ownership WHERE link_id='a'").get()).toBeNull();
-  } finally { held.close(); }
-  writeFileSync(path, JSON.stringify([record]));
-  expect(classify("--restore-reviewed", path).code).toBe(0);
+  writeFileSync(path, JSON.stringify(report.receipt));
+  expect(classify("--finalize", path).code).toBe(1);
   const verified = openSqliteDatabase(filename);
   try {
     const store = new MultiremiStore(verified);
-    expect(store.scmOwnershipReady()).toBe(true);
+    expect(store.scmOwnershipReady()).toBe(false);
     expect(verified.query("SELECT link_id,attribution FROM multiremi_scm_link_ownership ORDER BY link_id").values()).toEqual([
-      ["a", '["body"]'], ["i", "[]"], ["s", '["title"]'], ["w", "[]"],
+      ["i", "[]"], ["s", '["title"]'], ["w", "[]"],
     ]);
     expect(verified.query("SELECT active,source FROM multiremi_scm_issue_links WHERE id='i'").get()).toEqual({ active: 0, source: "auto" });
     expect(store.listIssueActivity(addedIssue).filter(activity => activity.type === "scm_merge_completed")).toEqual([]);

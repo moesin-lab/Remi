@@ -18,6 +18,8 @@ import type { RouterDeps } from "./deps.js";
 import { PasswordLoginLimiter } from "../helpers/password-login.js";
 import { assertCredentialIssuerAvailable } from '../helpers/login.js';
 import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
+import { SecurityAbort } from '@multiremi/store/security-write.js';
+import { currentJwtSigningDomain } from '../helpers/jwt.js';
 import { readRequestBodyLimited } from "../helpers/webhooks.js";
 import { authenticatedRequestUserId, currentAccessToken, currentRequestUserId, isObjectRecord } from "../wire/context.js";
 import { PasswordAccountError, normalizePasswordLoginEmail } from "@multiremi/store/repos/password-accounts-repo.js";
@@ -54,7 +56,6 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
 
   app.post("/auth/password", async (c) => {
     if (process.env.MULTIREMI_ALLOW_PASSWORD_LOGIN !== "1") return c.json({ error: "password login is disabled" }, 403);
-    assertCredentialIssuerAvailable(store);
     const limited = () => { c.header("Retry-After", "60"); return c.json({ error: "too many login attempts" }, 429); };
     if (!passwordLimiter.enter()) return limited();
     try {
@@ -65,11 +66,22 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
         return c.json({ error: "invalid email or password" }, 401);
       }
       if (!passwordLimiter.allowAccount(email)) return limited();
-      const session = await store.loginWithPassword(email, password);
+      let session;
+      if (store.jwtMaterials.isActive()) {
+        const signing = currentJwtSigningDomain();
+        if (!signing) throw new JwtMaterialUnavailable();
+        session = await store.loginWithRegisteredPassword(email, password, signing);
+      } else {
+        session = await store.loginWithPassword(email, password);
+      }
       if (!session) return c.json({ error: "invalid email or password" }, 401);
       setAuthCookie(c, session.token);
       return c.json(session);
-    } catch {
+    } catch (error) {
+      if (error instanceof JwtMaterialUnavailable || error instanceof SecurityAbort &&
+        ['security_state_unavailable', 'security_tx_invalid', 'authority_revision_conflict'].includes(error.code)) {
+        return c.json({ error: 'authentication state unavailable' }, 503);
+      }
       return c.json({ error: "invalid email or password" }, 401);
     } finally {
       passwordLimiter.leave();

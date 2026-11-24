@@ -100,45 +100,53 @@ export class JwtMaterials {
   }
 
   validateDigest(digest: string, signing: JwtSigningDomain, described?: ReturnType<typeof describeJwt>): JwtMaterialIdentity | null {
-    try {
-      const state = this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton = 1').get();
-      if (!state) throw new JwtMaterialUnavailable();
-      // This first read only determines the lock plan. Every field is re-read
-      // on the primary after taking the security revision lock.
-      const locator = this.db.query('SELECT credential_id,authority_node_id FROM multiremi_jwt_materials WHERE compact_digest = ?').get(digest);
-      if (!locator) return null;
-      return withSecurityWrite(this.db, undefined, {
-        expectedRevision: Number(state.security_revision), workspaceIds: [], numberKeys: [],
-        domainTargets: [`authority:${locator.authority_node_id}`, `jwt:${locator.credential_id}`].sort(),
-      }, tx => {
-        this.assertDomain(signing);
-        const row = this.db.query(`SELECT m.* FROM multiremi_jwt_materials m JOIN multiremi_jwt_current c
-          ON c.credential_id = m.credential_id AND c.current_material_version = m.material_version
-          WHERE m.compact_digest = ?`).get(digest);
-        if (!row || row.revoked_at_ms !== null || row.domain_id !== signing.domainId || row.key_epoch !== signing.keyEpoch
-          || row.subject_type !== 'user' || row.purpose !== 'dashboard' || Number(row.expires_at_ms) <= Date.now()
-          || row.credential_id !== locator.credential_id || row.authority_node_id !== locator.authority_node_id) return null;
-        const claims = JSON.parse(row.claims_json);
-        if (claims.sub !== row.subject_id || claims.jti !== row.credential_id || claims.purpose !== row.purpose
-          || claims.material_version !== Number(row.material_version) || claims.key_epoch !== row.key_epoch
-          || claims.signing_domain !== row.domain_id || claims.exp * 1000 !== Number(row.expires_at_ms)
-          || !jwtTimesValid(claims)) return null;
-        if (described && (row.claims_json !== described.claimsJson || row.header_json !== described.headerJson
-          || Number(row.expires_at_ms) !== described.expiresAtMs)) return null;
-        const node = this.db.query(`SELECT * FROM multiremi_authority_nodes WHERE node_id = ?`).get(row.authority_node_id);
-        if (!node || node.kind !== 'jwt_material' || node.subject_type !== row.subject_type || node.subject_id !== row.subject_id
-          || Number(node.issued_seq) !== Number(row.authority_seq) || Number(node.generation) !== Number(row.authority_generation)
-          || Number(node.continuous_parent_count) < 1 || Number(row.expires_at_ms) > Number(node.expires_at_ms)) return null;
-        this.assertSource(tx, {
-          nodeId: row.authority_node_id, generation: Number(row.authority_generation), familyId: row.family_id,
-          subjectType: row.subject_type, subjectId: row.subject_id, expiresAtMs: Number(row.expires_at_ms),
-        });
-        return { userId: row.subject_id, digest };
-      });
-    } catch (error) {
-      if (error instanceof SecurityAbort && error.code !== 'security_state_unavailable' && error.code !== 'security_tx_invalid') return null;
-      throw new JwtMaterialUnavailable();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return this.validateCurrentDigest(digest, signing, described);
+      } catch (error) {
+        if (error instanceof SecurityAbort && error.code === 'authority_revision_conflict') continue;
+        if (error instanceof SecurityAbort && error.code !== 'security_state_unavailable' && error.code !== 'security_tx_invalid') return null;
+        throw new JwtMaterialUnavailable();
+      }
     }
+    throw new JwtMaterialUnavailable();
+  }
+
+  private validateCurrentDigest(digest: string, signing: JwtSigningDomain, described?: ReturnType<typeof describeJwt>): JwtMaterialIdentity | null {
+    const state = this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton = 1').get();
+    if (!state) throw new JwtMaterialUnavailable();
+    // This first read only determines the lock plan. Every field is re-read
+    // on the primary after taking the security revision lock.
+    const locator = this.db.query('SELECT credential_id,authority_node_id FROM multiremi_jwt_materials WHERE compact_digest = ?').get(digest);
+    if (!locator) return null;
+    return withSecurityWrite(this.db, undefined, {
+      expectedRevision: Number(state.security_revision), workspaceIds: [], numberKeys: [],
+      domainTargets: [`authority:${locator.authority_node_id}`, `jwt:${locator.credential_id}`].sort(),
+    }, tx => {
+      this.assertDomain(signing);
+      const row = this.db.query(`SELECT m.* FROM multiremi_jwt_materials m JOIN multiremi_jwt_current c
+        ON c.credential_id = m.credential_id AND c.current_material_version = m.material_version
+        WHERE m.compact_digest = ?`).get(digest);
+      if (!row || row.revoked_at_ms !== null || row.domain_id !== signing.domainId || row.key_epoch !== signing.keyEpoch
+        || row.subject_type !== 'user' || row.purpose !== 'dashboard' || Number(row.expires_at_ms) <= Date.now()
+        || row.credential_id !== locator.credential_id || row.authority_node_id !== locator.authority_node_id) return null;
+      const claims = JSON.parse(row.claims_json);
+      if (claims.sub !== row.subject_id || claims.jti !== row.credential_id || claims.purpose !== row.purpose
+        || claims.material_version !== Number(row.material_version) || claims.key_epoch !== row.key_epoch
+        || claims.signing_domain !== row.domain_id || claims.exp * 1000 !== Number(row.expires_at_ms)
+        || !jwtTimesValid(claims)) return null;
+      if (described && (row.claims_json !== described.claimsJson || row.header_json !== described.headerJson
+        || Number(row.expires_at_ms) !== described.expiresAtMs)) return null;
+      const node = this.db.query(`SELECT * FROM multiremi_authority_nodes WHERE node_id = ?`).get(row.authority_node_id);
+      if (!node || node.kind !== 'jwt_material' || node.subject_type !== row.subject_type || node.subject_id !== row.subject_id
+        || Number(node.issued_seq) !== Number(row.authority_seq) || Number(node.generation) !== Number(row.authority_generation)
+        || Number(node.continuous_parent_count) < 1 || Number(row.expires_at_ms) > Number(node.expires_at_ms)) return null;
+      this.assertSource(tx, {
+        nodeId: row.authority_node_id, generation: Number(row.authority_generation), familyId: row.family_id,
+        subjectType: row.subject_type, subjectId: row.subject_id, expiresAtMs: Number(row.expires_at_ms),
+      });
+      return { userId: row.subject_id, digest };
+    });
   }
 
   private assertDomain(signing: JwtSigningDomain): void {

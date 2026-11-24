@@ -11,13 +11,13 @@ import {
 } from "@multiremi/ui/components/ui/tooltip";
 import { taskMessagesOptions } from "@multiremi/core/chat/queries";
 import { useTaskScopeSubscription } from "@multiremi/core/realtime";
-import type { AgentTask } from "@multiremi/core/types/agent";
+import { useT } from "../../i18n";
 import type { TaskMessagePayload } from "@multiremi/core/types/events";
-import { AgentTranscriptDialog } from "./agent-transcript-dialog";
+import { AgentTranscriptDialog, type TranscriptTask } from "./agent-transcript-dialog";
 import { buildTimeline, type TimelineItem } from "./build-timeline";
 
 interface TranscriptButtonProps {
-  task: AgentTask;
+  task: TranscriptTask;
   agentName: string;
   /**
    * Pre-loaded timeline. When provided the button skips the fetch and opens
@@ -52,6 +52,7 @@ export function TranscriptButton({
   headerSlot,
 }: TranscriptButtonProps) {
   const [open, setOpen] = useState(false);
+  const { t } = useT("common");
 
   // When the parent doesn't own the timeline, read from the shared
   // ["task-messages", id] query cache. use-realtime-sync writes every WS
@@ -59,7 +60,7 @@ export function TranscriptButton({
   // manual refetch. Chat tasks additionally need a scope subscription; issue
   // tasks ride the workspace-wide broadcast.
   const useQueryCache = providedItems === undefined;
-  const { data: liveMessages, isFetching } = useQuery({
+  const { data: liveMessages, isFetching, isError, refetch } = useQuery({
     ...taskMessagesOptions(task.id),
     enabled: open && useQueryCache,
   });
@@ -112,6 +113,9 @@ export function TranscriptButton({
           agentName={agentName}
           isLive={isLive}
           headerSlot={headerSlot}
+          emptyContent={useQueryCache && (isError ? <div role="alert">
+            {t(($) => $.load_error.description)} <button className="text-primary underline" onClick={() => void refetch()}>{t(($) => $.load_error.retry)}</button>
+          </div> : loading ? t(($) => $.loading) : undefined)}
         />
       )}
     </>

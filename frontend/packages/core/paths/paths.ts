@@ -31,6 +31,7 @@ function workspaceScoped(slug: string) {
       `${ws}/workbench?issue=${encode(id)}${sessionId ? `&session=${encode(sessionId)}` : ""}`,
     projects: () => `${ws}/projects`,
     repositories: () => `${ws}/repos`,
+    repositoryActivity: (id: string) => `${ws}/repos/${encode(id)}/activity`,
     repositoryWiki: (id: string) => `${ws}/repos/${encode(id)}/wiki`,
     repositoryWikiPage: (id: string, path: string) =>
       `${ws}/repos/${encode(id)}/wiki/${path.split("/").map(encode).join("/")}`,

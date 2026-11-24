@@ -69,6 +69,7 @@ const EXPECTED_EVENTS: readonly string[] = [
   "chat:session_read",
   "chat:session_updated",
   "chat:session_deleted",
+  "repository:activity_changed",
 ];
 
 interface RecordingWs {
@@ -168,6 +169,40 @@ describe("useRealtimeSync — registration / teardown parity", () => {
     renderHook(() => useRealtimeSync(mock.ws, stores), { wrapper: createWrapper(qc) });
 
     expect(new Set(mock.registered).size).toBe(mock.registered.length);
+  });
+
+  it("coalesces repository hints, follows an in-flight request once and ignores unrelated events", async () => {
+    vi.useFakeTimers();
+    const mock = createRecordingWs();
+    const key = ["repository-activity", "ws-1", "repo", { view: "active" }];
+    let finish = () => {};
+    const read = vi.fn(() => new Promise<string>((resolve) => { finish = () => resolve("page"); }));
+    const { unmount } = renderHook(() => {
+      useRealtimeSync(mock.ws, stores);
+      return useQuery({ queryKey: key, queryFn: read, initialData: "page", staleTime: Infinity });
+    }, { wrapper: createWrapper(qc) });
+    const hint = (workspace = "ws-1", repository = "repo") => mock.emit("repository:activity_changed", { workspace_id: workspace, repository_ids: [repository] });
+    hint("ws-2");
+    hint("ws-1", "another");
+    for (let index = 0; index < 100; index++) mock.emit("task:message", { task_id: "other", seq: index });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(read).not.toHaveBeenCalled();
+    hint();
+    await vi.advanceTimersByTimeAsync(240);
+    for (let index = 0; index < 100; index++) hint();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(read).toHaveBeenCalledTimes(1);
+    hint();
+    await vi.advanceTimersByTimeAsync(260);
+    hint();
+    finish();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(read).toHaveBeenCalledTimes(2);
+    hint();
+    unmount();
+    finish();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it("removes every listener it registered on unmount", () => {

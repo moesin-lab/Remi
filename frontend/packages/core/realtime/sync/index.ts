@@ -5,6 +5,7 @@ import { createTimelineHandlers } from "./timeline";
 import { createWorkspaceHandlers } from "./workspace";
 import { createTaskHandlers } from "./tasks";
 import { createChatHandlers } from "./chat";
+import { createRepositoryActivityHandlers } from "./repository-activity";
 import type { SyncContext, SyncHandler, SyncRegistrar } from "./types";
 
 export type { SyncContext, SyncHandler, SyncHandlerMap, SyncModule, SyncRegistrar } from "./types";
@@ -25,6 +26,7 @@ export const SYNC_REGISTRARS: readonly SyncRegistrar[] = [
   createWorkspaceHandlers,
   createTaskHandlers,
   createChatHandlers,
+  createRepositoryActivityHandlers,
 ];
 
 export interface BuiltSyncHandlers {

@@ -4,11 +4,12 @@ import { runMigrations } from '@multiremi/store/migrations.js';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { RegisteredCredentialProofs } from '@multiremi/store/registered-credential-proof.js';
+import { AccessTokensRepo } from '@multiremi/store/repos/access-tokens-repo.js';
 import { RootManagement } from '@multiremi/store/root-management.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
 
-test('registered PAT proves only its current material and true human origin', () => {
+test('registered PAT proves only its current material and true human origin', async () => {
   const sqlite = openSqliteDatabase();
   try {
     const db = sqlite as unknown as SqlDatabase;
@@ -32,6 +33,10 @@ test('registered PAT proves only its current material and true human origin', ()
     db.query(`INSERT INTO multiremi_credential_version_bindings(credential_id,material_version,material_digest,credential_type,purpose,subject_type,subject_id,
       family_id,authority_node_id,authority_generation,authority_seq,expires_at_ms) VALUES('token',1,?,'pat','personal','user','usr_fixture','family','credential',1,3,?)`).run(digest,expiry);
     const proof = proofs.verify(raw);
+    const tokens = new AccessTokensRepo(db);
+    expect((await tokens.verifyAccessToken(raw))?.id).toBe('token');
+    expect(await tokens.renewAccessTokenExpiry('token')).toBeNull();
+    expect(db.query('SELECT token_hash FROM multiremi_access_tokens WHERE id=?').get('token')?.token_hash).toBe(digest);
     expect(proof.kind).toBe('dependent');
     const request = {action:'root.grant.create',use:'management',actualTarget:{type:'user',id:'usr_fixture'}};
     expect(service.resolveCurrent(proof,request)).toMatchObject({transport:'human',subject:{type:'user',id:'usr_fixture'},
@@ -50,6 +55,8 @@ test('registered PAT proves only its current material and true human origin', ()
     db.run("UPDATE multiremi_authority_nodes SET subject_type='agent' WHERE kind='independent_identity'");
     expect(proofs.verify(raw).kind).toBe('invalid');
     db.run("UPDATE multiremi_authority_nodes SET subject_type='user',revoked_at_ms=1 WHERE kind='independent_identity'");
+    expect(await tokens.verifyAccessToken(raw)).toBeNull();
+    expect(await tokens.renewAccessTokenExpiry('token')).toBeNull();
     expect(check).toThrow('root_authority_revoked');
     expect(proofs.verify(raw).kind).toBe('invalid');
   } finally { sqlite.close(); }

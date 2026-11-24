@@ -3,6 +3,11 @@ import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DAEMON_CAPABILITY_REGISTRY,
+  daemonCapabilityName,
+  hasDaemonCapability,
+} from "../../../packages/contracts/src/daemon-compatibility.js";
+import {
   DAEMON_PROTOCOL_CAPS,
   DAEMON_PROTOCOL_ERROR_CODES,
   DAEMON_RETRYABLE_ERROR_CODES,
@@ -21,12 +26,24 @@ import {
 } from "../../../packages/contracts/src/root-authority.js";
 import {
   assertStatusResponseHasNoSecrets,
+  buildDaemonRootRestartResumeReply,
+  buildDaemonRootTaskOfferPayload,
+  classifyDaemonRestartResumeReply,
+  classifyDaemonRestartResumeRequest,
+  classifyDaemonTaskOfferPayload,
+  evaluateRootDeliveryNegotiation,
   isMonotonicReceiverTransition,
+  ROOT_DELIVERY_CAPABILITY,
   ROOT_DELIVERY_JWE_ALG,
   ROOT_DELIVERY_JWE_ENC,
   ROOT_DELIVERY_MIN_RSA_BITS,
+  ROOT_DELIVERY_MODE,
+  ROOT_DELIVERY_PROTOCOL_VERSION,
 } from "../../../packages/contracts/src/root-delivery.js";
+import { normalizeDaemonTurnOffer } from "../../../packages/server/src/worker/daemon-offers.js";
 import {
+  assertOrdinaryTaskContextOnly,
+  buildRootImmutableRunEnv,
   resolveTaskContext,
   ROOT_CARRIER_IMMUTABLE_ENV,
   ROOT_CARRIER_MODE_ENV,
@@ -36,6 +53,8 @@ import {
   TASK_CONTEXT_FILE_ENV,
 } from "../../../packages/shared/src/task-context-file.js";
 import {
+  compileExampleRouteOfferFrame,
+  compileExampleRouteResumeReply,
   fixtureAgentOriginPatContext,
   fixtureDeliveryActivationResponse,
   fixtureDeliveryJournalEntry,
@@ -43,8 +62,14 @@ import {
   fixtureDeliveryStatusResponse,
   fixtureEffectiveRootTaskContext,
   fixtureGrantedButIneffectiveTaskContext,
+  fixtureInitialRootDeliveryEnvelopePayload,
   fixturePublicErrorEnvelopes,
+  fixtureResumeRootDeliveryEnvelopePayload,
+  fixtureRootDeliveryNegotiationInput,
   fixtureRootHumanContext,
+  fixtureRootRestartResumeReply,
+  fixtureRootRestartResumeRequest,
+  fixtureRootTaskOfferPayload,
 } from "../../fixtures/root-authority.js";
 
 describe("MUL-1 §10.1 public contracts and fixtures", () => {
@@ -239,8 +264,263 @@ describe("MUL-1 §10.1 public contracts and fixtures", () => {
       });
       expect(missingTokenRoot.token).toBeNull();
       expect(missingTokenRoot.rootCarrier?.violation).toBe("root_immutable_env_missing");
+
+      // buildRootImmutableRunEnv strips inherited MULTIREMI_TASK_CONTEXT_FILE and passes resolveTaskContext.
+      const builtEnv = buildRootImmutableRunEnv({
+        token: "root-built-token",
+        turnId: "trn_built",
+        attemptId: "att_built",
+        receiptId: "rcpt_built",
+        deliveryVersion: 1,
+        runGeneration: 1,
+        baseEnv: {
+          PATH: "/usr/bin",
+          [TASK_CONTEXT_FILE_ENV]: filePath,
+        },
+      });
+      expect(TASK_CONTEXT_FILE_ENV in builtEnv).toBe(false);
+      expect(resolveTaskContext(builtEnv)).toEqual({
+        token: "root-built-token",
+        turnId: "trn_built",
+        attemptId: "att_built",
+        source: "root_immutable_env",
+        parked: false,
+        rootCarrier: {
+          mode: "immutable_run_env",
+          receiptId: "rcpt_built",
+          deliveryVersion: 1,
+          runGeneration: 1,
+          violation: null,
+        },
+      });
+      expect(() => assertOrdinaryTaskContextOnly(builtEnv)).toThrow(/MULTIREMI_TASK_CONTEXT_FILE/);
+      expect(() => assertOrdinaryTaskContextOnly({ MULTIREMI_TOKEN: "ordinary" })).not.toThrow();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("registers root.delivery capability and enforces fail-closed negotiation without downgrade", () => {
+    expect(DAEMON_CAPABILITY_REGISTRY[ROOT_DELIVERY_CAPABILITY]).toEqual({
+      aliases: [],
+      introduced: "0.2.96",
+      contract: null,
+    });
+    expect(daemonCapabilityName(ROOT_DELIVERY_CAPABILITY)).toBe(ROOT_DELIVERY_CAPABILITY);
+    expect(hasDaemonCapability([ROOT_DELIVERY_CAPABILITY], ROOT_DELIVERY_CAPABILITY)).toBe(true);
+    expect(DAEMON_PROTOCOL_ERROR_CODES).toContain("root_delivery_unsupported");
+    expect(DAEMON_PROTOCOL_ERROR_CODES).toContain("root_delivery_invalid");
+    expect(DAEMON_RETRYABLE_ERROR_CODES).not.toContain("root_delivery_unsupported" as never);
+    expect(DAEMON_RETRYABLE_ERROR_CODES).not.toContain("root_delivery_invalid" as never);
+
+    expect(evaluateRootDeliveryNegotiation(fixtureRootDeliveryNegotiationInput)).toEqual({
+      eligible: true,
+      delivery_mode: ROOT_DELIVERY_MODE,
+      root_delivery_protocol: ROOT_DELIVERY_PROTOCOL_VERSION,
+      carrier_mode: "immutable_run_env",
+    });
+
+    const missingHelloCap = evaluateRootDeliveryNegotiation({
+      ...fixtureRootDeliveryNegotiationInput,
+      hello_caps: ["offer", "turn.message", "turn.restart"],
+    });
+    expect(missingHelloCap).toMatchObject({
+      eligible: false,
+      code: "root_delivery_unsupported",
+      downgrade_allowed: false,
+    });
+
+    const missingWelcomeCap = evaluateRootDeliveryNegotiation({
+      ...fixtureRootDeliveryNegotiationInput,
+      welcome_caps: ["turn.restart"],
+    });
+    expect(missingWelcomeCap).toMatchObject({
+      eligible: false,
+      code: "root_delivery_unsupported",
+      downgrade_allowed: false,
+    });
+
+    const wrongProtocol = evaluateRootDeliveryNegotiation({
+      ...fixtureRootDeliveryNegotiationInput,
+      runtime_capabilities: { root_delivery_protocol: 2, root_carrier_modes: ["immutable_run_env"] },
+    });
+    expect(wrongProtocol).toMatchObject({
+      eligible: false,
+      code: "root_delivery_unsupported",
+      downgrade_allowed: false,
+    });
+
+    const missingCarrier = evaluateRootDeliveryNegotiation({
+      ...fixtureRootDeliveryNegotiationInput,
+      runtime_capabilities: { root_delivery_protocol: 1, root_carrier_modes: [] },
+    });
+    expect(missingCarrier).toMatchObject({
+      eligible: false,
+      code: "root_delivery_unsupported",
+      downgrade_allowed: false,
+    });
+
+    const untrustedRuntime = evaluateRootDeliveryNegotiation({
+      ...fixtureRootDeliveryNegotiationInput,
+      runtime_trusted: false,
+    });
+    expect(untrustedRuntime).toMatchObject({
+      eligible: false,
+      code: "root_runtime_untrusted",
+      downgrade_allowed: false,
+    });
+
+    const untrustedConsumer = evaluateRootDeliveryNegotiation({
+      ...fixtureRootDeliveryNegotiationInput,
+      consumer_trusted: false,
+    });
+    expect(untrustedConsumer).toMatchObject({
+      eligible: false,
+      code: "root_runtime_untrusted",
+      downgrade_allowed: false,
+    });
+  });
+
+  it("discriminates initial root task.offer and blocks downgrade into normalizeDaemonTurnOffer / handleTask", () => {
+    const classified = classifyDaemonTaskOfferPayload(fixtureRootTaskOfferPayload);
+    expect(classified.kind).toBe("root");
+    if (classified.kind === "root") {
+      expect(classified.payload.delivery_mode).toBe("root_envelope");
+      expect(classified.payload.root_delivery_protocol).toBe(1);
+      expect(classified.payload.carrier_mode).toBe("immutable_run_env");
+      expect(classified.payload.root_delivery).toEqual(fixtureInitialRootDeliveryEnvelopePayload);
+      expect("auth_token" in classified.payload).toBe(false);
+      expect("input_messages" in classified.payload).toBe(false);
+    }
+
+    // Even if a root task.offer accidentally reached the legacy ordinary parser, it fails closed.
+    expect(() => normalizeDaemonTurnOffer(fixtureRootTaskOfferPayload as unknown as Record<string, unknown>)).toThrow(
+      /invalid turn offer payload/,
+    );
+
+    // Ordinary offer without root indicators classifies as standard.
+    expect(classifyDaemonTaskOfferPayload({
+      turn_id: "trn_plain_1",
+      attempt_id: "att_plain_1",
+      input_from_seq: 0,
+      input_to_seq: 1,
+      input_messages: [],
+    })).toEqual({ kind: "standard" });
+
+    // Compilable reference router routes root offers to protected receiver and rejects untrusted/incapable consumers.
+    expect(compileExampleRouteOfferFrame(fixtureRootTaskOfferPayload, fixtureRootDeliveryNegotiationInput)).toEqual({
+      branch: "protected_root_receiver",
+      payload: fixtureRootTaskOfferPayload,
+    });
+    expect(compileExampleRouteOfferFrame(fixtureRootTaskOfferPayload, {
+      ...fixtureRootDeliveryNegotiationInput,
+      hello_caps: ["offer"],
+    })).toMatchObject({ branch: "reject", code: "root_delivery_unsupported" });
+    expect(compileExampleRouteOfferFrame(fixtureRootTaskOfferPayload, {
+      ...fixtureRootDeliveryNegotiationInput,
+      runtime_trusted: false,
+    })).toMatchObject({ branch: "reject", code: "root_runtime_untrusted" });
+
+    // Malformed, plaintext-leaking, hybrid, or version-mismatched root offers fail closed (never "standard").
+    expect(classifyDaemonTaskOfferPayload({
+      ...fixtureRootTaskOfferPayload,
+      auth_token: "leaked_raw_secret",
+    })).toMatchObject({ kind: "invalid_root", code: "root_delivery_invalid" });
+
+    expect(classifyDaemonTaskOfferPayload({
+      ...fixtureRootTaskOfferPayload,
+      input_messages: [],
+    })).toMatchObject({ kind: "invalid_root", code: "root_delivery_invalid" });
+
+    expect(classifyDaemonTaskOfferPayload({
+      ...fixtureRootTaskOfferPayload,
+      root_delivery: {
+        ...fixtureInitialRootDeliveryEnvelopePayload,
+        frozen_business_payload: { raw: "leaked" },
+      },
+    })).toMatchObject({ kind: "invalid_root", code: "root_delivery_invalid" });
+
+    expect(classifyDaemonTaskOfferPayload({
+      ...fixtureRootTaskOfferPayload,
+      root_delivery_protocol: 99,
+    })).toMatchObject({ kind: "invalid_root", code: "root_delivery_unsupported" });
+
+    expect(() => buildDaemonRootTaskOfferPayload({
+      turn_id: "trn_mismatched",
+      attempt_id: fixtureInitialRootDeliveryEnvelopePayload.tuple.attempt_id,
+      root_delivery: fixtureInitialRootDeliveryEnvelopePayload,
+    })).toThrow(/turn_id/);
+
+    expect(() => buildDaemonRootTaskOfferPayload({
+      turn_id: "trn_root_fixture_1",
+      attempt_id: "att_mismatched",
+      root_delivery: fixtureInitialRootDeliveryEnvelopePayload,
+    })).toThrow(/attempt_id/);
+
+    expect(() => buildDaemonRootTaskOfferPayload({
+      turn_id: "trn_root_fixture_1",
+      attempt_id: fixtureResumeRootDeliveryEnvelopePayload.tuple.attempt_id,
+      root_delivery: fixtureResumeRootDeliveryEnvelopePayload,
+    })).toThrow(/handoff_id/);
+  });
+
+  it("discriminates root turn.restart.resume requests and replies aligned with receipt replay", () => {
+    const reqClassified = classifyDaemonRestartResumeRequest(fixtureRootRestartResumeRequest);
+    expect(reqClassified).toEqual({
+      kind: "root",
+      payload: fixtureRootRestartResumeRequest,
+    });
+
+    expect(classifyDaemonRestartResumeRequest({
+      turn_id: "trn_plain_1",
+      attempt_id: "att_plain_1",
+      handoff_id: "hoff_plain_1",
+      generation: 1,
+      consumer_id: "cons_plain_consumer_1234",
+    })).toEqual({ kind: "standard" });
+
+    expect(classifyDaemonRestartResumeRequest({
+      ...fixtureRootRestartResumeRequest,
+      machine_proof: {
+        ...fixtureRootRestartResumeRequest.machine_proof,
+        consumer_id: "cons_other_consumer_9999",
+      },
+    })).toMatchObject({ kind: "invalid_root", code: "root_delivery_invalid" });
+
+    const replyClassified = classifyDaemonRestartResumeReply(fixtureRootRestartResumeReply);
+    expect(replyClassified.kind).toBe("root");
+    if (replyClassified.kind === "root") {
+      // Exact parity with receipt replay immutable RootDeliveryEnvelopePayload.
+      expect(replyClassified.payload.root_delivery.tuple).toEqual(fixtureDeliveryReplayResponse.tuple);
+      expect(replyClassified.payload.root_delivery.envelope).toBe(fixtureDeliveryReplayResponse.envelope);
+      expect(replyClassified.payload.root_delivery.envelope_digest).toBe(fixtureDeliveryReplayResponse.envelope_digest);
+      expect(replyClassified.payload.root_delivery.frozen_business_payload).toEqual(
+        fixtureDeliveryReplayResponse.frozen_business_payload,
+      );
+      expect("task" in replyClassified.payload).toBe(false);
+    }
+
+    expect(compileExampleRouteResumeReply(fixtureRootRestartResumeReply, fixtureRootDeliveryNegotiationInput)).toEqual({
+      branch: "protected_root_receiver",
+      reply: fixtureRootRestartResumeReply,
+    });
+    expect(compileExampleRouteResumeReply(fixtureRootRestartResumeReply, {
+      ...fixtureRootDeliveryNegotiationInput,
+      runtime_trusted: false,
+    })).toMatchObject({ branch: "reject", code: "root_runtime_untrusted" });
+
+    // Hybrid reply with `task` or plaintext `raw` fails closed (never "standard").
+    expect(classifyDaemonRestartResumeReply({
+      ...fixtureRootRestartResumeReply,
+      task: { auth_token: "leaked" },
+    })).toMatchObject({ kind: "invalid_root", code: "root_delivery_invalid" });
+
+    expect(() => buildDaemonRootRestartResumeReply({
+      turn_id: "trn_root_fixture_1",
+      attempt_id: fixtureResumeRootDeliveryEnvelopePayload.tuple.attempt_id,
+      handoff_id: "hoff_wrong",
+      generation: 1,
+      root_delivery: fixtureResumeRootDeliveryEnvelopePayload,
+    })).toThrow(/handoff_id/);
   });
 });

@@ -48,15 +48,48 @@ import type {
   TraceTurnPage,
 } from "./trace.js";
 import type { MultiremiChatSessionStatus, MultiremiDaemonHeartbeatAck, MultiremiDaemonSshMeshStatus } from "./types.js";
+import type { RootCarrierMode } from "./root-delivery.js";
+export {
+  buildDaemonRootRestartResumeReply,
+  buildDaemonRootTaskOfferPayload,
+  classifyDaemonRestartResumeReply,
+  classifyDaemonRestartResumeRequest,
+  classifyDaemonTaskOfferPayload,
+  evaluateRootDeliveryNegotiation,
+  ROOT_DELIVERY_CAPABILITY,
+  ROOT_DELIVERY_MODE,
+  ROOT_DELIVERY_PROTOCOL_VERSION,
+  STANDARD_DELIVERY_MODE,
+} from "./root-delivery.js";
 export type {
+  DaemonDeliveryMode,
+  DaemonRestartResumeReplyClassification,
+  DaemonRestartResumeReplyPayload,
+  DaemonRestartResumeRequestClassification,
+  DaemonRestartResumeRequestPayload,
+  DaemonRootRestartResumeReply,
+  DaemonRootRestartResumeRequest,
+  DaemonRootTaskOfferPayload,
+  DaemonRootWireRejectCode,
+  DaemonStandardRestartResumeReply,
+  DaemonStandardRestartResumeRequest,
+  DaemonStandardTaskOfferPayload,
+  DaemonTaskOfferClassification,
+  DaemonTaskOfferPayload,
+  RootCarrierMode,
   RootDeliveryActivationResponse,
+  RootDeliveryEnvelopePayload,
   RootDeliveryInstallAckRequest,
   RootDeliveryInstallAckResponse,
   RootDeliveryJournalEntry,
   RootDeliveryJweProtectedHeader,
   RootDeliveryMachineProof,
+  RootDeliveryNegotiationErrorCode,
+  RootDeliveryNegotiationInput,
+  RootDeliveryNegotiationResult,
   RootDeliveryReplayRequest,
   RootDeliveryReplayResponse,
+  RootDeliveryRuntimeCapabilities,
   RootDeliveryStatusRequest,
   RootDeliveryStatusResponse,
   RootDeliveryTuple,
@@ -369,6 +402,10 @@ export interface DaemonRuntimeCapabilities {
   feishu_concierge_protocol?: number;
   feishu_decision_card?: number;
   feishu_issue_decision_card?: number;
+  /** MUL-1 A2: root delivery protocol version (must match ROOT_DELIVERY_PROTOCOL_VERSION). Missing means unsupported. */
+  root_delivery_protocol?: number;
+  /** MUL-1 A2: root execution carrier modes supported by this runtime (must include "immutable_run_env"). */
+  root_carrier_modes?: readonly RootCarrierMode[];
 }
 
 export interface DaemonHelloRuntime {
@@ -965,6 +1002,8 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "receipt_conflict",
   "root_authority_revoked",
   "root_runtime_untrusted",
+  "root_delivery_unsupported",
+  "root_delivery_invalid",
   "security_state_unavailable",
   // transport
   "ack_timeout",

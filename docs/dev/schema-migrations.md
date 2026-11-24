@@ -153,9 +153,11 @@ bootstrap 目录后执行；启动 Node 前清除 `NODE_OPTIONS`、`NODE_PATH` �
 资源。checker 先写 `rollback-staged-result.json`，保留四阶段 stdout/stderr、失败诊断和旧探针/测试库/
 管理连接/临时 HOME 四项独立清理结果；该 staging 文件不是可发布证据，也不进入上传白名单。
 launcher 最终复核源码和 staged 身份，将必要元数据留存后，依序独立清理 `previous-input`、
-`candidate-checkout`、`staged-result`、`run-root`。全部内外清理及必要诊断的持久化/关闭通过后，才以 `wx`
-独占创建 `rollback-evidence.json`，持有文件句柄及 inode/device 所有权；写入或关闭失败只回收本轮文件，
-路径已被其他 writer 替换则保留其内容。最终发布后不再执行必需的诊断 I/O。
+`candidate-checkout`、`staged-result`、`run-root`。必要诊断每次序列化为 UTF-8 bytes，截断后从显式位置 0
+循环写完全部字节；短写继续推进，零进度立即失败，不复用句柄 cursor。全部内外清理及必要诊断的完整写入/
+关闭通过后，才以 `wx` 独占创建 `rollback-evidence.json`，持有文件句柄及 inode/device 所有权；保存或关闭
+失败保留最初错误，关闭重试成功也不恢复发布。final 写入或关闭失败只回收本轮 canonical 文件，路径已被
+其他 writer 替换则保留其内容，不追删未知移名路径或声称所有副本已失效。最终发布后不再执行必需的诊断 I/O。
 任一阶段、复核、清理或文件竞争失败均不产生本轮成功证据；另一 writer 创建的内容保留。`launcher-diagnostics.json`、`preparation-diagnostics.json`、`rollback-diagnostics.json`
 和日志保存本轮失败及清理结果，诊断不产生 `rollbackSafeFrom`。重跑选择全新产物目录，不从失败 CI 或
 旧文件推断成功。应用下述 workflow 补丁后，CI 以 `always()` 上传明确列出的证据/元数据/日志，不上传

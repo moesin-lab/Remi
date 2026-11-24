@@ -318,6 +318,9 @@ async function publicationFault(f, mode) {
     const mode = ${JSON.stringify(mode)}, events = [], root = ${JSON.stringify(f.artifacts)};
     const originalOpen = fs.open, originalWriteFile = fs.writeFile;
     let lastDiagnostic, closedDiagnostics = false, finalOpened = false, diagnosticCloseFaulted = false;
+    let diagnosticOpens = 0, firstInjectedError;
+    const snapshotMode = mode.startsWith('snapshot-');
+    const inject = label => { const error = fault(label); firstInjectedError ??= error; return error; };
     const fault = label => Object.assign(new Error('injected ' + label), { code: 'EIO' });
     const finishing = async () => {
       if (!lastDiagnostic?.runRoot) return false;
@@ -347,22 +350,67 @@ async function publicationFault(f, mode) {
       const handle = await originalOpen(...args);
       if (path.endsWith('/launcher-diagnostics.json')) {
         const truncate = handle.truncate.bind(handle), write = handle.write.bind(handle), close = handle.close.bind(handle);
+        const ordinal = ++diagnosticOpens;
+        let snapshot = 0, writes = 0, snapshotBuffer, snapshotCloseFaulted = false;
         handle.truncate = async (...params) => {
+          snapshot++; writes = 0; snapshotBuffer = undefined;
           if (await finishing()) { events.push('diagnostic-final-truncate'); if (mode === 'diagnostic-truncate') throw fault(mode); }
           if (finalOpened && mode === 'no-post-publication-io') throw fault('diagnostic truncate after final open');
           return truncate(...params);
         };
         handle.write = async (data, ...params) => {
-          try { lastDiagnostic = JSON.parse(data); } catch {}
+          try { lastDiagnostic = JSON.parse(Buffer.isBuffer(data) ? data.toString('utf8') : data); } catch {}
+          const buffered = Buffer.isBuffer(data), bytes = buffered ? data : Buffer.from(data, 'utf8');
+          const offset = buffered ? params[0] : 0, length = buffered ? params[1] : bytes.length;
+          const position = buffered ? params[2] : params[0];
+          writes++;
+          if (snapshotMode && writes > 12) throw new Error('test guard: diagnostic write made no progress');
+          if (snapshotMode && buffered) {
+            if (snapshotBuffer && snapshotBuffer !== data) throw new Error('snapshot was serialized more than once');
+            snapshotBuffer = data;
+          }
+          const prefix = async count => {
+            const result = count === 0 ? { bytesWritten: 0, buffer: data } : await write(bytes, offset, Math.min(count, length), position);
+            if (snapshotMode) events.push({ kind: 'diagnostic-write', ordinal, snapshot, buffered, offset, length, position,
+              bytesWritten: result.bytesWritten, splitUtf8: (bytes[offset + result.bytesWritten] & 0xc0) === 0x80 });
+            return result;
+          };
           if (await finishing()) {
             events.push('diagnostic-final-write');
-            if (mode === 'diagnostic-partial-write') { await write(String(data).slice(0, 30), ...params); throw fault(mode); }
+            if (mode === 'diagnostic-partial-write') {
+              await prefix(30); events.push('diagnostic-prefix-written'); throw fault(mode);
+            }
           }
           if (finalOpened && mode === 'no-post-publication-io') throw fault('diagnostic write after final open');
+          if (snapshotMode) {
+            if (ordinal === 1 && snapshot === 1) {
+              if (mode === 'snapshot-first-zero') return prefix(0);
+              if (mode === 'snapshot-short-zero') return prefix(writes === 1 ? 7 : 0);
+              if (mode === 'snapshot-first-throw' || mode === 'snapshot-save-close-recovery-short') throw inject('save first fault');
+              if (mode === 'snapshot-short-throw' || mode === 'snapshot-save-close-recovery-throw') {
+                if (writes === 1) return prefix(7);
+                throw inject('save after-prefix fault');
+              }
+            }
+            if (ordinal > 1 && mode.endsWith('recovery-throw')) throw inject('recovery later fault');
+            if ((mode === 'snapshot-short-once' || (ordinal > 1 && mode.endsWith('recovery-short'))) && writes === 1) return prefix(7);
+            if (mode === 'snapshot-short-many' && writes <= 5) {
+              const firstUtf8 = bytes.findIndex(byte => byte >= 0x80);
+              if (firstUtf8 < 0) throw new Error('UTF8 fixture contains no multibyte bytes');
+              return prefix(writes === 1 ? firstUtf8 + 1 : writes < 4 ? 1 : 3);
+            }
+            return prefix(length);
+          }
           return write(data, ...params);
         };
         handle.close = async () => {
           events.push('diagnostic-close');
+          if (snapshotMode) events.push({ kind: 'diagnostic-close', ordinal });
+          if (snapshotMode && ordinal === 1 && mode.includes('-close-') && !snapshotCloseFaulted) {
+            snapshotCloseFaulted = true;
+            if (mode !== 'snapshot-save-close-recovery-throw') { await close(); closedDiagnostics = true; }
+            throw inject('close later fault');
+          }
           if (finalOpened && mode === 'no-post-publication-io') throw fault('diagnostic close after final open');
           await close(); closedDiagnostics = true;
           if (mode === 'diagnostic-close' && !diagnosticCloseFaulted) { diagnosticCloseFaulted = true; throw fault(mode); }
@@ -403,9 +451,10 @@ async function publicationFault(f, mode) {
     };
     syncBuiltinESMExports();
     const { runSchemaRollback } = await import(${JSON.stringify(pathToFileURL(f.launcher).href)});
+    let preservedFirstError = true;
     try { await runSchemaRollback(${JSON.stringify({ sourceRepo: f.source, candidateRef: f.ref, artifacts: f.artifacts })}); }
-    catch (error) { console.error(String(error)); process.exitCode = 1; }
-    await originalWriteFile(${JSON.stringify(eventPath)}, JSON.stringify(events));
+    catch (error) { preservedFirstError = !firstInjectedError || error === firstInjectedError; console.error(String(error)); process.exitCode = 1; }
+    await originalWriteFile(${JSON.stringify(eventPath)}, JSON.stringify({ events, lastDiagnostic, preservedFirstError }));
   `);
   const result = await new Promise((accept, reject) => {
     const child = spawn(process.execPath, [driver], { cwd: f.bootstrap, env: f.env });
@@ -413,7 +462,7 @@ async function publicationFault(f, mode) {
     child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes);
     child.once('error', reject); child.once('close', status => accept({ status, stdout, stderr }));
   });
-  return { ...result, events: JSON.parse(await readFile(eventPath, 'utf8')) };
+  return { ...result, ...JSON.parse(await readFile(eventPath, 'utf8')) };
 }
 
 test('successful publication is consumer-valid and follows all required diagnostic writes and close', async t => {
@@ -427,6 +476,10 @@ for (const mode of ['diagnostic-truncate', 'diagnostic-partial-write', 'diagnost
   test(`${mode} leaves no final success file or partial publication`, async t => {
     const f = await consumableFixture(t), result = await publicationFault(f, mode);
     assert.notEqual(result.status, 0, result.stdout); assert.match(result.stderr, /injected/);
+    if (mode === 'diagnostic-partial-write') {
+      assert(result.events.includes('diagnostic-prefix-written'));
+      assert.doesNotMatch(result.stderr, /TypeError/);
+    }
     assert.equal(await present(join(f.artifacts, 'rollback-evidence.json')), false, JSON.stringify(result.events));
     if (mode.startsWith('diagnostic-')) assert.equal(result.events.includes('final-open'), false, JSON.stringify(result.events));
     if (!mode.startsWith('diagnostic-') || mode === 'diagnostic-close') assert.equal((await diagnostics(f)).status, 'failed');
@@ -442,6 +495,78 @@ for (const mode of ['final-open-race', 'final-write-replace', 'final-write-repla
     if (mode.endsWith('symlink')) assert.equal((await lstat(join(f.artifacts, 'rollback-evidence.json'))).isSymbolicLink(), true);
     if (mode.endsWith('diagnostic')) assert.equal(await readFile(join(f.artifacts, 'launcher-diagnostics.json'), 'utf8'), 'competing diagnostic writer bytes');
     else assert.equal((await diagnostics(f)).status, 'failed');
+  });
+}
+
+// Six diagnostic snapshot groups: full UTF8, one short write, repeated short
+// writes, zero progress, throwing writes, and combined save/close/recovery faults.
+const snapshotCases = [
+  ['UTF8 complete diagnostic snapshot', 'snapshot-utf8-full', true],
+  ['one short write then completion on every snapshot', 'snapshot-short-once', true],
+  ['repeated short writes across UTF8 byte boundaries', 'snapshot-short-many', true],
+  ['first write returns zero', 'snapshot-first-zero', false],
+  ['short write followed by zero', 'snapshot-short-zero', false],
+  ['first write throws', 'snapshot-first-throw', false],
+  ['short write followed by throw', 'snapshot-short-throw', false],
+  ['save and close fail but recovery completes short writes', 'snapshot-save-close-recovery-short', false],
+  ['save, close and recovery all fail', 'snapshot-save-close-recovery-throw', false],
+  ['close and recovery fail after complete save', 'snapshot-close-recovery-throw', false],
+];
+for (const [name, mode, success] of snapshotCases) {
+  test(`diagnostic snapshot: ${name}`, async t => {
+    const f = await consumableFixture(t), unicodeTemp = join(f.base, '临时🌱');
+    await mkdir(unicodeTemp, { mode: 0o700 }); f.env.TMPDIR = unicodeTemp;
+    const result = await publicationFault(f, mode);
+    const writes = result.events.filter(event => event?.kind === 'diagnostic-write');
+    const firstWrites = writes.filter(event => event.ordinal === 1 && event.snapshot === 1);
+    assert.equal(result.preservedFirstError, true, result.stderr);
+    assert.doesNotMatch(result.stderr, /TypeError|test guard/);
+    if (success) {
+      assert.equal(result.status, 0, result.stderr);
+      const bytes = await readFile(join(f.artifacts, 'launcher-diagnostics.json'));
+      const diagnostic = JSON.parse(bytes.toString('utf8'));
+      assert.equal(diagnostic.status, 'passed'); assert.match(diagnostic.runRoot, /临时🌱/);
+      assert.deepEqual(bytes, Buffer.from(JSON.stringify(result.lastDiagnostic, null, 2) + '\n', 'utf8'));
+      assert.equal(consumerAccepts(f, await readFile(join(f.artifacts, 'rollback-evidence.json'), 'utf8')), true);
+      const snapshots = Map.groupBy(writes, event => `${event.ordinal}:${event.snapshot}`);
+      assert(snapshots.size >= 6, 'Every reused-handle snapshot must reset its position');
+      for (const calls of snapshots.values()) {
+        let completed = 0;
+        for (const call of calls) {
+          assert.equal(call.buffered, true, 'Serialize one UTF8 Buffer per snapshot');
+          assert.equal(call.offset, completed); assert.equal(call.position, completed);
+          assert.equal(call.length, calls[0].length - completed);
+          assert(call.bytesWritten > 0 && call.bytesWritten <= call.length);
+          completed += call.bytesWritten;
+        }
+        assert.equal(completed, calls[0].length);
+        assert.equal(calls.length, mode === 'snapshot-short-many' ? 6 : mode === 'snapshot-short-once' ? 2 : 1);
+      }
+      if (mode === 'snapshot-short-many') assert(writes.some(event => event.splitUtf8), 'Must split a multibyte UTF8 character');
+    } else {
+      assert.notEqual(result.status, 0, result.stdout);
+      assert.equal(await present(join(f.artifacts, 'rollback-evidence.json')), false);
+      assert.equal(result.events.includes('final-open'), false);
+      assert.deepEqual(result.lastDiagnostic.cleanup.map(item => [item.name, item.status]),
+        ['previous-input', 'candidate-checkout', 'staged-result', 'run-root'].map(name => [name, 'passed']));
+      assert.equal(await present(result.lastDiagnostic.runRoot), false);
+      if (mode.endsWith('-zero')) {
+        assert.match(result.stderr, /Diagnostic write made invalid progress/);
+        assert.equal(firstWrites.length, mode === 'snapshot-first-zero' ? 1 : 2, 'Zero progress must fail immediately');
+      } else assert.match(result.stderr, /injected (save|close)/);
+      if (mode.includes('-close-')) {
+        assert.equal(result.events.filter(event => event?.kind === 'diagnostic-close' && event.ordinal === 1).length, 2);
+        assert.match(result.stderr, mode === 'snapshot-close-recovery-throw' ? /injected close later fault/ : /injected save/);
+        assert.doesNotMatch(result.stderr, /recovery later fault/);
+      }
+      if (mode.endsWith('recovery-short')) {
+        assert.equal(writes.filter(event => event.ordinal === 2).length, 2, 'Recovery must finish its own short write');
+        const diagnostic = await diagnostics(f);
+        assert.equal(diagnostic.status, 'failed'); assert.match(diagnostic.error, /injected save first fault/);
+        assert.deepEqual(await readFile(join(f.artifacts, 'launcher-diagnostics.json')),
+          Buffer.from(JSON.stringify(result.lastDiagnostic, null, 2) + '\n', 'utf8'));
+      }
+    }
   });
 }
 

@@ -264,7 +264,17 @@ export async function runSchemaRollback(options) {
   const candidate = join(runRoot, 'candidate'), previousInput = join(runRoot, 'previous-input');
   const staging = join(artifactRoot, 'rollback-staged-result.json');
   let stagingIdentity, diagnosticIdentity;
-  const save = async () => { await diagnosticFile.truncate(0); await diagnosticFile.write(JSON.stringify(diagnostic, null, 2) + '\n', 0, 'utf8'); };
+  const save = async (file = diagnosticFile) => {
+    const bytes = Buffer.from(JSON.stringify(diagnostic, null, 2) + '\n', 'utf8');
+    await file.truncate(0);
+    for (let position = 0; position < bytes.length;) {
+      const remaining = bytes.length - position;
+      const { bytesWritten } = await file.write(bytes, position, remaining, position);
+      assert(Number.isInteger(bytesWritten) && bytesWritten > 0 && bytesWritten <= remaining,
+        'Diagnostic write made invalid progress');
+      position += bytesWritten;
+    }
+  };
   try {
     diagnosticIdentity = await diagnosticFile.stat({ bigint: true });
     await mkdir(runRoot, { mode: 0o700 }); ownedRun = true;
@@ -416,8 +426,7 @@ export async function runSchemaRollback(options) {
         const current = await report.stat({ bigint: true });
         assert(diagnosticIdentity && current.isFile() && current.dev === diagnosticIdentity.dev && current.ino === diagnosticIdentity.ino,
           'Diagnostic ownership changed after close');
-        await report.truncate(0);
-        await report.write(JSON.stringify(diagnostic, null, 2) + '\n', 0, 'utf8');
+        await save(report);
       } catch { /* Keep the original failure and preserve competing writer content. */ }
       finally { if (report) { try { await report.close(); } catch { /* Best effort only. */ } } }
     }

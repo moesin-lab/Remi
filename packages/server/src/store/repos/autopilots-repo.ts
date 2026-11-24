@@ -236,10 +236,13 @@ export class AutopilotsRepo {
   deliverRunReportWithinTransaction(autopilot: MultiremiAutopilot, run: MultiremiAutopilotRunRecord, body: string): void {
     const targetId = autopilot.deliveryChatSessionId;
     if (!targetId || (run.quiet && run.status === "completed")) return;
-    const target = this.ctx.chat().getChatSession(targetId);
-    const member = autopilot.deliveryAuthorizedBy ? this.ctx.workspaces().getWorkspaceMember(autopilot.deliveryAuthorizedBy) : null;
-    const valid = target?.workspaceId === autopilot.workspaceId && target.status === "active"
-      && member?.workspaceId === autopilot.workspaceId && !member.archivedAt;
+    const recipient = this.ctx.db.query(`SELECT member.id FROM multiremi_chat_sessions chat
+      JOIN multiremi_agents agent ON agent.id = chat.agent_id AND agent.workspace_id = chat.workspace_id
+      JOIN multiremi_workspace_members member ON member.id = ? AND member.workspace_id = chat.workspace_id
+      WHERE chat.id = ? AND chat.workspace_id = ? AND chat.status = 'active' AND member.archived_at IS NULL
+      ${this.ctx.db.dialect === "postgres" ? "FOR SHARE" : ""}`)
+      .get(autopilot.deliveryAuthorizedBy ?? null, targetId, autopilot.workspaceId) as { id: string } | null;
+    const valid = Boolean(recipient);
     const events = createCommitEventQueue();
     // Timer replies bypass the platform status/report clamp in the inbox writer.
     // Bound the delivery copy once; the source Task retains the full output/error.
@@ -248,7 +251,7 @@ export class AutopilotsRepo {
       id: `msg_autopilot_delivery_${run.id}`,
       session_id: valid ? targetId : autopilotSessionId(autopilot.id),
       sender: { type: "timer", id: autopilot.id },
-      to: valid ? { type: "member", ref: member!.id } : { type: "none" },
+      to: recipient ? { type: "member", ref: recipient.id } : { type: "none" },
       message_kind: "reply", wake_requested: "inbox_only",
       body_md: reportBody,
       metadata: { autopilot_id: autopilot.id, run_id: run.id, task_id: run.taskId,

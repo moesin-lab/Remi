@@ -10,7 +10,8 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
   const restoreLevel2 = () => {
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
-      DELETE FROM multiremi_schema_steps WHERE level=3;
+      DROP TABLE multiremi_security_state;
+      DELETE FROM multiremi_schema_steps WHERE level>=3;
       UPDATE multiremi_schema_meta SET expand_level=2;`);
   };
   runMigrations(db);
@@ -31,7 +32,7 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
     if (historicalMaintenance) restoreLevel2();
     if (historicalMaintenance) runMigrations(db, { historicalMaintenance: true });
     else runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 3, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 4, contractLevel: 0 });
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 2, maxLevel: 2 })).not.toThrow();
     expect(db.query('SELECT * FROM multiremi_planned_restarts').all()).toEqual([]);
     const indexes = db.dialect === 'postgres'

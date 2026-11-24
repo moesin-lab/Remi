@@ -117,6 +117,51 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(count("issue_links")).toBe(4);
     });
 
+    it("uses frozen competitors and retries a pending merge activity exactly once after text changes", async () => {
+      const { store, db, issue, connection } = await setup();
+      const blocked = createResponsibleTestIssue(store, { title: "Competing owner", workspaceId: "local" });
+      store.updateWorkspace("local", { settings: { scm_complete_issue_on_merge_enabled: true } });
+      for (const [number, state, title] of [[42, "merged", `${issue.key} ${blocked.key}`], [43, "open", blocked.key]] as const) {
+        store.advanceScmEntitySnapshot({
+          connectionId: connection.id, repositoryId: "repo_widgets", entityType: "change_request", externalId: String(number),
+          revisionAt: pull.updated_at, revision: "v1", contentHash: `v1-${number}`,
+          payload: { number, state, title, body: `Also mentions ${issue.key}` },
+        });
+        for (const owner of [issue, blocked]) {
+          db.run(`INSERT INTO multiremi_scm_issue_links(id,workspace_id,change_request_id,issue_id,source,active,linked_at,created_at,updated_at)
+            SELECT ?,workspace_id,id,?,'auto',1,updated_at,created_at,updated_at FROM multiremi_scm_change_requests WHERE number=?`,
+            [`link-${number}-${owner.id}`, owner.id, number]);
+        }
+      }
+      db.run("DELETE FROM multiremi_scm_ownership_cutover");
+      classifyScmLinks(db);
+      db.run("UPDATE multiremi_scm_change_requests SET title='Clean', body=NULL, source_branch=NULL");
+      if (backend === "sqlite") {
+        db.exec("CREATE TRIGGER reject_merge_activity BEFORE INSERT ON multiremi_issue_activity WHEN NEW.type='scm_merge_completed' BEGIN SELECT RAISE(ABORT,'merge activity fault'); END");
+      } else {
+        db.run("CREATE FUNCTION fail_merge_activity() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'merge activity fault'; END; $$");
+        db.run("CREATE TRIGGER reject_merge_activity BEFORE INSERT ON multiremi_issue_activity FOR EACH ROW WHEN (NEW.type='scm_merge_completed') EXECUTE FUNCTION fail_merge_activity()");
+      }
+      const { event } = store.recordScmCanonicalEvent({ workspaceId: "local", connectionId: connection.id, repositoryId: "repo_widgets",
+        type: "change.merged", subjectType: "change_request", subjectId: "42", logicalKey: "merge:frozen", fidelity: "exact",
+        payload: { number: 42 }, evidence: { source: "webhook", dedupeKey: "merge:frozen" },
+      });
+      const effects = () => db.query("SELECT issue_id,status,last_error FROM multiremi_scm_effects WHERE event_id=?").all(event.id);
+      const activity = (id: string) => store.listIssueActivity(id).filter(entry => entry.type === "scm_merge_completed");
+      expect(effects()).toEqual([{ issue_id: issue.id, status: "pending", last_error: expect.stringContaining("merge activity fault") }]);
+      expect(activity(issue.id)).toHaveLength(0);
+      db.exec("DROP TRIGGER reject_merge_activity" + (backend === "postgres" ? " ON multiremi_issue_activity" : ""));
+      for (const offset of [60_000, 120_000]) {
+        store.dispatchPendingScmEvents(new Date(Date.now() + offset));
+        expect(activity(issue.id)).toHaveLength(1);
+        expect(activity(issue.id)[0]?.data).toMatchObject({ event_id: event.id, attribution: ["title"] });
+        expect(activity(blocked.id)).toHaveLength(0);
+        expect(effects()).toEqual([{ issue_id: issue.id, status: "applied", last_error: null }]);
+      }
+      expect(store.getScmCanonicalEvent(event.id)?.status).toBe("processed");
+      expect(store.getIssue(issue.id)?.status).toBe("todo");
+    });
+
     it("imports before polling, persists an active manual link, and retries without timestamps or broadcasts", async () => {
       const { store, issue, bind, count } = await setup();
       let calls = 0;
@@ -339,7 +384,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       // Fail the real link INSERT after the snapshot and projection writes.
       if (backend === "sqlite") db.exec("CREATE TRIGGER reject_bind_link BEFORE INSERT ON multiremi_scm_issue_links BEGIN SELECT RAISE(ABORT, 'injected link failure'); END");
       else {
-        db.exec("CREATE FUNCTION reject_bind_link_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected link failure'; END $$");
+        db.run("CREATE FUNCTION reject_bind_link_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected link failure'; END; $$");
         db.exec("CREATE TRIGGER reject_bind_link BEFORE INSERT ON multiremi_scm_issue_links FOR EACH ROW EXECUTE FUNCTION reject_bind_link_fn()");
       }
       mockFetch(() => Response.json(pull));
@@ -347,6 +392,8 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(count("entity_snapshots")).toBe(0);
       expect(count("change_requests")).toBe(0);
       expect(count("issue_links")).toBe(0);
+      expect(count("events")).toBe(0);
+      expect(count("effects")).toBe(0);
       expect(events).toHaveLength(0);
       db.exec("DROP TRIGGER reject_bind_link" + (backend === "postgres" ? " ON multiremi_scm_issue_links" : ""));
       expect((await bind({ url: pull.html_url })).status).toBe(200);

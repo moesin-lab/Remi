@@ -1,8 +1,9 @@
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
-import { JwtMaterials } from './jwt-materials.js';
+import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
+import { RootManagement } from './root-management.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
-import type { SecurityLockPlan } from './security-write.js';
+import { SecurityAbort, type SecurityLockPlan } from './security-write.js';
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
@@ -538,6 +539,7 @@ export class MultiremiStore {
   private feedback: FeedbackRepo;
   private accessTokens: AccessTokensRepo;
   readonly jwtMaterials: JwtMaterials;
+  readonly rootManagement: RootManagement;
   private passwordAccounts: PasswordAccountsRepo;
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
@@ -616,6 +618,7 @@ export class MultiremiStore {
     this.feedback = new FeedbackRepo(this.db);
     this.accessTokens = new AccessTokensRepo(this.db);
     this.jwtMaterials = new JwtMaterials(this.db);
+    this.rootManagement = new RootManagement(this.db);
     this.issueShares = new IssueSharesRepo(this.db);
     this.notificationChannels = new NotificationChannelsRepo(this.ctx);
     this.notificationDispatcher = new OutboundNotificationDispatcher({
@@ -1493,6 +1496,27 @@ runMigrations(this.db);
 
   loginWithPassword(email: string, password: string) {
     return this.passwordAccounts.login(email, password);
+  }
+
+  async loginWithRegisteredPassword(email: string, password: string, signing: JwtSigningDomain) {
+    try {
+      const credential = this.db.query('SELECT user_id FROM multiremi_password_credentials WHERE login_email = ?').get(email);
+      if (!credential) return null;
+      const user = this.workspaces.getUser(credential.user_id);
+      if (!user) return null;
+      const proof = await this.rootManagement.verifyIndependentPassword(user.id, password);
+      if (proof.kind !== 'independent') return null;
+      const ceiling = this.db.query(`SELECT MIN(n.expires_at_ms) AS ceiling FROM multiremi_authority_nodes n
+        JOIN multiremi_password_authority_versions p ON n.node_id IN (p.identity_node_id,p.password_node_id)
+        WHERE p.user_id = ? AND p.version = ?`).get(user.id, proof.proofVersion.version);
+      const expiresAtMs = Math.floor(Math.min(Number(ceiling?.ceiling), Date.now() + 30 * 24 * 60 * 60_000) / 1000) * 1000;
+      const token = this.rootManagement.issueIndependentDashboardSession(proof, expiresAtMs,
+        (tx, source, claims) => this.jwtMaterials.issue(tx, source, claims, signing));
+      return { user, token };
+    } catch (error) {
+      if (error instanceof SecurityAbort || error instanceof JwtMaterialUnavailable) throw error;
+      throw new JwtMaterialUnavailable();
+    }
   }
 
   getUser(id: string): MultiremiUser | null {

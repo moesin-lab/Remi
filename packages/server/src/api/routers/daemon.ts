@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { assertCredentialIssuerAvailable } from '../helpers/login.js';
 import { ensureDaemonProtocolUpgrade } from "../helpers/daemon-protocol-upgrade.js";
 import { CHAT_ATTACHMENT_MAX_BYTES, sanitizeChatAttachmentFilename } from "@multiremi/contracts/attachments.js";
 import { persistUploadedAttachments, detectContentTypeFromFilename,
@@ -293,6 +294,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     };
     let instructions = buildDaemonInstallInstructions(installInput);
     if (!token && shouldCreateToken) {
+      assertCredentialIssuerAvailable(store);
       const created = await store.createAccessToken({
         workspaceId,
         // Own the daemon token by the user provisioning it, so runtimes it later

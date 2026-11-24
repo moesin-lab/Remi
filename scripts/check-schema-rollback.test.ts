@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, access, cp, symlink, readdir, lstat, readlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,7 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
   try {
     await mkdir(join(root, 'scripts'));
     await copyFile(join(here, 'check-schema-rollback.ts'), join(root, 'scripts/check-schema-rollback.ts'));
+    await copyFile(join(here, 'platform-rollback-policy.mjs'), join(root, 'scripts/platform-rollback-policy.mjs'));
     await put('scripts/schema-rollback-identity.ts', `
       import assert from 'node:assert/strict';
       import { existsSync } from 'node:fs';
@@ -77,8 +78,17 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
         assert.equal(existsSync(marker), false); writeFileSync(marker, 'old-before');
       }
       console.error('old writer stderr');
-      console.log(JSON.stringify({ probe: 'previous-release-core', pass: true,
-        task: process.env.MUL173_EXPECT_TASK ? 'new-task' : 'retained-task', cancelled: 'cancelled-task' }));
+      const before = { probe: 'previous-release-core', pass: true, task: 'retained-task', cancelled: 'before-cancelled-task' };
+      const report = process.env.MUL173_EXPECT_TASK ? { ...before, task: 'new-task', cancelled: 'after-cancelled-task' } : before;
+      if (existsSync(join(process.cwd(), 'replay-before')) && process.env.MUL173_EXPECT_TASK) Object.assign(report, before);
+      if (existsSync(join(process.cwd(), 'same-task')) ||
+        (process.env.MUL173_EXPECT_TASK && existsSync(join(process.cwd(), 'same-task-after')))) report.cancelled = report.task;
+      for (const field of ['task', 'cancelled']) {
+        for (const original of ['task', 'cancelled']) {
+          if (process.env.MUL173_EXPECT_TASK && existsSync(join(process.cwd(), 'reuse-' + field + '-' + original))) report[field] = before[original];
+        }
+      }
+      console.log(JSON.stringify(report));
     `);
     await put('packages/platform-updater/src/schema-fingerprint.mjs', `export async function schemaLevelFingerprint() { return '${dataSchema}'; }`);
     await put('packages/server/src/store/db/postgres.ts', `export class PostgresSyncDatabase { close() {} }`);
@@ -112,7 +122,10 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
             appendFileSync(process.cwd() + '/ci-schema/admin.log', sql + '\\n');
             if (sql.startsWith('DROP') && process.env.FIXTURE_MODE === 'drop-failure') throw new Error('drop failed');
           }
-          async close() { appendFileSync(process.cwd() + '/ci-schema/admin.log', 'closed\\n'); }
+          async close() {
+            appendFileSync(process.cwd() + '/ci-schema/admin.log', 'closed\\n');
+            if (process.env.FIXTURE_MODE === 'output-collision') writeFileSync(evidence, 'created by another writer');
+          }
         },
         spawnSync(command, options) {
           writeFileSync(process.cwd() + '/ci-schema/temporary-home.txt', options.env.HOME);
@@ -126,7 +139,6 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
     execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'], { cwd: root });
     await put('ci-schema/previous-release.json', previousManifest);
     await mkdir(join(root, 'ci-schema/previous/scripts'), { recursive: true });
-    await put('ci-schema/rollback-evidence.json', JSON.stringify({ stale: true, rollbackSafeFrom: ['stale'] }));
     const execute: Execute = (mode = '', output = 'ci-schema/rollback-evidence.json') => spawnSync(process.execPath, ['--experimental-strip-types', '--import', join(root, 'bootstrap.mjs'),
       join(root, 'scripts/check-schema-rollback.ts'), 'ci-schema/previous', 'ci-schema/previous-release.json', output], {
       cwd: root, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME,
@@ -134,6 +146,22 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
     });
     await run(root, execute);
   } finally { await rm(root, { recursive: true, force: true }); }
+}
+
+async function snapshot(root: string) {
+  const files: Record<string, unknown> = {};
+  const visit = async (directory: string, prefix = '') => {
+    for (const name of (await readdir(directory)).sort()) {
+      if (name === '.git') continue;
+      const path = join(directory, name), key = prefix + name;
+      const stat = await lstat(path);
+      files[key] = stat.isSymbolicLink() ? { link: await readlink(path) } : stat.isDirectory()
+        ? { directory: true } : { mode: stat.mode, bytes: (await readFile(path)).toString('base64') };
+      if (stat.isDirectory()) await visit(path, key + '/');
+    }
+  };
+  await visit(root);
+  return files;
 }
 
 const readJson = async (root: string, name: string) => JSON.parse(await readFile(join(root, 'ci-schema', name), 'utf8'));
@@ -177,16 +205,14 @@ test('root output identity failure retains diagnostics without publishing succes
   });
 });
 
-test('pre-existing untracked root success is diagnosed before being invalidated', async () => {
+test('pre-existing root success is rejected and preserved without any writes', async () => {
   await fixture(async (root, execute) => {
     await writeFile(join(root, 'rollback-evidence.json'), JSON.stringify({ rollbackSafeFrom: ['stale'] }));
+    const before = await snapshot(root);
     const result = execute('', 'rollback-evidence.json');
     assert.notEqual(result.status, 0);
-    await absent(join(root, 'rollback-evidence.json'));
-    const diagnostic = JSON.parse(await readFile(join(root, 'rollback-diagnostics.json'), 'utf8'));
-    assert.match(diagnostic.error, /Candidate has untracked files: rollback-evidence.json/);
-    assert.deepEqual(diagnostic.phases, []);
-    assertNoDeclaration(diagnostic);
+    assert.match(String(result.stderr), /Artifact already exists/);
+    assert.deepEqual(await snapshot(root), before);
   });
 });
 
@@ -206,22 +232,142 @@ for (const dirty of [
         execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'tracked log fixture'], { cwd: root });
       }
       await writeFile(changed, 'candidate change must survive');
+      const before = await snapshot(root);
       const result = execute('', dirty.output);
       assert.notEqual(result.status, 0);
-      await absent(join(root, dirty.output));
-      assert.equal(await readFile(changed, 'utf8'), 'candidate change must survive');
-      const diagnostic = JSON.parse(await readFile(join(root, dirname(dirty.output), 'rollback-diagnostics.json'), 'utf8'));
-      assert.equal(diagnostic.status, 'failed');
-      assert.match(diagnostic.error, dirty.tracked ? /git diff --quiet HEAD/ : /Candidate has untracked files/);
-      assert.deepEqual(diagnostic.phases, []);
-      assert.deepEqual(diagnostic.cleanup, []);
-      assertNoDeclaration(diagnostic);
-      await absent(join(root, 'ci-schema/previous/scripts/mul173-schema-rollback-probe.ts'));
+      assert.deepEqual(await snapshot(root), before);
+      assert.match(String(result.stderr), dirty.path.includes('rollback-logs') && dirty.tracked
+        ? /Artifact overlaps tracked/ : dirty.tracked ? /git diff --quiet HEAD/ : /Artifact already exists|Candidate has untracked files/);
     });
   });
 }
 
-test('invalid identity in a real CLI subprocess removes stale success before verification', async () => {
+for (const scenario of [
+  { name: 'tracked output', output: 'bootstrap.mjs' },
+  { name: 'dirty tracked output', output: 'scripts/schema-rollback-probe.ts', dirty: true },
+  { name: 'clean tracked logs', path: 'ci-schema/rollback-logs/tracked.log', tracked: true },
+  { name: 'tracked diagnostics', path: 'ci-schema/rollback-diagnostics.json', tracked: true },
+  { name: 'untracked output', path: 'ci-schema/rollback-evidence.json' },
+  { name: 'untracked log contents', path: 'ci-schema/rollback-logs/keep.txt' },
+  { name: 'untracked diagnostics', path: 'ci-schema/rollback-diagnostics.json' },
+  { name: 'output aliases diagnostics', output: 'ci-schema/rollback-diagnostics.json' },
+  { name: 'output aliases logs', output: 'ci-schema/rollback-logs' },
+  { name: 'output aliases input', output: 'ci-schema/previous-release.json' },
+  { name: 'output enters git metadata', output: '.git/new-evidence.json' },
+  { name: 'output is ancestor of tracked source', output: 'scripts' },
+]) {
+  test(`preflight rejects ${scenario.name} without modifying any existing content`, async () => {
+    await fixture(async (root, execute) => {
+      if (scenario.path) {
+        await mkdir(dirname(join(root, scenario.path)), { recursive: true });
+        await writeFile(join(root, scenario.path), 'pre-existing content');
+        if (scenario.tracked) {
+          execFileSync('git', ['add', scenario.path], { cwd: root });
+          execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'tracked artifact fixture'], { cwd: root });
+        }
+      }
+      if (scenario.dirty) await writeFile(join(root, scenario.output!), 'dirty source must survive');
+      const before = await snapshot(root);
+      const result = execute('', scenario.output);
+      assert.notEqual(result.status, 0);
+      assert.match(String(result.stderr), /Artifact/);
+      assert.deepEqual(await snapshot(root), before);
+      await absent(join(root, '.git/new-evidence.json'));
+    });
+  });
+}
+
+for (const path of ['ci-schema/rollback-evidence.json', 'ci-schema/rollback-logs', 'ci-schema/linked']) {
+  test(`preflight rejects symlink ${path} and preserves its target`, async () => {
+    await fixture(async (root, execute) => {
+      await mkdir(join(root, 'ci-schema/keep'));
+      await writeFile(join(root, 'ci-schema/keep/keep.txt'), 'keep target');
+      await symlink(path.endsWith('.json') ? 'keep/keep.txt' : 'keep', join(root, path));
+      const before = await snapshot(root);
+      const result = execute('', path.endsWith('linked') ? path + '/evidence.json' : undefined);
+      assert.notEqual(result.status, 0);
+      assert.match(String(result.stderr), /symlink/);
+      assert.deepEqual(await snapshot(root), before);
+    });
+  });
+}
+
+for (const mode of ['replay-before', 'same-task', 'same-task-after', 'reuse-task-task', 'reuse-task-cancelled', 'reuse-cancelled-task', 'reuse-cancelled-cancelled']) {
+  test(`producer rejects ${mode} reports and cleans resources without success evidence`, async () => {
+    await fixture(async (root, execute) => {
+      await writeFile(join(root, 'ci-schema/previous', mode), '');
+      const result = execute();
+      assert.notEqual(result.status, 0);
+      await absent(join(root, 'ci-schema/rollback-evidence.json'));
+      const diagnostic = await readJson(root, 'rollback-diagnostics.json');
+      assert.match(diagnostic.error, /distinct ID/);
+      assert.equal(diagnostic.status, 'failed');
+      assert(diagnostic.cleanup.every(item => item.status === 'passed'));
+      await absent(join(root, 'ci-schema/previous/scripts/mul173-schema-rollback-probe.ts'));
+      assertNoDeclaration(diagnostic);
+    });
+  });
+}
+
+test('different clean checkout with the same schema level cannot run this checker or candidate phases', async () => {
+  await fixture(async (root, execute) => {
+    const other = await mkdtemp(join(tmpdir(), 'rollback-other-candidate-'));
+    try {
+      await cp(root, other, { recursive: true });
+      await writeFile(join(other, 'packages/server/src/store/migrations.ts'), 'throw new Error("A migrations must not execute B");');
+      execFileSync('git', ['add', '.'], { cwd: other });
+      execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'different migrations same level'], { cwd: other });
+      const before = await snapshot(root), otherBefore = await snapshot(other);
+      for (const args of [
+        [join(other, 'ci-schema/previous'), join(other, 'ci-schema/previous-release.json'), join(other, 'ci-schema/rollback-evidence.json')],
+        ['--candidate-expand'], ['--read-schema'],
+      ]) {
+        const result = spawnSync(process.execPath, ['--experimental-strip-types', '--import', join(root, 'bootstrap.mjs'),
+          join(root, 'scripts/check-schema-rollback.ts'), ...args], { cwd: other, encoding: 'utf8',
+          env: { PATH: process.env.PATH, HOME: process.env.HOME, MULTIREMI_TEST_POSTGRES_URL: 'postgres://test@127.0.0.1/postgres' } });
+        assert.notEqual(result.status, 0);
+        assert.match(String(result.stderr), /own candidate repository root/);
+        assert.deepEqual(await snapshot(root), before);
+        assert.deepEqual(await snapshot(other), otherBefore);
+      }
+      assert.equal(execute().status, 0, 'matching checkout remains supported');
+    } finally { await rm(other, { recursive: true, force: true }); }
+  });
+});
+
+test('real path aliases of the matching checkout remain supported', async () => {
+  await fixture(async root => {
+    const temporary = await mkdtemp(join(tmpdir(), 'rollback-root-alias-'));
+    try {
+      const alias = join(temporary, 'candidate');
+      await symlink(root, alias);
+      const result = spawnSync(process.execPath, ['--experimental-strip-types', '--import', join(root, 'bootstrap.mjs'),
+        join(root, 'scripts/check-schema-rollback.ts'), 'ci-schema/previous', 'ci-schema/previous-release.json', 'ci-schema/rollback-evidence.json'], {
+        cwd: alias, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME,
+          FIXTURE_OUTPUT: 'ci-schema/rollback-evidence.json', MULTIREMI_TEST_POSTGRES_URL: 'postgres://test@127.0.0.1/postgres' },
+      });
+      assert.equal(result.status, 0, String(result.stderr));
+      assertAcceptedEvidence(await readJson(root, 'rollback-evidence.json'));
+    } finally { await rm(temporary, { recursive: true, force: true }); }
+  });
+});
+
+test('output created by another writer during cleanup is preserved and rejects publication', async () => {
+  await fixture(async (root, execute) => {
+    const result = execute('output-collision');
+    assert.notEqual(result.status, 0);
+    assert.equal(await readFile(join(root, 'ci-schema/rollback-evidence.json'), 'utf8'), 'created by another writer');
+    const diagnostic = await readJson(root, 'rollback-diagnostics.json');
+    assert.equal(diagnostic.status, 'failed');
+    assert.match(diagnostic.error, /EEXIST/);
+    assert(diagnostic.cleanup.every(item => item.status === 'passed'));
+    assertNoDeclaration(diagnostic);
+    await absent(join(root, 'ci-schema/previous/scripts/mul173-schema-rollback-probe.ts'));
+    await absent(await readFile(join(root, 'ci-schema/temporary-home.txt'), 'utf8'));
+  });
+});
+
+test('invalid identity in a real CLI subprocess never publishes success', async () => {
   await fixture(async (root, execute) => {
     await writeFile(join(root, 'ci-schema/previous-release.json'), JSON.stringify({ invalid: true }));
     const result = execute();

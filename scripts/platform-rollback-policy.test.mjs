@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { rollbackPolicy } from './platform-rollback-policy.mjs';
 const manifest = { version: '1.2.0', ref: 'a'.repeat(40) };
 const review = {
@@ -173,6 +178,51 @@ test('requires both real core reports and levels matching each other and the tar
     evidence => { evidence.checks = []; },
     evidence => { evidence.rollbackSafeFrom = []; },
   ]);
+});
+const replayedProbeMutations = [
+  evidence => { evidence.probes.after = { ...evidence.probes.before }; },
+  ...['task', 'cancelled'].flatMap(after => ['task', 'cancelled'].map(before => evidence => {
+    evidence.probes.after[after] = evidence.probes.before[before];
+  })),
+  ...['before', 'after'].map(phase => evidence => {
+    evidence.probes[phase].cancelled = evidence.probes[phase].task;
+  }),
+];
+test('rejects replayed reports and every within-phase or cross-phase task ID reuse', () => {
+  for (const drift of [false, true]) rejectMutations(replayedProbeMutations, drift);
+});
+test('packaging rejects replayed or contradictory reports before invoking Docker', { skip: process.platform !== 'linux' }, async () => {
+  const temporary = await mkdtemp(join(tmpdir(), 'remi-rollback-policy-package-'));
+  try {
+    const bin = join(temporary, 'bin'), dockerMarker = join(temporary, 'docker-called');
+    const manifestPath = join(temporary, 'platform-release.json'), evidencePath = join(temporary, 'rollback-evidence.json');
+    await mkdir(bin);
+    await writeFile(join(bin, 'docker'), `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(dockerMarker)}, 'called');\nprocess.exit(99);\n`, { mode: 0o755 });
+    const release = { ...target, apiImage: `ghcr.io/moesin-lab/remi-api@sha256:${'a'.repeat(64)}`,
+      webImage: `ghcr.io/moesin-lab/remi-web@sha256:${'b'.repeat(64)}` };
+    const run = async evidence => {
+      await rm(dockerMarker, { force: true });
+      await writeFile(manifestPath, JSON.stringify(release));
+      await writeFile(evidencePath, JSON.stringify(evidence));
+      return spawnSync(process.execPath, [fileURLToPath(new URL('./package-platform-application.mjs', import.meta.url)), manifestPath, temporary], {
+        cwd: fileURLToPath(new URL('../', import.meta.url)), encoding: 'utf8',
+        env: { ...process.env, PATH: bin + delimiter + process.env.PATH, PLATFORM_SCHEMA_ROLLBACK_EVIDENCE: evidencePath },
+      });
+    };
+    // A valid fixture reaches the deliberate Docker cutoff; no real Docker runs.
+    const control = await run(mixedVersionEvidence(true));
+    assert.notEqual(control.status, 0);
+    assert.match(control.stderr, /docker pull failed/);
+    assert.equal(await readFile(dockerMarker, 'utf8'), 'called');
+    for (const mutate of replayedProbeMutations) {
+      const evidence = mixedVersionEvidence(true);
+      mutate(evidence);
+      const result = await run(evidence);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /Invalid mixed-version rollback evidence/);
+      await assert.rejects(readFile(dockerMarker), { code: 'ENOENT' });
+    }
+  } finally { await rm(temporary, { recursive: true, force: true }); }
 });
 test('requires all independent cleanups to pass, refusing incomplete or failed cleanup artifacts', () => {
   rejectMutations([

@@ -45,6 +45,17 @@ function validateIdentity(previous, identity, previousManifest) {
   assert(hash(provenance.publishLogSha256) && hash(provenance.verificationSha256));
 }
 
+export function validateCoreProbeReports(reports) {
+  const ids = [];
+  for (const report of reports) {
+    assert.equal(report.probe, 'previous-release-core');
+    assert.equal(report.pass, true);
+    assert(text(report.task) && text(report.cancelled));
+    ids.push(report.task, report.cancelled);
+  }
+  assert.equal(new Set(ids).size, ids.length, 'Each completed/cancelled task must have a distinct ID across core probes');
+}
+
 function validateMixedVersionEvidence(manifest, evidence) {
   try {
     assert.equal(evidence.format, 1);
@@ -68,11 +79,7 @@ function validateMixedVersionEvidence(manifest, evidence) {
       assert.equal(phase.stdout, `rollback-logs/${phase.name}.stdout.log`);
       assert.equal(phase.stderr, `rollback-logs/${phase.name}.stderr.log`);
     }
-    for (const probe of [evidence.probes.before, evidence.probes.after]) {
-      assert.equal(probe.probe, 'previous-release-core');
-      assert.equal(probe.pass, true);
-      assert(text(probe.task) && text(probe.cancelled));
-    }
+    validateCoreProbeReports([evidence.probes.before, evidence.probes.after]);
     assert.deepEqual(evidence.cleanup.map(result => result.name),
       ['previous-probe', 'test-database', 'admin-connection', 'temporary-home']);
     for (const result of evidence.cleanup) {

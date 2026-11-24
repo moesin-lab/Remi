@@ -131,9 +131,16 @@ API 不可用、签名失败、来源缺失或源码不符均阻断，不回退�
 成功证据包含候选实际 checkout SHA（PR CI 中为 merge SHA）、manifest/归档 digest、源码 tree、
 发布/实际运行 ref、observed tag、来源验证结果及每阶段 stdout/stderr 路径。
 
-执行准备和探针前都先删除旧成功证据；`preparation-diagnostics.json`、`rollback-diagnostics.json` 与
-`rollback-logs/` 保存失败进度和每项清理结果，诊断中不产生 `rollbackSafeFrom`。探针文件、测试库、
-连接及临时 HOME 独立清理，清理失败同样阻断；全部成功后才写 `rollback-evidence.json`。
+准备流程清除其旧成功证据；checker 必须从自身所在的候选仓库根运行，候选 SHA、指纹与实际迁移执行根
+必须一致，内部 expand/read 子进程也检查该根。任何写入或资源创建前，checker 验证候选干净且 evidence、
+`rollback-diagnostics.json`、`rollback-logs/` 三个目标均不存在、互不重叠，并处于候选目录内、`.git` 外。
+目标不能与跟踪文件（含父子目录）、前版源码或 manifest 重叠，路径组件不能经过符号链接。
+预检失败只向 stderr 报错，不写诊断、不删除预存 tracked/untracked 内容；包括旧成功 evidence 在内的
+已有产物均拒绝覆盖，重跑须由调用方保留原记录并选择全新的输出路径。成功 CI 是消费证据的前提，不能
+从失败运行遗留的文件推断成功。通过预检后，checker 独占创建诊断和日志；本轮失败不产生成功 evidence，
+只清理本轮已拥有的资源。`preparation-diagnostics.json`、`rollback-diagnostics.json` 与 `rollback-logs/`
+保存失败进度和每项清理结果，诊断中不产生 `rollbackSafeFrom`。探针文件、测试库、连接及临时 HOME
+独立清理，清理失败同样阻断；全部成功后才独占创建 `rollback-evidence.json`。
 应用下述 workflow 补丁后，CI 以 `always()` 上传明确列出的证据和日志，不上传归档、源码或依赖。有 contract 的 schema 不生成
 自动回退声明。核心探针不能替代所有产品行为的兼容验证。
 
@@ -156,7 +163,9 @@ PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/
   镜像身份、run/attempt/job 的 URL 绑定和日志/签名验证摘要必须完整，不能用 digest-only 模型替代。
 - 四阶段必须依序为 `previous-before-expand`、`candidate-expand`、`previous-after-expand`、
   `verify-schema-levels`，全部 `passed`、exit 0、无 signal/error，并保留对应 stdout/stderr 日志路径；
-  前后两次核心探针必须报告成功及创建/取消的 task ID。`schemaVerification` 必须等于 expand 结果，
+  前后两次核心探针必须报告成功及创建/取消的 task ID，四个非空 ID 必须互不相同；producer 与 consumer
+  均拒绝整份报告重放、跨阶段复用及同一任务既完成又取消。跨 expand 保留并读取的旧 task 由环境传入，
+  `after.task` 则是第二次探针新建的任务。`schemaVerification` 必须等于 expand 结果，
   level 重新计算的指纹必须等于目标 `dataSchema`，contract 仍为 0。
 - 探针、测试库、管理连接和临时 HOME 四项 cleanup 必须完整、依序且全部 `passed`、无 error；
   缺失、重复、跳过或失败均拒绝自动回退声明。版本先后、候选 SHA、完整 checks 和前版回退指纹也必须匹配。

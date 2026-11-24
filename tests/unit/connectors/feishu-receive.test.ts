@@ -570,9 +570,9 @@ describe("Feishu group message routing", () => {
     const connector = Object.create(FeishuConnector.prototype);
     Object.assign(connector, { _groupPolicy: groupPolicy,
       _channel: { setMessageReceipt: async () => {}, handleTaskStream: async (_chat: string, _key: string, _stream: unknown, meta: { taskId: string }) => { cards.push(meta.taskId); } },
-      _taskStreamHandler: createFeishuTaskHandler({ cancelFeishuBotSessionTask: async (_revision: number, key: string) => {
-        cancellations.push(key); return { outcome: "none" };
-      } } as any, 4, "Remi") });
+      _taskStreamHandler: createFeishuTaskHandler({ executeFeishuBotCommand: async ({ semantic }: { semantic: { external_session_key: string } }) => {
+        cancellations.push(semantic.external_session_key); return { state: "committed", result: { name: "stop", cancel: { outcome: "none" } } };
+      } } as any, 4, "Remi", { appId: "app", domain: "feishu", botId: "default" }) });
     for (const [chatType, text] of [["p2p", "/stop"], ["group", "@_user_1 /stop"], ["group", "助手 /stop"]] as const) {
       const event = messageEvent({ messageId: uniqueMessageId("native-stop"), chatId: "oc_stop", senderOpenId: "ou_stop", chatType, text,
         mentions: text.startsWith("@") ? [{ key: "@_user_1", name: "Remi", id: { open_id: "ou_bot" } }] : [] });

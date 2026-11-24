@@ -1,3 +1,5 @@
+import type { FeishuBotCommandRequest, FeishuBotCommandResult, FeishuBotSessionSnapshot, FeishuCommandSemantic } from "@multiremi/contracts/types.js";
+
 export type FeishuDomainName = "feishu" | "lark" | "bytedance";
 
 export interface FeishuChannelConfig {
@@ -33,5 +35,13 @@ export interface GroupPolicy {
   } | null;
 }
 
-/** Apply the current bot's sender access policy to the inbound identity. */
-export type FeishuSenderAuthorizer = (senderOpenId: string, context: import("./types.js").FeishuMessageContext) => Promise<boolean>;
+export type FeishuCommandOutcome = FeishuBotCommandResult | { name: "status"; snapshot: FeishuBotSessionSnapshot } | { name: "unknown" };
+
+export interface FeishuCommandRuntime {
+  revision: number;
+  botId: string;
+  execute(request: FeishuBotCommandRequest): Promise<FeishuCommandOutcome | null>;
+  render(result: FeishuCommandOutcome, semantic: FeishuCommandSemantic): { text: string; displayName: string };
+}
+
+export type FeishuSenderAuthorizer = ((senderOpenId: string, context: import("./types.js").FeishuMessageContext) => Promise<boolean>) & { commands?: FeishuCommandRuntime };

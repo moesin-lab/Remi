@@ -1,0 +1,56 @@
+diff --git a/.github/workflows/release-build-check.yml b/.github/workflows/release-build-check.yml
+index 777068777..0e2cd4b06 100644
+--- a/.github/workflows/release-build-check.yml
++++ b/.github/workflows/release-build-check.yml
+@@ -114,12 +114,23 @@ jobs:
+           tests/unit/multiremi/unified-model-migration.test.ts
+           tests/unit/multiremi/usage-startup-postgres.test.ts
+           tests/unit/multiremi/usage-startup-migration.test.ts
++      - uses: actions/setup-node@v4
++        with:
++          node-version: 22
+       - name: Verify level fingerprints and rollback evidence validation
+         run: node --test scripts/schema-fingerprint.test.mjs scripts/platform-rollback-policy.test.mjs scripts/package-platform-application.test.mjs
++      - name: Verify published source identity and archive rejection
++        run: |
++          python3 -I scripts/verify-release-source.test.py
++          bun test tests/unit/scripts/schema-rollback-identity.test.ts
++      - name: Verify rollback orchestration failure handling
++        run: node --experimental-strip-types --test scripts/check-schema-rollback.test.ts
+       - name: Resolve previous published platform release
+         env:
+           GH_TOKEN: ${{ github.token }}
+-        run: bun scripts/prepare-schema-rollback.ts ci-schema
++        run: |
++          mkdir -p ci-schema
++          bun scripts/prepare-schema-rollback.ts ci-schema >ci-schema/preparation.stdout.log 2>ci-schema/preparation.stderr.log
+       - name: Restore previous release Bun package downloads
+         uses: actions/cache/restore@v4
+         with:
+@@ -129,12 +140,24 @@ jobs:
+         working-directory: ci-schema/previous
+         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+       - name: Previous release core tests on candidate expanded schema
++        env:
++          GH_TOKEN: ${{ github.token }}
+         run: bun scripts/check-schema-rollback.ts ci-schema/previous ci-schema/previous-release.json ci-schema/rollback-evidence.json
+-      - name: Preserve SHA-bound rollback evidence
++      - name: Preserve SHA-bound rollback evidence and failure diagnostics
++        if: always()
+         uses: actions/upload-artifact@v4
+         with:
+           name: schema-rollback-${{ github.sha }}
+-          path: ci-schema/rollback-evidence.json
++          # Explicit allowlist: never upload the release archive, source or dependencies.
++          path: |
++            ci-schema/rollback-evidence.json
++            ci-schema/rollback-diagnostics.json
++            ci-schema/preparation-diagnostics.json
++            ci-schema/previous-identity.json
++            ci-schema/previous-release.json
++            ci-schema/api-image-verification.json
++            ci-schema/*.log
++            ci-schema/rollback-logs/
+           if-no-files-found: error
+ 
+   im-platform-smoke:

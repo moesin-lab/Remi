@@ -108,12 +108,34 @@ updater 的隔离演练也保留未登记旧库的启动拒绝，并提示先按
 不会在演练或切换时自动执行历史维护。边界恢复测试的人工迁移步骤显式使用离线维护入口。
 
 [prepare-schema-rollback.ts](../../scripts/prepare-schema-rollback.ts) 从 GitHub 已发布的稳定平台
-Release 解析上一版，建立独立 worktree；[check-schema-rollback.ts](../../scripts/check-schema-rollback.ts)
-绑定 tag、commit、package version、已发布 manifest，在隔离 PostgreSQL 库上执行旧版真实 Store 的
-启动与 create/claim/start/complete/cancel，再执行本版迁移，再次运行旧版同组核心读写。
-旧版模块按旧 worktree 的 tsconfig 解析，不导入本版 Store。
-成功才生成绑定目标 SHA / schema 的 `rollback-evidence.json` 与 `rollbackSafeFrom`；失败先删除旧证据。
-有 contract 的 schema 不生成自动回退声明。核心探针不能替代所有产品行为的兼容验证。
+Release 解析上一版。它校验 manifest 与 source 资产的仓库、版本、URL、GitHub digest、大小及
+`sourceSha256`，使用候选代码中的 [归档校验器](../../scripts/verify-release-source.py) 在解包前核对
+PAX commit，并按全部文件内容、Git 模式和符号链接重建 Git tree，与原发布 commit API 的 tree 精确匹配。
+异常路径、重复条目、特殊文件、硬链接及逃逸链接被拒绝；下载与源码各在新建的独立目录，不能覆盖旧目录。
+
+来源模型显式使用三个相互核对的环节：`gh attestation verify` 验证 API 镜像的签名、证书、固定仓库/
+workflow、发布 tag/source SHA 和 GitHub hosted runner；证书与 provenance 的 invocation 必须对应同一
+成功 push 发布 run/attempt 和成功 publish job；GitHub job 日志必须包含原提交、source archive 生成和
+上传命令。完整 source Git tree 再绑定该已签名的原提交。这是组合来源证明，**不是源码归档的签名证明**：
+`sourceArchiveAttestation: false` 保留这一边界，GitHub Release 资产可被替换，不能称为不可变资产。
+API 不可用、签名失败、来源缺失或源码不符均阻断，不回退为 schema 指纹映射。
+
+正常路径仍要求 tag commit、manifest ref 和旧 worktree HEAD 严格一致。若当前 tag 已漂移，则在
+`published-archive` 模式恢复通过上述全部校验的原发布源码；`observedTagRef` 保留实际观察，
+`actualPreviousRef` 必须等于 `publishedRef`，不以重写后的 tag 代码冒充发布前版。探针前再次核对归档、
+安装后源码、版本、schema 指纹和来源。没有硬编码 SHA 对映射；这也不推断历史 tag 迁移的操作者或原因。
+
+[check-schema-rollback.ts](../../scripts/check-schema-rollback.ts) 在一次性本地 PostgreSQL 库中依次执行
+旧版真实 Store 的启动与 create/claim/start/complete/cancel、本版离线协议准备与 expand/startup、
+同一旧版的启动与核心读写，再验证 schema levels 保留。旧版模块按旧源码目录的 tsconfig 解析，不导入本版 Store。
+成功证据包含候选实际 checkout SHA（PR CI 中为 merge SHA）、manifest/归档 digest、源码 tree、
+发布/实际运行 ref、observed tag、来源验证结果及每阶段 stdout/stderr 路径。
+
+执行准备和探针前都先删除旧成功证据；`preparation-diagnostics.json`、`rollback-diagnostics.json` 与
+`rollback-logs/` 保存失败进度和每项清理结果，诊断中不产生 `rollbackSafeFrom`。探针文件、测试库、
+连接及临时 HOME 独立清理，清理失败同样阻断；全部成功后才写 `rollback-evidence.json`。
+应用下述 workflow 补丁后，CI 以 `always()` 上传明确列出的证据和日志，不上传归档、源码或依赖。有 contract 的 schema 不生成
+自动回退声明。核心探针不能替代所有产品行为的兼容验证。
 
 ```bash
 bun scripts/prepare-schema-rollback.ts ci-schema
@@ -126,10 +148,15 @@ PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/
 和版本先后；没有证据时沿用人工审核或空声明。当前 platform-release workflow 不自动下载此 artifact，
 须显式提供 `PLATFORM_SCHEMA_ROLLBACK_EVIDENCE`；发布侧自动取证接线仍需 owner 配合。
 
-[完整 workflow 补丁](../deploy/MUL-173-workflow.patch) 修改现有 release-build-check，加入 PostgreSQL
-守卫、历史回归和上一发布版混跑 job，并加入总 build 的 needs。本 PR 不提交 workflow 本体：
-owner 在本 PR 合入后另开 PR 应用补丁，经 CI 通过再合入；因此该 job 在补丁合入前尚未常态运行。
-补丁可用 `git apply --check docs/deploy/MUL-173-workflow.patch` 检查。
+[release-build-check](../../.github/workflows/release-build-check.yml) 的 `schema-compatibility` job
+执行 PostgreSQL 守卫、历史回归和上一发布版混跑，并作为总 build 的依赖。
+[MUL-4 workflow 补丁](../deploy/MUL-4-release-identity-workflow.patch) 增加身份回归、checker 的 `GH_TOKEN`
+及 `always()` 失败证据上传。当前凭据缺少 `workflow` scope，源码 PR 无法提交 workflow 本体；
+须由具备权限的 owner 在独立 PR 应用补丁并核对最终候选的实际 CI，未应用不能宣称门禁已恢复。
+可用 `git apply --check docs/deploy/MUL-4-release-identity-workflow.patch` 检查补丁。
+归档校验回归使用 `python3 -I scripts/verify-release-source.test.py`；身份来源回归使用
+`bun test tests/unit/scripts/schema-rollback-identity.test.ts`，失败编排回归使用
+`node --experimental-strip-types --test scripts/check-schema-rollback.test.ts`。这些回归不替代真实发布前版的 PostgreSQL 混跑。
 
 ## SQL 允许清单与检测边界
 

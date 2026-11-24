@@ -1,3 +1,4 @@
+import { verifyFeishuWakeWordUpgrade } from "../../fixtures/feishu-wake-word-schema-upgrade.js";
 import { verifyPlannedRestartSchemaUpgrade } from "../../fixtures/planned-restart-schema-upgrade.js";
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,6 +53,9 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
     }
     finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=4'); }
   });
+  it('upgrades existing bot rows and accepts old writers after level 4', () => {
+    verifyFeishuWakeWordUpgrade(db);
+  }, 30_000);
   it('upgrades level 2 planned restart schema atomically and preserves old drains on PostgreSQL', () => {
     verifyPlannedRestartSchemaUpgrade(db);
   }, 30_000);

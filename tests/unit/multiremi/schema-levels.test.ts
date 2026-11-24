@@ -1,3 +1,4 @@
+import { verifyFeishuWakeWordUpgrade } from "../../fixtures/feishu-wake-word-schema-upgrade.js";
 import { verifyPlannedRestartSchemaUpgrade } from "../../fixtures/planned-restart-schema-upgrade.js";
 import { afterEach, describe, expect, it } from 'bun:test';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
@@ -67,6 +68,9 @@ describe('schema compatibility protocol', () => {
     expect(database.query("SELECT name FROM sqlite_master WHERE name='multiremi_live_terms'").get()).not.toBeNull();
     expect(database.query("SELECT id FROM multiremi_schema_steps WHERE level=2").get().id).toBe('20261118_live_term_fence');
   });
+  it('upgrades existing bot rows and accepts old writers after level 4', () => {
+    verifyFeishuWakeWordUpgrade(db());
+  }, 30_000);
   it('upgrades level 2 planned restart schema atomically and preserves old drains', () => {
     verifyPlannedRestartSchemaUpgrade(db());
   });

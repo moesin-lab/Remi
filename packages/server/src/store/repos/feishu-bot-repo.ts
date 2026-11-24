@@ -72,6 +72,7 @@ import {
   type FeishuDecisionDegradeReason,
 } from "@multiremi/contracts/types.js";
 import type {
+  FeishuBotAuthorizeSenderResult,
   FeishuBotAuditAction,
   IssueTopicConfig,
   FeishuPresentationCheckpoint,
@@ -255,6 +256,9 @@ export class FeishuBotConfigError extends Error {
     this.name = "FeishuBotConfigError";
   }
 }
+
+type FeishuSenderIdentity = Pick<SubmitFeishuBotMessageInput,
+  "externalSessionKey" | "senderOpenId" | "senderUserId" | "senderUnionId" | "senderTenantKey" | "senderName">;
 
 export class FeishuBotRepo {
   private replayingOutboundOperation = false;
@@ -3894,7 +3898,7 @@ export class FeishuBotRepo {
     log.warn(`Feishu receipt delivery ${deliveryId} failed after ${attempts} attempt(s)`);
   }
 
-  authorizeSender(workspaceId: string, runtimeId: string, input: Pick<SubmitFeishuBotMessageInput, "externalSessionKey" | "senderOpenId" | "senderUserId" | "senderUnionId" | "senderTenantKey" | "senderName"> & { revision: number }): { allowed: boolean } {
+  authorizeSender(workspaceId: string, runtimeId: string, input: FeishuSenderIdentity & { revision: number }): FeishuBotAuthorizeSenderResult {
     return this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const config = this.getConfig(workspaceId);
@@ -3909,7 +3913,7 @@ export class FeishuBotRepo {
   private resolveSender(
     workspaceId: string,
     appId: string,
-    input: Pick<SubmitFeishuBotMessageInput, "externalSessionKey" | "senderOpenId" | "senderUserId" | "senderUnionId" | "senderTenantKey" | "senderName">,
+    input: FeishuSenderIdentity,
     accessPolicy: MultiremiFeishuBotConfig["senderAccessPolicy"],
   ): ResolvedFeishuSender {
     const unionId = optionalBoundedString(input.senderUnionId, "sender_union_id", 512);

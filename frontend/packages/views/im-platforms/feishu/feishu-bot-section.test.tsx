@@ -301,6 +301,16 @@ describe("FeishuBotSection (admin form)", () => {
     expect(mockSave.mock.calls.at(-1)?.[0]).toHaveProperty("responsible_member_id", null);
   });
 
+  it("drops an unsaved wake word when switching bots", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderSection();
+    await user.type(screen.getByLabelText("Group wake words (one per line)"), "Draft");
+    botSelectionRef.botId = "second";
+    botRef.current = { role: "admin", config: { ...CONFIGURED.config, bot_id: "second", wake_words: ["Hello"] } };
+    rerender(<FeishuBotSection />);
+    expect(screen.getByLabelText("Group wake words (one per line)")).toHaveValue("Hello");
+  });
+
   it("seeds the form from the stored config and never renders a secret", () => {
     renderSection();
     expect(screen.getByLabelText("App ID")).toHaveValue("cli_abc123");

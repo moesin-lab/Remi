@@ -57,6 +57,33 @@ afterEach(() => sqlite.close());
 
 function enable() { db.run("UPDATE multiremi_security_state SET feature_activation=1,bootstrap_completed=1,minimum_enforcement_version='fixture'"); }
 
+test('direct retry invocation binds the fresh actor and primary turn to one proposed replacement in its transaction',()=>{
+  enable();
+  db.run("INSERT INTO multiremi_workspaces(id,name,slug,created_at,updated_at) VALUES('local','fixture','fixture','now','now')");
+  db.run("INSERT INTO multiremi_agents(id,name,provider,created_at,updated_at) VALUES('agt_fixture','fixture','codex','now','now')");
+  db.run("INSERT INTO multiremi_issues(id,title,created_at,updated_at) VALUES('iss_fixture','fixture','now','now')");
+  db.run("INSERT INTO multiremi_issue_sessions(id,issue_id,created_at,updated_at) VALUES('ises_fixture','iss_fixture','now','now')");
+  db.run(`INSERT INTO multiremi_turns(id,session_id,seq,agent_id,execution_scope,status,current_attempt_id,workspace_id,created_at)
+    VALUES('turn_fixture','ises_fixture',1,'agt_fixture','fixture-scope','failed','tsk_previous','local','now')`);
+  db.run(`INSERT INTO multiremi_turn_attempts(id,turn_id,attempt_no,status,created_at,updated_at) VALUES('tsk_previous','turn_fixture',1,'lost','now','now')`);
+  const target = {turnId:'turn_fixture',previousAttemptId:'tsk_previous',attemptId:'tsk_new'};
+  const base = service.planDirectRetry(proof,target);
+  const plan = {...base,domainTargets:[...base.domainTargets,'attempt:tsk_other'].sort()};
+  const handle = withSecurityWrite(db,undefined,plan,tx=>{
+    const verified = service.verifyDirectRetryInvocation(tx,proof,target);
+    expect(service.requireDirectRetryInvocation(tx,verified,target)).toMatchObject({actorId:'usr_test',agentId:'agt_fixture',
+      workspaceId:'local',sessionId:'ises_fixture',sessionOwnerType:'issue',sessionOwnerId:'iss_fixture',executionScope:'fixture-scope',grantGeneration:1});
+    return verified;
+  });
+  expect(()=>withSecurityWrite(db,undefined,plan,tx=>service.requireDirectRetryInvocation(tx,handle,target))).toThrow('root_authority_revoked');
+  expect(()=>withSecurityWrite(db,undefined,plan,tx=>{
+    const verified = service.verifyDirectRetryInvocation(tx,proof,target);
+    service.requireDirectRetryInvocation(tx,verified,{...target,attemptId:'tsk_other'});
+  })).toThrow('authority_revision_conflict');
+  db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='actor-grant'");
+  expect(()=>withSecurityWrite(db,undefined,plan,tx=>service.verifyDirectRetryInvocation(tx,proof,target))).toThrow('root_authority_revoked');
+});
+
 test('catching a rejected management target still rolls back the outer write', () => {
   enable();
   let notified = false;

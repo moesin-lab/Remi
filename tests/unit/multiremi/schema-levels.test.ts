@@ -33,7 +33,7 @@ describe('schema compatibility protocol', () => {
     runMigrations(database);
     expect(readSchemaLevels(database)).toEqual({ expandLevel: 4, contractLevel: 0 });
     runMigrations(database);
-    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(4);
+    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(5);
     database.exec('UPDATE multiremi_schema_meta SET expand_level=5, contract_level=5');
     const before = database.query('SELECT total_changes() AS count').get();
     expect(() => runMigrations(database)).toThrow('contract_level=5 exceeds code maxLevel=4');

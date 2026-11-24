@@ -11,6 +11,8 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
       DROP TABLE multiremi_security_state;
+      DROP TABLE multiremi_authority_edges;
+      DROP TABLE multiremi_authority_nodes;
       DELETE FROM multiremi_schema_steps WHERE level>=3;
       UPDATE multiremi_schema_meta SET expand_level=2;`);
   };

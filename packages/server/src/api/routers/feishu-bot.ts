@@ -1,4 +1,4 @@
-import { normalizeFeishuWakeWords } from "@multiremi/shared/feishu-wake-words.ts";
+import { normalizeFeishuWakeWords } from "@shared/feishu-wake-words.js";
 import { createId } from "@multiremi/ids.js";
 /**
  * Workspace Feishu concierge bot routes (MUL-206).

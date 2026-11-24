@@ -1,4 +1,4 @@
-import { normalizeFeishuWakeWords } from "@multiremi/shared/feishu-wake-words.ts";
+import { normalizeFeishuWakeWords } from "@shared/feishu-wake-words.js";
 import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
 import { STORAGE_SETTINGS_DEFAULTS, STORAGE_SETTINGS_KEYS, type WorkspaceStorageResponse } from "@multiremi/contracts/storage.js";
 import {

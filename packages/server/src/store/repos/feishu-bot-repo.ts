@@ -1,4 +1,4 @@
-import { normalizeFeishuWakeWords } from "@multiremi/shared/feishu-wake-words.ts";
+import { normalizeFeishuWakeWords } from "@shared/feishu-wake-words.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 /** Feishu message UUID dedup is one hour; reserve five minutes for transit/clock skew. */
 export const FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS = 55 * 60_000;

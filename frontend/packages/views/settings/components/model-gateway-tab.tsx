@@ -162,7 +162,7 @@ function IssueAutoTitleSection({ workspace, endpoint, protocol, pending }: { wor
             <SystemModelInput workspaceId={workspace.id} endpoint={endpoint} protocol={protocol} pending={pending}
               id="issue-auto-title-model"
               value={model}
-              onChange={(event) => setModel(event.target.value)}
+              onValueChange={setModel}
               placeholder="gpt-5.6-luna"
               className="font-mono text-xs"
             />
@@ -267,7 +267,7 @@ function ProgressSummarySection({ workspace, chat, messages, pending }: { worksp
               <SystemModelInput workspaceId={workspace.id} endpoint={chat} protocol="openai-chat-completions" pending={pending} inactive={transport !== "auto" && transport !== "openai"}
                 id="progress-summary-openai-model"
                 value={openAiModel}
-                onChange={(event) => setOpenAiModel(event.target.value)}
+                onValueChange={setOpenAiModel}
                 placeholder="gpt-5.6-luna"
                 className="font-mono text-xs"
               />
@@ -282,7 +282,7 @@ function ProgressSummarySection({ workspace, chat, messages, pending }: { worksp
               <SystemModelInput workspaceId={workspace.id} endpoint={messages} protocol="anthropic-messages" pending={pending} inactive={transport !== "auto" && transport !== "api"}
                 id="progress-summary-claude-model"
                 value={model}
-                onChange={(event) => setModel(event.target.value)}
+                onValueChange={setModel}
                 placeholder="claude-haiku-4-5-20251001"
                 className="font-mono text-xs"
               />

@@ -5,11 +5,16 @@ import { multiremiStateDir } from "@shared/home-paths.js";
 import type { FeishuMessageEvent } from "./types.js";
 
 type ChatType = "p2p" | "group";
+type LiveFollowup = "denial" | "command";
+export type FeishuInboundDelivery = (event: FeishuMessageEvent, liveOnly?: LiveFollowup) => Promise<void | LiveFollowup>;
+const HISTORY_WINDOW_MS = 10 * 60_000;
+const ACK_RETENTION_MS = 30 * 60_000;
 interface InboundState {
   version: 1;
   initializedAt: number;
   chats: Record<string, { type: ChatType; through: number; scannedThrough: number }>;
   pending: Record<string, FeishuMessageEvent>;
+  acknowledged: Record<string, { at: number; liveOnly?: LiveFollowup }>;
   skipped: Array<{ chatId: string; reason: string; at: number; status: "skipped"; messageId?: string; command?: string }>;
 }
 
@@ -25,6 +30,8 @@ export function feishuRecoveryPath(appId: string, domain = "feishu"): string {
 export class FeishuInboundRecovery {
   private readonly state: InboundState;
   private queue: Promise<void> = Promise.resolve();
+  private nextPruneAt = 0;
+  private closed = false;
 
   constructor(private readonly path: string, private readonly now = Date.now) {
     if (existsSync(path)) {
@@ -33,17 +40,23 @@ export class FeishuInboundRecovery {
       if (state.version !== 1 || !Number.isFinite(state.initializedAt)
           || !state.chats || !state.pending || !Array.isArray(state.skipped)) throw new Error("Invalid Feishu inbound journal");
       this.state = state;
+      this.state.acknowledged ??= {};
     } else {
-      this.state = { version: 1, initializedAt: now() - 10 * 60_000, chats: {}, pending: {}, skipped: [] };
+      this.state = { version: 1, initializedAt: now() - HISTORY_WINDOW_MS, chats: {}, pending: {}, acknowledged: {}, skipped: [] };
       this.save();
     }
   }
 
   private save(): void {
+    if (this.closed) throw new Error("Feishu inbound journal closed");
     mkdirSync(dirname(this.path), { recursive: true });
     const temporary = `${this.path}.tmp`;
     writeFileSync(temporary, JSON.stringify(this.state), { mode: 0o600 });
     renameSync(temporary, this.path);
+  }
+
+  close(): void {
+    this.closed = true;
   }
 
   private serialized(action: () => Promise<void>): Promise<void> {
@@ -65,8 +78,21 @@ export class FeishuInboundRecovery {
       since: Math.max(this.state.initializedAt, Math.min(chat.through, chat.scannedThrough) - 60_000) }));
   }
 
-  accept(event: FeishuMessageEvent, deliver: (event: FeishuMessageEvent) => Promise<void>): Promise<void> {
+  private pruneAcknowledgements(): void {
+    const now = this.now();
+    if (now < this.nextPruneAt) return;
+    for (const [id, receipt] of Object.entries(this.state.acknowledged)) {
+      if (receipt.at < now - ACK_RETENTION_MS && !Object.hasOwn(this.state.pending, id)) delete this.state.acknowledged[id];
+    }
+    this.nextPruneAt = now + 60_000;
+  }
+
+  accept(event: FeishuMessageEvent, deliver: FeishuInboundDelivery): Promise<void> {
     const id = event.message.message_id;
+    this.pruneAcknowledgements();
+    if (event.recovery_source === "history" && Number(event.message.create_time) < this.now() - HISTORY_WINDOW_MS) return Promise.resolve();
+    const receipt = this.state.acknowledged[id];
+    if (receipt && (!receipt.liveOnly || event.recovery_source === "history")) return Promise.resolve();
     this.rememberChat(event.message.chat_id, event.message.chat_type);
     // This synchronous write happens before any await, even behind another callback.
     const pending = this.state.pending[id];
@@ -78,23 +104,27 @@ export class FeishuInboundRecovery {
     return this.serialized(() => this.deliver(id, deliver));
   }
 
-  private async deliver(id: string, callback: (event: FeishuMessageEvent) => Promise<void>): Promise<void> {
+  private async deliver(id: string, callback: FeishuInboundDelivery): Promise<void> {
     const event = this.state.pending[id];
     if (!event) return;
-    await callback(event);
+    const receipt = this.state.acknowledged[id];
+    if (!receipt || (receipt.liveOnly && event.recovery_source !== "history")) {
+      const liveOnly = await callback(event, receipt?.liveOnly);
+      this.state.acknowledged[id] = { at: this.now(), ...(liveOnly ? { liveOnly } : {}) };
+    }
     const timestamp = Number(event.message.create_time);
     if (Number.isFinite(timestamp) && timestamp > 0 && timestamp <= this.now()) {
       const chat = this.state.chats[event.message.chat_id]!;
       chat.through = Math.max(chat.through, timestamp);
     }
-    // The callback may have yielded while a newer copy arrived. Its queued
-    // delivery still owns that copy, even when this older history callback was
-    // successful; keep it durable until its own callback acknowledges it.
-    if (this.state.pending[id] === event) delete this.state.pending[id];
+    const pending = this.state.pending[id];
+    if (pending === event || pending?.recovery_source === "history" || !this.state.acknowledged[id].liveOnly) {
+      delete this.state.pending[id];
+    }
     this.save();
   }
 
-  replay(callback: (event: FeishuMessageEvent) => Promise<void>): Promise<void> {
+  replay(callback: FeishuInboundDelivery): Promise<void> {
     return this.serialized(async () => {
       for (const id of Object.keys(this.state.pending)) await this.deliver(id, callback);
     });
@@ -107,6 +137,7 @@ export class FeishuInboundRecovery {
   }
 
   scanned(chatId: string, before: number): void {
+    this.pruneAcknowledgements();
     const chat = this.state.chats[chatId]!;
     chat.scannedThrough = Math.max(chat.scannedThrough, Math.min(chat.through, before));
     this.save();
@@ -144,7 +175,7 @@ export async function recoverFeishuHistory(options: {
   journal: FeishuInboundRecovery;
   list: (params: { container_id_type: string; container_id: string; start_time: string; end_time: string;
     sort_type: "ByCreateTimeDesc"; page_size: number; page_token?: string }) => Promise<FeishuHistoryPage>;
-  deliver: (event: FeishuMessageEvent) => Promise<void>;
+  deliver: FeishuInboundDelivery;
   warn: (chatId: string, reason: string) => void;
   now?: number;
   maxPages?: number;
@@ -152,7 +183,7 @@ export async function recoverFeishuHistory(options: {
 }): Promise<void> {
   const { journal, deliver } = options;
   await journal.replay(deliver);
-  const now = options.now ?? Date.now(), cutoff = now - (options.windowMs ?? 10 * 60_000);
+  const now = options.now ?? Date.now(), cutoff = now - Math.min(options.windowMs ?? HISTORY_WINDOW_MS, HISTORY_WINDOW_MS);
   const skipped = (chatId: string, reason: string) => { journal.skipped(chatId, reason); options.warn(chatId, reason); };
   for (const chat of journal.chats()) {
     if (chat.since < cutoff) skipped(chat.id, "history_time_window");

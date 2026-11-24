@@ -883,7 +883,7 @@ export class ScmRepo {
     return { advance: written.snapshot.advance, events: written.events };
   }
 
-  private advanceEntitySnapshotLocked(input: UpsertScmEntitySnapshotInput): LockedSnapshotAdvanceResult {
+  private advanceEntitySnapshotLocked(input: UpsertScmEntitySnapshotInput, discoverIssueLinks = true): LockedSnapshotAdvanceResult {
     const now = nowIso();
     const observedAt = normalizeIsoTimestamp(input.observedAt ?? now, "snapshot observation time");
     const revisionAt = normalizeIsoTimestamp(input.revisionAt ?? observedAt, "snapshot revision time");
@@ -915,7 +915,7 @@ export class ScmRepo {
     ).get(...values) as Row | null;
     if (inserted) {
       if (input.entityType === "change_request") {
-        projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now);
+        projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now, discoverIssueLinks);
       }
       return {
         advance: { applied: true, previous: null, snapshot: toEntitySnapshot(inserted) },
@@ -965,7 +965,7 @@ export class ScmRepo {
     ) as Row | null;
     if (!updated) throw new Error("SCM snapshot compare-and-set lost its locked row");
     if (input.entityType === "change_request") {
-      projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now);
+      projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now, discoverIssueLinks);
     }
     return {
       advance: { applied: true, previous, snapshot: toEntitySnapshot(updated) },
@@ -1041,7 +1041,8 @@ export class ScmRepo {
           || observation.payload.number !== number) {
           throw new ScmOperationError("scm_reference_invalid", "SCM observation does not match the reference");
         }
-        const written = this.advanceEntitySnapshotLocked(observationSnapshotInput(binding, observation));
+        // Explicit binding grants only the requested Issue a new association.
+        const written = this.advanceEntitySnapshotLocked(observationSnapshotInput(binding, observation), false);
         projectionChanged = written.projection !== null;
         // First insertion is a baseline; an existing predecessor must retain real transitions.
         eventInputs = observationCanonicalEvents({ binding, observation, baseline: true }, written.advance);
@@ -1660,6 +1661,7 @@ export class ScmRepo {
     externalId: string,
     payload: Record<string, unknown>,
     now: string,
+    discoverIssueLinks = true,
   ): { changeRequestId: string; issueIds: string[] } {
     const number = finiteInteger(payload.number);
     const draft = payload.draft === true;
@@ -1755,7 +1757,7 @@ export class ScmRepo {
     ).get(...lookupParams) as Row | null;
     if (!row) throw new Error("SCM change request projection could not be read after upsert");
     const changeRequest = toChangeRequest(row);
-    if (this.ctx.workspaces().getWorkspace(connection.workspaceId)?.settings.scm_auto_link_enabled !== false) {
+    if (discoverIssueLinks && this.ctx.workspaces().getWorkspace(connection.workspaceId)?.settings.scm_auto_link_enabled !== false) {
       const haystack = [changeRequest.title, changeRequest.sourceBranch ?? "", changeRequest.body ?? ""].join("\n");
       for (const issue of this.ctx.issues().listIssues({ workspaceId: connection.workspaceId })) {
         if (!issue.key || !new RegExp(`\\b${escapeRegExp(issue.key)}\\b`, "i").test(haystack)) continue;

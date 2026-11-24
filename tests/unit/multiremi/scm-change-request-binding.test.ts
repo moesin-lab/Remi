@@ -143,14 +143,24 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect((await bind({ url: pull.html_url })).status).toBe(200);
     });
 
-    it("retains enabled automatic discovery while adding the requested manual link", async () => {
-      const { store, issue, bind } = await setup();
+    it.each([
+      { setting: true, field: "title" }, { setting: true, field: "branch" }, { setting: true, field: "body" },
+      { setting: undefined, field: "title" }, { setting: undefined, field: "branch" }, { setting: undefined, field: "body" },
+    ])("explicitly binds only the requested Issue with autoLink=$setting and Key in $field", async ({ setting, field }) => {
+      const { store, issue, bind, count } = await setup();
       const other = createResponsibleTestIssue(store, { title: "Referenced", workspaceId: "local" });
-      store.updateWorkspace("local", { settings: { scm_auto_link_enabled: true } });
-      mockFetch(() => Response.json({ ...pull, body: other.key }));
+      store.updateWorkspace("local", { settings: { scm_auto_link_enabled: setting } });
+      expect(store.getWorkspace("local")!.settings.scm_auto_link_enabled).toBe(setting);
+      mockFetch(() => Response.json({
+        ...pull,
+        ...(field === "title" ? { title: `${other.key} referenced` } : {}),
+        ...(field === "branch" ? { head: { ...pull.head, ref: `${other.key}/feature` } } : {}),
+        ...(field === "body" ? { body: `Closes ${other.key}` } : {}),
+      }));
       expect((await bind({ url: pull.html_url })).status).toBe(200);
-      expect(store.listScmChangeRequestsForIssue(other.id)).toHaveLength(1);
+      expect(store.listScmChangeRequestsForIssue(other.id)).toHaveLength(0);
       expect(store.listScmChangeRequestsForIssue(issue.id)).toHaveLength(1);
+      expect(count("issue_links")).toBe(1);
     });
 
     it("preserves a merge observed during an in-flight bind after another Issue initializes the entity", async () => {

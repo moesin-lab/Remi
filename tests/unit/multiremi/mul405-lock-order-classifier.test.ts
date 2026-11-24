@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { classifyLockOrderStatement, type LockOrderClass } from "@multiremi/store/lock-order-sentinel.js";
+import {
+  classifyLockOrderStatement, lockOrderSentinelNoteNumberLock, lockOrderSentinelNoteStatement,
+  lockOrderSentinelTransactionBegin, lockOrderSentinelTransactionEnd, type LockOrderClass,
+} from "@multiremi/store/lock-order-sentinel.js";
 
 const cases: Array<[string, string, LockOrderClass[]]> = [
+  ["security state read", "SELECT * FROM multiremi_security_state", []],
+  ["security singleton update", 'UPDATE "public"."multiremi_security_state" AS s SET revision = s.revision WHERE singleton = 1', ["S"]],
+  ["security singleton through CTE", 'WITH gate AS (SELECT * FROM "multiremi_security_state" s FOR UPDATE OF s) SELECT * FROM gate', ["S"]],
+  ["domain alias named after singleton", "SELECT * FROM multiremi_issues AS multiremi_security_state FOR UPDATE OF multiremi_security_state", ["D"]],
   ["live term lock", "UPDATE multiremi_live_terms SET term = term WHERE scope = ? RETURNING term", ["F"]],
   ["live term initialization", "INSERT INTO multiremi_live_terms(scope, term) VALUES (?, 0)", ["F"]],
   ["live term locking SELECT", "SELECT term FROM multiremi_live_terms FOR UPDATE", ["F"]],
@@ -102,6 +109,29 @@ const cases: Array<[string, string, LockOrderClass[]]> = [
 ];
 
 describe("MUL-405 shared lock-order SQL classifier", () => {
+  const acquire: Record<LockOrderClass, () => void> = {
+    F: () => lockOrderSentinelNoteStatement("SELECT * FROM multiremi_live_terms FOR UPDATE"),
+    S: () => lockOrderSentinelNoteStatement("SELECT * FROM multiremi_security_state FOR UPDATE"),
+    W: () => lockOrderSentinelNoteStatement("SELECT * FROM multiremi_workspaces FOR UPDATE"),
+    N: () => lockOrderSentinelNoteNumberLock("issue"),
+    D: () => lockOrderSentinelNoteStatement("SELECT * FROM multiremi_issues FOR UPDATE"),
+  };
+  function takeLocks(order: readonly LockOrderClass[]) {
+    lockOrderSentinelTransactionBegin();
+    try {
+      for (const lock of order) acquire[lock]();
+    } finally {
+      lockOrderSentinelTransactionEnd();
+    }
+  }
+  it("accepts the singleton after the fence and before workspace locks", () => {
+    expect(() => takeLocks(["F", "S", "W", "N", "D"])).not.toThrow();
+  });
+  for (const order of [["S", "F"], ["W", "S"], ["N", "S"], ["D", "S"]] as const) {
+    it(`rejects ${order.join(" then ")}`, () => {
+      expect(() => takeLocks(order)).toThrow("lock order violated");
+    });
+  }
   for (const [label, sql, expected] of cases) {
     it(label, () => expect(classifyLockOrderStatement(sql)).toEqual(expected));
   }

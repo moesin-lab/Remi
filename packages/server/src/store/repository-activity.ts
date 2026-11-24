@@ -170,11 +170,16 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
   return { items, has_more: hasMore, next_cursor: cursor, as_of: new Date().toISOString() };
 }
 
+const authorization = /\b(?:(?:proxy-)?authorization[ \t]*:[ \t]*(?:basic|bearer)|bearer)[ \t]+[^\s,;]+/gi;
+const credential = /\b[\w-]*(?:api[_-]?key|secret|token|password)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\s,;]+)/gi;
+const quotedPath = /(["'`])(?:[a-z]:[\\/]|\\\\|(?:~|\.{1,2})?\/).*?\1/gi;
+const unquotedPath = /(?:[a-z]:[\\/]|\\\\|(?<![^\s("'`=:\[])(?:~|\.{1,2})?\/(?=\S)).*?(?=[,;]\s|$)/gi;
+
 function summary(value: string | null): string | null {
   if (!value) return null;
   const line = value.split(/[\r\n\u2028\u2029]/, 1)[0]!;
-  const safeLine = line.replace(/\b(?:Bearer\s+|[\w-]*(?:api[_-]?key|secret|token|password)["']?\s*[:=]).*$/i, "[redacted]");
-  const separator = safeLine.search(/[\\/]/);
-  const safePrefix = separator < 0 ? safeLine : safeLine.slice(0, separator).replace(/\S*$/, "[path]");
-  return redactRuntimeCommandText(safePrefix).slice(0, 180) || null;
+  const masked = line.replace(authorization, "[redacted]").replace(/\b(?:proxy-)?authorization\s*:.*$/i, "[redacted]")
+    .replace(credential, "[redacted]");
+  const safe = redactRuntimeCommandText(masked).replace(quotedPath, "[path]").replace(unquotedPath, "[path]").slice(0, 180);
+  return /[\p{L}\p{N}]/u.test(safe.replace(/\[(?:path|redacted)\]/gi, "")) ? safe : null;
 }

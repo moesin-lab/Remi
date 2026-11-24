@@ -48,6 +48,34 @@ describe("repository activity", () => {
     expect(inspections.sort()).toEqual([repository.url, other.url].sort());
   });
 
+  it("retains public context and omits credential-only and path-only summaries over HTTP", async () => {
+    const { store, issue, agent } = setup();
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Test summaries" });
+    const app = createMultiremiApp({ store });
+    const update = db!.prepare(`UPDATE multiremi_turn_attempts SET status='failed',error=?,progress_summary=?,wait_reason=?,failure_reason=? WHERE id=?`);
+    const basic = `aUtHoRiZaTiOn \t:  bAsIc\t${Buffer.from("fixture:example").toString("base64")}`;
+    const bearer = "Authorization: BEARER fixture-token";
+    for (const [input, expected] of [
+      [basic, null], [bearer, null], ['access_token="fixture credential"', null],
+      [String.raw`C:\Example\Team checkout\fixture.txt`, null], [String.raw`\\fileserver\private share\fixture.txt`, null],
+      ["/private/team checkout/fixture.txt", null], [null, null],
+      ["CI/CD checks passed", "CI/CD checks passed"], ["Checked 3/5 files, tests passed", "Checked 3/5 files, tests passed"],
+      ["C++/Rust checks passed, 3 / 5 done", "C++/Rust checks passed, 3 / 5 done"],
+      [`CI/CD: ${basic}; checked 3/5 files`, "CI/CD: [redacted]; checked 3/5 files"],
+      [`Read /private/team checkout/fixture.txt, ${bearer}; tests passed`, "Read [path], [redacted]; tests passed"],
+      [String.raw`Checked "C:\Example\Team checkout\fixture.txt" successfully`, "Checked [path] successfully"],
+    ] as const) {
+      update.run("private raw diagnostic", input, input, input, task.id);
+      const response = await app.request("/api/workspaces/local/repos/r1/activity?view=history");
+      expect(response.status).toBe(200);
+      const { items } = await response.json();
+      expect(items[0]?.task_id).toBe(task.id);
+      for (const field of ["progress_summary", "wait_reason", "failure_reason", "error_summary"]) {
+        expect(items[0][field] === expected, field).toBe(true);
+      }
+    }
+  });
+
   it("binds filters, scopes and stable tie breaks before limiting rows", async () => {
     const { store, issue, agent } = setup();
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "sensitive prompt" });

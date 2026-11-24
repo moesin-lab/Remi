@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, access, cp, symlink,
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { assertCleanCandidate, runCleanups } from './check-schema-rollback.ts';
 import { rollbackPolicy } from './platform-rollback-policy.mjs';
@@ -40,13 +40,19 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
     await put('scripts/schema-rollback-identity.ts', `
       import assert from 'node:assert/strict';
       import { existsSync } from 'node:fs';
-      import { readFile } from 'node:fs/promises';
+      import { readFile, writeFile } from 'node:fs/promises';
       import { createHash } from 'node:crypto';
       export async function verifyPreparedRelease(root, manifest) {
         assert.equal(existsSync(process.cwd() + '/' + process.env.FIXTURE_OUTPUT), false,
           'stale evidence must be absent before identity verification');
         const bytes = await readFile(manifest);
         const previous = JSON.parse(bytes.toString('utf8'));
+        if (process.env.FIXTURE_MODE === 'identity-barrier') {
+          await writeFile(process.cwd() + '/ci-schema/identity-entered', 'waiting');
+          while (!existsSync(process.cwd() + '/ci-schema/identity-release')) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+        }
         if (previous.invalid) throw new Error('invalid prepared release identity');
         return { format: 1, mode: 'published-archive', publishedRef: previous.ref, actualPreviousRef: previous.ref,
           observedTagRef: 'b'.repeat(40), tagDrift: true,
@@ -91,7 +97,35 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
       console.log(JSON.stringify(report));
     `);
     await put('packages/platform-updater/src/schema-fingerprint.mjs', `export async function schemaLevelFingerprint() { return '${dataSchema}'; }`);
-    await put('packages/server/src/store/db/postgres.ts', `export class PostgresSyncDatabase { close() {} }`);
+    await put('scripts/fixture-drift.mjs', `
+      import { appendFileSync, writeFileSync } from 'node:fs';
+      import { execFileSync } from 'node:child_process';
+      export function mutateCandidate(kind) {
+        const cwd = process.cwd();
+        const head = () => execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+        const before = head();
+        const source = 'packages/server/src/store/migrations.ts';
+        if (kind === 'untracked') writeFileSync(cwd + '/unexpected-source.ts', 'export const drift = true;');
+        else appendFileSync(cwd + '/' + source, '\\nconsole.error("MUTATED_CANDIDATE_SOURCE_EXECUTED");\\n');
+        if (kind === 'head') {
+          execFileSync('git', ['add', source], { cwd });
+          execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            'commit', '-qm', 'concurrent candidate same schema level'], { cwd });
+        }
+        writeFileSync(cwd + '/ci-schema/drift-applied.json', JSON.stringify({ kind, before, after: head() }));
+      }
+    `);
+    await put('packages/server/src/store/db/postgres.ts', `
+      import { existsSync, readFileSync } from 'node:fs';
+      import { mutateCandidate } from '../../../../../scripts/fixture-drift.mjs';
+      export class PostgresSyncDatabase {
+        constructor() {
+          const trigger = process.cwd() + '/ci-schema/drift-in-candidate';
+          if (existsSync(trigger)) mutateCandidate(readFileSync(trigger, 'utf8'));
+        }
+        close() {}
+      }
+    `);
     await put('packages/server/src/store/schema-levels.ts', `
       import { readFileSync } from 'node:fs'; import { join } from 'node:path';
       export function readSchemaLevels() {
@@ -114,6 +148,7 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
       import assert from 'node:assert/strict';
       import { appendFileSync, writeFileSync, existsSync } from 'node:fs';
       import { spawnSync } from 'node:child_process';
+      import { mutateCandidate } from './scripts/fixture-drift.mjs';
       const evidence = process.cwd() + '/' + process.env.FIXTURE_OUTPUT;
       globalThis.Bun = {
         SQL: class {
@@ -125,10 +160,20 @@ async function fixture(run: (root: string, execute: Execute) => Promise<void>) {
           async close() {
             appendFileSync(process.cwd() + '/ci-schema/admin.log', 'closed\\n');
             if (process.env.FIXTURE_MODE === 'output-collision') writeFileSync(evidence, 'created by another writer');
+            if (process.env.FIXTURE_MODE?.startsWith('drift-publication-')) mutateCandidate(process.env.FIXTURE_MODE.split('-').at(-1));
           }
         },
         spawnSync(command, options) {
           writeFileSync(process.cwd() + '/ci-schema/temporary-home.txt', options.env.HOME);
+          const phase = command.at(-1);
+          if (phase === '--candidate-expand' || phase === '--read-schema') {
+            appendFileSync(process.cwd() + '/ci-schema/candidate-identity-env.jsonl', JSON.stringify({
+              phase, expectedRef: options.env.SCHEMA_ROLLBACK_EXPECTED_REF,
+              ownedArtifacts: options.env.SCHEMA_ROLLBACK_OWNED_ARTIFACTS,
+            }) + '\\n');
+            const stage = phase === '--candidate-expand' ? 'expand' : 'read';
+            if (process.env.FIXTURE_MODE?.startsWith('drift-' + stage + '-')) mutateCandidate(process.env.FIXTURE_MODE.split('-').at(-1));
+          }
           const result = spawnSync(command[0], ['--experimental-strip-types', ...command.slice(1)], options);
           return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status, signalCode: result.signal };
         }
@@ -175,6 +220,188 @@ function assertAcceptedEvidence(evidence: any) {
   assert.equal(sha256(evidence.previousManifest), evidence.previousIdentity.manifestSha256);
   assert.deepEqual(JSON.parse(evidence.previousManifest), evidence.previousRelease);
   assert.deepEqual(rollbackPolicy({ version: '0.2.96', ref: evidence.targetRef, dataSchema }, undefined, evidence), [previousRelease.dataSchema]);
+}
+
+const head = (root: string) => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+
+async function applyExternalDrift(root: string, kind: string) {
+  const source = 'packages/server/src/store/migrations.ts';
+  if (kind === 'untracked') await writeFile(join(root, 'unexpected-source.ts'), 'export const drift = true;');
+  else {
+    const migration = join(root, source);
+    await writeFile(migration, await readFile(migration, 'utf8') + '\nconsole.error("MUTATED_CANDIDATE_SOURCE_EXECUTED");\n');
+  }
+  if (kind === 'head') {
+    execFileSync('git', ['add', source], { cwd: root });
+    execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '-qm', 'concurrent candidate same schema level'], { cwd: root });
+  }
+}
+
+function assertDriftState(root: string, kind: string, expectedRef: string) {
+  const dirty = spawnSync('git', ['diff', '--quiet', 'HEAD'], { cwd: root }).status;
+  if (kind === 'head') {
+    assert.notEqual(head(root), expectedRef, 'The concurrent writer committed a different candidate');
+    assert.equal(dirty, 0, 'New HEAD remains clean and has the same schema level');
+  } else {
+    assert.equal(head(root), expectedRef, 'Source drift must not require a HEAD change');
+    assert.equal(dirty, kind === 'dirty' ? 1 : 0);
+    if (kind === 'untracked') {
+      assert.match(execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8' }),
+        /^unexpected-source\.ts$/m, 'Preserve the concurrent writer\'s untracked source');
+    }
+  }
+}
+
+/** A real concurrent writer changes the checkout while identity awaits I/O.
+ * The bounded barrier avoids timing assumptions about network verification. */
+async function executeDuringIdentity(root: string, change: () => Promise<void>) {
+  const child = spawn(process.execPath, ['--experimental-strip-types', '--import', join(root, 'bootstrap.mjs'),
+    join(root, 'scripts/check-schema-rollback.ts'), 'ci-schema/previous', 'ci-schema/previous-release.json', 'ci-schema/rollback-evidence.json'], {
+    cwd: root, env: { PATH: process.env.PATH, HOME: process.env.HOME, FIXTURE_MODE: 'identity-barrier',
+      FIXTURE_OUTPUT: 'ci-schema/rollback-evidence.json', MULTIREMI_TEST_POSTGRES_URL: 'postgres://test@127.0.0.1/postgres' },
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000,
+  });
+  let stderr = '', stdout = '', closed = false;
+  child.stderr.on('data', data => { stderr += data.toString(); });
+  child.stdout.on('data', data => { stdout += data.toString(); });
+  const finished = new Promise<number | null>(resolve => child.once('close', code => { closed = true; resolve(code); }));
+  try {
+    const deadline = Date.now() + 5000;
+    while (true) {
+      try { await access(join(root, 'ci-schema/identity-entered')); break; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      assert(!closed && Date.now() < deadline, `Checker did not reach identity barrier: ${stderr}`);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await change();
+    await writeFile(join(root, 'ci-schema/identity-release'), 'continue');
+    return { status: await finished, stderr, stdout };
+  } finally {
+    if (!closed) child.kill('SIGKILL');
+    await finished;
+  }
+}
+
+async function assertDriftFailure(root: string, result: { status: number | null; stderr: unknown }, output = 'ci-schema/rollback-evidence.json') {
+  assert.notEqual(result.status, 0, String(result.stderr));
+  await absent(join(root, output));
+  const diagnostic = JSON.parse(await readFile(join(root, dirname(output), 'rollback-diagnostics.json'), 'utf8'));
+  assert.equal(diagnostic.status, 'failed');
+  assert.match(diagnostic.error, /candidate|HEAD|git diff/i, 'Reject the changed candidate identity, not an unrelated fixture error');
+  assertNoDeclaration(diagnostic);
+  if (diagnostic.cleanup.length > 0) {
+    assert.deepEqual(diagnostic.cleanup.map(item => [item.name, item.status]), [
+      ['previous-probe', 'passed'], ['test-database', 'passed'], ['admin-connection', 'passed'], ['temporary-home', 'passed'],
+    ]);
+    assert.match(await readFile(join(root, 'ci-schema/admin.log'), 'utf8'), /CREATE DATABASE.*\nDROP DATABASE.*\nclosed\n/);
+    await absent(await readFile(join(root, 'ci-schema/temporary-home.txt'), 'utf8'));
+  } else {
+    await absent(join(root, 'ci-schema/admin.log'));
+    await absent(join(root, 'ci-schema/temporary-home.txt'));
+  }
+  await absent(join(root, 'ci-schema/previous/scripts/mul173-schema-rollback-probe.ts'));
+  for (const phase of diagnostic.phases) {
+    assert.doesNotMatch(await readFile(join(root, dirname(output), phase.stderr), 'utf8'), /MUTATED_CANDIDATE_SOURCE_EXECUTED/);
+  }
+  return diagnostic;
+}
+
+for (const kind of ['dirty', 'head', 'untracked']) {
+  test(`candidate ${kind} drift during asynchronous identity verification rejects evidence and retains diagnostics`, async () => {
+    await fixture(async root => {
+      const expectedRef = head(root);
+      const result = await executeDuringIdentity(root, async () => {
+        const diagnostic = await readJson(root, 'rollback-diagnostics.json');
+        assert.equal(diagnostic.status, 'running');
+        await applyExternalDrift(root, kind);
+      });
+      assertDriftState(root, kind, expectedRef);
+      const diagnostic = await assertDriftFailure(root, result);
+      assert.equal(diagnostic.targetRef, expectedRef, 'Failed diagnostics retain the original candidate SHA');
+      assert.deepEqual(diagnostic.cleanup, [], 'Identity drift must be detected before acquiring resources');
+      assert.deepEqual(diagnostic.phases, [], 'Do not start any probe using a changed candidate');
+    });
+  });
+}
+
+for (const stage of ['expand', 'read']) {
+  for (const kind of ['dirty', 'head']) {
+    test(`candidate ${stage} child rejects ${kind} drift after the parent check and before module loading`, async () => {
+      await fixture(async (root, execute) => {
+        const expectedRef = head(root);
+        const result = execute(`drift-${stage}-${kind}`);
+        const mutation = await readJson(root, 'drift-applied.json');
+        assert.equal(mutation.before, expectedRef);
+        assertDriftState(root, kind, expectedRef);
+        const diagnostic = await assertDriftFailure(root, result);
+        assert.equal(diagnostic.phases.at(-1).name, stage === 'expand' ? 'candidate-expand' : 'verify-schema-levels');
+        assert.equal(diagnostic.phases.at(-1).status, 'failed');
+        assert.match(await readFile(join(root, 'ci-schema', diagnostic.phases.at(-1).stderr), 'utf8'), /candidate|HEAD|git diff/i);
+      });
+    });
+  }
+}
+
+for (const kind of ['dirty', 'head']) {
+  test(`candidate phase rejects ${kind} drift after database construction before importing migrations`, async () => {
+    await fixture(async (root, execute) => {
+      const expectedRef = head(root);
+      await writeFile(join(root, 'ci-schema/drift-in-candidate'), kind);
+      const result = execute();
+      await readJson(root, 'drift-applied.json');
+      assertDriftState(root, kind, expectedRef);
+      const diagnostic = await assertDriftFailure(root, result);
+      assert.equal(diagnostic.phases.at(-1).name, 'candidate-expand');
+      assert.equal(diagnostic.phases.at(-1).status, 'failed');
+    });
+  });
+}
+
+for (const kind of ['dirty', 'head', 'untracked']) {
+  test(`candidate ${kind} drift during cleanup rejects final publication after every resource is cleaned`, async () => {
+    await fixture(async (root, execute) => {
+      const expectedRef = head(root);
+      // Root artifacts exercise the narrow exemption during final identity checks.
+      const result = execute(`drift-publication-${kind}`, 'rollback-evidence.json');
+      await readJson(root, 'drift-applied.json');
+      assertDriftState(root, kind, expectedRef);
+      const diagnostic = await assertDriftFailure(root, result, 'rollback-evidence.json');
+      assert.equal(diagnostic.phases.length, 4);
+      assert(diagnostic.phases.every(phase => phase.status === 'passed'));
+      assert.equal(diagnostic.cleanup.length, 4);
+    });
+  });
+}
+
+test('parent binds both candidate children to its original SHA and exact owned artifact paths', async () => {
+  await fixture(async (root, execute) => {
+    const expectedRef = head(root), output = 'rollback-evidence.json';
+    const result = execute('', output);
+    assert.equal(result.status, 0, String(result.stderr));
+    const records = (await readFile(join(root, 'ci-schema/candidate-identity-env.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(records.map(record => record.phase), ['--candidate-expand', '--read-schema']);
+    for (const record of records) {
+      assert.equal(record.expectedRef, expectedRef);
+      assert.deepEqual(JSON.parse(record.ownedArtifacts).sort(), ['rollback-diagnostics.json', 'rollback-logs'].map(path => join(root, path)).sort(),
+        'An unpublished evidence path is not owned and cannot exempt untracked source');
+    }
+    assertAcceptedEvidence(JSON.parse(await readFile(join(root, output), 'utf8')));
+  });
+});
+
+for (const phase of ['--candidate-expand', '--read-schema']) {
+  test(`direct ${phase} rejects missing expected SHA before touching modules or resources`, async () => {
+    await fixture(async root => {
+      const before = await snapshot(root);
+      const result = spawnSync(process.execPath, ['--experimental-strip-types', join(root, 'scripts/check-schema-rollback.ts'), phase], {
+        cwd: root, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME },
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(String(result.stderr), /SCHEMA_ROLLBACK_EXPECTED_REF|expected.*ref|expected.*SHA/i);
+      assert.deepEqual(await snapshot(root), before);
+    });
+  });
 }
 
 // Root output must not make its own diagnostics fail the candidate clean check.

@@ -132,7 +132,12 @@ API 不可用、签名失败、来源缺失或源码不符均阻断，不回退�
 发布/实际运行 ref、observed tag、来源验证结果及每阶段 stdout/stderr 路径。
 
 准备流程清除其旧成功证据；checker 必须从自身所在的候选仓库根运行，候选 SHA、指纹与实际迁移执行根
-必须一致，内部 expand/read 子进程也检查该根。任何写入或资源创建前，checker 验证候选干净且 evidence、
+必须一致，内部 expand/read 子进程也检查该根。主进程冻结最初 SHA，并通过环境将该 SHA 和本轮已独占
+创建的诊断、日志路径传给候选子进程。身份异步验证后、各阶段前后、候选模块加载与迁移执行前后以及
+清理后的成功证据发布前后，均复核 HEAD 和源码状态；同目录内 dirty 源码、同 level 的新提交或额外
+untracked 源码都会阻断。根目录输出仅豁免本轮已独占拥有的产物，尚未创建的 evidence 不在豁免内；
+现有 `ci-schema/` 生成输入约定不变，tracked 变化始终拒绝。该复核检测各边界观察到的变化，不锁定
+其他 writer；运行期间应保持候选 checkout 专用于本次检查。任何写入或资源创建前，checker 验证候选干净且 evidence、
 `rollback-diagnostics.json`、`rollback-logs/` 三个目标均不存在、互不重叠，并处于候选目录内、`.git` 外。
 目标不能与跟踪文件（含父子目录）、前版源码或 manifest 重叠，路径组件不能经过符号链接。
 预检失败只向 stderr 报错，不写诊断、不删除预存 tracked/untracked 内容；包括旧成功 evidence 在内的

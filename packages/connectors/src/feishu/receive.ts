@@ -69,7 +69,7 @@ import { buildMarkdownCard, getMessageFeishu, sendCardFeishu } from "./send.js";
 import { handleFormSubmission, handleButtonClick, hasPendingAction } from "./card-actions.js";
 import { handleIssueDecisionInteractionEvent, handleTaskInteractionEvent } from "./task-interaction.js";
 
-import { FeishuInboundRecovery, feishuRecoveryPath, recoverFeishuHistory, type FeishuInboundDelivery, type CommandReply } from "./inbound-recovery.js";
+import { FeishuAdmissionUnavailable, FeishuInboundRecovery, feishuRecoveryPath, recoverFeishuHistory, type FeishuInboundDelivery, type CommandReply } from "./inbound-recovery.js";
 
 // ── Dedup (persisted across restarts) ────────────────────────
 const DEDUP_TTL_MS = 30 * 60 * 1000;
@@ -432,14 +432,15 @@ export function parseFeishuMessageEvent(
   const rawContent = parseTextContent(event.message.content, event.message.message_type);
   const mentionedBot = checkBotMentioned(event, botOpenId);
   const content = stripBotMention(rawContent, event.message.mentions);
+  const senderIds = event.sender.sender_id ?? {};
 
   return {
     chatId: event.message.chat_id,
     messageId: event.message.message_id,
-    senderId: event.sender.sender_id.user_id || event.sender.sender_id.open_id || "",
-    senderOpenId: event.sender.sender_id.open_id || "",
-    senderUserId: event.sender.sender_id.user_id || "",
-    senderUnionId: event.sender.sender_id.union_id || "",
+    senderId: senderIds.user_id || senderIds.open_id || "",
+    senderOpenId: senderIds.open_id || "",
+    senderUserId: senderIds.user_id || "",
+    senderUnionId: senderIds.union_id || "",
     senderTenantKey: event.sender.tenant_key || "",
     chatType: event.message.chat_type,
     mentionedBot,
@@ -586,7 +587,7 @@ export async function processFeishuMessageEvent(
   }
   if (admission?.durableIntake && event.message.chat_type === "group"
       && event.message.mentions?.length && !botOpenId) {
-    throw new Error("Feishu bot identity unavailable for durable group admission");
+    throw new FeishuAdmissionUnavailable("Feishu bot identity unavailable for durable group admission");
   }
 
   // Dedup
@@ -626,14 +627,14 @@ export async function processFeishuMessageEvent(
   if (admission.classify && !admission.classify(ctx, monitored)) return null;
   const shouldNotifyAdmissionDenial = !monitored && event.recovery_source !== "history";
   if (admission.durableIntake && !ctx.senderOpenId && !ctx.senderUserId && !ctx.senderUnionId) {
-    throw new Error("Feishu sender identity temporarily unavailable");
+    throw new FeishuAdmissionUnavailable("Feishu sender identity temporarily unavailable");
   }
   let admitted = false;
   try {
     admitted = Boolean(ctx.senderOpenId || ctx.senderUnionId || ctx.senderUserId)
       && await admission.authorizeSender(ctx.senderOpenId, ctx);
   } catch {
-    if (admission.durableIntake) throw new Error("Feishu sender admission temporarily unavailable");
+    if (admission.durableIntake) throw new FeishuAdmissionUnavailable("Feishu sender admission temporarily unavailable");
     log.error("Feishu sender authorization unavailable");
     logDroppedGroupMessage(event, "membership_unavailable", "warn");
     return shouldNotifyAdmissionDenial
@@ -866,7 +867,7 @@ export function createFeishuInboundDelivery(options: {
         const semantic = describeFeishuCommand({ domain, app_id: appId, external_message_id: id,
           sender_open_id: context.senderOpenId, external_session_key: feishuSessionKey(context),
           chat_id: context.chatId, raw_content: context.content });
-        if (!context.senderOpenId) throw new Error("Feishu sender identity temporarily unavailable");
+        if (!context.senderOpenId) throw new FeishuAdmissionUnavailable("Feishu sender identity temporarily unavailable");
         const digest = feishuCommandDigest(semantic);
         if ((previous.digest && digest !== previous.digest) || (previous.botId && previous.botId !== runtime?.botId)) return false;
         if (previous.legacyPending && event.recovery_source !== "history" && ["stop", "new"].includes(semantic.name)) {
@@ -949,7 +950,12 @@ export function createFeishuInboundDelivery(options: {
         denied, chatId: context.chatId, replyTo: denied || inThread ? id : undefined };
       active.checkpoint(id, { reply });
     }
-    if (!reply.denied && !await authorizeSender(context.senderOpenId, context)) return;
+    if (!reply.denied) {
+      const authorized = await authorizeSender(context.senderOpenId, context).catch(() => {
+        throw new FeishuAdmissionUnavailable("Feishu sender admission temporarily unavailable");
+      });
+      if (!authorized) return;
+    }
     checkActive();
     const sent = await sendJournaledReply(client, active, id, reply);
     if (sent && !reply.denied && runtime) await setFeishuMessageReceipt(client, JSON.stringify([domain, appId]), id, "completed").catch(() => {});
@@ -984,7 +990,7 @@ export function startWebSocketListener(
     if (recovering) return recovering;
     recovering = recoverFeishuHistory({ journal: recovery, deliver,
       list: params => client.im.message.list({ params }),
-      warn: (id, reason) => log.warn(`skipped Feishu recovery chat_hash=${hashIdentifier(id)} reason=${reason}`),
+      warn: (id, reason) => log.warn(`Feishu recovery chat_hash=${hashIdentifier(id)} reason=${reason}`),
     }).catch(error => {
       log.warn(`Feishu inbound recovery pending: ${redactFeishuError(error, [creds.appId, creds.appSecret])}`);
     }).finally(() => {

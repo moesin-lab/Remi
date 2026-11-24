@@ -3,6 +3,7 @@ import { LIVE_TERM_SCHEMA } from './live-term-fence.js';
 import { expandSecurityState } from './security-state-schema.js';
 import { expandAuthorityProvenance } from './authority-provenance-schema.js';
 import { expandRootGrants } from './root-grant-schema.js';
+import { expandRootManagement } from './root-management-schema.js';
 import type { SchemaMigration } from './schema-migration-runner.js';
 
 /** Historical bootstrap is frozen at level 0. New DDL belongs in this list;
@@ -28,4 +29,7 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
 }, {
   id: '20261124_root_grants', phase: 'expand', level: 4,
   expandRelease: '0.2.95', release: '0.2.95', run: expandRootGrants,
+}, {
+  id: '20261124_root_management', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandRootManagement,
 }];

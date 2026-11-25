@@ -45,6 +45,29 @@ afterEach(() => {
 });
 
 describe("native CLI resource contracts", () => {
+  it("reads project attempts from the HTTP route and formats only public summary codes", async () => {
+    const { createMultiremiApp } = await import("@multiremi/api.js");
+    const fixture = await import("../multiremi/helpers.js");
+    const store = fixture.createLocalStore();
+    try {
+      const project = store.createProject({title:"Activity"});
+      const issue = store.createIssue({title:"Build",projectId:project.id});
+      const agent = store.createAgent({name:"Ada",provider:"claude"});
+      const task = store.createTask({agentId:agent.id,issueId:issue.id,prompt:"private"});
+      const update = fixture.db!.prepare("UPDATE multiremi_turn_attempts SET status='failed',failure_reason=?,error='private' WHERE id=?");
+      const app = createMultiremiApp({store});
+      useCliEnv();
+      const spec = specById("project.activity");
+      globalThis.fetch = mockFetch(spec.id, [], request => app.request(new URL(request.url).pathname + new URL(request.url).search));
+      const args = [project.id,"--view","history","--status","failed","--agent-id",agent.id,"--query","Build"];
+      update.run("agent_error.context_overflow",task.id);
+      expect(await execute(spec,args)).toContain("Context limit exceeded");
+      update.run("private",task.id);
+      const result = JSON.parse(await execute(spec,[...args,"--output","json"]));
+      expect(result.items[0]).toMatchObject({attempt_id:task.id,public_summary:null});
+      expect(JSON.stringify(result)).not.toContain("private");
+    } finally { fixture.resetMultiremiTestEnv(); }
+  });
   it("routes account compatibility aliases to the authenticated account and lists one workspace operator", async () => {
     useCliEnv();
     console.log = () => {}; console.error = () => {};

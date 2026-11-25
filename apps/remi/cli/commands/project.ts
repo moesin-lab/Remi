@@ -20,6 +20,22 @@ import {
   stringOptions,
 } from "./resource-common.js";
 import { resolveRepository } from "./repo.js";
+import type { ProjectActivityResponse, ProjectActivitySummary } from "@multiremi/contracts/types.js";
+
+function activitySummary(summary: ProjectActivitySummary | null): string {
+  switch (summary?.code) {
+    case "step_progress": return Number.isInteger(summary.step) && Number.isInteger(summary.total) && summary.step >= 0 && summary.total > 0 && summary.step <= summary.total && summary.total <= 1_000_000 ? `${summary.step}/${summary.total}` : "—";
+    case "queued": return "Queued";
+    case "dispatched": return "Dispatched";
+    case "needs_directory": return "Waiting for directory";
+    case "needs_human": return "Waiting for input";
+    case "completed": return "Completed";
+    case "cancelled": return "Cancelled";
+    case "context_overflow": return "Context limit exceeded";
+    case "offer_too_large": return "Offer too large";
+    default: return "—";
+  }
+}
 
 const PROJECT_FIELDS: readonly CliOptionSpec[] = [
   { name: "title", type: "string", valueName: "title", description: "Project title" },
@@ -53,6 +69,21 @@ export function projectCommandSpecs(): CommandSpec[] {
     spec("project.get", ["project", "get"], "Get a project", "read", ["human", "task"], [refPositional("project")], PAGE_OPTIONS, async (invocation) => {
       const client = await clientFor(invocation);
       renderResource(invocation, await resolveProject(client, requiredWorkspace(invocation), positional(invocation, 0, "project")));
+    }),
+    spec("project.activity", ["project", "activity"], "List execution attempts in a project", "read", ["human", "task"], [refPositional("project-id")], [
+      { name: "view", type: "string", description: "active or history" },
+      { name: "status", type: "string", description: "Filter attempt status" },
+      { name: "agent-id", type: "string", description: "Filter executing agent" },
+      { name: "from", type: "string", description: "Inclusive UTC creation timestamp" },
+      { name: "to", type: "string", description: "Exclusive UTC creation timestamp" },
+    ], async invocation => {
+      const client = await clientFor(invocation);
+      const { data } = await client.request<ProjectActivityResponse>({ method: "GET", path: `/api/projects/${encodePath(positional(invocation,0,"project-id"))}/activity`,
+        query: queryOptions(invocation, { view: stringOption(invocation,"view"), status: stringOption(invocation,"status"), agent_id: stringOption(invocation,"agent-id"), from: stringOption(invocation,"from"), to: stringOption(invocation,"to") }) });
+      new CliRenderer().render(data, { mode: outputMode(invocation), rows: () => data.items, columns: [
+        {header:"ATTEMPT",value:row=>row.attempt_id}, {header:"ISSUE",value:row=>row.issue.key}, {header:"AGENT",value:row=>row.agent.name}, {header:"STATUS",value:row=>row.status},
+        {header:"PROGRESS",value:row=>activitySummary(row.public_summary)},
+      ] });
     }),
     spec("project.defaults", ["project", "defaults"], "Show project issue defaults", "read", ["human", "task"], [refPositional("project")], [], async (invocation) => {
       const client = await clientFor(invocation);

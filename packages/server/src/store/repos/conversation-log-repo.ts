@@ -130,9 +130,10 @@ export class ConversationLogRepo {
         wake_requested:'inbox_only',metadata:input.metadata,visibility:input.visibility==='hidden'?'hidden':'shown'},events);
       afterCommit(ctx.db,()=>ctx.emitCommitEvents(events));return result.message.seq;
     });
-    registerTurnChangeHook(ctx.db, (turnId,created,revisions) => {
-      const row=ctx.db.query("SELECT session_id,seq FROM multiremi_turns WHERE id=?").get(turnId);
+    registerTurnChangeHook(ctx.db, (turnId,created,revisions,activity) => {
+      const row=ctx.db.query("SELECT session_id,seq,workspace_id,issue_id,chat_session_id FROM multiremi_turns WHERE id=?").get(turnId);
       if (!row) return;
+      if (activity && row.issue_id && !row.chat_session_id) ctx.notifyIssueProjectActivity(row.workspace_id,row.issue_id);
       ctx.db.run("UPDATE multiremi_conversation_log SET revision=revision+?,updated_at=? WHERE session_id=? AND seq=?",[revisions,nowIso(),row.session_id,row.seq]);
       ctx.db.run("UPDATE multiremi_conversation_heads SET log_version=log_version+?,updated_at=? WHERE session_id=?",
         [revisions,nowIso(),row.session_id]);
@@ -828,7 +829,7 @@ export class ConversationLogRepo {
     const keys=Object.keys(values);
     if(keys.length)this.ctx.db.run(`UPDATE multiremi_turn_attempts SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,[...keys.map(k=>values[k]),taskId]);
     if(fields.finalEntryId!==undefined&&fields.finalEntryId!==null)this.ctx.db.run('UPDATE multiremi_turns SET reply_message_id=? WHERE id=? AND current_attempt_id=?',[fields.finalEntryId,attempt.turn_id,taskId]);
-    notifyTurnChanged(this.ctx.db,attempt.turn_id);
+    notifyTurnChanged(this.ctx.db,attempt.turn_id,false,fields.failureReason !== undefined);
     return materialize ? this.findTurnEntry(taskId) : null;
   }
   recordTurnInboxDeliveryWithinTransaction(taskId:string,fromSeq:number,toSeq:number):ConversationLogEntry|null {

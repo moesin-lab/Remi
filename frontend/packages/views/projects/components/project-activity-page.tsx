@@ -54,7 +54,11 @@ const AttemptRow = memo(function AttemptRow({ row, workspace, now }: { row: Atte
   const [expanded, setExpanded] = useState(false);
   const status = statuses.find((value) => value === row.status);
   const active = activityStatuses.active.some((value) => value === status);
-  const end = row.ended_at ? Date.parse(row.ended_at) : active ? now : NaN;
+  let end = row.ended_at ? Date.parse(row.ended_at) : NaN;
+  if (active && row.ended_at === null) {
+    const start = Date.parse(row.started_at ?? row.created_at ?? "");
+    end = start > now ? Date.now() : now;
+  }
   const queued = ["queued", "dispatched", "waiting_local_directory"].includes(row.status);
   const queueEnd = row.started_at ? Date.parse(row.started_at) : queued ? end : NaN;
   const updated = Date.parse(row.updated_at ?? "");

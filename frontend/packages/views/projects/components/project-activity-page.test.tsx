@@ -155,6 +155,42 @@ it("separates read errors, no matches, unknown durations and collected worktrees
   expect(await screen.findByText("No linked PRs.")).toBeVisible();
 });
 
+it.each([
+  ["queued", "Queue time", null, "2026-11-25T00:00:08Z", "2 sec"],
+  ["running", "Run time", "2026-11-25T00:00:08Z", "2026-11-25T00:00:00Z", "2 sec"],
+  ["queued", "Queue time", null, "2026-11-25T00:00:12Z", "—"],
+  ["failed", "Run time", "2026-11-25T00:00:08Z", null, "—"],
+] as const)("shows %s %s on first appearance between ticks (%s, %s)", async (status, label, started_at, created_at, elapsed) => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-25T00:00:00Z"));
+  try {
+    vi.mocked(api.listProjectActivity).mockResolvedValueOnce({ ...page, items: [] });
+    const { client } = mount(status === "failed" ? "view=history" : "");
+    await screen.findByText("No attempts match these filters.");
+    clock.mockReturnValue(Date.parse("2026-11-25T00:00:10Z"));
+    vi.mocked(api.listProjectActivity).mockResolvedValueOnce({ ...page, items: [{ ...row, status, started_at, created_at,
+      ended_at: status === "failed" ? "2026-11-25T00:00:07Z" : null }] });
+    await act(async () => { await client.invalidateQueries({ queryKey: ["project-activity"] }); });
+    expect(await screen.findByRole("listitem")).toHaveTextContent(`${label} · ${elapsed}`);
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+it("skips duration rendering for all 30 unchanged active rows on a silent refresh", async () => {
+  const items = Array.from({ length: 30 }, (_, index) => ({ ...row, attempt_id: `running-${index}`, status: "running", ended_at: null }));
+  vi.mocked(api.listProjectActivity).mockResolvedValue({ ...page, items });
+  const { client } = mount("");
+  expect(await screen.findAllByRole("listitem")).toHaveLength(30);
+  const format = vi.spyOn(Intl, "NumberFormat");
+  try {
+    vi.mocked(api.listProjectActivity).mockResolvedValue({ ...page, items: structuredClone(items), as_of: "2026-11-25T00:04:01Z" });
+    await act(async () => { await client.invalidateQueries({ queryKey: ["project-activity"] }); });
+    expect(format).not.toHaveBeenCalled();
+  } finally {
+    format.mockRestore();
+  }
+});
+
 it("ignores a late read after switching projects", async () => {
   let finish!: (data: ActivityPage) => void;
   vi.mocked(api.listProjectActivity).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValueOnce({ ...page, items: [] });

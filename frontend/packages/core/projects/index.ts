@@ -21,3 +21,5 @@ export {
   useReplaceProjectDevices,
   useDeleteProjectDevice,
 } from "./device-queries";
+export { projectActivityOptions, activityFilters, activityStatuses } from "./activity";
+export type { ActivityPage } from "../api/schemas/project-activity";

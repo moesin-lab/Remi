@@ -37,6 +37,7 @@ function workspaceScoped(slug: string) {
     repositoryWikiPage: (id: string, path: string) =>
       `${ws}/repos/${encode(id)}/wiki/${path.split("/").map(encode).join("/")}`,
     projectDetail: (id: string) => `${ws}/projects/${encode(id)}`,
+    projectActivity: (id: string) => `${ws}/projects/${encode(id)}/activity`,
     projectWiki: (id: string) => `${ws}/projects/${encode(id)}/wiki`,
     projectWikiPage: (id: string, ref: string) =>
       `${ws}/projects/${encode(id)}/wiki/${encode(ref)}`,

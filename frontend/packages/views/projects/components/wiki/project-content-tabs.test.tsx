@@ -15,6 +15,7 @@ vi.mock("@multiremi/core/paths", () => ({
   useWorkspacePaths: () => ({
     projectDetail: (id: string) => `/ws/projects/${id}`,
     projectWiki: (id: string) => `/ws/projects/${id}/wiki`,
+    projectActivity: (id: string) => `/ws/projects/${id}/activity`,
   }),
 }));
 
@@ -56,6 +57,12 @@ function renderTabs(
 }
 
 describe("ProjectContentTabs", () => {
+  it("links the executions tab without mounting the executions panel on Issues", () => {
+    const push = renderTabs();
+    fireEvent.click(screen.getByRole("tab", { name: "Executions" }));
+    expect(push).toHaveBeenCalledWith("/ws/projects/proj-1/activity");
+    expect(screen.getByText("issues board")).toBeInTheDocument();
+  });
   it("shows the branch the route asked for, not one it tracks itself", () => {
     renderTabs();
 

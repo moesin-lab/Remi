@@ -176,6 +176,23 @@ it.each([
   }
 });
 
+it.each([
+  ["running", "2026-11-25T00:00:12Z", null, "—", "—"],
+  ["completed", "2026-11-25T00:00:02Z", "2026-11-25T00:01:00Z", "2 sec", "—"],
+  ["completed", "2026-11-25T00:00:02Z", "2026-11-25T00:00:10Z", "2 sec", "8 sec"],
+] as const)("validates queue and run endpoints independently for %s (%s, %s)", async (status, started_at, ended_at, queue, run) => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-25T00:00:10Z"));
+  try {
+    vi.mocked(api.listProjectActivity).mockResolvedValue({ ...page, items: [{ ...row, status, created_at: "2026-11-25T00:00:00Z", started_at, ended_at }] });
+    mount(status === "running" ? "" : "view=history");
+    const attempt = within(await screen.findByRole("listitem"));
+    expect(attempt.getByText(`Queue time · ${queue}`)).toBeVisible();
+    expect(attempt.getByText(`Run time · ${run}`)).toBeVisible();
+  } finally {
+    clock.mockRestore();
+  }
+});
+
 it("skips duration rendering for all 30 unchanged active rows on a silent refresh", async () => {
   const items = Array.from({ length: 30 }, (_, index) => ({ ...row, attempt_id: `running-${index}`, status: "running", ended_at: null }));
   vi.mocked(api.listProjectActivity).mockResolvedValue({ ...page, items });

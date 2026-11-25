@@ -33,7 +33,7 @@ export function listProjectActivity(db: SqlDatabase, scope: ProjectActivityScope
   const limit = Number(params.limit?.trim() || 30);
   const from = timestamp(params.from), to = timestamp(params.to);
   if ((view !== "active" && view !== "history") || (status && !states[view]!.includes(status as ProjectActivityStatus)) || !Number.isInteger(limit) || limit < 1 || limit > 100 || (from && to && from >= to)) throw new ProjectActivityQueryError("invalid activity filters");
-  const agent = params.agent_id?.trim() || null, search = params.q?.trim().toLowerCase() || null;
+  const agent = params.agent_id?.trim() || null, search = params.q?.trim().replace(/[A-Z]/g, letter => letter.toLowerCase()) || null;
   const binding = createHash("sha256").update(JSON.stringify([scope.workspaceId, scope.projectId, scope.taskId, scope.privateAgentOwner, scope.identity, view, status || null, agent, search, from, to, limit])).digest("base64url");
   const selected = status ? [status] : states[view]!;
   const conditions = [`status IN (${selected.map(() => "?").join(",")})`];
@@ -42,7 +42,8 @@ export function listProjectActivity(db: SqlDatabase, scope: ProjectActivityScope
   if (scope.privateAgentOwner !== null) { conditions.push("(visibility <> 'private' OR owner_id=?)"); args.push(scope.privateAgentOwner); }
   if (agent) { conditions.push("agent_id=?"); args.push(agent); }
   if (search) {
-    conditions.push("(lower(issue_key) LIKE ? ESCAPE '!' OR lower(issue_title) LIKE ? ESCAPE '!')");
+    const collation = db.dialect === "postgres" ? ' COLLATE "C"' : "";
+    conditions.push(`(lower(issue_key${collation}) LIKE ? ESCAPE '!' OR lower(issue_title${collation}) LIKE ? ESCAPE '!')`);
     const pattern = `%${search.replace(/[!%_]/g, "!$&")}%`;
     args.push(pattern, pattern);
   }

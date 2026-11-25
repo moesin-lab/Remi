@@ -52,6 +52,20 @@ pendingTurnBackendTests("Project activity", fixture => {
     }
   });
 
+  it("preserves non-ASCII titles and literal wildcards when folding ASCII search filters", async () => {
+    const { store, issue, agent, project, task, read, app, url } = setup();
+    store.updateIssue(issue.id, { title: "ÉTUDE 100%_" });
+    const other = store.createIssue({ title: "ÉTUDE 100XY", projectId: project.id });
+    store.createTask({ agentId: agent.id, issueId: other.id, prompt: "test" });
+    const page = await read("q=ÉTUDE&limit=1");
+    expect(page.has_more).toBe(true);
+    const next = await read(`q=Étude&limit=1&cursor=${page.next_cursor}`);
+    expect(next.items).toHaveLength(1);
+    expect(next.items[0].attempt_id).not.toBe(page.items[0].attempt_id);
+    expect((await read(`q=${encodeURIComponent("ÉTUDE 100%_")}`)).items.map(item => item.attempt_id)).toEqual([task.id]);
+    expect((await app.request(`${url}?q=étude&limit=1&cursor=${page.next_cursor}`)).status).toBe(400);
+  });
+
   it("only emits closed summary codes and bounded running step counts over HTTP", async () => {
     const { db,task,read } = setup();
     const unsafe = String.raw`private diagnostic C:\fixture\secret /fixture/access_token`;

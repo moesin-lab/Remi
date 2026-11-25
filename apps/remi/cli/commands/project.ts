@@ -22,9 +22,23 @@ import {
 import { resolveRepository } from "./repo.js";
 import type { ProjectActivityResponse, ProjectActivitySummary } from "@multiremi/contracts/types.js";
 
+function projectPublicSummary(summary: ProjectActivitySummary | null): ProjectActivitySummary | null {
+  switch (summary?.code) {
+    case "step_progress": {
+      const { step, total } = summary;
+      return Number.isInteger(step) && Number.isInteger(total) && step >= 0 && total >= 1 && step <= total && total <= 1_000_000
+        ? { code: "step_progress", step, total } : null;
+    }
+    case "queued": case "dispatched": case "needs_directory": case "needs_human":
+    case "completed": case "cancelled": case "context_overflow": case "offer_too_large":
+      return { code: summary.code };
+    default: return null;
+  }
+}
+
 function activitySummary(summary: ProjectActivitySummary | null): string {
   switch (summary?.code) {
-    case "step_progress": return Number.isInteger(summary.step) && Number.isInteger(summary.total) && summary.step >= 0 && summary.total > 0 && summary.step <= summary.total && summary.total <= 1_000_000 ? `${summary.step}/${summary.total}` : "—";
+    case "step_progress": return `${summary.step}/${summary.total}`;
     case "queued": return "Queued";
     case "dispatched": return "Dispatched";
     case "needs_directory": return "Waiting for directory";
@@ -80,7 +94,8 @@ export function projectCommandSpecs(): CommandSpec[] {
       const client = await clientFor(invocation);
       const { data } = await client.request<ProjectActivityResponse>({ method: "GET", path: `/api/projects/${encodePath(positional(invocation,0,"project-id"))}/activity`,
         query: queryOptions(invocation, { view: stringOption(invocation,"view"), status: stringOption(invocation,"status"), agent_id: stringOption(invocation,"agent-id"), from: stringOption(invocation,"from"), to: stringOption(invocation,"to") }) });
-      new CliRenderer().render(data, { mode: outputMode(invocation), rows: () => data.items, columns: [
+      const items = data.items.map(item => ({ ...item, public_summary: projectPublicSummary(item.public_summary) }));
+      new CliRenderer().render({ ...data, items }, { mode: outputMode(invocation), rows: () => items, columns: [
         {header:"ATTEMPT",value:row=>row.attempt_id}, {header:"ISSUE",value:row=>row.issue.key}, {header:"AGENT",value:row=>row.agent.name}, {header:"STATUS",value:row=>row.status},
         {header:"PROGRESS",value:row=>activitySummary(row.public_summary)},
       ] });

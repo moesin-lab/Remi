@@ -45,6 +45,37 @@ afterEach(() => {
 });
 
 describe("native CLI resource contracts", () => {
+  it("projects public summaries before rendering every project activity output mode", async () => {
+    useCliEnv();
+    const spec = specById("project.activity");
+    const summaries = [
+      { code: "queued", extra: "SYNTHETIC_ONLY" },
+      { code: "step_progress", step: 0, total: 1_000_000, extra: "SYNTHETIC_ONLY" },
+      { code: "SYNTHETIC_ONLY" },
+      { code: "step_progress", step: 2, total: 1 },
+      { code: "step_progress", step: 1, total: 1_000_001 },
+    ];
+    const items = summaries.map((public_summary, index) => ({
+      attempt_id: `attempt-${index}`, issue: { key: "MUL-7" }, agent: { name: "Ada" }, status: "queued", public_summary,
+    }));
+    const pagination = { has_more: true, next_cursor: "next", as_of: "2026-11-25T00:00:00.000Z" };
+    globalThis.fetch = mockFetch(spec.id, [], () => Response.json({ items, ...pagination }));
+    const expected = [{ code: "queued" }, { code: "step_progress", step: 0, total: 1_000_000 }, null, null, null];
+    for (const mode of ["table", "json", "jsonl"]) {
+      const output = await execute(spec, ["project-id", "--output", mode]);
+      expect(output).not.toContain("SYNTHETIC_ONLY");
+      if (mode === "table") {
+        expect(output).toContain("Queued");
+        expect(output).toContain("0/1000000");
+        expect(output.match(/—/g)).toHaveLength(3);
+      } else {
+        const rows = mode === "json" ? JSON.parse(output).items : output.split("\n").map(line => JSON.parse(line));
+        expect(rows.map((row: { public_summary: unknown }) => row.public_summary)).toEqual(expected);
+        if (mode === "json") expect(JSON.parse(output)).toMatchObject(pagination);
+      }
+    }
+  });
+
   it("reads project attempts from the HTTP route and formats only public summary codes", async () => {
     const { createMultiremiApp } = await import("@multiremi/api.js");
     const fixture = await import("../multiremi/helpers.js");

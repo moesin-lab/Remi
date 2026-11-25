@@ -131,9 +131,12 @@ export class ConversationLogRepo {
       afterCommit(ctx.db,()=>ctx.emitCommitEvents(events));return result.message.seq;
     });
     registerTurnChangeHook(ctx.db, (turnId,created,revisions,activity) => {
-      const row=ctx.db.query("SELECT session_id,seq,workspace_id,issue_id,chat_session_id FROM multiremi_turns WHERE id=?").get(turnId);
+      const row = ctx.db.query(activity
+        ? `SELECT t.session_id,t.seq,t.workspace_id,i.project_id FROM multiremi_turns t
+           LEFT JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id AND t.chat_session_id IS NULL WHERE t.id=?`
+        : "SELECT session_id,seq FROM multiremi_turns WHERE id=?").get(turnId);
       if (!row) return;
-      if (activity && row.issue_id && !row.chat_session_id) ctx.notifyIssueProjectActivity(row.workspace_id,row.issue_id);
+      if (row.project_id) ctx.notifyProjectActivity(row.workspace_id, [row.project_id]);
       ctx.db.run("UPDATE multiremi_conversation_log SET revision=revision+?,updated_at=? WHERE session_id=? AND seq=?",[revisions,nowIso(),row.session_id,row.seq]);
       ctx.db.run("UPDATE multiremi_conversation_heads SET log_version=log_version+?,updated_at=? WHERE session_id=?",
         [revisions,nowIso(),row.session_id]);

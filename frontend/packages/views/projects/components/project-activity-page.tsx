@@ -39,9 +39,10 @@ function useActivityClock(active: boolean) {
   return now;
 }
 
-function span(start: string | null, end: number, locale: string) {
-  const seconds = start ? Math.floor((end - Date.parse(start)) / 1000) : NaN;
-  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+function span(start: string | null, end: number, observedAt: number, locale: string) {
+  const beginning = Date.parse(start ?? "");
+  if (!(beginning <= end && end <= observedAt)) return "—";
+  const seconds = Math.floor((end - beginning) / 1000);
   const unit = seconds < 60 ? "second" : seconds < 3600 ? "minute" : "hour";
   const divisor = unit === "second" ? 1 : unit === "minute" ? 60 : 3600;
   return new Intl.NumberFormat(locale, { style: "unit", unit, maximumFractionDigits: unit === "hour" ? 1 : 0 }).format(seconds / divisor);
@@ -54,10 +55,11 @@ const AttemptRow = memo(function AttemptRow({ row, workspace, now }: { row: Atte
   const [expanded, setExpanded] = useState(false);
   const status = statuses.find((value) => value === row.status);
   const active = activityStatuses.active.some((value) => value === status);
+  const observedAt = Date.now();
   let end = row.ended_at ? Date.parse(row.ended_at) : NaN;
   if (active && row.ended_at === null) {
     const start = Date.parse(row.started_at ?? row.created_at ?? "");
-    end = start > now ? Date.now() : now;
+    end = start > now ? observedAt : now;
   }
   const queued = ["queued", "dispatched", "waiting_local_directory"].includes(row.status);
   const queueEnd = row.started_at ? Date.parse(row.started_at) : queued ? end : NaN;
@@ -79,8 +81,8 @@ const AttemptRow = memo(function AttemptRow({ row, workspace, now }: { row: Atte
     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
       <span>{t(($) => $.activity.attempt, { number: row.attempt_no })} · {row.attempt_id}</span>
       <span>Turn · {row.turn_id}</span>
-      <span>{t(($) => $.activity.queueTime)} · {span(row.created_at, queueEnd, i18n.language)}</span>
-      <span>{t(($) => $.activity.runTime)} · {span(row.started_at, end, i18n.language)}</span>
+      <span>{t(($) => $.activity.queueTime)} · {span(row.created_at, queueEnd, observedAt, i18n.language)}</span>
+      <span>{t(($) => $.activity.runTime)} · {span(row.started_at, end, observedAt, i18n.language)}</span>
       <span>{t(($) => $.activity.updated)} · {Number.isFinite(updated) ? new Date(updated).toLocaleString(i18n.language) : "—"}</span>
     </div>
     <button type="button" aria-expanded={expanded} className="text-xs text-primary hover:underline" onClick={() => setExpanded(!expanded)}>

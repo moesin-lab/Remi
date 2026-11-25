@@ -1,5 +1,5 @@
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
   DAEMON_HEARTBEAT_INTERVAL_MS,
 } from "@multiremi/contracts/daemon-protocol.js";
@@ -12,15 +12,13 @@ import {
 } from "@multiremi/contracts/types.js";
 import { runtimeCapabilitiesInFrame } from "../../fixtures/daemon-protocol.js";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
-import { useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
-
-useMigratedIntegrationDatabases();
+import { openIntegrationDatabase, useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
 
 const fixtures: DaemonProtocolHarness[] = [];
 const releaseProviders: Array<() => void> = [];
 const savedEnvironment = new Map<string, string | undefined>();
 
-beforeEach(() => {
+beforeAll(() => {
   for (const [key, value] of Object.entries({
     MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY: Buffer.alloc(32, 11).toString("base64"),
     MULTIREMI_PUBLIC_URL: "https://remi.example.com",
@@ -35,6 +33,9 @@ beforeEach(() => {
 afterEach(async () => {
   for (const release of releaseProviders.splice(0)) release();
   for (const h of fixtures.splice(0)) await h.dispose();
+});
+
+afterAll(() => {
   for (const [key, value] of savedEnvironment) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -42,8 +43,16 @@ afterEach(async () => {
   savedEnvironment.clear();
 });
 
+// Warm under the same environment as the cases. Cold migration belongs to
+// suite setup; every case still gets an independent DB and a real new Store.
+useMigratedIntegrationDatabases();
+beforeAll(async () => {
+  const database = await openIntegrationDatabase();
+  await database.close();
+}, 30_000);
+
 async function fixture(options: Parameters<typeof DaemonProtocolHarness.create>[0] = {}) {
-  const h = await DaemonProtocolHarness.create(options);
+  const h = await DaemonProtocolHarness.create({ ...options, database: options.database ?? await openIntegrationDatabase() });
   fixtures.push(h);
   return h;
 }

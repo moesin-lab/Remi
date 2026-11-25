@@ -60,6 +60,11 @@ HTTP listener ready、任务 `running` 和 daemon protocol drain 各自都不足
 
 ## 后端测试入口
 
+`runtime-capabilities` 套件在固定测试环境下先预热集成数据库镜像，再向 daemon
+harness 传入每例独立的数据库；harness 负责关闭它。普通能力断言不重复承担冷迁移，
+新 Store 仍走真实迁移入口，迁移专项仍使用 fresh 数据库。
+
+
 ```bash
 bun run test tests/unit/multiremi/multiremi-api-issues.test.ts
 bun run test tests/arch/

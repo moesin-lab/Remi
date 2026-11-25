@@ -3395,15 +3395,15 @@ export class TasksRepo {
       // same workspace lock. Holding it through claim + snapshot prevents a
       // mutable capability change from slipping between dispatch and freeze.
       this.ctx.agentPlugins().lockAgentPluginWorkspace(runtime.workspaceId ?? "local");
-      const lockedRuntime = this.ctx.runtimes().getRuntimeForDispatch(runtimeId);
-      if (!lockedRuntime || (lockedRuntime.workspaceId ?? "local") !== (runtime.workspaceId ?? "local")) {
+      const claim = this.ctx.runtimes().heartbeatForClaim(runtimeId, runtime.workspaceId ?? "local");
+      if (!claim) {
         throw new AgentPluginReadinessChangedError("Runtime changed during task claim");
       }
-      this.ctx.runtimes().heartbeatRuntime(runtimeId, { claimPending: false });
+      const lockedRuntime = claim.runtime;
 
       // Manual, deployment and CLI-update drains share a persisted physical-daemon
       // fence, serialized with begin/undrain by the workspace lifecycle lock.
-      if (this.ctx.runtimes().hasCliUpdateDrainForRuntime(runtimeId)) return null;
+      if (claim.draining) return null;
 
       // Policy edits share W with claim. Qualify before any task becomes dispatched,
       // including stale offers, so an old daemon never enters claim/rescind churn.

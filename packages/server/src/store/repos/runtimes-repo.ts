@@ -534,6 +534,14 @@ export class RuntimesRepo {
     return row ? withRuntimeLiveness(this.hydrateRuntime(toRuntime(row), false)) : null;
   }
 
+  heartbeatForClaim(id: string, workspaceId: string) {
+    const row = this.readRuntimeRow(id, true);
+    if (!row || (row.workspace_id ?? 'local') !== workspaceId) return null;
+    const runtime = withRuntimeLiveness(this.hydrateRuntime(toRuntime(row), false));
+    this.heartbeatFromRow(id, { claimPending: false }, row);
+    return { runtime, draining: row.draining_daemon_id != null };
+  }
+
   /**
    * The Runtime row on its own: no usage scan, execution groups or model catalog.
    *
@@ -614,13 +622,13 @@ export class RuntimesRepo {
    * mutation-relevant fields, not models or token totals — should not pay for them, and
    * a single request can take that lock several times.
    */
-  private readRuntimeRow(id: string): Row | null {
+  private readRuntimeRow(id: string, refresh = false): Row | null {
     // One request reads this row from the auth guard, the heartbeat body and the response
     // assembly. The cache is request-scoped and cleared by every Runtime write, so a read after
     // a write in the same request still sees the write.
     const cache = activeRequestReadCache();
     const key = cacheKey("multiremi_runtimes", "row", id);
-    if (cache) {
+    if (cache && !refresh) {
       const cached = cache.get<Row | null>(key);
       if (cached !== undefined) return cached;
     }
@@ -2529,7 +2537,10 @@ export class RuntimesRepo {
     // The heartbeat reads the Runtime row and its own columns; `getRuntime` would also run
     // the usage scan, execution-group membership and model catalog, which this method never
     // reads and which the route reads again for its response.
-    const initialRow = this.readRuntimeRow(runtimeId);
+    return this.heartbeatFromRow(runtimeId, options, this.readRuntimeRow(runtimeId));
+  }
+
+  private heartbeatFromRow(runtimeId: string, options: NonNullable<Parameters<RuntimesRepo['heartbeatRuntime']>[1]>, initialRow: Row | null): MultiremiDaemonHeartbeatAck {
     if (!initialRow) {
       return { runtime_id: runtimeId, status: "runtime_gone", runtime_gone: true };
     }

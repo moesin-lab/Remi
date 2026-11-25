@@ -74,18 +74,20 @@ export class IssueWorkspacesRepo {
     })();
   }
 
-  report(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
-    const initialIssue = this.ctx.db.query(
-      "SELECT workspace_id FROM multiremi_issues WHERE id = ?",
-    ).get(input.issueId) as Row | null;
-    if (!initialIssue) throw new Error(`Issue not found: ${input.issueId}`);
-    const workspaceId = String(initialIssue.workspace_id ?? "local");
+  report(input: ReportIssueWorkspaceInput, reportWorkspaceId?: string): MultiremiIssueWorkspace {
+    const workspaceId = reportWorkspaceId ?? this.issueWorkspaceId(input.issueId);
     const tx = this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       this.ctx.lockIssueLifecycle(input.issueId);
       return this.reportWithinLifecycleLock(input, workspaceId);
     });
     return tx();
+  }
+
+  private issueWorkspaceId(issueId: string): string {
+    const issue = this.ctx.db.query("SELECT workspace_id FROM multiremi_issues WHERE id = ?").get(issueId);
+    if (!issue) throw new Error(`Issue not found: ${issueId}`);
+    return String(issue.workspace_id ?? 'local');
   }
 
   /** Caller holds the issue workspace's Runtime lifecycle lock. */

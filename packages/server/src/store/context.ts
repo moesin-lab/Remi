@@ -872,6 +872,7 @@ export interface RuntimesSurface {
   getRuntime(id: string): MultiremiRuntime | null;
   /** Current dispatch capabilities without historical usage aggregation. */
   getRuntimeForDispatch(id: string): MultiremiRuntime | null;
+  heartbeatForClaim(id: string, workspaceId: string): { runtime: MultiremiRuntime; draining: boolean } | null;
   /** The Runtime row without the derived usage / model / execution-group reads. */
   getRuntimeLite(id: string): MultiremiRuntime | null;
   listRuntimes(): MultiremiRuntime[];

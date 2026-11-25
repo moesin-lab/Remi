@@ -51,7 +51,10 @@ export class DaemonTurnBridge {
   private transaction<T>(fn:(events:CommitEventQueue)=>T):T {const events=createCommitEventQueue();const result=this.ctx.db.transaction(()=>fn(events))();afterCommit(this.ctx.db,()=>this.ctx.emitCommitEvents(events));return result;}
   private authorized(turnId:string,attemptId:string,scope:DaemonTurnScope,terminal=false,sentInput=false):any {
     this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
-    const row=this.ctx.db.query('SELECT t.*,a.runtime_id,a.status AS attempt_status,a.offered_at,a.projection_to_seq AS offered_to FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE t.id=? AND a.id=?').get(turnId,attemptId);
+    const policyColumn = sentInput || terminal
+      ? ', (SELECT b.binding_json FROM multiremi_attempt_system_prompts b WHERE b.task_id=a.id) AS binding_json' : '';
+    const row=this.ctx.db.query(`SELECT t.*,a.runtime_id,a.status AS attempt_status,a.offered_at,a.projection_to_seq AS offered_to${policyColumn}
+      FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE t.id=? AND a.id=?`).get(turnId,attemptId);
     const runtime=this.ctx.runtimes().getRuntimeLite(scope.runtimeId);
     if(!row||row.workspace_id!==scope.workspaceId||row.runtime_id!==scope.runtimeId||runtime?.daemonId!==scope.daemonId)throw new Error('stale_attempt');
     lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);
@@ -199,7 +202,7 @@ export class DaemonTurnBridge {
     try{return this.transaction(events=>{
       const turn=this.authorized(String(payload.turn_id),String(payload.attempt_id),{...scope,generation:payload.generation as number|undefined},false,type==='turn.input');
       if(type==='turn.input'){
-        if (!this.ctx.systemPrompts().acceptsReport(String(payload.attempt_id),scope,payload)) return {ok:false,code:'policy_offer_mismatch',retryable:false};
+        if (!this.ctx.systemPrompts().acceptsReport(String(payload.attempt_id),scope,payload,turn.binding_json)) return {ok:false,code:'policy_offer_mismatch',retryable:false};
         // Re-project under the same current-attempt authority; never advance a receipt.
         if(payload.resync===true)return {ok:true,input:this.offerInput(this.ctx.tasks().getTaskWithAgent(turn.current_attempt_id)!)};
         const to=Number(payload.input_to_seq),from=this.cursor(turn);
@@ -276,7 +279,7 @@ export class DaemonTurnBridge {
       // A second completion can pass the initial check while the first is committing.
       // Recheck the binding under the same locks before returning its committed result.
       try{const replay=this.transaction(()=>{const turn=this.authorized(p.turn_id,p.attempt_id,scope,true);
-        if (!this.ctx.systemPrompts().acceptsReport(p.attempt_id,scope,{...p})) return {ok:false,code:'policy_offer_mismatch',retryable:false};
+        if (!this.ctx.systemPrompts().acceptsReport(p.attempt_id,scope,{...p},turn.binding_json)) return {ok:false,code:'policy_offer_mismatch',retryable:false};
         return turn.status==='completed'?{ok:true,turn_id:turn.id,reply_message_id:turn.reply_message_id}:null;});if(replay)return replay;}catch(replayError){
         if(turnRejectionCode(replayError,p.attempt_id,scope.runtimeId)===null)throw replayError;
       }

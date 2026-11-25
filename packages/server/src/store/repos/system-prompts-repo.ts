@@ -214,8 +214,9 @@ export class SystemPromptsRepo {
 
   dispatchPolicy(taskId: string) { return this.storedAttempt(taskId)?.dispatch; }
 
-  acceptsReport(taskId: string, scope: {workspaceId:string;runtimeId:string;daemonId:string}, payload: Record<string,unknown>): boolean {
-    const dispatch = this.dispatchPolicy(taskId);
+  acceptsReport(taskId: string, scope: {workspaceId:string;runtimeId:string;daemonId:string}, payload: Record<string,unknown>, bindingJson?: string | null): boolean {
+    const dispatch: DispatchPolicy | undefined = bindingJson === undefined ? this.dispatchPolicy(taskId)
+      : bindingJson === null ? undefined : JSON.parse(bindingJson).dispatch;
     if (dispatch?.protocol !== 'adopt') return payload.receipt_id === undefined && payload.offer_generation === undefined && payload.content_hash === undefined;
     if (dispatch.state !== 'adopted' || typeof payload.receipt_id !== 'string' || typeof payload.offer_generation !== 'string' || typeof payload.content_hash !== 'string') return false;
     const status = this.offerStatus({attempt_id:taskId,workspace_id:scope.workspaceId,runtime_id:scope.runtimeId,daemon_id:scope.daemonId,

@@ -326,7 +326,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
               if (current?.lastTaskId === taskId && current.runtimeId === runtimeId
                 && current.rootPath === input.rootPath && current.branchName === input.branchName
                 && current.status === input.status && isDeepStrictEqual(current.repos, mapped)) break;
-              try { store.reportIssueWorkspace(input); }
+              try { store.reportIssueWorkspace(input, authority.workspaceId); }
               catch { reject(); }
               break;
             }

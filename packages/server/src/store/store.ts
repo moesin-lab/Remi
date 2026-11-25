@@ -3307,6 +3307,10 @@ runMigrations(this.db);
     return this.runtimes.getRuntimeForDispatch(id);
   }
 
+  heartbeatForClaim(id: string, workspaceId: string) {
+    return this.runtimes.heartbeatForClaim(id, workspaceId);
+  }
+
   /** The Runtime row without the derived usage/model/group reads. */
   daemonInputRuntimeIds(workspaceId: string) { return this.runtimes.daemonInputRuntimeIds(workspaceId); }
 
@@ -3892,8 +3896,8 @@ runMigrations(this.db);
     return this.issueWorkspaces.abandon(issueId, workspaceId);
   }
 
-  reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
-    const workspace = this.issueWorkspaces.report(input);
+  reportIssueWorkspace(input: ReportIssueWorkspaceInput, workspaceId?: string): MultiremiIssueWorkspace {
+    const workspace = this.issueWorkspaces.report(input, workspaceId);
     // A live Issue workspace is pinned to its daemon. Its readiness changes
     // eligibility for sibling providers on that host, not unrelated machines.
     const runtime = this.runtimes.getRuntimeLite(input.runtimeId)!;

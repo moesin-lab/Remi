@@ -92,12 +92,33 @@ export async function checkSchemaRollback(args: string[]) {
   await mkdir(artifactRoot, { recursive: true });
   // Exclusive creation establishes ownership; never truncate a pre-existing file.
   const diagnosticFile = await open(diagnosticsPath, 'wx');
-  const saveDiagnostics = async () => {
-    await diagnosticFile.truncate(0);
-    await diagnosticFile.write(JSON.stringify(diagnostics,
-      (key, value) => key === 'rollbackSafeFrom' ? undefined : value, 2) + '\n', 0, 'utf8');
+  let diagnosticIdentity: { dev: bigint; ino: bigint } | undefined;
+  const saveDiagnostics = async (file = diagnosticFile) => {
+    const bytes = Buffer.from(JSON.stringify(diagnostics,
+      (key, value) => key === 'rollbackSafeFrom' ? undefined : value, 2) + '\n', 'utf8');
+    await file.truncate(0);
+    for (let position = 0; position < bytes.length;) {
+      const remaining = bytes.length - position;
+      const { bytesWritten } = await file.write(bytes, position, remaining, position);
+      assert(Number.isInteger(bytesWritten) && bytesWritten > 0 && bytesWritten <= remaining,
+        'Diagnostic write made invalid progress');
+      position += bytesWritten;
+    }
+  };
+  const recoverDiagnostics = async () => {
+    diagnostics.status = 'failed'; diagnostics.error ??= String(failure);
+    let report: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      report = await open(diagnosticsPath, constants.O_RDWR | constants.O_NOFOLLOW);
+      const current = await report.stat({ bigint: true });
+      assert(diagnosticIdentity && current.isFile() && current.dev === diagnosticIdentity.dev && current.ino === diagnosticIdentity.ino,
+        'Diagnostic ownership changed after close');
+      await saveDiagnostics(report);
+    } catch { /* Keep the original failure and preserve competing writer content. */ }
+    finally { if (report) { try { await report.close(); } catch { /* Best effort only. */ } } }
   };
   try {
+    diagnosticIdentity = await diagnosticFile.stat({ bigint: true });
     await mkdir(logs);
     await saveDiagnostics();
     await checkCandidate();
@@ -152,9 +173,11 @@ export async function checkSchemaRollback(args: string[]) {
         phase.status = 'failed'; phase.error = String(error);
         throw error;
       } finally {
-        await writeFile(join(logs, `${name}.stdout.log`), stdout);
-        await writeFile(join(logs, `${name}.stderr.log`), stderr || (phase.error ? phase.error + '\n' : ''));
-        await saveDiagnostics();
+        try {
+          await writeFile(join(logs, `${name}.stdout.log`), stdout);
+          await writeFile(join(logs, `${name}.stderr.log`), stderr || (phase.error ? phase.error + '\n' : ''));
+          await saveDiagnostics();
+        } catch (error) { if (phase.status !== 'failed') throw error; }
       }
     };
     const seeded = await runPhase('previous-before-expand', [process.execPath, probe], previousRoot);
@@ -190,10 +213,15 @@ export async function checkSchemaRollback(args: string[]) {
       failure ??= new Error('Rollback cleanup failed; see rollback-diagnostics.json');
     }
     diagnostics.status = failure ? 'failed' : 'passed';
-    // No success file has been created yet; failure cannot delete caller data.
-    try { await saveDiagnostics(); } finally { if (failure) await diagnosticFile.close(); }
+    // Required diagnostic I/O must finish before creating successful staging.
+    try { await saveDiagnostics(); } catch (error) { failure ??= error; }
+    try { await diagnosticFile.close(); }
+    catch (error) {
+      failure ??= error;
+      try { await diagnosticFile.close(); } catch { /* Preserve the original close failure. */ }
+    }
   }
-  if (failure) throw failure;
+  if (failure) { await recoverDiagnostics(); throw failure; }
   let outputFile: Awaited<ReturnType<typeof open>> | undefined;
   try {
     assert(evidence, 'Missing complete rollback evidence');
@@ -202,15 +230,16 @@ export async function checkSchemaRollback(args: string[]) {
     await checkCandidate();
     await outputFile.writeFile(JSON.stringify({ ...evidence, cleanup: cleanupResults }, null, 2) + '\n');
     await checkCandidate();
+    await outputFile.close();
     console.log(JSON.stringify({ pass: true, targetRef: evidence.targetRef, previousIdentity: evidence.previousIdentity, schema: evidence.schema }));
   } catch (error) {
-    if (outputFile) await rm(output, { force: true });
-    diagnostics.status = 'failed'; diagnostics.error = String(error);
-    await saveDiagnostics();
-    throw error;
-  } finally {
-    await outputFile?.close();
-    await diagnosticFile.close();
+    failure = error;
+    if (outputFile) {
+      try { await outputFile.close(); } catch { /* Still attempt staged output cleanup. */ }
+      try { await rm(output, { force: true }); } catch { /* Preserve the publication failure. */ }
+    }
+    await recoverDiagnostics();
+    throw failure;
   }
 }
 

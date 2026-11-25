@@ -82,7 +82,7 @@ async function fixture(run: (f: Fixture) => Promise<void>) {
           }
         }
         if (previous.invalid) throw new Error('invalid prepared release identity');
-        return { format: 1, mode: 'published-archive', publishedRef: previous.ref, actualPreviousRef: previous.ref,
+        return { format: 1, mode: 'published-archive', description: previous.notes + '🌱', publishedRef: previous.ref, actualPreviousRef: previous.ref,
           observedTagRef: 'b'.repeat(40), tagDrift: true,
           manifestSha256: createHash('sha256').update(bytes).digest('hex'), sourceSha256: previous.sourceSha256,
           sourceTree: 'e'.repeat(40), releaseId: 11, manifestAssetId: 12, sourceAssetId: 13,
@@ -169,6 +169,61 @@ async function fixture(run: (f: Fixture) => Promise<void>) {
       import { join } from 'node:path';
       import { spawnSync } from 'node:child_process';
       import { context, mutateCandidate } from './scripts/fixture-drift.mjs';
+      import fs from 'node:fs/promises';
+      import { syncBuiltinESMExports } from 'node:module';
+      const mode = process.env.FIXTURE_MODE ?? '';
+      if (mode.startsWith('diagnostic-')) {
+        const originalOpen = fs.open;
+        let opens = 0;
+        fs.open = async (path, ...args) => {
+          const file = await originalOpen(path, ...args);
+          if (!String(path).endsWith('/rollback-diagnostics.json')) return file;
+          const ordinal = ++opens, truncate = file.truncate.bind(file), write = file.write.bind(file), close = file.close.bind(file);
+          let snapshot = 0, writes = 0, active = false;
+          const record = event => appendFileSync(join(context().artifactRoot, 'diagnostic-io.jsonl'), JSON.stringify({ ordinal, snapshot, ...event }) + '\\n');
+          file.truncate = async (...args) => { snapshot++; writes = 0; active = false; return truncate(...args); };
+          file.write = async (...args) => {
+            const buffered = Buffer.isBuffer(args[0]);
+            const bytes = buffered ? args[0] : Buffer.from(args[0], 'utf8');
+            const offset = buffered ? args[1] : 0, length = buffered ? args[2] : bytes.length, position = buffered ? args[3] : args[1];
+            if (!writes) {
+              const report = JSON.parse(bytes.toString('utf8'));
+              active = mode.includes('-initial-') || (mode.includes('phase-error') && report.phases.some(phase => phase.status === 'failed')) ||
+                (report.status === 'passed' && report.cleanup?.length === 4) || ordinal > 1;
+            }
+            writes++;
+            if (!active) return write(...args);
+            if (writes > 12) throw new Error('diagnostic test guard: no progress');
+            const remaining = bytes.subarray(offset, offset + length);
+            const strategy = ordinal > 1 ? (mode.split('-recovery-')[1] ?? '') : mode.split('-recovery-')[0];
+            let count = length;
+            if (strategy.includes('short-once') && writes === 1) count = 1;
+            if (strategy.includes('short-many') && writes <= 5) {
+              const multibyte = remaining.findIndex(byte => byte >= 0xc0);
+              count = multibyte >= 0 ? multibyte + 1 : 1;
+            }
+            if (strategy.includes('short-zero')) count = writes === 1 ? 1 : 0;
+            else if (strategy.includes('zero')) count = 0;
+            if (strategy.includes('short-throw') && writes === 1) count = 1;
+            else if (strategy.includes('throw')) { record({ kind: 'throw' }); throw new Error(ordinal > 1 ? 'diagnostic recovery fault' : 'diagnostic save fault'); }
+            if (strategy.includes('invalid-negative')) count = -1;
+            if (strategy.includes('invalid-fraction')) count = 0.5;
+            if (strategy.includes('invalid-nan')) count = NaN;
+            if (strategy.includes('invalid-overrun')) count = length + 1;
+            record({ kind: 'write', buffered, offset, length, position, count, bytes: writes === 1 ? bytes.toString('base64') : undefined,
+              splitUtf8: count > 0 && count < length && (remaining[count] & 0xc0) === 0x80 });
+            if (Number.isInteger(count) && count >= 0 && count <= length) await write(remaining, 0, count, position);
+            return { bytesWritten: count, buffer: args[0] };
+          };
+          file.close = async () => {
+            record({ kind: 'close' });
+            await close();
+            if (mode.includes('close-failure')) throw new Error('diagnostic close fault');
+          };
+          return file;
+        };
+        syncBuiltinESMExports();
+      }
       globalThis.Bun = {
         SQL: class {
           async unsafe(sql) {
@@ -180,7 +235,7 @@ async function fixture(run: (f: Fixture) => Promise<void>) {
           async close() {
             const ctx = context();
             appendFileSync(join(ctx.artifactRoot, 'admin.log'), 'closed\\n');
-            if (process.env.FIXTURE_MODE === 'output-collision') writeFileSync(join(ctx.artifactRoot, 'rollback-staged-result.json'), 'created by another writer');
+            if (process.env.FIXTURE_MODE?.includes('output-collision')) writeFileSync(join(ctx.artifactRoot, 'rollback-staged-result.json'), 'created by another writer');
             if (process.env.FIXTURE_MODE?.startsWith('drift-publication-')) mutateCandidate(process.env.FIXTURE_MODE.split('-').at(-1));
           }
         },
@@ -366,6 +421,107 @@ for (const kind of ['dirty', 'head', 'untracked', 'ignored']) {
     });
   });
 }
+
+for (const mode of ['short-once', 'short-many']) {
+  test(`checker diagnostic ${mode} completes UTF8 bytes before staging`, async () => {
+    await fixture(async f => {
+      const result = f.execute(`diagnostic-${mode}`);
+      assert.equal(result.status, 0, String(result.stderr));
+      assertStagedEvidence(f, await readJson(f, 'rollback-staged-result.json'));
+      const bytes = await readFile(join(f.artifactRoot, 'rollback-diagnostics.json'));
+      assert(bytes.length > 1, `Checker exited 0 and staged success with diagnostic bytes: ${bytes.toString('utf8')}`);
+      const diagnostic = JSON.parse(bytes.toString('utf8'));
+      assert.equal(diagnostic.status, 'passed'); assertNoDeclaration(diagnostic);
+      assert.match(diagnostic.previousIdentity ? JSON.stringify(diagnostic) : '', /发布前版|published-archive/);
+      const events = (await readFile(join(f.artifactRoot, 'diagnostic-io.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      const writes = events.filter(event => event.kind === 'write');
+      assert.equal(writes.length, mode === 'short-once' ? 2 : 6);
+      assert.deepEqual(bytes, Buffer.from(writes[0].bytes, 'base64'));
+      let position = 0;
+      for (const call of writes) {
+        assert.equal(call.buffered, true); assert.equal(call.offset, position); assert.equal(call.position, position);
+        assert.equal(call.length, bytes.length - position); position += call.count;
+      }
+      assert.equal(position, bytes.length);
+      if (mode === 'short-many') assert(writes.some(call => call.splitUtf8), 'Must split multibyte UTF8');
+      assertStagedEvidence(f, await readJson(f, 'rollback-staged-result.json'));
+      await assertResourcesCleaned(f, diagnostic); await absent(join(f.artifactRoot, 'rollback-evidence.json'));
+    });
+  });
+}
+for (const stage of ['initial', 'final']) for (const fault of ['first-zero', 'short-zero', 'first-throw', 'short-throw',
+  'invalid-negative', 'invalid-fraction', 'invalid-nan', 'invalid-overrun']) {
+  test(`checker diagnostic ${stage} ${fault} rejects staging without looping`, async () => {
+    await fixture(async f => {
+      const result = f.execute(`diagnostic-${stage}-${fault}`);
+      assert.notEqual(result.status, 0); await absent(f.output); await absent(join(f.artifactRoot, 'rollback-evidence.json'));
+      assert.doesNotMatch(String(result.stdout), /"pass":true/);
+      assert.match(String(result.stderr), fault.includes('throw') ? /diagnostic save fault/ : /Diagnostic write made invalid progress/);
+      assert.doesNotMatch(String(result.stderr), /test guard/);
+      const events = (await readFile(join(f.artifactRoot, 'diagnostic-io.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      const first = events.filter(event => event.ordinal === 1 && event.snapshot === events[0].snapshot && ['write', 'throw'].includes(event.kind));
+      assert.equal(first.length, fault.startsWith('short') ? 2 : 1);
+      assert(events.some(event => event.kind === 'close'));
+      if (stage === 'final') {
+        await absent(join(f.previousRoot, 'scripts/mul173-schema-rollback-probe.ts'));
+        assert.match(await readFile(join(f.artifactRoot, 'admin.log'), 'utf8'), /DROP DATABASE.*\nclosed\n/);
+        await absent(await readFile(join(f.artifactRoot, 'temporary-home.txt'), 'utf8'));
+      } else await absent(join(f.artifactRoot, 'admin.log'));
+    });
+  });
+}
+for (const mode of ['initial-first-throw-close-failure-recovery-short-once', 'short-throw-close-failure-recovery-throw',
+  'close-failure', 'close-failure-recovery-zero', 'close-failure-recovery-throw']) {
+  test(`checker diagnostic ${mode} preserves the first error through recovery`, async () => {
+    await fixture(async f => {
+      const result = f.execute(`diagnostic-${mode}`);
+      assert.notEqual(result.status, 0); await absent(f.output); await absent(join(f.artifactRoot, 'rollback-evidence.json'));
+      assert.match(String(result.stderr), mode.split('-recovery-')[0].includes('throw') ? /diagnostic save fault/ : /diagnostic close fault/);
+      assert.doesNotMatch(String(result.stderr), /\nError: diagnostic recovery fault|\nError: diagnostic test guard/);
+      assert.doesNotMatch(String(result.stdout), /"pass":true/);
+      const events = (await readFile(join(f.artifactRoot, 'diagnostic-io.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(events.filter(event => event.kind === 'close' && event.ordinal === 1).length, 2);
+      assert(events.some(event => event.ordinal === 2), 'Must attempt recovery');
+      if (mode.endsWith('recovery-short-once')) {
+        assert.equal(events.filter(event => event.kind === 'write' && event.ordinal === 2).length, 2);
+        const diagnostic = await readJson(f, 'rollback-diagnostics.json');
+        assert.equal(diagnostic.status, 'failed'); assert.match(diagnostic.error, /diagnostic save fault/);
+      }
+    });
+  });
+}
+test('checker preserves the original identity error when diagnostic close and recovery fail', async () => {
+  await fixture(async f => {
+    await writeFile(f.manifestPath, JSON.stringify({ invalid: true }));
+    const result = f.execute('diagnostic-close-failure-recovery-throw');
+    assert.notEqual(result.status, 0); await absent(f.output); await absent(join(f.artifactRoot, 'rollback-evidence.json'));
+    assert.match(String(result.stderr), /invalid prepared release identity/);
+    assert.doesNotMatch(String(result.stderr), /diagnostic close fault|diagnostic recovery fault/);
+  });
+});
+
+test('checker preserves failed phase through diagnostic save, close and recovery failures', async () => {
+  await fixture(async f => {
+    await writeFile(join(f.previousRoot, 'fail-after'), '');
+    const result = f.execute('diagnostic-phase-error-first-throw-close-failure-recovery-throw');
+    assert.notEqual(result.status, 0); await absent(f.output); await absent(join(f.artifactRoot, 'rollback-evidence.json'));
+    assert.match(String(result.stderr), /previous-after-expand failed \(19\)/);
+    assert.doesNotMatch(String(result.stderr), /\nError: diagnostic (save|close|recovery) fault/);
+    await absent(join(f.previousRoot, 'scripts/mul173-schema-rollback-probe.ts'));
+    await absent(await readFile(join(f.artifactRoot, 'temporary-home.txt'), 'utf8'));
+    assert.match(await readFile(join(f.artifactRoot, 'admin.log'), 'utf8'), /DROP DATABASE.*\nclosed\n/);
+  });
+});
+
+test('checker preserves staging collision and caller bytes when diagnostic recovery fails', async () => {
+  await fixture(async f => {
+    const result = f.execute('diagnostic-output-collision-recovery-throw');
+    assert.notEqual(result.status, 0); assert.match(String(result.stderr), /EEXIST/);
+    assert.doesNotMatch(String(result.stderr), /\nError: diagnostic recovery fault/);
+    assert.equal(await readFile(f.output, 'utf8'), 'created by another writer');
+    await absent(join(f.artifactRoot, 'rollback-evidence.json'));
+  });
+});
 
 test('private context and all candidate identity reports bind the same fixed SHA/tree/run', async () => {
   await fixture(async f => {

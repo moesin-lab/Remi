@@ -15,7 +15,8 @@ import { useMigratedIntegrationDatabases } from "../../helpers/integration-datab
 
 useMigratedIntegrationDatabases();
 
-for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only the adopted policy after reconnect with lost ${loss}`, async () => {
+for (const recovery of ['on the original socket','after reconnect','after restart'] as const) for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only the adopted policy ${recovery} with lost ${loss}`, async () => {
+  const connected = recovery === 'on the original socket';
   let providerRuns = 0;
   let providerInstructions = '';
   const h = await DaemonProtocolHarness.create({database:'sqlite',manualOfferClock:true,providerFactory: options => ({
@@ -38,26 +39,58 @@ for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only 
     edit('POLICY A');
     const adopt = (h.layer as any).rpcHandlers.get('task.offer_adopt');
     let dropped = false;
+    let lostGeneration: unknown;
+    const releaseReplies: Array<() => void> = [];
     h.layer.registerRpcHandler('task.offer_adopt', async (frame,session) => {
-      if (dropped) return adopt(frame,session);
-      if (loss === 'adopt_response') expect((await adopt(frame,session)).state).toBe('adopted');
+      const sameGeneration = lostGeneration === frame.payload.offer_generation;
+      if (dropped && (!connected || !sameGeneration || (loss === 'adopt_response' && releaseReplies.length >= 2))) return adopt(frame,session);
+      lostGeneration = frame.payload.offer_generation;
+      const reply = loss === 'adopt_response' ? await adopt(frame,session) : {ok:false,code:'policy_offer_mismatch'};
+      if (loss === 'adopt_response') expect(reply.state).toBe('adopted');
       dropped = true;
-      return session.deferReply(frame.id!,new Promise(() => {}));
+      return session.deferReply(frame.id!,new Promise(resolve => releaseReplies.push(() => resolve(reply))));
     });
     const chat = h.store.createChatSession({agentId:agent.id});
     const {task} = h.store.sendChatMessage(chat.id,{body:'Exercise durable policy adoption'});
     await waitFor(()=>dropped,'first adoption reached the transport',5000);
     expect(providerRuns).toBe(0);
     edit('POLICY B');
-    await h.disconnect(); await h.reconnect();
-    if (loss === 'adopt_request') h.clock.advance(DAEMON_OFFER_COOLDOWN_MS);
+    if (connected) {
+      for (let seconds = 0; seconds < 90 && !providerRuns; seconds++) {
+        h.clock.advance(1_000);
+        await Bun.sleep(15);
+      }
+      expect(h.sessions).toHaveLength(1);
+      expect(providerRuns).toBe(1);
+    } else {
+      if (recovery === 'after restart') {
+        h.clock.advance(10_000);
+        await Bun.sleep(20);
+        await h.stopDaemon();
+        expect(h.client.diagnostics()).toMatchObject({timers:0,pending_rpcs:0,background:0});
+        await h.recreateDaemon(); await h.settleHeartbeat();
+      } else { await h.disconnect(); await h.reconnect(); }
+      if (loss === 'adopt_request') h.clock.advance(DAEMON_OFFER_COOLDOWN_MS);
+    }
     await waitFor(()=>h.store.getTask(task.id)?.status === 'completed','same attempt completed',45_000);
+    for (const release of releaseReplies) release();
+    await h.settleHeartbeat();
     expect(providerRuns).toBe(1);
     const expected = loss === 'adopt_response' ? 'POLICY A' : 'POLICY B';
     const binding = h.store.getAttemptSystemPrompt(task.id)!;
     expect(binding.content.common).toBe(expected);
+    expect(h.store.getTaskPrompt(task.id)?.systemPromptPolicy).toEqual(binding);
     expect(providerInstructions).toContain(expected);
-    expect(h.ledger.filter(entry=>entry.type === 'task.prompt').at(-1)?.frame.p.system_prompt_policy.content.common).toBe(expected);
+    const reports = h.ledger.filter(entry => entry.partition === task.id);
+    expect(reports.findLast(entry=>entry.type === 'task.prompt')?.frame.p.system_prompt_policy).toEqual(binding);
+    const offers = reports.filter(entry=>entry.type === 'task.offer_adopt').map(entry=>entry.frame.p);
+    const generations = new Set(offers.map(offer=>offer.offer_generation));
+    expect(generations.size).toBe(loss === 'adopt_request' ? 2 : 1);
+    for (const generation of generations) expect(new Set(offers.filter(offer=>offer.offer_generation === generation).map(offer=>offer.receipt_id)).size).toBe(1);
+    if (connected) {
+      expect(reports.filter(entry=>entry.type === 'task.offer_status').length).toBeGreaterThan(0);
+      expect(releaseReplies.length).toBeGreaterThan(1);
+    }
     const cli = Bun.spawn([process.execPath,'apps/remi/main.ts','workspace','system-prompt','get','local',
       '--attempt',task.id,'--content-hash',binding.contentHash,'--output','json'],{
       env:{...process.env,MULTIREMI_SERVER_URL:h.url,MULTIREMI_TOKEN:'fixture-master',MULTIREMI_CONFIG:join(h.root,'cli.json')},

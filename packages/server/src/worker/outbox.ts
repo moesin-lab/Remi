@@ -177,6 +177,7 @@ export class MultiremiTaskReportOutbox {
       CREATE TABLE IF NOT EXISTS held_best_effort_reports(id INTEGER PRIMARY KEY,task_id TEXT NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS verified_new_attempts(task_id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS policy_execution_lanes(task_id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,lane TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS independent_legacy_launches(task_id TEXT PRIMARY KEY,runtime_id TEXT NOT NULL,lane TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS restart_source_rows(source TEXT, handoff TEXT, store_id TEXT, original_id INTEGER,
         original_key TEXT, task_id TEXT, PRIMARY KEY(source,handoff,store_id,original_key));
       CREATE TABLE IF NOT EXISTS legacy_outbox_origins(event_id INTEGER PRIMARY KEY, store_id TEXT, original_id INTEGER,
@@ -380,6 +381,22 @@ export class MultiremiTaskReportOutbox {
     if (this.canProveNewAttempt(createdAt)) this.db.run('INSERT OR IGNORE INTO verified_new_attempts VALUES(?,?,?)',[identity.attempt_id,identity.receipt_id,createdAt]);
   }
 
+  canAdmitOffer(createdAt: string, lane: string, exclusiveDelivery: boolean): boolean {
+    return this.canProveNewAttempt(createdAt) || (exclusiveDelivery && this.uncertainHandoffs().every(incident => incident.source !== lane));
+  }
+
+  claimIndependentLegacyLaunch(taskId: string, runtime: string, lane: string, createdAt: string, exclusiveDelivery: boolean): boolean {
+    return this.db.transaction(() => {
+      if (this.isHeld(taskId) || !this.canAdmitOffer(createdAt,lane,exclusiveDelivery)
+        || this.query('SELECT 1 FROM policy_offer_receipts WHERE attempt_id=?').get(taskId)) return false;
+      return this.db.run('INSERT OR IGNORE INTO independent_legacy_launches VALUES(?,?,?,?)',[taskId,runtime,lane,createdAt]).changes === 1;
+    }).immediate();
+  }
+
+  hasIndependentLegacyLaunch(taskId: string): boolean {
+    return Boolean(this.query('SELECT 1 FROM independent_legacy_launches WHERE task_id=?').get(taskId));
+  }
+
   hasRestartIncident(): boolean {
     return Boolean(this.query('SELECT 1 FROM restart_incidents LIMIT 1').get());
   }
@@ -397,10 +414,15 @@ export class MultiremiTaskReportOutbox {
       WHERE i.rowid>? AND r.store_id='shared' AND r.original_id=? LIMIT 1`).get(sequence,record.id));
   }
 
-  classifyReport(taskId: string, receipt: unknown): boolean {
+  classifyReport(taskId: string, receipt: unknown, producerRuntime?: string | null): boolean {
     if (taskId.startsWith('rt:')) return false;
     if (this.isHeld(taskId)) return true;
     if (this.provesIndependentExecution(taskId,receipt)) return false;
+    if (receipt === undefined && producerRuntime) {
+      const launch = this.query('SELECT lane,created_at FROM independent_legacy_launches WHERE task_id=? AND runtime_id=?')
+        .get(taskId,producerRuntime) as {lane:string;created_at:string} | null;
+      if (launch && this.canAdmitOffer(launch.created_at,launch.lane,true)) return false;
+    }
     this.db.run('INSERT OR IGNORE INTO unverified_report_origins VALUES(?)',[taskId]);
     return true;
   }
@@ -469,15 +491,15 @@ export class MultiremiTaskReportOutbox {
   }
 
   /** Persist a report and wake the task's delivery pump. Never throws on queue pressure. */
-  enqueue(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>): number | null {
+  enqueue(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>, producerRuntime?: string | null): number | null {
     if (this.closed) throw new Error("outbox is closed");
-    this.classifyReport(taskId,payload.receipt_id);
+    this.classifyReport(taskId,payload.receipt_id,producerRuntime);
     const snapshot = payload.usageSnapshot as import("@multiremi/contracts/usage-accounting.js").TaskUsageSnapshot | undefined;
     if (kind === "usage" && snapshot?.version === 2 && Array.isArray(snapshot.units)) {
       const chunks = splitUsageReport(snapshot);
       if (chunks.length > 1) {
         let lastId: number | null = null;
-        for (const chunk of chunks) lastId = this.enqueue(taskId, kind, { ...payload, usageSnapshot: chunk });
+        for (const chunk of chunks) lastId = this.enqueue(taskId, kind, { ...payload, usageSnapshot: chunk },producerRuntime);
         return lastId;
       }
     }
@@ -515,8 +537,8 @@ export class MultiremiTaskReportOutbox {
     return id;
   }
 
-  enqueueAndWait(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>, timeoutMs = 30_000, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    const id = this.enqueue(taskId, kind, payload);
+  enqueueAndWait(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>, timeoutMs = 30_000, signal?: AbortSignal, producerRuntime?: string | null): Promise<Record<string, unknown>> {
+    const id = this.enqueue(taskId, kind, payload,producerRuntime);
     if (id === null) return Promise.resolve({ ok: true });
     const blocked = this.readMeta(`blocked:${taskId}`);
     if (blocked) return Promise.reject(new DaemonProtocolRpcError(this.readMeta(`blocked-code:${taskId}`) ?? "protocol_violation", false));
@@ -561,10 +583,11 @@ export class MultiremiTaskReportOutbox {
             this.db.run('INSERT OR IGNORE INTO unverified_report_origins VALUES(?)',[collision.task_id]);
             this.db.run('INSERT OR IGNORE INTO unverified_report_origins VALUES(?)',[String(row.task_id)]);
           }
-          this.classifyReport(String(row.task_id),toRecord(row).payload.receipt_id);
+          const held = this.classifyReport(String(row.task_id),toRecord(row).payload.receipt_id);
+          const retryAt = held || row.status !== 'pending' ? row.next_attempt_at : null;
           const inserted = this.db.run(`INSERT INTO outbox_events(idempotency_key,task_id,kind,payload,seq,terminal,status,attempts,next_attempt_at,last_error,created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[collision ? randomUUID() : String(row.idempotency_key),String(row.task_id),String(row.kind),String(row.payload),Number(row.seq),Number(row.terminal),
-              String(row.status),Number(row.attempts),row.next_attempt_at == null ? null : Number(row.next_attempt_at),row.last_error == null ? null : String(row.last_error),String(row.created_at)]);
+              String(row.status),Number(row.attempts),retryAt == null ? null : Number(retryAt),row.last_error == null ? null : String(row.last_error),String(row.created_at)]);
           this.db.run('INSERT INTO legacy_outbox_origins VALUES(?,?,?,?,?)',[Number(inserted.lastInsertRowid),path,Number(row.id),String(row.idempotency_key),runtimeId ?? null]);
           if (row.status === 'blocked' && !this.isHeld(String(row.task_id))) this.blockPartition(String(row.task_id), 'legacy permanent delivery error');
           if (row.status === 'input_unread' && row.kind === 'turn.complete' && !this.isHeld(String(row.task_id))) {

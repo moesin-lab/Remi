@@ -1741,6 +1741,14 @@ export class MultiremiDaemon {
         }).finally(() => { this.updateConfirmation = null; });
         for (const reporter of this.activityReporters) reporter.resend();
         this.parkedLanes?.resendAll();
+        if (!this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
+      },
+      onRuntimeConfirmed: async () => {
+        if (this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
+      },
+    };
+    const sendRuntimeReady = async () => {
+        const generation = this.protocolClient.connectionGeneration();
         const runtime = this.protocolLane.runtime();
         if (runtime) {
           const outbox = this.ensureOutbox();
@@ -1764,6 +1772,7 @@ export class MultiremiDaemon {
               } catch { continue; }
             }
           }
+          if (this.stopped || this.protocolClient.connectionGeneration() !== generation) return;
           this.protocolClient.send({ t: "runtime.ready", rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids,
             held_restart_attempts: this.protocolLane.runtime()?.held_restart_attempts,
             prepared_offers: this.ensureOutbox().preparedOffers(runtime.runtime_id),
@@ -1771,9 +1780,13 @@ export class MultiremiDaemon {
             active_question_waits: runtime.active_question_waits ?? [] } });
         }
         if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
-          this.onceOfferTimer = setTimeout(() => { this.onceOfferTimer = null; this.stop(); }, this.options.onceOfferTimeoutMs);
+          const stopWhenIdle = () => {
+            this.onceOfferTimer = null;
+            if (hasPendingOffer()) this.onceOfferTimer = setTimeout(stopWhenIdle,this.options.onceOfferTimeoutMs);
+            else this.stop();
+          };
+          this.onceOfferTimer = setTimeout(stopWhenIdle,this.options.onceOfferTimeoutMs);
         }
-      },
     };
     // Requests are derived from persisted server handoffs, never a local timer.
     this.protocolClient.registerFrameHandler("turn.restart", frame => {
@@ -1806,7 +1819,8 @@ export class MultiremiDaemon {
       this.restartDeadlines.set(p.attempt_id, deadline);
     });
     this.protocolClient.addLane(this.protocolLane);
-    registerDaemonOfferHandler(this.protocolClient, {
+    const hasPendingOffer = registerDaemonOfferHandler(this.protocolClient, {
+      stopSignal: () => this.pollAbort.signal,
       runtimeId: () => this.options.runtimeId,
       adoption: { workspace: () => this.options.workspaceId ?? 'local', daemon: () => this.options.daemonId ?? this.options.runtimeName,lane: () => this.restartJournalPath(),
         outbox: () => this.ensureOutbox(), held: id => this.ensureOutbox().isHeld(id) || Boolean(this.restartJournal?.entries().some(entry => entry.execution.attempt_id === id)) },
@@ -3849,12 +3863,12 @@ export class MultiremiDaemon {
    */
   private enqueueTaskReport(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>): void {
     const identity = this.ensureOutbox().reportIdentity(taskId,this.options.runtimeId);
-    const terminal = !this.ensureOutbox().classifyReport(taskId,payload.receipt_id ?? identity.receipt_id) && (kind === "complete" || kind === "fail");
+    const terminal = !this.ensureOutbox().classifyReport(taskId,payload.receipt_id ?? identity.receipt_id,this.options.runtimeId) && (kind === "complete" || kind === "fail");
     const status = kind === "complete" ? "completed" : "failed";
     if (terminal && this.options.runtimeId) this.ensureTrace().track(taskId, this.options.runtimeId);
     // The completion fields describe the close that follows the enqueue.
     this.ensureOutbox().enqueue(taskId, kind, { ...identity, ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
-      ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) });
+      ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) },this.options.runtimeId);
     if (terminal) {
       this.attemptSlashCommands.delete(taskId);
       this.ensureTrace().close(taskId, status, typeof payload.error === "string"
@@ -4330,7 +4344,7 @@ export class MultiremiDaemon {
       const startReply = await this.ensureOutbox().enqueueAndWait(task.id, "start", {
         ...this.ensureOutbox().reportIdentity(task.id, this.options.runtimeId),
         usage_run_id: usageRunId, runtime_id: this.options.runtimeId, ...(this.executionGenerations.has(task.id) ? { generation: this.executionGenerations.get(task.id) } : {}),
-      }, this.options.requestTimeoutMs, startSignal);
+      }, this.options.requestTimeoutMs, startSignal,this.options.runtimeId);
       if (startReply.execution_authorized !== true) throw new Error("Task execution start does not authorize this run to execute");
       startSignal.throwIfAborted();
       if (codexCatalogError) {

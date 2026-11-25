@@ -13,7 +13,7 @@ import {
 import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent, requiresPromptPolicyCapability } from "@shared/system-prompt-policy-hash.js";
 
 type DocumentRow = { id: string; workspace_id: string; current_version_id: string | null; revision: number };
-type DispatchPolicy = { protocol: 'adopt' | 'legacy'; state: 'proposed' | 'adopted' | 'revoked'; runtimeId: string; daemonId: string; receiptId?: string };
+type DispatchPolicy = { protocol: 'adopt' | 'legacy'; state: 'proposed' | 'adopted' | 'revoked'; runtimeId: string; daemonId: string; receiptId?: string; exclusiveDelivery?: boolean };
 type VersionRow = {
   id: string; document_id: string; workspace_id: string; version_number: number;
   mode: SystemPromptMode; operation: SystemPromptOperation; content_snapshot_json: string; content_hash: string;
@@ -315,12 +315,15 @@ export class SystemPromptsRepo {
       versionId: state.document.currentVersionId, versionNumber: state.document.revision, mode: state.document.mode,
       defaultRevision: state.currentDefault.revision, content: state.content, contentHash: hashSystemPromptContent(state.content),
       legacyCompatible: options.legacyCompatible };
-    const dispatch = options.protocol && task.runtimeId ? { protocol: options.protocol, state: 'proposed', runtimeId: task.runtimeId,
-      daemonId: this.ctx.runtimes().getRuntimeLite(task.runtimeId)?.daemonId } : undefined;
+    const daemonId = options.protocol && task.runtimeId ? this.ctx.runtimes().getRuntimeLite(task.runtimeId)?.daemonId : null;
+    const dispatch = options.protocol && task.runtimeId ? { protocol: options.protocol, state: 'proposed', runtimeId: task.runtimeId, daemonId,
+      exclusiveDelivery: previous ? previous.dispatch?.state === 'revoked' && previous.dispatch.exclusiveDelivery === true
+        && previous.dispatch.runtimeId === task.runtimeId && previous.dispatch.daemonId === daemonId
+        : !task.offeredAt && !task.startedAt && !this.ctx.taskTraces().getTaskTrace(taskId) } : undefined;
     this.ctx.db.run(`INSERT INTO multiremi_attempt_system_prompts (task_id,workspace_id,document_id,version_id,binding_json,created_at)
       VALUES (?,?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET workspace_id=excluded.workspace_id,document_id=excluded.document_id,
       version_id=excluded.version_id,binding_json=excluded.binding_json,created_at=excluded.created_at`,
-      [taskId, workspaceId, binding.documentId, binding.versionId, JSON.stringify({ ...binding, offerGeneration: generation, confirmed: false, dispatch }), nowIso()]);
+      [taskId, workspaceId, binding.documentId, binding.versionId, JSON.stringify({ ...binding, offerGeneration: generation, confirmed: false, dispatch }), task.dispatchedAt ?? nowIso()]);
     return binding;
   }
 }

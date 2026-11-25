@@ -87,7 +87,7 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
     async report(type, partition, payload, wait = false) {
       const runtimeId = runtime();
       const identity = outbox().reportIdentity(partition,runtimeId);
-      const terminal = !outbox().classifyReport(partition,payload.receipt_id ?? identity.receipt_id) && (type === "turn.complete" || type === "task.fail");
+      const terminal = !outbox().classifyReport(partition,payload.receipt_id ?? identity.receipt_id,runtimeId) && (type === "turn.complete" || type === "task.fail");
       const status = type === "turn.complete" ? "completed" : "failed";
       // The fields describe the close below; the trace is sealed only after the
       // report is queued (or accepted), so a rejected completion can continue the turn.
@@ -97,11 +97,11 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
       const kind = (type.startsWith("task.") ? type.slice(5) : type) as MultiremiOutboxKind;
       if (wait) {
         const reply = await outbox().enqueueAndWait(partition, kind, p,
-          typeof wait === "object" ? wait.timeoutMs : waitTimeoutMs, waitSignal?.());
+          typeof wait === "object" ? wait.timeoutMs : waitTimeoutMs, waitSignal?.(),runtimeId);
         if (terminal && !outbox().isHeld(partition)) trace?.close(partition, status, terminalError(payload));
         return reply;
       }
-      outbox().enqueue(partition, kind, p);
+      outbox().enqueue(partition, kind, p,runtimeId);
       if (terminal) trace?.close(partition, status, terminalError(payload));
       return { ok: true };
     },
@@ -109,7 +109,7 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
     upgradeWaiting: () => protocol.connectionState() === "upgrade_wait",
     bestEffort(type, payload) {
       const taskId = typeof payload.task_id === "string" ? payload.task_id : null;
-      if (taskId && outbox().classifyReport(taskId,payload.receipt_id ?? outbox().reportIdentity(taskId,runtime()).receipt_id)) {
+      if (taskId && outbox().classifyReport(taskId,payload.receipt_id ?? outbox().reportIdentity(taskId,runtime()).receipt_id,runtime())) {
         outbox().preserveBestEffort(taskId,type,payload);
         return;
       }

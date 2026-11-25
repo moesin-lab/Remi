@@ -4,7 +4,7 @@ import type { StoreContext,CommitEventQueue } from '../context.js';
 import { createCommitEventQueue } from '../context.js';
 import { afterCommit } from '../db/postgres.js';
 import type { MultiremiTaskWithAgent } from '@multiremi/contracts/types.js';
-import type { DaemonTaskCompletionFields } from '@multiremi/contracts/daemon-protocol.js';
+import type { DaemonTaskCompletionFields, DaemonTurnCompletePayload } from '@multiremi/contracts/daemon-protocol.js';
 import type { UnifiedMessage,DecisionOption } from '@multiremi/contracts/unified-model.js';
 import { sendMessageWithinTransaction,getMessage,messageFromRow } from './send-message.js';
 import { plannedRestartDeliveredInputs } from './attempt-input.js';
@@ -21,7 +21,7 @@ import { readBackgroundDoorbell } from '@shared/background-tasks.js';
 export interface DaemonTurnScope {runtimeId:string;daemonId:string;workspaceId:string;userId?:string|null;inputUnread?:boolean;generation?:number}
 export type DaemonTurnRpc='turn.input'|'turn.decision'|'turn.decision.get'|'turn.decision.expire'|'turn.decision.consume';
 export interface DaemonTurnInput {turn_id:string;attempt_id:string;input_from_seq:number;input_to_seq:number;input_messages:UnifiedMessage[]}
-export interface DaemonTurnCompletePayload {turn_id:string;attempt_id:string;input_to_seq:number;reply:{body_md:string;message_kind:'reply'|'final'};session_id?:string|null;work_dir?:string|null;input_unread_fallback?:boolean}
+export type { DaemonTurnCompletePayload } from '@multiremi/contracts/daemon-protocol.js';
 
 // Only explicit Store refusals are permanent. Database/write failures must reach
 // the protocol session, which returns server_error/retryable:true to the outbox.
@@ -32,9 +32,10 @@ const invalidTurnReports=new Set([
   'Source turn does not belong to the sender workspace',
   'Message sender belongs to another workspace','Message recipient belongs to another workspace',
 ]);
-function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_execution'|'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
+function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_execution'|'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|'policy_offer_mismatch'|null {
   if(error instanceof PlannedRestartError)return 'stale_execution';
   if(!(error instanceof Error))return null;
+  if(error.message==='policy_offer_mismatch')return 'policy_offer_mismatch';
   if ('retryable' in error && error.retryable === false && 'code' in error
     && ['authority_revoked','task_not_found'].includes(String(error.code))) return 'stale_attempt';
   if(error.message==='stale_attempt'||error.message==='input_gap'||error.message==='turn_input_pending')return error.message;
@@ -266,13 +267,11 @@ export class DaemonTurnBridge {
   complete(input:{payload:DaemonTurnCompletePayload;completionFields:DaemonTaskCompletionFields|null;traceEventCount?:number},scope:DaemonTurnScope):Record<string,unknown> {
     const p=input.payload;
     try{
-      return this.ctx.systemPrompts().withReportPolicy(scope.workspaceId, () => {
-      if (!this.ctx.systemPrompts().acceptsReport(p.attempt_id,scope,{...p})) return {ok:false,code:'policy_offer_mismatch',retryable:false};
       this.ctx.tasks().completeTask(p.attempt_id,{output:p.reply.body_md,sessionId:p.session_id,workDir:p.work_dir,completionFields:input.completionFields,traceEventCount:input.traceEventCount,
+        reportedPolicy:{receipt_id:p.receipt_id,offer_generation:p.offer_generation,content_hash:p.content_hash},
         expectedTurnId:p.turn_id,turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope);
       const turn=this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE id=?').get(p.turn_id);
       return {ok:true,turn_id:p.turn_id,reply_message_id:turn?.reply_message_id??null};
-      });
     }catch(error){
       // A second completion can pass the initial check while the first is committing.
       // Recheck the binding under the same locks before returning its committed result.

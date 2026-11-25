@@ -536,6 +536,9 @@ export interface DaemonTurnWrapUpPayload {
 }
 
 export interface DaemonTurnCompletePayload {
+  receipt_id?: string;
+  offer_generation?: string;
+  content_hash?: string;
   /** Provider unavailable or two reminders exhausted: preserve the reply and unread interval. */
   input_unread_fallback?: boolean;
   turn_id: string;

@@ -158,6 +158,12 @@ describe("MultiremiTaskReportOutbox", () => {
       expect(scanned.isHeld('R')).toBe(false);
       scanned.recordHandoffEvidence('bad-lane','bad',null,'2020-01-02');
       scanned.recordHandoffEvidence('bad-lane','bad',null,'2029-01-02');
+      expect(scanned.claimIndependentLegacyLaunch('prior','claude','other-lane','2020-01-01',false)).toBe(false);
+      expect(scanned.claimIndependentLegacyLaunch('P','claude','other-lane','2020-01-03',true)).toBe(false);
+      expect(scanned.claimIndependentLegacyLaunch('later-legacy','claude','other-lane','2020-01-03',false)).toBe(true);
+      expect(scanned.claimIndependentLegacyLaunch('later-legacy','claude','other-lane','2020-01-03',false)).toBe(false);
+      expect(scanned.classifyReport('later-legacy',undefined,'claude')).toBe(false);
+      expect(scanned.classifyReport('later-legacy',undefined)).toBe(true);
       const fresh = launch('S','2020-01-03','bad-lane');
       blocked.enqueue('S','progress',{...fresh});
       blocked.enqueue('unknown-origin','progress',{summary:'unattributed'});

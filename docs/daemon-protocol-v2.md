@@ -68,6 +68,8 @@ offer 输入与会话投影的范围记录都为 complete 时什么也不加；�
 完整五槽快照与内容哈希；offer 准备阶段不重读最新配置。未 accept 的 rescind/requeue/stale reclaim 可以重绑，
 running 尝试保持原快照。`prompt.policy.adopt.v1` 单独协商。daemon 校验完整五槽与内容哈希，在本地 outbox 数据库登记收据，通过 `task.offer_adopt` 取得同一代次、哈希及收据的授权，再以条件更新消费启动权。`task.offer_status` 用于只读对账。裸成功回执只说明传输结果。
 
+连接存活而采用 RPC 超时时，daemon 对同一收据串行退避重试，间隔从 500ms 增至最多 5s。每次先查询该身份的状态，再申请原授权。断开连接取消等待，下一次 ready 从本地 prepared 收据恢复。服务端首次领取时验证该 attempt 没有既往绑定、发送、启动或领取留下的 trace 记录，才在该代 offer 上标记 `exclusive_delivery`。其他物理 lane 的坏 journal 允许这样的首次投递；既有隔离成员及来源不明的旧报告继续保全。
+
 启动权与执行者 PID 在同一个本地事务登记。冷启动可对已退出进程的收据逐一对账。daemon 保留仍有未确认上报、隔离或 planned restart 的分区。对已采用、原进程已退出的执行，`runtime.ready.exited_launches` 携带准确收据，服务端在 workspace 生命周期锁内重核归属、活跃状态与 handoff，按原重试规则结束该 attempt。PID 仍在使用或进程状态无法验证时继续保留。
 当 mode 为 custom，或当前服务端默认不等于首版 `LEGACY_BASELINE_DEFAULT_REVISION` 时，claim 前必须具备此能力，
 否则等待并提供升级诊断。仅 default 且默认仍等价于基线时允许旧 daemon 兼容执行；reset 不绕过未来默认升级的能力门禁。
@@ -1426,4 +1428,4 @@ checkpoint/report 应答后，删除本地 handoff journal、trace identity 和�
 
 损坏的旧 journal 可能只剩 handoff 标识。共享 outbox 在启动恢复前枚举同一 server、workspace、daemon 的 provider 库，记录每个 handoff 的候选分区、已有行和旧库来源。多个 handoff 可同时保留同一分区。报告使用原上行序号等待对应 `res`。跨分区成功回执只确认本批行，隔离期间的迟到回执另存为投递证据。压缩、终态替换和启动时的未读输入恢复均保留隔离原件。
 
-在双向协商 `turn.restart` 和 `prompt.policy.adopt.v1` 后，daemon 可通过只读 `task.offer_status` 核对 handoff 归属。查询同时读取 workspace 现有 attempt 的最大创建时间。首次观察的上界持久化后，服务端创建时间严格超过该上界的独立 attempt 可带自己的采用收据运行。时间相等或缺少证据的旧分区仍需核验。映射到具体 attempt 只缩小隔离范围；恢复执行仍需原 journal 收据及 `resume_bound` 授权。
+采用协议连接在对应 runtime 首次心跳确认注册后发送 `runtime.ready`。在双向协商 `turn.restart` 和 `prompt.policy.adopt.v1` 后，daemon 可通过只读 `task.offer_status` 核对 handoff 归属。查询同时读取 workspace 现有 attempt 的最大创建时间。首次观察的上界持久化后，服务端创建时间严格超过该上界的独立 attempt 可运行。另一物理来源的首次投递也可凭服务端 `exclusive_delivery` 证明放行。legacy welcome 下仍校验 workspace 和 runtime，在本地持久登记一次启动权，只有既有上界或明确的首次投递能证明独立时才启动。旧服务端缺少两种证据时继续隔离。历史导入不携带本地 producer 的身份。映射到具体 attempt 只缩小隔离范围；恢复执行仍需原 journal 收据及 `resume_bound` 授权。

@@ -397,6 +397,7 @@ export class DaemonTaskOffers {
       }
       if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id, generation); return; }
       if (session.supportsPromptPolicy) payload.offer_generation = generation;
+      if (store.systemPromptsRepo().dispatchPolicy(task.id)?.exclusiveDelivery) payload.exclusive_delivery = true;
       const budgeted = fitTaskOfferToBudget(payload, runtimeId, undefined, session.supportsWikiFetch);
       console.info(JSON.stringify({ event: "daemon_offer_budget", task_id: task.id, runtime_id: runtimeId, ...budgeted.report }));
       let report = budgeted.report;
@@ -542,6 +543,7 @@ export class DaemonTaskOffers {
         currentBackgroundTerm()?.assertCurrent();
         if (this.session(runtimeId) !== session || !payload || !['adopted','proposed'].includes(policy.offerStatus(proof))) continue;
         payload.offer_generation = proof.offer_generation;
+        if (policy.dispatchPolicy(proof.attempt_id)?.exclusiveDelivery) payload.exclusive_delivery = true;
         const fitted = fitTaskOfferToBudget(payload,runtimeId,undefined,session.supportsWikiFetch);
         session.sendEvent({t:'task.offer',rt:runtimeId,p:fitted.response},{pausable:true});
       }

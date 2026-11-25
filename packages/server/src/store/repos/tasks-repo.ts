@@ -816,7 +816,7 @@ export interface TaskDaemonReportAuthority { runtimeId: string; workspaceId: str
 
 /** A reliable report must either change state, be a terminal replay, or remain pending. */
 export class TaskDaemonReportError extends Error {
-  constructor(readonly code: "authority_revoked" | "server_error", readonly retryable: boolean) { super(code); }
+  constructor(readonly code: "authority_revoked" | "server_error" | "policy_offer_mismatch", readonly retryable: boolean) { super(code); }
 }
 
 function sameExecutionLaneSql(queued: string, active: string): string {
@@ -3411,7 +3411,8 @@ export class TasksRepo {
       const policy = this.ctx.systemPrompts().getSystemPrompt(workspaceId);
       const requiresPolicy = requiresPromptPolicyCapability(policy.document.mode, policy.currentDefault.revision);
       const policyBlocked = !options.supportsPromptPolicy && requiresPolicy;
-      this.recoverExpiredPolicyProposals(runtimeId);
+      const recoveryCutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
+      this.recoverExpiredPolicyProposals(runtimeId,recoveryCutoff);
 
       if (policyBlocked) {
         this.diagnosePolicyWaits(lockedRuntime, options, true);
@@ -3426,7 +3427,7 @@ export class TasksRepo {
       // Recovery must examine stale dispatches even when their Agent can no
       // longer run here. It rechecks eligibility and requeues incompatible
       // work instead of leaving it permanently dispatched on the old member.
-      const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds], Boolean(options.supportsPromptPolicy), Boolean(options.policyProtocol));
+      const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds], Boolean(options.supportsPromptPolicy), Boolean(options.policyProtocol),recoveryCutoff);
       // Group membership and reported model capabilities can change while work
       // is queued. Skip incompatible Agents before selecting, so they cannot
       // block another runnable task at the head of the queue.
@@ -4320,21 +4321,20 @@ ${routing.sql}
       && this.runtimePassesProjectDeviceRouting(runtime, task.id);
   }
 
-  private recoverExpiredPolicyProposals(runtimeId: string): void {
+  private recoverExpiredPolicyProposals(runtimeId: string, cutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString()): void {
     const field = (path: string) => this.ctx.db.dialect === 'postgres'
       ? `b.binding_json::jsonb #>> '{${path.replaceAll('.', ',')}}'` : `json_extract(b.binding_json,'$.${path}')`;
     const expired = this.ctx.db.query(`SELECT a.id, ${field('offerGeneration')} AS generation FROM multiremi_turn_attempts a
       JOIN multiremi_attempt_system_prompts b ON b.task_id=a.id WHERE a.runtime_id=? AND a.status='accepted'
       AND ${field('dispatch.protocol')}='adopt' AND ${field('dispatch.state')}='proposed'
       AND COALESCE(a.offered_at,b.created_at) <= ? ORDER BY b.created_at,a.id LIMIT 32`)
-      .all(runtimeId, new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString());
+      .all(runtimeId, cutoff);
     for (const row of expired) this.requeueTaskOffer(String(row.id), runtimeId, 'unknown', String(row.generation));
   }
 
-  private reclaimStaleDispatchedTaskForRuntime(runtimeId: string, excludedAgentIds: string[], supportsPromptPolicy: boolean, negotiated: boolean): MultiremiTaskWithAgent | null {
+  private reclaimStaleDispatchedTaskForRuntime(runtimeId: string, excludedAgentIds: string[], supportsPromptPolicy: boolean, negotiated: boolean, cutoff: string): MultiremiTaskWithAgent | null {
     if (negotiated) return null;
     const leases = [...this.acceptedOfferLeases];
-    const cutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
     const now = nowIso();
     const candidate = this.ctx.db.query(executionClaimBaseSql(`
       SELECT t.id FROM multiremi_turn_attempts claim_attempt
@@ -4619,8 +4619,8 @@ ${routing.sql}
          LEFT JOIN multiremi_issues project_issue ON project_issue.id = claim_turn.issue_id
          LEFT JOIN multiremi_issue_sessions code_session ON code_session.id = claim_turn.issue_session_id
          LEFT JOIN multiremi_runtimes code_runtime ON code_runtime.id = code_session.code_runtime_id
-         WHERE claim_attempt.status = 'offered' AND t.status = 'queued'
-           ${negotiated ? `AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_system_prompts binding WHERE binding.task_id=claim_attempt.id
+         WHERE claim_attempt.status = 'offered' AND t.status = 'queued'${negotiated ? `
+           AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_system_prompts binding WHERE binding.task_id=claim_attempt.id
              AND COALESCE(${this.ctx.db.dialect === 'postgres' ? "binding.binding_json::jsonb #>> '{dispatch,state}'" : "json_extract(binding.binding_json,'$.dispatch.state')"},'unverified') <> 'revoked')
              AND (t.offered_at IS NULL OR EXISTS(SELECT 1 FROM multiremi_attempt_system_prompts binding WHERE binding.task_id=claim_attempt.id))` : ''}
            AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?)
@@ -4712,9 +4712,8 @@ ${placementAfter.sql}
            ${runtime.metadata.claude_profiles !== 1 ? "AND t.claude_profile IS NULL" : ""}
            ${excludedAgentIds.length ? `AND t.agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
            ${excludedExecutionTargetSql(excludedTargets)}
-           ${excludedTaskIds.length ? `AND t.id NOT IN (${excludedTaskIds.map(() => "?").join(", ")})` : ""}
-    `;
-    return { sql, params };
+           ${excludedTaskIds.length ? `AND t.id NOT IN (${excludedTaskIds.map(() => "?").join(", ")})` : ""}`;
+    return { sql, params, now };
   }
 
   private diagnosePolicyWaits(runtime: MultiremiRuntime, options: ClaimTaskOptions, requiresPolicy: boolean, existingOnly = false): void {
@@ -4772,10 +4771,11 @@ ${placementAfter.sql}
   }
 
   private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean): MultiremiTask | null {
-    const { sql, params } = this.candidateSelection(runtime, excludedAgentIds, excludedTargets, excludedTaskIds, negotiated);
-    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql} ORDER BY t.priority DESC, t.created_at ASC LIMIT 1
+    const { sql, params, now } = this.candidateSelection(runtime, excludedAgentIds, excludedTargets, excludedTaskIds, negotiated);
+    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql}
+         ORDER BY t.priority DESC, t.created_at ASC
+         LIMIT 1
       ${this.ctx.db.dialect === 'postgres' ? 'FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED' : ''}`));
-    const now = nowIso();
     const claimOne = (): Row | null => {
       const candidate = selectCandidate.get(...params) as Row | null;
       if (!candidate) return null;
@@ -5473,12 +5473,13 @@ ${placementAfter.sql}
     allowUnreadInput?:boolean;
     replyKind?:'reply'|'final';
     expectedTurnId?:string;
+    reportedPolicy?:Record<string,unknown>;
     expectedRuntimeId?:string;
     expectedDaemonId?:string;
   }, daemonAuthority?: TaskDaemonReportAuthority): MultiremiTask {
-    const initial = this.getTaskIdentity(taskId);
-    if (!initial && input.expectedTurnId) throw new Error('stale_attempt');
-    if (!initial || (!daemonAuthority && !isActiveTaskStatus(initial.status))) throw new Error(`Task not found or terminal: ${taskId}`);
+    const initial = daemonAuthority ? null : this.getTaskIdentity(taskId);
+    if (!daemonAuthority && (!initial || !isActiveTaskStatus(initial.status))) throw new Error(`Task not found or terminal: ${taskId}`);
+    const workspaceId = daemonAuthority?.workspaceId ?? initial!.workspaceId;
     const childStatusChanges: ChildStatusChange[] = [];
     let deferredEvents = createCommitEventQueue();
     const ownsTransaction = !this.ctx.db.inTransaction;
@@ -5486,8 +5487,9 @@ ${placementAfter.sql}
     let unreadInput: { read_to_seq: number; required_to_seq: number } | undefined;
     const completeWithinTransaction = () => {
       unreadInput = undefined;
-      if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
+      if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
+      if (daemonAuthority && input.reportedPolicy && !this.ctx.systemPrompts().acceptsReport(taskId,daemonAuthority,input.reportedPolicy)) throw new Error('policy_offer_mismatch');
       if (daemonAuthority) new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(taskId, daemonAuthority.generation);
       const reportedTurn = input.expectedTurnId ? readCurrentTurnRow(this.ctx.db, taskId) : null;
       if (input.expectedTurnId && (!reportedTurn || reportedTurn.id !== input.expectedTurnId
@@ -5512,7 +5514,7 @@ ${placementAfter.sql}
         }
       }
       if (!current || (!isActiveTaskStatus(current.status) && !(daemonAuthority && current.status === "queued"))
-        || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
+        || current.workspaceId !== workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
       if(input.expectedRuntimeId&&(current.runtimeId!==input.expectedRuntimeId||this.ctx.runtimes().getRuntimeLite(input.expectedRuntimeId)?.daemonId!==input.expectedDaemonId))throw new Error('stale_attempt');
       this.assertTaskRuntimeAvailableWithinWorkspaceLock(current);
       const chatExecutionKind = this.getTaskChatExecutionKind(current);
@@ -5613,6 +5615,7 @@ ${placementAfter.sql}
 
   failTask(taskId: string, input: {
     error: string;
+    reportedPolicy?: Record<string,unknown>;
     traceEventCount?: number;
     completionFields?: DaemonTaskCompletionFields | null;
     sessionId?: string | null;
@@ -5620,13 +5623,15 @@ ${placementAfter.sql}
     failureReason?: string | null;
     failure_reason?: string | null;
   }, daemonAuthority?: TaskDaemonReportAuthority): MultiremiTask {
-    const initial = this.getTask(taskId);
-    if (!initial || (!daemonAuthority && !isActiveTaskStatus(initial.status))) throw new Error(`Task not found or terminal: ${taskId}`);
+    const initial = daemonAuthority ? null : this.getTaskIdentity(taskId);
+    if (!daemonAuthority && (!initial || !isActiveTaskStatus(initial.status))) throw new Error(`Task not found or terminal: ${taskId}`);
+    const workspaceId = daemonAuthority?.workspaceId ?? initial!.workspaceId;
     const childStatusChanges: ChildStatusChange[] = [];
     const deferredEvents = createCommitEventQueue();
     const failWithinTransaction = () => {
-      if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
+      if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
+      if (daemonAuthority && input.reportedPolicy && !this.ctx.systemPrompts().acceptsReport(taskId,daemonAuthority,input.reportedPolicy)) throw new TaskDaemonReportError('policy_offer_mismatch',false);
       if (daemonAuthority) new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(taskId, daemonAuthority.generation);
       if (current && daemonAuthority) {
         if (["completed", "failed", "cancelled"].includes(current.status)) return { task: current, followUps: null };
@@ -5642,7 +5647,7 @@ ${placementAfter.sql}
         }
       }
       if (!current || (!isActiveTaskStatus(current.status) && !(daemonAuthority && current.status === "queued"))
-        || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
+        || current.workspaceId !== workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
       this.assertTaskRuntimeAvailableWithinWorkspaceLock(current);
       this.getTaskChatExecutionKind(current);
       this.lockTaskIssueSessionsWithinWorkspaceLock([current]);

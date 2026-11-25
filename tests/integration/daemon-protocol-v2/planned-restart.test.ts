@@ -14,7 +14,7 @@ import { MultiremiTaskReportOutbox } from '@multiremi/worker/outbox.js';
 
 useMigratedIntegrationDatabases();
 
-test('an unmapped damaged co-resident journal retains both legacy partitions across welcome, ready, retry and replacement', async () => {
+for (const legacyWelcome of [false,true]) test(`an unmapped damaged co-resident journal retains both legacy partitions across ${legacyWelcome ? 'legacy' : 'adopt'} welcome, ready, retry and replacement`, async () => {
   const h = await DaemonProtocolHarness.create({database:'sqlite',providers:['claude','codex'],outboxBackoffMs:[5]});
   try {
     await h.startDaemon(); await h.settleHeartbeat();
@@ -23,6 +23,8 @@ test('an unmapped damaged co-resident journal retains both legacy partitions acr
     const healthy = h.store.createTask({agentId:agent.id,prompt:'first healthy execution'});
     await waitFor(()=>h.store.getTask(healthy.id)?.status === 'completed','first execution has a native receipt',8_000);
     await h.stopDaemon();
+    const waiting = h.store.createTask({agentId:agent.id,prompt:'queued on the independent Claude lane during downtime'});
+    expect(h.store.getTask(waiting.id)?.offeredAt).toBeNull();
     const path = (prefix:string) => join(h.root,readdirSync(h.root).find(name=>name.startsWith(prefix) && name.endsWith('.db'))!);
     const shared = path('v2-');
     const journalPath = path('restart-codex-');
@@ -44,13 +46,21 @@ test('an unmapped damaged co-resident journal retains both legacy partitions acr
       const bytes = original();
       const journalRow = () => evidence.query('SELECT * FROM planned_restart_journal WHERE handoff_id=?').get(bad.execution.handoff_id);
       const saved = journalRow();
+      if (legacyWelcome) (h.layer as any).welcomeCaps = ['offer','turn.restart'];
       await h.recreateDaemon(); await h.settleHeartbeat();
       await waitFor(()=>!db.query('SELECT 1 FROM outbox_events WHERE id=?').get(high),'higher unrelated receipt drains',8_000);
-      await waitFor(()=>Boolean(db.query('SELECT 1 FROM restart_uncertain WHERE server_high IS NOT NULL').get()),'discovery boundary reconciled',5_000);
+      if (!legacyWelcome) await waitFor(()=>Boolean(db.query('SELECT 1 FROM restart_uncertain WHERE server_high IS NOT NULL').get()),'discovery boundary reconciled',5_000);
+      const outbox = (h.daemon as any).ensureOutbox() as MultiremiTaskReportOutbox;
+      const unknown = outbox.enqueue('unknown-source','progress',{runtime_id:runtime.id,summary:'unattributed'});
+      const unknownRow = () => db.query('SELECT * FROM outbox_events WHERE id=?').get(unknown!);
+      const originalUnknown = unknownRow();
+      expect(outbox.isHeld('unknown-source')).toBe(true);
       const later = h.store.createTask({agentId:agent.id,prompt:'after the discovery boundary'});
+      await waitFor(()=>h.store.getTask(waiting.id)?.status === 'completed','previously unoffered Claude task completes',8_000);
       await waitFor(()=>h.store.getTask(later.id)?.status === 'completed','independent new attempt completes',8_000);
       await h.disconnect(); await h.reconnect(); await h.recreateDaemon(); await h.settleHeartbeat();
       expect(original()).toEqual(bytes); expect(journalRow()).toEqual(saved);
+      expect(unknownRow()).toEqual(originalUnknown);
       expect(h.ledger.filter(entry=>['P','Q'].includes(entry.partition))).toHaveLength(0);
       expect(h.ledger.filter(entry=>['turn.restart.resume','turn.restart.resume_bound','turn.restart.suspend'].includes(entry.type))).toHaveLength(0);
       expect(evidence.query('SELECT count(*) AS n FROM planned_restart_retries').get()).toEqual({n:0});

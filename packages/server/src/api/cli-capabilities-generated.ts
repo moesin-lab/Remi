@@ -1133,19 +1133,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "repo.activity": {
-      "command": "remi repo activity",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "repo.activity",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "repo.get": {
       "command": "remi repo get",
       "auth": [

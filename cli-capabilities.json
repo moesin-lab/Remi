@@ -1662,23 +1662,6 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "repo.activity": {
-      "command": "remi repo activity",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "repo.activity",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
     "repo.get": {
       "command": "remi repo get",
       "aliases": [],
@@ -12832,9 +12815,6 @@
     },
     "GET /api/workspaces/:id/repos": {
       "command": "repo.list"
-    },
-    "GET /api/workspaces/:id/repos/:repositoryId/activity": {
-      "command": "repo.activity"
     },
     "GET /api/workspaces/:id/repos/:repositoryId/wiki": {
       "command": "wiki.repository.list"

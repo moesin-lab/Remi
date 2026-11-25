@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { AgentTranscriptDialog, type TranscriptTask } from "./agent-transcript-dialog";
+import type { AgentTask } from "@multiremi/core/types/agent";
+import type { SessionTask } from "@multiremi/core/types";
+import { AgentTranscriptDialog } from "./agent-transcript-dialog";
 import { useTurnTrace } from "./use-task-trace";
 
 const ACTIVE_TASK_STATUSES = new Set(["dispatched", "running", "waiting_local_directory", "awaiting_human"]);
@@ -12,7 +14,7 @@ export function TaskTraceDialog(props: TaskTraceDialogProps) {
 }
 
 interface TaskTraceDialogProps {
-  task: TranscriptTask;
+  task: AgentTask | SessionTask;
   agentName: string;
   onOpenChange: (open: boolean) => void;
   headerSlot?: React.ReactNode;

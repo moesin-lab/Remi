@@ -10,9 +10,7 @@ import type {
   RepositoryWikiBuildResponse,
 } from "../../types";
 import type { HttpClient } from "../http";
-import { parseWithFallback, parseStrictResponse } from "../schema";
-import { activityResponseSchema, type ActivityPage } from "../schemas/repository-activity";
-import type { ActivityFilters } from "../../repositories/activity-filters";
+import { parseWithFallback } from "../schema";
 import {
   EMPTY_REPOSITORY_LIST_RESPONSE,
   EMPTY_REPOSITORY_INSPECTION_RESPONSE,
@@ -30,16 +28,6 @@ import {
 
 export class RepositoriesEndpoints {
   constructor(readonly http: HttpClient) {}
-
-  async listRepositoryActivity(workspaceId: string, repositoryId: string, filters: ActivityFilters, signal?: AbortSignal) {
-    const params = new URLSearchParams();
-    for (const [name, value] of Object.entries(filters)) if (value) params.set(name, value);
-    const raw = await this.http.fetch<unknown>(
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/repos/${encodeURIComponent(repositoryId)}/activity?${params}`,
-      { signal },
-    );
-    return parseStrictResponse<ActivityPage>(raw, activityResponseSchema, { endpoint: "GET /api/workspaces/:id/repos/:repositoryId/activity" });
-  }
 
   async listWorkspaceRepositories(
     workspaceId: string,

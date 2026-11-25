@@ -1,6 +1,5 @@
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
-import { hasActivityForChange } from "../repository-activity.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { lockIssueRowWithinTransaction } from "../issue-row-lock.js";
 import { decryptScmCredential, encryptScmCredential } from "@multiremi/scm/credentials.js";
@@ -1037,7 +1036,7 @@ export class ScmRepo {
       this.emitChangeRequestUpdated(changeRequest.workspaceId, {
         changeRequestId,
         issueIds: this.activeIssueIds(changeRequestId),
-      }, [issueId]);
+      });
     }
     return changed;
   }
@@ -1791,7 +1790,6 @@ export class ScmRepo {
   private emitChangeRequestUpdated(
     workspaceId: string,
     input: { changeRequestId: string; issueIds: string[] },
-    affectedIssues = input.issueIds,
   ): void {
     this.ctx.emitWorkspaceEvent({
       type: "change_request:updated",
@@ -1803,14 +1801,6 @@ export class ScmRepo {
         issue_ids: input.issueIds,
       },
     });
-    if (affectedIssues.length) {
-      const repositoryId = this.ctx.db.query("SELECT repository_id FROM multiremi_scm_change_requests WHERE workspace_id=? AND id=?")
-        .get(workspaceId, input.changeRequestId)?.repository_id;
-      if (repositoryId && hasActivityForChange(this.ctx.db, workspaceId, repositoryId, affectedIssues)) {
-        this.ctx.emitWorkspaceEvent({type:"repository:activity_changed", workspaceId, actorType:"system", actorId:null,
-          payload:{workspace_id:workspaceId, repository_ids:[repositoryId]}});
-      }
-    }
   }
 
   private lockConnectionAndBinding(

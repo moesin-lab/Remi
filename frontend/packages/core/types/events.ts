@@ -11,7 +11,6 @@ import type { MultiremiIssueDecision } from "@multiremi/contracts";
 
 // WebSocket event types (matching Go server protocol/events.go)
 export type WSEventType =
-  | "repository:activity_changed"
   | "issue:created"
   | "issue:updated"
   | "issue:deleted"

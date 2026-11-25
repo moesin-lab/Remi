@@ -130,22 +130,6 @@ describe("useRealtimeSync — ws instance change", () => {
     expect(invalidateSpy).not.toHaveBeenCalled();
   });
 
-  it("restores activity on reconnect and defers hidden-page requests", async () => {
-    const ws = createMockWs();
-    renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
-    const reconnect = vi.mocked(ws.onReconnect).mock.calls[0]![0];
-    const hidden = vi.spyOn(document, "hidden", "get");
-    try {
-      for (const background of [true, false]) {
-        hidden.mockReturnValue(background);
-        await reconnect();
-        expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["repository-activity", "ws-1"], refetchType: background ? "none" : "active" });
-      }
-    } finally {
-      hidden.mockRestore();
-    }
-  });
-
   it("does not invalidate when ws goes from instance to null", () => {
     const ws1 = createMockWs();
     const { rerender } = renderHook(
@@ -187,10 +171,9 @@ describe("useRealtimeSync — ws instance change", () => {
     const ws2 = createMockWs();
     rerender({ ws: ws2 });
 
-    expect(invalidateSpy).toHaveBeenCalledTimes(25);
+    expect(invalidateSpy).toHaveBeenCalledTimes(24);
     const calls = invalidateSpy.mock.calls.map((call: [{ queryKey?: unknown }, ...unknown[]]) => call[0].queryKey);
     expect(calls).toContainEqual(["chat", "ws-1"]);
-    expect(calls).toContainEqual(["repository-activity", "ws-1"]);
     expect(calls).toContainEqual(["labels", "ws-1"]);
     expect(calls).toContainEqual(["workspaces", "ws-1", "invitations"]);
     expect(calls).toContainEqual(["workspaces", "ws-1", "agent-plugins"]);

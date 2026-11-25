@@ -92,7 +92,7 @@ vi.mock("@multiremi/core/hooks", () => ({
 }));
 
 vi.mock("@multiremi/core/paths", () => ({
-  useWorkspacePaths: () => ({ repositoryWiki: (id: string) => `/workspace/repos/${id}/wiki`, repositoryActivity: (id: string) => `/workspace/repos/${id}/activity` }),
+  useWorkspacePaths: () => ({ repositoryWiki: (id: string) => `/workspace/repos/${id}/wiki` }),
 }));
 
 vi.mock("@multiremi/core/auth", () => ({
@@ -126,9 +126,6 @@ describe("RepositoriesPage", () => {
 
     expect(screen.getByText("web")).toBeInTheDocument();
     expect(screen.getByText("agent-platform")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "Tasks" }).map((link) => link.getAttribute("href"))).toEqual([
-      "/workspace/repos/repo-github/activity", "/workspace/repos/repo-codebase/activity",
-    ]);
     expect(screen.queryByRole("button", { name: "GitHub" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Codebase" })).not.toBeInTheDocument();
     expect(screen.queryByText("Source")).not.toBeInTheDocument();

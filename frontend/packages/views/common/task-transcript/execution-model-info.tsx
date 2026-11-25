@@ -1,12 +1,12 @@
 "use client";
 
 import { ArrowRightLeft } from "lucide-react";
-import type { TranscriptTask } from "./agent-transcript-dialog";
+import type { AgentTask } from "@multiremi/core/types";
 import { executionModel as normalizeExecutionModel } from "@multiremi/shared/agent-execution";
 import { useT } from "../../i18n";
 
 export function ExecutionModelInfo({ task, agentModel, agentThinkingLevel, traceModel }: {
-  task: TranscriptTask;
+  task: Omit<AgentTask, "issue_id">;
   agentModel?: string | null;
   agentThinkingLevel?: string | null;
   traceModel?: string | null;

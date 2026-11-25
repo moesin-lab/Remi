@@ -1,5 +1,4 @@
 export {
-  repositoryActivityOptions,
   repositoryKeys,
   repositoryListOptions,
   repositoryWikiDocsOptions,
@@ -9,8 +8,6 @@ export {
   wikiSummariesRefetchInterval,
   WIKI_BUILD_POLL_INTERVAL_MS,
 } from "./queries";
-export { activityFilters, activityStatuses } from "./activity-filters";
-export type { ActivityPage } from "../api/schemas/repository-activity";
 export {
   useImportWorkspaceRepository,
   useInspectWorkspaceRepository,

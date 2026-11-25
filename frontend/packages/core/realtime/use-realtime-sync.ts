@@ -44,10 +44,6 @@ const logger = createLogger("realtime-sync");
 function invalidateWorkspaceScopedQueries(qc: QueryClient, includeChat = true): void {
   const wsId = getCurrentWsId();
   if (wsId) {
-    qc.invalidateQueries({
-      queryKey: ["repository-activity", wsId],
-      refetchType: typeof document !== "undefined" && document.hidden ? "none" : "active",
-    });
     qc.invalidateQueries({ queryKey: issueKeys.all(wsId) });
     qc.invalidateQueries({ queryKey: inboxKeys.all(wsId) });
     qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });

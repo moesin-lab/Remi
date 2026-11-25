@@ -17,8 +17,6 @@ import { afterCommit, type SqlDatabase, openMultiremiDatabase } from "@multiremi
 import { runStartupMigrations as runMigrations } from "@multiremi/store/migrations.js";
 import { invalidatingDatabase } from "@multiremi/store/request-read-cache.js";
 import { daemonRuntimeId, isTerminalStatus, parseJson } from "@multiremi/store/helpers.js";
-import { activityRepositories, hasProjectActivity, readRepositoryActivity, type ActivityScope, type ActivitySubject } from "./repository-activity.js";
-import { canonicalGitRemoteKey, normalizeWorkspaceRepositories } from "../api/helpers/repositories.js";
 import { agentRoleAtLeast } from "@multiremi/store/agent-role.js";
 import { FeedbackRepo } from "@multiremi/store/repos/feedback-repo.js";
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
@@ -643,8 +641,6 @@ export class MultiremiStore {
     // The analytics recorders are not part of the public facade, so domains reach them through the
     // context rather than through `resolveHost`.
     this.ctx.registerAnalytics(this.analytics);
-    this.onTaskEnqueued(task => this.notifyTaskRepositoryActivity(task));
-    this.onTaskEvent(({ task }) => this.notifyTaskRepositoryActivity(task));
     this.projects = new ProjectsRepo(this.ctx);
     this.repositoryWiki = new RepositoryWikiRepo(this.ctx);
     this.knowledge = new KnowledgeRepo(this.ctx);
@@ -1147,7 +1143,6 @@ runMigrations(this.db);
       }
       return agent;
     })();
-    if (input.name !== undefined || input.visibility !== undefined) this.notifyRepositoryActivity(updated.workspaceId, this.affectedActivity(updated.workspaceId, "agent", id));
     this.publishDaemonDispatchConditionsChanged(updated.workspaceId);
     return updated;
   }
@@ -3873,16 +3868,11 @@ runMigrations(this.db);
   }
 
   abandonIssueWorkspace(issueId: string, workspaceId: string) {
-    const previous = this.issueWorkspaces.get(issueId);
-    const result = this.issueWorkspaces.abandon(issueId, workspaceId);
-    if (result.status === "abandoned") this.notifyWorktreeActivity(previous, result.workspace);
-    return result;
+    return this.issueWorkspaces.abandon(issueId, workspaceId);
   }
 
   reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
-    const previous = this.issueWorkspaces.get(input.issueId);
     const workspace = this.issueWorkspaces.report(input);
-    this.notifyWorktreeActivity(previous, workspace);
     // A live Issue workspace is pinned to its daemon. Its readiness changes
     // eligibility for sibling providers on that host, not unrelated machines.
     const runtime = this.runtimes.getRuntimeLite(input.runtimeId)!;
@@ -3895,11 +3885,8 @@ runMigrations(this.db);
 
   /** `gc.subject_reclaimed`: the daemon deleted a subject's workspace. */
   reportSubjectReclaimed(runtimeId: string, input: SubjectReclaimedInput): void {
-    const previous = input.subject.kind === "issue" ? this.issueWorkspaces.get(input.subject.id) : null;
     this.storage.reportSubjectReclaimed(runtimeId, input);
     if (input.subject.kind === "issue") {
-      const current = this.issueWorkspaces.get(input.subject.id);
-      if (current) this.notifyWorktreeActivity(previous, current);
       this.publishDaemonDispatchConditionsChanged(this.runtimes.getRuntimeLite(runtimeId)?.workspaceId ?? "local");
     }
   }
@@ -3910,18 +3897,6 @@ runMigrations(this.db);
 
   listDaemonStorageReports(workspaceId: string, daemonIds: readonly string[]): DaemonStorageReportRecord[] {
     return this.storage.listDaemonStorageReports(workspaceId, daemonIds);
-  }
-
-  private notifyWorktreeActivity(previous: MultiremiIssueWorkspace | null, current: MultiremiIssueWorkspace) {
-    const entries = (workspace: MultiremiIssueWorkspace | null) => new Map((workspace?.status === "cleaned" ? [] : workspace?.repos ?? []).map(repo =>
-      [canonicalGitRemoteKey(repo.repoUrl), JSON.stringify([repo.branchName, repo.status])]));
-    const before = entries(previous);
-    const after = entries(current);
-    const urls = [...new Set([...before.keys(), ...after.keys()])].filter(url => before.get(url) !== after.get(url));
-    if (!urls.length) return;
-    const visible = this.affectedActivity(current.workspaceId, "issue", current.issueId);
-    const imported = normalizeWorkspaceRepositories(this.getWorkspace(current.workspaceId)?.repos ?? []);
-    this.notifyRepositoryActivity(current.workspaceId, imported.filter(repo => visible.includes(repo.id) && urls.includes(canonicalGitRemoteKey(repo.url))).map(repo => repo.id));
   }
 
   getIssueByRef(ref: string, workspaceId?: string | null): MultiremiIssue | null {
@@ -4060,7 +4035,7 @@ runMigrations(this.db);
   }
 
   updateIssueAndDispatch(id: string, input: UpdateIssueInput): ReturnType<IssuesRepo['updateIssueAndDispatch']> {
-    return this.withIssueActivityUpdate(id, input, () => this.issues.updateIssueAndDispatch(id, input));
+    return this.issues.updateIssueAndDispatch(id,input);
   }
 
   updateIssueWithOutcome(
@@ -4074,21 +4049,7 @@ runMigrations(this.db);
     /** The Issue the write itself saw, after its row lock (see the repo). */
     previous: MultiremiIssue;
   } {
-    return this.withIssueActivityUpdate(id, input, () => this.issues.updateIssueWithOutcome(id, input, options));
-  }
-
-  private withIssueActivityUpdate<T extends { issue: MultiremiIssue }>(id: string, input: UpdateIssueInput, write: () => T): T {
-    const changesScope = [input.title, input.projectId, input.project_id, input.workspaceId, input.workspace_id].some(value => value !== undefined);
-    if (!changesScope) return write();
-    const previous = this.getIssue(id);
-    const before = previous ? this.affectedActivity(previous.workspaceId, "issue", id) : [];
-    const result = write();
-    const workspaceId = result.issue.workspaceId;
-    const after = this.affectedActivity(workspaceId, "issue", id);
-    if (previous && previous.workspaceId !== workspaceId) this.notifyRepositoryActivity(previous.workspaceId, before);
-    else after.push(...before);
-    this.notifyRepositoryActivity(workspaceId, after);
-    return result;
+    return this.issues.updateIssueWithOutcome(id, input, options);
   }
 
   /** MUL-400 E3: prerequisites that are not `done` yet. */
@@ -4629,9 +4590,7 @@ runMigrations(this.db);
   }
 
   updateIssueSession(id: string, input: UpdateIssueSessionInput): MultiremiIssueSession {
-    const result = this.sessions.updateIssueSession(id, input);
-    if (input.title !== undefined) this.notifyRepositoryActivity(result.workspaceId, this.affectedActivity(result.workspaceId, "session", id));
-    return result;
+    return this.sessions.updateIssueSession(id, input);
   }
 
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant {
@@ -5092,9 +5051,7 @@ runMigrations(this.db);
   }
 
   createProjectResource(projectId: string, input: CreateProjectResourceInput): MultiremiProjectResource {
-    const result = this.projects.createProjectResource(projectId, input);
-    this.notifyResourceActivity([result]);
-    return result;
+    return this.projects.createProjectResource(projectId, input);
   }
 
   getProjectResource(id: string): MultiremiProjectResource | null {
@@ -5102,25 +5059,11 @@ runMigrations(this.db);
   }
 
   updateProjectResource(projectId: string, resourceId: string, input: UpdateProjectResourceInput): MultiremiProjectResource {
-    const previous = this.projects.getProjectResource(resourceId);
-    const result = this.projects.updateProjectResource(projectId, resourceId, input);
-    if (input.resourceRef || input.resource_ref) this.notifyResourceActivity([previous, result]);
-    return result;
+    return this.projects.updateProjectResource(projectId, resourceId, input);
   }
 
   deleteProjectResource(projectId: string, resourceId: string): void {
-    const previous = this.projects.getProjectResource(resourceId);
-    this.projects.deleteProjectResource(projectId, resourceId);
-    this.notifyResourceActivity([previous]);
-  }
-
-  private notifyResourceActivity(resources: (MultiremiProjectResource | null)[]) {
-    const repos = resources.filter(resource => resource?.resourceType === "github_repo");
-    const workspaceId = repos[0]?.workspaceId;
-    if (!workspaceId || !hasProjectActivity(this.db, workspaceId, repos[0]!.projectId)) return;
-    const urls = repos.flatMap(resource => typeof resource?.resourceRef.url === "string" ? [canonicalGitRemoteKey(resource.resourceRef.url)] : []);
-    const imported = normalizeWorkspaceRepositories(this.getWorkspace(workspaceId)?.repos ?? []);
-    this.notifyRepositoryActivity(workspaceId, imported.filter(repo => urls.includes(canonicalGitRemoteKey(repo.url))).map(repo => repo.id));
+    return this.projects.deleteProjectResource(projectId, resourceId);
   }
 
   listProjectDocs(projectId: string, input: { kind?: string | null; includeBody?: boolean } = {}): MultiremiProjectDoc[] {
@@ -6023,24 +5966,6 @@ runMigrations(this.db);
     return this.tasks.listTasks(status);
   }
 
-  listRepositoryActivity(scope: ActivityScope, params: Record<string, string>) {
-    return readRepositoryActivity(this.db, scope, params);
-  }
-
-  notifyRepositoryActivity(workspaceId: string, repositoryIds: string[]) {
-    if (!repositoryIds.length) return;
-    this.ctx.emitWorkspaceEvent({ type: "repository:activity_changed", workspaceId, actorType: "system", actorId: null,
-      payload: { workspace_id: workspaceId, repository_ids: [...new Set(repositoryIds)] } });
-  }
-
-  private affectedActivity(workspaceId: string, subject: ActivitySubject, id: string) {
-    return activityRepositories(this.db, workspaceId, subject, id);
-  }
-
-  private notifyTaskRepositoryActivity(task: MultiremiTask) {
-    if (this.ctx.workspaceEventListeners.size && !task.chatSessionId) this.notifyRepositoryActivity(task.workspaceId, this.affectedActivity(task.workspaceId, "task", task.id));
-  }
-
   /** Full rows for one runtime's pending statuses; avoids a whole-table read. */
   listTasksForRuntimeStatuses(runtimeId: string, statuses: readonly MultiremiTaskStatus[]): MultiremiTask[] {
     return this.tasks.listTasksForRuntimeStatuses(runtimeId, statuses);
@@ -6394,9 +6319,7 @@ runMigrations(this.db);
   }
 
   reportProgress(taskId: string, summary: string, step?: number | null, total?: number | null, options?: { allowTerminal?: boolean }): MultiremiTask {
-    const task = this.tasks.reportProgress(taskId, summary, step, total, options);
-    this.notifyTaskRepositoryActivity(task);
-    return task;
+    return this.tasks.reportProgress(taskId, summary, step, total, options);
   }
 
   /** PR 5: the `task.activity` count of an active attempt; see `TasksRepo.recordRunningSubagents`. */

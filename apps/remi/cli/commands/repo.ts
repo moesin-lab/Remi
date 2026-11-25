@@ -33,18 +33,6 @@ export function repoCommandSpecs(): CommandSpec[] {
       const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(requiredWorkspace(invocation))}/repos` });
       renderResource(invocation, response.data, ["repositories"]);
     }),
-    spec("repo.activity", ["repo", "activity"], "List task activity for an imported repository ID", "read", ["human", "task"], [refPositional("repository-id")], [
-      { name: "view", type: "string", description: "active or history" },
-      { name: "status", type: "string", description: "Filter by task status" },
-      { name: "agent-id", type: "string", description: "Filter by agent ID" },
-    ], async (invocation) => {
-      const client = await clientFor(invocation);
-      const response = await client.request({ method: "GET",
-        path: `/api/workspaces/${encodePath(requiredWorkspace(invocation))}/repos/${encodePath(positional(invocation, 0, "repository-id"))}/activity`,
-        query: { view: stringOption(invocation, "view"), status: stringOption(invocation, "status"), agent_id: stringOption(invocation, "agent-id"),
-          q: stringOption(invocation, "query"), limit: integerOption(invocation, "limit"), cursor: stringOption(invocation, "cursor") } });
-      renderResource(invocation, response.data, ["items"]);
-    }),
     spec("repo.get", ["repo", "get"], "Get an imported repository", "read", ["human", "task"], [refPositional("repository")], [], async (invocation) => {
       const client = await clientFor(invocation);
       renderResource(invocation, await resolveRepository(client, requiredWorkspace(invocation), positional(invocation, 0, "repository")));

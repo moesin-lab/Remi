@@ -282,9 +282,6 @@ export function RepositoriesPage() {
               >
                 <div className="min-w-0 py-2">
                   <div className="truncate font-medium">{repository.name}</div>
-                  <AppLink href={paths.repositoryActivity(repository.id)} className="text-xs text-primary hover:underline">
-                    {t(($) => $.activity.tasks)}
-                  </AppLink>
                   <div className="truncate font-mono text-xs text-muted-foreground" title={repository.url}>
                     {repository.url}
                   </div>

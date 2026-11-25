@@ -41,6 +41,11 @@ export function createIssueHandlers({ qc }: SyncContext): SyncModule {
 
   return {
     handlers: {
+      "issue:worktree_changed": (payload) => {
+        if (payload && typeof payload === "object" && "issue_id" in payload && typeof payload.issue_id === "string" && payload.issue_id) {
+          void qc.invalidateQueries({ queryKey: issueKeys.workspace(payload.issue_id), exact: true });
+        }
+      },
       "issue:updated": (p) => {
         const { issue } = p as IssueUpdatedPayload;
         if (!issue?.id) return;

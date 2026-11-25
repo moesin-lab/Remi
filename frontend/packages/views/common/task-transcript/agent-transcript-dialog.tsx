@@ -47,7 +47,7 @@ import {
 import { api } from "@multiremi/core/api";
 import { useTranscriptViewStore } from "@multiremi/core/agents/stores";
 import type { AgentTask, Agent, AgentRuntime } from "@multiremi/core/types/agent";
-import type { SessionTask } from "@multiremi/core/types";
+export type TranscriptTask = Omit<Partial<AgentTask>, "status" | "issue_id"> & { id: string; status: string };
 import { redactItem } from "./redact";
 import { useT } from "../../i18n";
 import {
@@ -67,7 +67,7 @@ import type { TurnTraceReadInfo } from "./use-task-trace";
 interface AgentTranscriptDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  task: AgentTask | SessionTask;
+  task: TranscriptTask;
   /** The trace's turn; model and context usage come from it. */
   turn?: TraceTurn | null;
   /** Every item of the trace, at any depth; subagent items nest their own. */

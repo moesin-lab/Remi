@@ -2,7 +2,7 @@
  * final evidence after this staged result and all outer cleanup succeed.
  * Internal: SCHEMA_ROLLBACK_RUN_CONTEXT=... bun scripts/check-schema-rollback.ts <previous source> <manifest> <staging> */
 import assert from 'node:assert/strict';
-import { constants } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { resolve, join, dirname, relative, sep } from 'node:path';
 import { copyFile, readFile, writeFile, rm, mkdir, mkdtemp, lstat, realpath, open } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -23,6 +23,10 @@ async function assertExecutionRoot() {
 
 const contains = (parent: string, path: string) => path === parent || path.startsWith(parent + sep);
 const overlaps = (a: string, b: string) => contains(a, b) || contains(b, a);
+
+type FileIdentity = Pick<BigIntStats, 'dev' | 'ino'>;
+const hasFileIdentity = (current: BigIntStats, identity: FileIdentity | undefined) =>
+  identity && current.isFile() && current.dev === identity.dev && current.ino === identity.ino;
 
 /** Preflight is read-only. Existing files, including stale artifacts, belong to
  * the caller; a run only owns outputs that it creates exclusively afterward. */
@@ -92,7 +96,7 @@ export async function checkSchemaRollback(args: string[]) {
   await mkdir(artifactRoot, { recursive: true });
   // Exclusive creation establishes ownership; never truncate a pre-existing file.
   const diagnosticFile = await open(diagnosticsPath, 'wx');
-  let diagnosticIdentity: { dev: bigint; ino: bigint } | undefined;
+  let diagnosticIdentity: FileIdentity | undefined;
   const saveDiagnostics = async (file = diagnosticFile) => {
     const bytes = Buffer.from(JSON.stringify(diagnostics,
       (key, value) => key === 'rollbackSafeFrom' ? undefined : value, 2) + '\n', 'utf8');
@@ -111,8 +115,7 @@ export async function checkSchemaRollback(args: string[]) {
     try {
       report = await open(diagnosticsPath, constants.O_RDWR | constants.O_NOFOLLOW);
       const current = await report.stat({ bigint: true });
-      assert(diagnosticIdentity && current.isFile() && current.dev === diagnosticIdentity.dev && current.ino === diagnosticIdentity.ino,
-        'Diagnostic ownership changed after close');
+      assert(hasFileIdentity(current, diagnosticIdentity), 'Diagnostic ownership changed after close');
       await saveDiagnostics(report);
     } catch { /* Keep the original failure and preserve competing writer content. */ }
     finally { if (report) { try { await report.close(); } catch { /* Best effort only. */ } } }
@@ -223,10 +226,12 @@ export async function checkSchemaRollback(args: string[]) {
   }
   if (failure) { await recoverDiagnostics(); throw failure; }
   let outputFile: Awaited<ReturnType<typeof open>> | undefined;
+  let outputIdentity: FileIdentity | undefined;
   try {
     assert(evidence, 'Missing complete rollback evidence');
     await checkCandidate();
     outputFile = await open(output, 'wx');
+    outputIdentity = await outputFile.stat({ bigint: true });
     await checkCandidate();
     await outputFile.writeFile(JSON.stringify({ ...evidence, cleanup: cleanupResults }, null, 2) + '\n');
     await checkCandidate();
@@ -236,7 +241,11 @@ export async function checkSchemaRollback(args: string[]) {
     failure = error;
     if (outputFile) {
       try { await outputFile.close(); } catch { /* Still attempt staged output cleanup. */ }
-      try { await rm(output, { force: true }); } catch { /* Preserve the publication failure. */ }
+      if (outputIdentity) {
+        try {
+          if (hasFileIdentity(await lstat(output, { bigint: true }), outputIdentity)) await rm(output, { force: true });
+        } catch { /* Preserve the publication failure. */ }
+      }
     }
     await recoverDiagnostics();
     throw failure;

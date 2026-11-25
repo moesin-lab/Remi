@@ -172,6 +172,36 @@ async function fixture(run: (f: Fixture) => Promise<void>) {
       import fs from 'node:fs/promises';
       import { syncBuiltinESMExports } from 'node:module';
       const mode = process.env.FIXTURE_MODE ?? '';
+      if (mode.startsWith('staging-')) {
+        const originalOpen = fs.open, originalLstat = fs.lstat;
+        let closeFailed = false;
+        const isStaging = path => String(path).endsWith('/rollback-staged-result.json');
+        fs.open = async (path, ...args) => {
+          const file = await originalOpen(path, ...args);
+          if (!isStaging(path)) return file;
+          const close = file.close.bind(file);
+          if (mode === 'staging-stat-fault') {
+            file.stat = async () => { throw new Error('staging stat fault'); };
+          }
+          file.close = async () => {
+            if (!closeFailed && mode === 'staging-close-replacement') {
+              await fs.rename(path, path + '.moved');
+              await fs.writeFile(path, '另一写入者\\n', { flag: 'wx' });
+            }
+            closeFailed = true;
+            await close();
+            throw new Error('staging close fault');
+          };
+          return file;
+        };
+        fs.lstat = async (path, ...args) => {
+          if (closeFailed && isStaging(path) && mode === 'staging-close-lstat-fault') {
+            throw new Error('staging lstat fault');
+          }
+          return originalLstat(path, ...args);
+        };
+        syncBuiltinESMExports();
+      }
       if (mode.startsWith('diagnostic-')) {
         const originalOpen = fs.open;
         let opens = 0;
@@ -747,6 +777,33 @@ test('staging created by another writer during cleanup is preserved and rejects 
     assert.match(diagnostic.error, /EEXIST/); assertNoDeclaration(diagnostic); await assertResourcesCleaned(f, diagnostic);
   });
 });
+
+for (const [mode, firstError] of [
+  ['staging-close-owned', 'staging close fault'],
+  ['staging-close-replacement', 'staging close fault'],
+  ['staging-stat-fault', 'staging stat fault'],
+  ['staging-close-lstat-fault', 'staging close fault'],
+]) {
+  test(`checker preserves first error and respects staging ownership on ${mode}`, async () => {
+    await fixture(async f => {
+      const result = f.execute(mode);
+      assert.equal(result.status, 1, String(result.stderr));
+      assert.match(String(result.stderr), new RegExp(`Error: ${firstError}`));
+      assert.equal(String(result.stdout).trim(), '');
+      const diagnostic = await readJson(f, 'rollback-diagnostics.json');
+      assert.equal(diagnostic.status, 'failed');
+      assert.equal(diagnostic.error, `Error: ${firstError}`);
+      await assertResourcesCleaned(f, diagnostic);
+      await absent(join(f.artifactRoot, 'rollback-evidence.json'));
+      switch (mode) {
+        case 'staging-close-owned': await absent(f.output); break;
+        case 'staging-close-replacement': assert.deepEqual(await readFile(f.output), Buffer.from('另一写入者\n')); break;
+        case 'staging-stat-fault': assert.equal((await lstat(f.output)).size, 0); break;
+        case 'staging-close-lstat-fault': assertStagedEvidence(f, await readJson(f, 'rollback-staged-result.json')); break;
+      }
+    });
+  });
+}
 
 test('private phase subprocesses run old -> fixed candidate -> same old and retain logs and levels', async () => {
   await fixture(async f => {

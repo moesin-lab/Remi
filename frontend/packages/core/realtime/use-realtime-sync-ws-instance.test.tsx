@@ -73,6 +73,7 @@ describe("useRealtimeSync — ws instance change", () => {
     // The same workspace-scoped invalidation a reconnect runs — the two paths
     // share one implementation, so a `resync` cannot recover less than a drop.
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["issues", "ws-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["project-activity", "ws-1"], refetchType: "active" });
   });
 
   it("keeps Chat's cursor-backed rows during a same-instance reconnect", () => {
@@ -87,6 +88,7 @@ describe("useRealtimeSync — ws instance change", () => {
     reconnect?.();
     const keys = invalidateSpy.mock.calls.map((call: [{ queryKey?: unknown }, ...unknown[]]) => call[0].queryKey);
     expect(keys).toContainEqual(["issues", "ws-1"]);
+    expect(keys).toContainEqual(["project-activity", "ws-1"]);
     expect(keys).not.toContainEqual(["chat", "ws-1"]);
     // What no stream resumes is refreshed: session lists and details, the
     // pending roll-up, the background-task registry (PR 6 review #7).
@@ -171,7 +173,7 @@ describe("useRealtimeSync — ws instance change", () => {
     const ws2 = createMockWs();
     rerender({ ws: ws2 });
 
-    expect(invalidateSpy).toHaveBeenCalledTimes(24);
+    expect(invalidateSpy).toHaveBeenCalledTimes(25);
     const calls = invalidateSpy.mock.calls.map((call: [{ queryKey?: unknown }, ...unknown[]]) => call[0].queryKey);
     expect(calls).toContainEqual(["chat", "ws-1"]);
     expect(calls).toContainEqual(["labels", "ws-1"]);

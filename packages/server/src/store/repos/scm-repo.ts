@@ -1172,7 +1172,7 @@ export class ScmRepo {
       this.emitChangeRequestUpdated(changeRequest.workspaceId, {
         changeRequestId,
         issueIds: this.activeIssueIds(changeRequestId),
-      });
+      }, [issueId]);
     }
     return changed;
   }
@@ -1896,6 +1896,7 @@ export class ScmRepo {
   private emitChangeRequestUpdated(
     workspaceId: string,
     input: { changeRequestId: string; issueIds: string[] },
+    affectedIssueIds = input.issueIds,
   ): void {
     this.ctx.emitWorkspaceEvent({
       type: "change_request:updated",
@@ -1905,6 +1906,7 @@ export class ScmRepo {
       payload: {
         change_request_id: input.changeRequestId,
         issue_ids: input.issueIds,
+        affected_issue_ids: affectedIssueIds,
       },
     });
   }

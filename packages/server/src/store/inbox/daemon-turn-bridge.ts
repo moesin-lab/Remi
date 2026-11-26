@@ -250,7 +250,8 @@ export class DaemonTurnBridge {
         const key=message.metadata.human_request?'human_request':'decision_record';
         if (message.metadata.question) new Questions(this.ctx).detachWithinTransaction(message.id,String(payload.status),events);
         else patchDecisionRecord(this.ctx,message.id,key,{status:payload.status,responded_at:nowIso()},'pending');
-        if(turn.waiting_on_message_id===message.id){this.ctx.db.run("UPDATE multiremi_turns SET status='running',waiting_on_message_id=NULL WHERE id=?",[turn.id]);if(turn.issue_id)deriveIssueStatusWithinTransaction(this.ctx,turn.issue_id,events);}
+        if(turn.waiting_on_message_id===message.id){this.ctx.db.run("UPDATE multiremi_turns SET status='running',waiting_on_message_id=NULL WHERE id=?",[turn.id]);if(turn.issue_id)deriveIssueStatusWithinTransaction(this.ctx,turn.issue_id,events);
+          if(turn.issue_id && !turn.chat_session_id)this.ctx.notifyIssueProjectActivity(turn.workspace_id,turn.issue_id);}
       }
       const current=getMessage(this.ctx,message.id)!;
       const reply=this.ctx.db.query("SELECT id FROM multiremi_conversation_log WHERE reply_to_id=? AND message_kind='reply' AND deleted_at IS NULL ORDER BY seq LIMIT 1").get(message.id);

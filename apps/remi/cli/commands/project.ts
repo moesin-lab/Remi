@@ -20,6 +20,36 @@ import {
   stringOptions,
 } from "./resource-common.js";
 import { resolveRepository } from "./repo.js";
+import type { ProjectActivityResponse, ProjectActivitySummary } from "@multiremi/contracts/types.js";
+
+function projectPublicSummary(summary: ProjectActivitySummary | null): ProjectActivitySummary | null {
+  switch (summary?.code) {
+    case "step_progress": {
+      const { step, total } = summary;
+      return Number.isInteger(step) && Number.isInteger(total) && step >= 0 && total >= 1 && step <= total && total <= 1_000_000
+        ? { code: "step_progress", step, total } : null;
+    }
+    case "queued": case "dispatched": case "needs_directory": case "needs_human":
+    case "completed": case "cancelled": case "context_overflow": case "offer_too_large":
+      return { code: summary.code };
+    default: return null;
+  }
+}
+
+function activitySummary(summary: ProjectActivitySummary | null): string {
+  switch (summary?.code) {
+    case "step_progress": return `${summary.step}/${summary.total}`;
+    case "queued": return "Queued";
+    case "dispatched": return "Dispatched";
+    case "needs_directory": return "Waiting for directory";
+    case "needs_human": return "Waiting for input";
+    case "completed": return "Completed";
+    case "cancelled": return "Cancelled";
+    case "context_overflow": return "Context limit exceeded";
+    case "offer_too_large": return "Offer too large";
+    default: return "—";
+  }
+}
 
 const PROJECT_FIELDS: readonly CliOptionSpec[] = [
   { name: "title", type: "string", valueName: "title", description: "Project title" },
@@ -53,6 +83,22 @@ export function projectCommandSpecs(): CommandSpec[] {
     spec("project.get", ["project", "get"], "Get a project", "read", ["human", "task"], [refPositional("project")], PAGE_OPTIONS, async (invocation) => {
       const client = await clientFor(invocation);
       renderResource(invocation, await resolveProject(client, requiredWorkspace(invocation), positional(invocation, 0, "project")));
+    }),
+    spec("project.activity", ["project", "activity"], "List execution attempts in a project", "read", ["human", "task"], [refPositional("project-id")], [
+      { name: "view", type: "string", description: "active or history" },
+      { name: "status", type: "string", description: "Filter attempt status" },
+      { name: "agent-id", type: "string", description: "Filter executing agent" },
+      { name: "from", type: "string", description: "Inclusive UTC creation timestamp" },
+      { name: "to", type: "string", description: "Exclusive UTC creation timestamp" },
+    ], async invocation => {
+      const client = await clientFor(invocation);
+      const { data } = await client.request<ProjectActivityResponse>({ method: "GET", path: `/api/projects/${encodePath(positional(invocation,0,"project-id"))}/activity`,
+        query: queryOptions(invocation, { view: stringOption(invocation,"view"), status: stringOption(invocation,"status"), agent_id: stringOption(invocation,"agent-id"), from: stringOption(invocation,"from"), to: stringOption(invocation,"to") }) });
+      const items = data.items.map(item => ({ ...item, public_summary: projectPublicSummary(item.public_summary) }));
+      new CliRenderer().render({ ...data, items }, { mode: outputMode(invocation), rows: () => items, columns: [
+        {header:"ATTEMPT",value:row=>row.attempt_id}, {header:"ISSUE",value:row=>row.issue.key}, {header:"AGENT",value:row=>row.agent.name}, {header:"STATUS",value:row=>row.status},
+        {header:"PROGRESS",value:row=>activitySummary(row.public_summary)},
+      ] });
     }),
     spec("project.defaults", ["project", "defaults"], "Show project issue defaults", "read", ["human", "task"], [refPositional("project")], [], async (invocation) => {
       const client = await clientFor(invocation);

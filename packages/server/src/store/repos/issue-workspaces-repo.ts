@@ -70,6 +70,7 @@ export class IssueWorkspacesRepo {
          WHERE issue_id = ? AND workspace_id = ? AND runtime_id IS NULL AND status != 'cleaned'`,
         [now, now, issueId, workspaceId],
       ).changes;
+      if (abandoned) this.notifyChanged(workspaceId, issueId);
       return { status: "abandoned", workspace: this.get(issueId)!, issueWorkspacesAbandoned: abandoned };
     })();
   }
@@ -165,6 +166,7 @@ export class IssueWorkspacesRepo {
         now,
       ],
     );
+    if (current?.status !== input.status || current.branchName !== input.branchName || toJson(current.repos) !== toJson(input.repos ?? [])) this.notifyChanged(workspaceId, input.issueId);
     return this.get(input.issueId)!;
   }
 
@@ -209,7 +211,12 @@ export class IssueWorkspacesRepo {
         input.issueId,
       ],
     );
+    if (current.status !== "cleaned") this.notifyChanged(workspaceId, input.issueId);
     return this.get(input.issueId)!;
+  }
+
+  private notifyChanged(workspaceId: string, issueId: string): void {
+    this.ctx.emitWorkspaceEvent({type:"issue:worktree_changed",workspaceId,payload:{issue_id:issueId}});
   }
 
   private runtimesShareDaemon(firstRuntimeId: string, secondRuntimeId: string): boolean {

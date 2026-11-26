@@ -785,7 +785,11 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     );
     // Compare the full legacy predicate independently of the changed FROM/locks.
     const predicate = golden.slice(golden.indexOf("         WHERE t.status"))
-      .replace("WHERE t.status = 'queued'", "WHERE claim_attempt.status = 'offered' AND t.status = 'queued'");
+      .replace("WHERE t.status = 'queued'", "WHERE claim_attempt.status = 'offered' AND t.status = 'queued'")
+      .replace("\n         ORDER BY", ` AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e
+      WHERE e.attempt_id=claim_attempt.id AND e.eligibility='root' AND NOT EXISTS (SELECT 1 FROM multiremi_machine_enrollments m
+        WHERE m.runtime_id=? AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id AND m.incarnation=e.incarnation
+          AND m.retired_at_ms IS NULL AND m.credential_id=?))\n         ORDER BY`);
     const actual = claim!.slice(claim!.indexOf("         WHERE claim_attempt.status"))
       .replace(/\s*FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED\s*$/, "").trim();
     const expected = executionClaimBaseSql(predicate);

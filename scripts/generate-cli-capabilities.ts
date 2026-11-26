@@ -402,6 +402,7 @@ function mappedResourceCommand(route: string): string | null {
     [/^GET \/api\/projects\/:id\/docs\/:ref\/revisions$/, "wiki.revisions"],
     [/^GET \/api\/projects\/:id\/docs\/:ref\/backlinks$/, "memory.backlinks"],
     [/^GET \/api\/projects\/:id\/knowledge\/recall$/, "memory.search"],
+    [/^GET \/api\/projects\/:id\/activity$/, "project.activity"],
     [/^GET \/api\/workspaces\/:id\/repos$/, "repo.list"],
     [/^POST \/api\/workspaces\/:id\/repos\/inspect$/, "repo.inspect"],
     [/^POST \/api\/workspaces\/:id\/repos$/, "repo.create"],

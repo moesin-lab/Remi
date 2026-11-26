@@ -267,6 +267,7 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   if(input.message_kind==='decision'&&source){
     lockLane(ctx,source.session_id,source.agent_id,source.execution_scope);
     ctx.db.run("UPDATE multiremi_turns SET status='awaiting_human',waiting_on_message_id=? WHERE id=? AND status IN ('pending','running','awaiting_human')",[message.id,source.id]);
+    if (source.issue_id && !source.chat_session_id) ctx.notifyIssueProjectActivity(source.workspace_id,source.issue_id);
   }
   const resumedIssues=new Set<string>();
   if(input.message_kind==='reply'&&reply?.message_kind==='decision'){
@@ -274,6 +275,7 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
     const waiting=ctx.db.query("SELECT * FROM multiremi_turns WHERE waiting_on_message_id=? AND status='awaiting_human'").all(reply.id);
     for(const turn of waiting){lockLane(ctx,turn.session_id,turn.agent_id,turn.execution_scope);
       ctx.db.run("UPDATE multiremi_turns SET status='running',waiting_on_message_id=NULL WHERE id=? AND status='awaiting_human'",[turn.id]);
+      if (turn.issue_id && !turn.chat_session_id) ctx.notifyIssueProjectActivity(turn.workspace_id,turn.issue_id);
       const resumed=ctx.tasks().getTask(turn.current_attempt_id);
       if(resumed)afterCommit(ctx.db,()=>ctx.notifyTaskEvent('task:running',resumed));
       if(turn.issue_id && !ctx.issueSessions().getIssueSession(turn.session_id)?.chatId && !turn.chat_session_id)resumedIssues.add(turn.issue_id);}

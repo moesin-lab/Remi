@@ -114,27 +114,59 @@ jobs:
           tests/unit/multiremi/unified-model-migration.test.ts
           tests/unit/multiremi/usage-startup-postgres.test.ts
           tests/unit/multiremi/usage-startup-migration.test.ts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Verify level fingerprints and rollback evidence validation
         run: node --test scripts/schema-fingerprint.test.mjs scripts/platform-rollback-policy.test.mjs scripts/package-platform-application.test.mjs
-      - name: Resolve previous published platform release
+      - name: Verify published source identity and archive rejection
+        run: |
+          python3 -I scripts/verify-release-source.test.py
+          bun test tests/unit/scripts/schema-rollback-identity.test.ts
+      - name: Verify private candidate execution and rollback failure handling
+        run: node --experimental-strip-types --test scripts/run-schema-rollback.test.mjs scripts/schema-rollback-candidate.test.mjs scripts/check-schema-rollback.test.ts
+      - name: Previous release probes on a fixed private candidate
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bun scripts/prepare-schema-rollback.ts ci-schema
-      - name: Restore previous release Bun package downloads
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('ci-schema/previous/bun.lock') }}
-      - name: Install previous release dependencies
-        working-directory: ci-schema/previous
-        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
-      - name: Previous release core tests on candidate expanded schema
-        run: bun scripts/check-schema-rollback.ts ci-schema/previous ci-schema/previous-release.json ci-schema/rollback-evidence.json
-      - name: Preserve SHA-bound rollback evidence
+          ROLLBACK_CANDIDATE_REF: ${{ github.sha }}
+          ROLLBACK_ARTIFACTS: ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          unset NODE_OPTIONS NODE_PATH GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+          unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+          node --input-type=module <<'BOOTSTRAP'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+          import { join } from 'node:path';
+          const source = process.env.GITHUB_WORKSPACE;
+          const ref = process.env.ROLLBACK_CANDIDATE_REF;
+          assert.match(ref, /^[a-f0-9]{40}$/);
+          const bootstrap = await mkdtemp(join(process.env.RUNNER_TEMP, 'schema-bootstrap-'));
+          try {
+            const launcher = join(bootstrap, 'run-schema-rollback.mjs');
+            const fixed = execFileSync('git', ['-C', source, 'show', `${ref}:scripts/run-schema-rollback.mjs`]);
+            await writeFile(launcher, fixed, { flag: 'wx', mode: 0o600 });
+            execFileSync(process.execPath, [launcher, '--source-repo', source, '--candidate-ref', ref,
+              '--artifacts', process.env.ROLLBACK_ARTIFACTS], { stdio: 'inherit' });
+          } finally { await rm(bootstrap, { recursive: true }); }
+          BOOTSTRAP
+      - name: Preserve SHA-bound rollback evidence and failure diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: schema-rollback-${{ github.sha }}
-          path: ci-schema/rollback-evidence.json
+          # No source, archives, dependencies, HOME, or staged result is uploaded.
+          path: |
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/rollback-evidence.json
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/launcher-diagnostics.json
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/rollback-diagnostics.json
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/preparation-diagnostics.json
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/previous-identity.json
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/previous-release.json
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/api-image-verification.json
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            ${{ runner.temp }}/schema-rollback-${{ github.run_id }}-${{ github.run_attempt }}/rollback-logs/
           if-no-files-found: error
 
   im-platform-smoke:

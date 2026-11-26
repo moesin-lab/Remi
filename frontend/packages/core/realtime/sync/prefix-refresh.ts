@@ -226,6 +226,15 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
         if (payload?.workspace_id) void qc.resetQueries({ queryKey: deliveryTargetsOptions(payload.workspace_id).queryKey, exact: true });
         return;
       }
+      if (msg.type === "change_request:updated" && msg.payload && typeof msg.payload === "object" &&
+          "affected_issue_ids" in msg.payload && Array.isArray(msg.payload.affected_issue_ids)) {
+        for (const issueId of new Set(msg.payload.affected_issue_ids)) {
+          if (typeof issueId === "string" && issueId) debouncedRefresh(`change_request:${issueId}`, () => {
+            void qc.invalidateQueries({ queryKey: scmKeys.changeRequests(issueId), exact: true });
+          });
+        }
+        return;
+      }
       if (msg.type === "daemon:maintenance_changed") {
         void qc.invalidateQueries({ queryKey: platformLifecycleKeys.status() });
         return;
@@ -258,6 +267,8 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
 
 // Event types handled by specific handlers below -- skip generic refresh
 const SPECIFIC_EVENTS = new Set([
+  "issue:worktree_changed",
+  "project:activity_changed",
   "workspace:updated",
   "issue:updated", "issue:created", "issue:deleted", "issue_labels:changed", "issue_metadata:changed",
   // Both item and index-only new signals are consumed by createInboxHandlers.

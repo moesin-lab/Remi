@@ -11,7 +11,9 @@ import type {
   UpdateProjectResourceRequest,
 } from "../../types";
 import type { HttpClient } from "../http";
-import { parseWithFallback } from "../schema";
+import { parseStrictResponse, parseWithFallback } from "../schema";
+import type { ProjectActivityQuery } from "@multiremi/contracts";
+import { projectActivitySchema, type ActivityPage } from "../schemas/project-activity";
 import {
   EMPTY_PROJECT,
   EMPTY_PROJECT_LIST,
@@ -25,6 +27,13 @@ import {
 
 export class ProjectsEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async listProjectActivity(id: string, filters: ProjectActivityQuery, signal?: AbortSignal) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined) params.set(key, String(value));
+    const raw = await this.http.fetch<unknown>(`/api/projects/${encodeURIComponent(id)}/activity?${params}`, { signal });
+    return parseStrictResponse<ActivityPage>(raw, projectActivitySchema, { endpoint: "GET /api/projects/:id/activity" });
+  }
 
   // Projects
   async listProjects(params?: { status?: string }): Promise<ListProjectsResponse> {

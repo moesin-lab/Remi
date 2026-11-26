@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { BookText, ListTodo } from "lucide-react";
+import { Activity, BookText, ListTodo } from "lucide-react";
 import {
   Tabs,
   TabsContent,
@@ -13,7 +13,7 @@ import { ProjectWikiSection } from "./project-wiki-section";
 import { useNavigation } from "../../../navigation";
 import { useT } from "../../../i18n";
 
-export type ProjectContentTab = "issues" | "wiki";
+export type ProjectContentTab = "issues" | "wiki" | "activity";
 
 /**
  * Issues | Wiki switch for the project detail content panel.
@@ -33,11 +33,13 @@ export type ProjectContentTab = "issues" | "wiki";
 export function ProjectContentTabs({
   projectId,
   issues,
+  activity,
   contentTab,
   wikiSlug,
 }: {
   projectId: string;
-  issues: ReactNode;
+  issues?: ReactNode;
+  activity?: ReactNode;
   contentTab: ProjectContentTab;
   wikiSlug?: string;
 }) {
@@ -52,7 +54,7 @@ export function ProjectContentTabs({
         push(
           value === "wiki"
             ? paths.projectWiki(projectId)
-            : paths.projectDetail(projectId),
+            : value === "activity" ? paths.projectActivity(projectId) : paths.projectDetail(projectId),
         )
       }
       className="min-h-0 flex-1 gap-0"
@@ -66,6 +68,7 @@ export function ProjectContentTabs({
           <BookText className="h-4 w-4" />
           {t(($) => $.wiki.tab_wiki)}
         </TabsTrigger>
+        <TabsTrigger value="activity"><Activity className="h-4 w-4" />{t(($) => $.activity.title)}</TabsTrigger>
       </TabsList>
       <TabsContent value="issues" className="flex min-h-0 flex-col text-base">
         {issues}
@@ -73,6 +76,7 @@ export function ProjectContentTabs({
       <TabsContent value="wiki" className="flex min-h-0 flex-col text-base">
         <ProjectWikiSection projectId={projectId} selectedRef={wikiSlug} />
       </TabsContent>
+      <TabsContent value="activity" className="flex min-h-0 flex-col text-base">{activity}</TabsContent>
     </Tabs>
   );
 }

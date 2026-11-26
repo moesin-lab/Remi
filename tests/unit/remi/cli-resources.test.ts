@@ -45,6 +45,60 @@ afterEach(() => {
 });
 
 describe("native CLI resource contracts", () => {
+  it("projects public summaries before rendering every project activity output mode", async () => {
+    useCliEnv();
+    const spec = specById("project.activity");
+    const summaries = [
+      { code: "queued", extra: "SYNTHETIC_ONLY" },
+      { code: "step_progress", step: 0, total: 1_000_000, extra: "SYNTHETIC_ONLY" },
+      { code: "SYNTHETIC_ONLY" },
+      { code: "step_progress", step: 2, total: 1 },
+      { code: "step_progress", step: 1, total: 1_000_001 },
+    ];
+    const items = summaries.map((public_summary, index) => ({
+      attempt_id: `attempt-${index}`, issue: { key: "MUL-7" }, agent: { name: "Ada" }, status: "queued", public_summary,
+    }));
+    const pagination = { has_more: true, next_cursor: "next", as_of: "2026-11-25T00:00:00.000Z" };
+    globalThis.fetch = mockFetch(spec.id, [], () => Response.json({ items, ...pagination }));
+    const expected = [{ code: "queued" }, { code: "step_progress", step: 0, total: 1_000_000 }, null, null, null];
+    for (const mode of ["table", "json", "jsonl"]) {
+      const output = await execute(spec, ["project-id", "--output", mode]);
+      expect(output).not.toContain("SYNTHETIC_ONLY");
+      if (mode === "table") {
+        expect(output).toContain("Queued");
+        expect(output).toContain("0/1000000");
+        expect(output.match(/—/g)).toHaveLength(3);
+      } else {
+        const rows = mode === "json" ? JSON.parse(output).items : output.split("\n").map(line => JSON.parse(line));
+        expect(rows.map((row: { public_summary: unknown }) => row.public_summary)).toEqual(expected);
+        if (mode === "json") expect(JSON.parse(output)).toMatchObject(pagination);
+      }
+    }
+  });
+
+  it("reads project attempts from the HTTP route and formats only public summary codes", async () => {
+    const { createMultiremiApp } = await import("@multiremi/api.js");
+    const fixture = await import("../multiremi/helpers.js");
+    const store = fixture.createLocalStore();
+    try {
+      const project = store.createProject({title:"Activity"});
+      const issue = store.createIssue({title:"Build",projectId:project.id});
+      const agent = store.createAgent({name:"Ada",provider:"claude"});
+      const task = store.createTask({agentId:agent.id,issueId:issue.id,prompt:"private"});
+      const update = fixture.db!.prepare("UPDATE multiremi_turn_attempts SET status='failed',failure_reason=?,error='private' WHERE id=?");
+      const app = createMultiremiApp({store});
+      useCliEnv();
+      const spec = specById("project.activity");
+      globalThis.fetch = mockFetch(spec.id, [], request => app.request(new URL(request.url).pathname + new URL(request.url).search));
+      const args = [project.id,"--view","history","--status","failed","--agent-id",agent.id,"--query","Build"];
+      update.run("agent_error.context_overflow",task.id);
+      expect(await execute(spec,args)).toContain("Context limit exceeded");
+      update.run("private",task.id);
+      const result = JSON.parse(await execute(spec,[...args,"--output","json"]));
+      expect(result.items[0]).toMatchObject({attempt_id:task.id,public_summary:null});
+      expect(JSON.stringify(result)).not.toContain("private");
+    } finally { fixture.resetMultiremiTestEnv(); }
+  });
   it("routes account compatibility aliases to the authenticated account and lists one workspace operator", async () => {
     useCliEnv();
     console.log = () => {}; console.error = () => {};

@@ -1208,6 +1208,24 @@ export class StoreContext {
     });
   }
 
+  notifyProjectActivity(workspaceId: string, ids: (string | null)[]): void {
+    const projectIds = [...new Set(ids.filter((id): id is string => Boolean(id)))];
+    if (projectIds.length) this.emitWorkspaceEvent({ type: "project:activity_changed", workspaceId, actorType:"system", payload: { workspace_id: workspaceId, project_ids: projectIds } });
+  }
+
+  notifyIssueProjectActivity(workspaceId: string, issueId: string): void {
+    if (!this.workspaceEventListeners.size) return;
+    const issue = this.db.query("SELECT project_id FROM multiremi_issues WHERE id=? AND workspace_id=?").get(issueId, workspaceId);
+    if (issue?.project_id) this.notifyProjectActivity(workspaceId, [issue.project_id]);
+  }
+
+  notifyAgentProjectActivity(workspaceId: string, agentId: string): void {
+    if (!this.workspaceEventListeners.size) return;
+    const rows = this.db.query(`SELECT DISTINCT i.project_id FROM multiremi_turns t JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id
+      WHERE t.agent_id=? AND t.workspace_id=? AND t.chat_session_id IS NULL AND i.project_id IS NOT NULL`).all(agentId, workspaceId);
+    this.notifyProjectActivity(workspaceId, rows.map(row => row.project_id));
+  }
+
   /**
    * Publish a caller-owned transaction's deferred events once the OUTERMOST
    * transaction commits (MUL-405 QA round 2).

@@ -202,11 +202,16 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
             const start=async(seq:number)=>client.event({t:'task.start',seq,rt:runtime.id,p:{...identity,task_id:tuple.attempt_id,usage_run_id:tuple.consumer_id,
               root_receipt_id:tuple.receipt_id,execution_locator:locator,machine_proof:await recovery.proof(tuple,'start')}});
             expect(await start(1)).toMatchObject({ok:true,execution_authorized:true});
-            const request={turn_id:turnId,attempt_id:tuple.attempt_id,body_md:'Choose direction',dedupe_key:'root-first-question',options:[{label:'A',value:'A'}],
+            const request={turn_id:turnId,attempt_id:tuple.attempt_id,wait_id:'root-first-native-wait',body_md:'Choose direction',dedupe_key:'root-first-question',options:[{label:'A',value:'A'}],
               metadata:{kind:'question',questions:[{fieldKey:'direction',question:{question:'Choose direction',options:[{label:'A'}]}}]}};
             const question=await client.rpc('turn.decision',request,runtime.id).catch(error=>{throw new Error('first question',{cause:error});});
             const original=store.getQuestion(String(question.message_id));
             expect(original).toMatchObject({route_revision:1,status:'pending'});
+            expect((await recovery.status(tuple,delivery.envelope_digest)).allowed_recovery_action).toBe('reattach_running');
+            store.reconcileQuestionWaits(runtime.id,[],'token');
+            expect(store.getTask(attemptId)?.status).toBe('awaiting_human');
+            expect(store.getQuestion(String(question.message_id))?.wait_status).toBe('waiting');
+            expect((await recovery.status(tuple,delivery.envelope_digest)).allowed_recovery_action).toBe('reattach_running');
             expect(await client.rpc('turn.decision',request,runtime.id)).toMatchObject({message_id:question.message_id});
             expect(store.getQuestion(String(question.message_id))).toEqual(original);
             const answered=store.answerQuestion(String(question.message_id),{expected_route_revision:1,response:{answer:'A'}},{type:'member',id:'mem_local_local'});

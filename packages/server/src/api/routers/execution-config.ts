@@ -3,6 +3,7 @@ import type { Context, Hono } from "hono";
 import type { RouterDeps } from "./deps.js";
 import { parseEndpointConnection, type EndpointProtocol } from "@multiremi/contracts/execution-endpoint.js";
 import { inspectEndpoint } from "@multiremi/relay/endpoint-inspection.js";
+import { SecurityAbort } from "@multiremi/store/security-write.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import { guardRootResourceWrite } from "../helpers/root-access.js";
 import {
@@ -41,8 +42,9 @@ export function registerExecutionConfigRoutes(
         : denyCurrentUserWorkspaceAccess(c, store, id)) ?? id
     );
   }
-  const failure = (c: Context, error: unknown) =>
-    c.json(
+  const failure = (c: Context, error: unknown) => {
+    if (error instanceof SecurityAbort) throw error;
+    return c.json(
       {
         ...(error instanceof ExecutionModelPolicyError ? { code: error.code, field: error.field } : {}),
         error:
@@ -52,6 +54,7 @@ export function registerExecutionConfigRoutes(
       },
       400,
     );
+  };
   app.get("/api/execution-endpoints", (c) => {
     const ws = workspace(c);
     return ws instanceof Response ? ws : c.json({ endpoints: store.listExecutionEndpoints(ws) });

@@ -13,6 +13,7 @@ import {
 } from "../helpers.js";
 import { currentRequestUserId, currentAccessToken, cleanString, currentWorkspaceRoleStrict, daemonAgentPluginDesiredResponse } from "../wire/index.js";
 import { AgentPluginStoreError } from "@multiremi/store/repos/agent-plugins-repo.js";
+import { SecurityAbort } from "@multiremi/store/security-write.js";
 import { AgentPluginValidationError } from "@multiremi/agent-plugins/import.js";
 import {
   AgentPluginGitImportError,
@@ -556,6 +557,7 @@ function unsupportedBindingConfiguration(
 }
 
 function pluginErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SecurityAbort) throw error;
   if (error instanceof AgentPluginGitImportError) {
     const body = { error: error.message, code: error.code };
     if (error.status === 409) return c.json(body, 409);

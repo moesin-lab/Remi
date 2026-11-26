@@ -10219,6 +10219,28 @@
             "allowed": true
           },
           {
+            "id": "root.agent-configuration.approve",
+            "command": "remi root agent-configuration approve",
+            "capability": "root.agent-configuration.approve",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.agent-pat.create",
+            "command": "remi root agent-pat create",
+            "capability": "root.agent-pat.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": false
+          },
+          {
             "id": "root.audit.list",
             "command": "remi root audit list",
             "capability": "root.audit.list",
@@ -10252,6 +10274,17 @@
             "allowed": true
           },
           {
+            "id": "root.delegation.revoke",
+            "command": "remi root delegation revoke",
+            "capability": "root.delegation.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "root.grant.create",
             "command": "remi root grant create",
             "capability": "root.grant.create",
@@ -10266,6 +10299,17 @@
             "id": "root.grant.list",
             "command": "remi root grant list",
             "capability": "root.grant.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.preview",
+            "command": "remi root grant preview",
+            "capability": "root.grant.preview",
             "outputs": [
               "table",
               "json",

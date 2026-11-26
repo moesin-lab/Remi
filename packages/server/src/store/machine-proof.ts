@@ -17,10 +17,9 @@ const verifiedMachines = new WeakMap<MachineBrand, { db: SqlDatabase; credential
 declare const connectionBrand: unique symbol;
 export interface MachineConnection { readonly [connectionBrand]: true }
 const connections = new WeakMap<object, MachineConnection>();
-const connectionProofs = new WeakMap<MachineConnection, { db: SqlDatabase; owner: object; credentialDigest: string; id: string }>();
+const connectionProofs = new WeakMap<MachineConnection, { db: SqlDatabase; owner: object | null; credentialDigest: string; id: string }>();
 
-export function bindMachineConnection(db: SqlDatabase, owner: object, bearer: string): MachineConnection | null {
-  if (connections.has(owner)) return reject();
+export function prepareMachineConnection(db: SqlDatabase, bearer: string): MachineConnection | null {
   if (!bearer) return null;
   const credentialDigest = hash(bearer);
   const token = db.query(`SELECT t.expires_at FROM multiremi_access_tokens t JOIN multiremi_workspaces w ON w.id=t.workspace_id
@@ -28,8 +27,7 @@ export function bindMachineConnection(db: SqlDatabase, owner: object, bearer: st
     (SELECT 1 FROM multiremi_daemon_retirements d WHERE d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id)`).get(credentialDigest);
   if (!token || token.expires_at!==null && !(Date.parse(token.expires_at)>Date.now())) return null;
   const connection = Object.freeze({}) as MachineConnection;
-  connections.set(owner,connection);
-  connectionProofs.set(connection,{db,owner,credentialDigest,id:randomUUID()});
+  connectionProofs.set(connection,{db,owner:null,credentialDigest,id:randomUUID()});
   return connection;
 }
 
@@ -39,10 +37,28 @@ export function releaseMachineConnection(owner: object): void {
   connections.delete(owner);
 }
 
+export function attachMachineConnection(db: SqlDatabase, connection: MachineConnection, session: object): void {
+  const proof = connectionProofs.get(connection);
+  if (!proof || proof.db !== db || proof.owner !== null || connections.has(session)) return reject();
+  proof.owner = session;
+  connections.set(session, connection);
+}
+
+export function bindMachineConnection(db: SqlDatabase, owner: object, bearer: string): MachineConnection | null {
+  if (connections.has(owner)) return reject();
+  const connection = prepareMachineConnection(db, bearer);
+  if (connection) attachMachineConnection(db, connection, owner);
+  return connection;
+}
+
+export function sessionMachineConnection(session: object): MachineConnection {
+  return connections.get(session) ?? reject();
+}
+
 function currentConnectionDigest(db: SqlDatabase, connection: string | MachineConnection): string {
   if (typeof connection==='string') return hash(connection);
   const proof = connectionProofs.get(connection);
-  if (!proof || proof.db!==db || connections.get(proof.owner)!==connection) return reject();
+  if (!proof?.owner || proof.db!==db || connections.get(proof.owner)!==connection) return reject();
   return proof.credentialDigest;
 }
 

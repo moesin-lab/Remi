@@ -3,8 +3,8 @@ import { createHash, createPublicKey, generateKeyPairSync, privateDecrypt, sign 
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { beginMachineChallenge, machineSignaturePayload } from '@multiremi/store/machine-proof.js';
 import { rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
-import { DaemonProtocolLayer } from '@multiremi/api/daemon-protocol/index.js';
-import { registerTaskInputRpcs } from '@multiremi/api/daemon-protocol/task-input-rpcs.js';
+import { startMultiremiServer } from '@multiremi/api/server.js';
+import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
 import { createReplacementAttemptWithinTransaction } from '@multiremi/store/turn-attempts.js';
 import { withAttemptAdmission } from '@multiremi/store/attempt-admission.js';
@@ -190,6 +190,9 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const recoveryPlan=repo.planRecovery(found!);
     function signedChallenge(action:Parameters<typeof repo.challenge>[3]) {
       const challenge=store.withSecurityWrite('1',recoveryPlan,tx=>repo.challenge(tx,connection,tuple.runtime_id,action,tuple.receipt_id));
+      return signChallenge(challenge);
+    }
+    function signChallenge(challenge: ReturnType<typeof repo.challenge>) {
       const nonce=privateDecrypt({key:recipientKeys.privateKey,oaepHash:'sha256'},Buffer.from(challenge.encryptedNonce,'base64url')).toString('base64url');
       const signed_at=new Date().toISOString();
       const signature=sign(null,machineSignaturePayload(challenge,nonce,signed_at),signingKeys.privateKey).toString('base64url');
@@ -216,27 +219,35 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(status).toThrow('root_authority_revoked');
     expect(acknowledge).toThrow('root_authority_revoked');
     expect(repo.bindConnection({},token.token)).toBeNull();
-    const layer=new DaemonProtocolLayer({store});
-    registerTaskInputRpcs(layer,store,()=>{});
-    const frames=new Map<string,Record<string,unknown>>();
-    const session=layer.openSession({bufferedAmount:0,send(wire){const frame=JSON.parse(wire); if (frame.t==='res') frames.set(frame.re,frame.p); return wire.length;},
-      close(){}},{accessToken:store.getAccessToken('machine-token'),masterToken:false});
+    const server=startMultiremiServer({store,port:0,hostname:'127.0.0.1',authToken:'test-master',backgroundJobs:false});
+    const client=new DaemonProtocolClient({serverUrl:`http://127.0.0.1:${server.port}`,token:'machine-token',daemonId:local.daemon_id,
+      cliVersion:DAEMON_MIN_CLI_VERSION,caps:['root.delivery']});
+    let confirmConnection: (()=>void) | undefined;
+    const lane:DaemonProtocolLane={runtime:()=>({runtime_id:local.runtime_id,provider:'codex',max_concurrency:1,active_task_ids:[task.id],
+      capabilities:{root_delivery_protocol:1,root_carrier_modes:['immutable_run_env']}}),heartbeat:()=>({active_task_count:1}),
+      async onHeartbeatAck(){},onRuntimeConfirmed(){confirmConnection?.();},async probeUpgrade(){},async onTerminal(){}};
+    const connect=()=>new Promise<void>(resolve=>{confirmConnection=resolve;client.startLane(lane);});
+    client.addLane(lane);
     try {
-      await session.handleMessage(JSON.stringify({v:2,t:'hello',p:{protocol:2,cli_version:DAEMON_MIN_CLI_VERSION,daemon_id:local.daemon_id,caps:['root.delivery'],
-        runtimes:[{runtime_id:local.runtime_id,provider:'codex',max_concurrency:1,active_task_ids:[task.id],capabilities:{root_delivery_protocol:1,root_carrier_modes:['immutable_run_env']}}]}}));
-      connection=repo.bindConnection(session,'machine-token')!;
-      const rpc=async(id:string,action:string,payload:Record<string,unknown>)=>{
-        await session.handleMessage(JSON.stringify({v:2,t:`delivery.receipt.${action}`,id,rt:local.runtime_id,p:payload}));
-        return frames.get(id);
+      await connect();
+      const rpc=(action:string,payload:Record<string,unknown>)=>client.rpc(`delivery.receipt.${action}`,payload,local.runtime_id);
+      const wireProof=async(action:string)=>{
+        const issued=await rpc('challenge', {action,attempt_id:task.id,consumer_id:local.consumer_id});
+        expect(issued.ok).toBe(true);
+        return signChallenge(issued.challenge as ReturnType<typeof repo.challenge>).proof;
       };
-      const query={execution_key:{attempt_id:task.id},machine_proof:signedChallenge('status').proof};
-      expect(await rpc('first','status',query)).toMatchObject({ok:true,ack_state:'confirmed',allowed_recovery_action:'start_execution'});
-      expect(await rpc('duplicate','status',query)).toMatchObject({ok:false});
-      expect(await rpc('envelope','replay',{receipt_id:tuple.receipt_id,expected_receipt_version:1,expected_delivery_version:1,
-        run_lease_id:'one',fence_term:'1',machine_proof:signedChallenge('replay').proof})).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
-      expect(await rpc('ack','install_ack',{tuple,envelope_digest:delivery.envelope_digest,installed_at:new Date().toISOString(),execution_locator:locator,
-        machine_proof:signedChallenge('install_ack').proof})).toMatchObject({ok:true,idempotent_replay:true});
-    } finally {repo.releaseConnection(session); session.handleSocketClose(); layer.stop();}
+      const staleProof=await wireProof('status');
+      client.stopLane(lane);
+      await connect();
+      await expect(rpc('status',{execution_key:{attempt_id:task.id},machine_proof:staleProof})).rejects.toMatchObject({code:'authority_revoked'});
+      const query={execution_key:{attempt_id:task.id},machine_proof:await wireProof('status')};
+      expect(await rpc('status',query)).toMatchObject({ok:true,ack_state:'confirmed',allowed_recovery_action:'start_execution'});
+      await expect(rpc('status',query)).rejects.toMatchObject({code:'authority_revoked'});
+      expect(await rpc('replay',{receipt_id:tuple.receipt_id,expected_receipt_version:1,expected_delivery_version:1,
+        run_lease_id:'one',fence_term:'1',machine_proof:await wireProof('replay')})).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
+      expect(await rpc('install_ack',{tuple,envelope_digest:delivery.envelope_digest,installed_at:new Date().toISOString(),execution_locator:locator,
+        machine_proof:await wireProof('install_ack')})).toMatchObject({ok:true,idempotent_replay:true});
+    } finally {client.stopLane(lane); await server.stop(true);}
     connection=repo.bindConnection({},'machine-token')!;
     statusProof=authenticate('status');
     replayProof=authenticate('replay');

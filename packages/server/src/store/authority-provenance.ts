@@ -19,7 +19,7 @@ export function assertUnrevokedAncestry(db: SqlDatabase, tx: SecurityTx, ref: Au
   return withSecurityTarget(db, tx, `authority:${ref.nodeId}`, () => checkAncestry(db, ref));
 }
 
-export function grantAncestryIsCurrent(db: SqlDatabase, tx: SecurityTx, targetId: string, ref: AuthorityNodeRef, type: 'user' | 'runtime' = 'user'): boolean {
+export function grantAncestryIsCurrent(db: SqlDatabase, tx: SecurityTx, targetId: string, ref: AuthorityNodeRef, type: 'user' | 'agent' | 'runtime' = 'user'): boolean {
   return withSecurityTarget(db, tx, `management:${type}:${targetId}`, () => {
     try { checkAncestry(db, ref); return true; } catch (error) {
       if (error instanceof SecurityAbort && error.code === 'root_authority_revoked') return false;

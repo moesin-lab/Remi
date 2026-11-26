@@ -58,7 +58,8 @@ describe('schema compatibility protocol', () => {
     expect(readSchemaLevels(database)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     runMigrations(database);
     const steps = database.query('SELECT id FROM multiremi_schema_steps').all();
-    expect(steps).toHaveLength(20);
+    expect(steps).toHaveLength(21);
+    expect(steps).toContainEqual({ id: '20261126_agent_grant_dependencies' });
     expect(steps).toContainEqual({ id: '20261126_machine_deployment_roots' });
     expect(database.query('SELECT attempt_id FROM multiremi_attempt_eligibility').all()).toEqual([]);
     expect(database.query('SELECT attempt_id FROM multiremi_current_task_leases').all()).toEqual([]);

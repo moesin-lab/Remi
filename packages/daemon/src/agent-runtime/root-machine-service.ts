@@ -40,8 +40,11 @@ async function servePeer(directory: string, owner: number, peer: number, request
       } finally { closeSync(fd); }
     };
     const config = JSON.parse(read('binding.json').toString('utf8'));
-    const uids = [owner, config.daemonUid, config.executionUid];
-    if (new Set(uids).size !== 3 || uids.some(uid => !Number.isSafeInteger(uid) || uid < 1 || uid >= 0xffffffff || uid === 65534) ||
+    const executionUids = config.executionUids === undefined ? [config.executionUid] : config.executionUids;
+    if (!Array.isArray(executionUids) || !executionUids.length ||
+        (config.executionUids !== undefined && config.executionUid !== undefined)) throw new Error('Invalid execution identity pool');
+    const uids = [owner, config.daemonUid, ...executionUids];
+    if (new Set(uids).size !== uids.length || uids.some(uid => !Number.isSafeInteger(uid) || uid < 1 || uid >= 0xffffffff || uid === 65534) ||
         config.daemonUid !== peer) throw new Error('Unauthorized machine peer');
     const operation = JSON.parse(request.toString('utf8'));
     if (!['publicBinding','answerChallenge','installEnvelope'].includes(operation.method)) throw new Error('Unknown machine operation');
@@ -52,8 +55,10 @@ async function servePeer(directory: string, owner: number, peer: number, request
     const keys = new RootMachineKeys(config.identity, readKey('recipient.pem'), readKey('signing.pem'));
     if (operation.method === 'installEnvelope') {
       if (!config.supervisorTargetSocket?.startsWith('/')) throw new Error('Missing supervisor endpoint');
+      const executionUid = executionUids.find(uid => uid === operation.target?.uid);
+      if (executionUid === undefined) throw new Error('Unregistered execution identity');
       return keys.installEnvelope(operation.delivery,operation.status,operation.target,
-        {endpoint:config.supervisorTargetSocket,supervisorUid:0},config.executionUid);
+        {endpoint:config.supervisorTargetSocket,supervisorUid:0},executionUid);
     }
     return operation.method === 'publicBinding' ? keys.publicBinding() : keys.answerChallenge(operation.challenge);
   } finally { closeSync(dir); }

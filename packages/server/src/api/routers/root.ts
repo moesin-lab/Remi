@@ -9,7 +9,7 @@ import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
 import { RootManagementRequestError } from '@multiremi/store/root-management.js';
 import { SecurityAbort, type SecurityTx } from '@multiremi/store/security-write.js';
 import type { MultiremiStore } from '@multiremi/store/store.js';
-import { requireRootProof, type RegisteredProof } from '../helpers/root-access.js';
+import { requireRootProof, runRootMutation, type RegisteredProof } from '../helpers/root-access.js';
 import { currentAuth } from '../wire/context.js';
 
 function record(value: unknown): Record<string, unknown> {
@@ -58,12 +58,7 @@ export function rootError(c: Context, error: unknown): Response | null {
 function mutate<T>(c: Context, store: MultiremiStore, proof: RegisteredProof, action: string, type: string, id: string,
   operation: (tx: SecurityTx, actor: ReturnType<AuthorityKernel['authorizeWrite']>) => T): Response {
   const use: AuthorityUse = { action, actualTarget: { type, id }, use: 'management' };
-  const plan = store.rootManagement.plan(proof, use);
-  const result = store.withAuthorizedMutation(proof, use, plan, (tx, actor) => {
-    store.rootManagement.requireMutationActor(tx, actor, use);
-    return operation(tx, actor);
-  });
-  return c.json(result);
+  return c.json(runRootMutation(store, proof, use, operation));
 }
 
 function page(c: Context) {

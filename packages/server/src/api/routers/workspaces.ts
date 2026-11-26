@@ -1,4 +1,4 @@
-import { requestHasRootRead } from '../helpers/root-access.js';
+import { effectiveRootProof, requestHasRootRead, runRootMutation } from '../helpers/root-access.js';
 import { rootError } from './root.js';
 import { STORAGE_SETTINGS_DEFAULTS, storageThresholdErrors, validateStorageSettingsPatch } from "@multiremi/contracts/storage.js";
 import { MultiremiApiError } from "../helpers.js";
@@ -534,11 +534,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (!proof) return c.json(workspaceResponse(store.updateWorkspace(workspaceId, body)));
     const use = { action: 'workspace.update', actualTarget: { type: 'workspace', id: workspaceId }, use: 'write' };
     try {
-      const plan = store.rootManagement.plan(proof, use);
-      const updated = store.withAuthorizedMutation(proof, use, { ...plan, workspaceIds: [workspaceId] }, (tx, actor) => {
-        store.rootManagement.requireMutationActor(tx, actor, use);
-        return store.updateWorkspace(workspaceId, body);
-      });
+      const updated = runRootMutation(store, proof, use, () => store.updateWorkspace(workspaceId, body), [workspaceId]);
       return c.json(workspaceResponse(updated));
     } catch (error) {
       const response = rootError(c, error);
@@ -1079,7 +1075,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.delete("/api/workspaces/:id", (c) => {
     const workspaceId = c.req.param("id");
     const actorToken = currentAccessToken(c);
-    if (actorToken?.type === "task") {
+    const use = { action: 'workspace.delete', actualTarget: { type: 'workspace', id: workspaceId }, use: 'write' };
+    const proof = effectiveRootProof(c, store, use);
+    if (actorToken?.type === "task" && !proof) {
       return c.json({
         error: "forbidden for task token",
         code: "task_token_hard_denied",
@@ -1093,9 +1091,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     }
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireWorkspaceAdmin(c, store, workspaceId);
-    if (denied) return denied;
+    if (denied && !proof) return denied;
     try {
-      const deleted = store.deleteWorkspace(workspaceId);
+      if (!store.hasWorkspace(workspaceId)) return c.json({ error: 'workspace not found' }, 404);
+      const deleted = proof ? runRootMutation(store, proof, use, () => store.deleteWorkspace(workspaceId), [workspaceId])
+        : store.deleteWorkspace(workspaceId);
       if (!deleted) return c.json({ error: "workspace not found" }, 404);
       return c.body(null, 204);
     } catch (error) {
@@ -1117,6 +1117,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
           },
         }, 409);
       }
+      const response = rootError(c, error);
+      if (response) return response;
       throw error;
     }
   });

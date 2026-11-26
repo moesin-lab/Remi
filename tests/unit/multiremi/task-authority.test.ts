@@ -306,6 +306,14 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect((await api('/api/agents/' + privateAgent.id, token.token)).status).toBe(200);
     expect((await api('/api/workspaces/' + other.id, token.token, { name: 'Renamed workspace' }, 'PATCH')).status).toBe(200);
     expect(store.getWorkspace(other.id)?.name).toBe('Renamed workspace');
+    const platform = await api('/api/multiremi/platform/operations', token.token, { kind: 'check_updates', requestId: 'root-task-platform' });
+    expect(platform.status).toBe(202);
+    const operation = (await platform.json()).operation;
+    expect(operation.requestedBy).toBe(agent.id);
+    expect((await api('/api/multiremi/platform/operations/' + operation.id + '/cancel', token.token, {})).status).toBe(200);
+    const removable = store.createWorkspace({ id: 'ws_root_delete', name: 'Removable workspace', slug: 'root-delete' });
+    expect((await api('/api/workspaces/' + removable.id, token.token, undefined, 'DELETE')).status).toBe(204);
+    expect(store.getWorkspace(removable.id)).toBeNull();
     db.run("UPDATE multiremi_current_task_leases SET expires_at_ms=1 WHERE attempt_id='tsk_admitted'");
     expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(false);
     const revokeUse={action:'root.grant.revoke',use:'management',actualTarget:{type:'grant',id:'grant-agent'}};
@@ -313,6 +321,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       expected_revision: service.plan(taskProof, revokeUse).expectedRevision, idempotency_key: 'task-revoke', reason: 'retire',
     });
     expect((await revoke()).status).toBe(403);
+    expect((await api('/api/workspaces/' + other.id, token.token, undefined, 'DELETE')).status).toBe(403);
     expect((await api('/api/workspaces/' + other.id, token.token, { name: 'Expired credential write' }, 'PATCH')).status).toBe(403);
     expect(store.getWorkspace(other.id)?.name).toBe('Renamed workspace');
     expect(db.query("SELECT revoked_at_ms FROM multiremi_root_grants WHERE grant_id='grant-agent'").get().revoked_at_ms).toBeNull();

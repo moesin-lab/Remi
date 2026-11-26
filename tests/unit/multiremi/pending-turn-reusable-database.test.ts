@@ -1,14 +1,20 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { createPostgresStoreTemplate } from "../../helpers/postgres-store-template.js";
 import { afterCommit } from "@multiremi/store/db/postgres.js";
 import { createReusableStoreDatabase } from "../../helpers/reusable-store-database.js";
 
 for (const dialect of ["sqlite", "postgres"] as const) {
   describe.skipIf(dialect === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL)(`pending-turn committed baseline (${dialect})`, () => {
-    const create = () => createReusableStoreDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL, {
+    const url = process.env.MULTIREMI_TEST_POSTGRES_URL;
+    const template = dialect === "postgres" && url ? createPostgresStoreTemplate(url, { prefix: "pending_reset", fixture: "pending-turn-reset-contract" }) : undefined;
+    beforeAll(async () => { await template?.prepare(); await template?.warm(); }, 30_000);
+    afterAll(async () => { await template?.dispose(); });
+    const create = async (options: Partial<Pick<Parameters<typeof createReusableStoreDatabase>[2], "notificationSenders" | "notificationSendTimeoutMs">> = {}) => createReusableStoreDatabase(dialect, url, {
+      ...options, postgresDatabase: await template?.createDatabase(),
       fixture: "pending-turn-reset-contract", label: "Pending-turn committed baseline", strictStoreState: true,
     });
-    it("keeps real commits and rollback callbacks while restoring rows, analytics and settled caches", () => {
-      const fixture = create();
+    it("keeps real commits and rollback callbacks while restoring rows, analytics and settled caches", async () => {
+      const fixture = await create();
       try {
         const store = fixture.store;
         const internals = store as unknown as {
@@ -55,8 +61,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         await released;
         aliveWhileSettling = fixture.db.query("SELECT 1 AS alive").get().alive;
       } };
-      const fixture = createReusableStoreDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL, {
-        fixture: "pending-turn-reset-contract", label: "Pending-turn committed baseline", strictStoreState: true,
+      const fixture = await create({
         notificationSenders: { feishu_group: sender }, notificationSendTimeoutMs: 1,
       });
       const state = fixture.store as unknown as {
@@ -104,8 +109,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       }
     });
 
-    it("fails closed for unfinished scopes and rejects schema changes before erasing case evidence", () => {
-      const fixture = create();
+    it("fails closed for unfinished scopes and rejects schema changes before erasing case evidence", async () => {
+      const fixture = await create();
       const state = fixture.store as unknown as {
         tasks: { acceptedOfferLeases: Set<string>; taskRequestIssueLocks: Set<string> };
         agentPlugins: { uncommittedVersionIds: Set<string> };

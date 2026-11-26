@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { registerDaemonReportHandlers } from "@multiremi/api/daemon-protocol/report-handlers.js";
 import { registerTaskInputRpcs } from "@multiremi/api/daemon-protocol/task-input-rpcs.js";
 import { expect, it } from "bun:test";
@@ -18,7 +19,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     const agent = f.store.createAgent({ name: "Restart agent", provider: "codex", runtimeId: scope.runtimeId });
     const issue = maxAttempts > 1 ? f.createIssue({ title: "Restart recovery", assigneeType: "agent", assigneeId: agent.id }) : null;
     const task = f.store.createTask({ agentId: agent.id, issueId: issue?.id, prompt: "Continue the same turn", maxAttempts });
-    expect(f.store.claimTask(scope.runtimeId)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, scope.runtimeId)?.id).toBe(task.id);
     f.store.startTask(task.id);
     const offer = f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(task.id)!);
     const checkpoint: PlannedRestartCheckpoint = { version: 1, session_id: null, work_dir: null, trace_head: 12,
@@ -40,7 +41,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     x.f.store.updateRuntime(x.scope.runtimeId, { maxConcurrency: 2 });
     const agent = x.f.store.createAgent({ name: "Healthy peer", provider: "codex", runtimeId: x.scope.runtimeId });
     const task = x.f.store.createTask({ agentId: agent.id, prompt: "Keep running", maxAttempts: 1 });
-    expect(x.f.store.claimTask(x.scope.runtimeId)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(x.f.store, x.scope.runtimeId)?.id).toBe(task.id);
     x.f.store.startTask(task.id);
     x.f.store.reportTaskUsageSnapshot(task.id, { version: 2, runId: "healthy-peer-consumer", revision: 0, complete: false, units: [] }, x.scope);
     const snapshot = () => ({ task: x.f.store.getTask(task.id),
@@ -476,7 +477,7 @@ it("recovers daemon journal and server checkpoint across real SQLite close/open 
     store.registerRuntime({ id: scope.runtimeId, daemonId: scope.daemonId, name: "Disk", provider: "codex", workspaceId: scope.workspaceId });
     const agent = store.createAgent({ name: "Disk agent", provider: "codex", runtimeId: scope.runtimeId });
     const task = store.createTask({ agentId: agent.id, prompt: "survive SQLite reopen", maxAttempts: 1 });
-    store.claimTask(scope.runtimeId); store.startTask(task.id);
+    claimWithCurrentRuntime(store, scope.runtimeId); store.startTask(task.id);
     store.beginDaemonDrain(scope.workspaceId, scope.daemonId);
     const h = store.plannedRestarts().request(task.id, scope);
     const savedInput = db.query("SELECT input_ack_seq FROM multiremi_turn_attempts WHERE id=?").get(task.id) as { input_ack_seq: number | null };

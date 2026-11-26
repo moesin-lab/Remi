@@ -43,7 +43,7 @@ pendingTurnBackendTests('root delivery prepare and abort', fixture => {
     const key = await crypto.subtle.generateKey({ name: 'RSA-OAEP', hash: 'SHA-256', modulusLength: 3072,
       publicExponent: new Uint8Array([1,0,1]) }, false, ['encrypt','decrypt']);
     const tuple = { ...fixtureDeliveryTuple, recipient_key_fingerprint: recipientFingerprint(key.publicKey),
-      business_payload_digest: rootBusinessPayloadDigest(business) };
+      material_expires_at: new Date(Date.now() + 120000).toISOString(), business_payload_digest: rootBusinessPayloadDigest(business) };
     const candidate = await PreparedRootDelivery.prepare(tuple, business, key.publicKey);
     expect(JSON.parse(candidate.businessJson)).toEqual(business);
     expect(() => rootBusinessPayloadDigest({ ...business, lease_id: 'protocol-metadata' })).toThrow('Unknown receipt payload field');

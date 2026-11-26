@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -475,7 +476,7 @@ describe("Multiremi API — daemon retirement", () => {
     });
     const issue = createResponsibleTestIssue(store, { title: "Running work", workspaceId: "local", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "keep running" });
-    expect(store.claimTask(claude.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.reportIssueWorkspace({
       issueId: issue.id,
@@ -980,7 +981,7 @@ describe("Multiremi API — daemon retirement", () => {
     const finished = (runtimeId: string, traceEventCount: number) => {
       const agent = agents[store.getRuntime(runtimeId)!.provider as "claude" | "codex"];
       const task = store.createTask({ agentId: agent.id, runtimeId, prompt: `trace ${runtimeId} ${traceEventCount}` });
-      expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id);
       store.startTask(task.id);
       store.completeTask(task.id, { output: "done", traceEventCount });
       return task.id;
@@ -1019,7 +1020,7 @@ describe("Multiremi API — daemon retirement", () => {
     const run = (runtimeId: string) => {
       const agent = agents[store.getRuntime(runtimeId)!.provider as "claude" | "codex"];
       const task = store.createTask({ agentId: agent.id, runtimeId, prompt: runtimeId });
-      expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id);
       store.startTask(task.id);
       store.completeTask(task.id, { output: "done", traceEventCount: 1 });
       return task.id;

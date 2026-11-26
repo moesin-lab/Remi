@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
@@ -39,7 +40,7 @@ describe("Multiremi API — dashboard JSON endpoints", () => {
       ...(options.projectId ? { projectId: options.projectId } : {}),
     });
     const task = store.createTask({ agentId: agent.id, workspaceId, issueId: issue.id, prompt: "seed usage" });
-    const claimed = store.claimTask(options.runtimeId);
+    const claimed = claimWithCurrentRuntime(store, options.runtimeId);
     expect(claimed?.id).toBe(task.id);
     store.reportTaskUsage(task.id, [{
       provider,
@@ -125,7 +126,7 @@ describe("Multiremi API — dashboard JSON endpoints", () => {
 
     const agent = store.createAgent({ name: "Failing", provider: "claude", workspaceId: "local" });
     const failingTask = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "will fail" });
-    store.claimTask("rt_runtime_daily");
+    claimWithCurrentRuntime(store, "rt_runtime_daily");
     store.failTask(failingTask.id, { error: "boom" });
 
     const response = await app.request("/api/dashboard/runtime/daily?workspace_id=local");

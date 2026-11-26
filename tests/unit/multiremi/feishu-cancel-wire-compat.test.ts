@@ -11,9 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { MultiremiDaemonClient } from "@multiremi/client.js";
 import type { FeishuBotCancelResult } from "@multiremi/contracts/types.js";
-import type { MultiremiDaemon } from "@multiremi/worker/daemon.js";
-import type { TaskStreamEvent } from "@connectors/base.js";
-import { createFeishuTaskHandler } from "../../../apps/remi/cli/multiremi.js";
+import { renderFeishuStopResult } from "../../../apps/remi/cli/multiremi.js";
 import { jsonResponse } from "./helpers.js";
 
 /**
@@ -49,39 +47,10 @@ function clientReturning(body: unknown): MultiremiDaemonClient {
   return new MultiremiDaemonClient("https://remi.example", "tok_test");
 }
 
-/**
- * Drive a real HTTP response body through the real client and the real command
- * handler, and return the reply card the user would see. This is the whole
- * path a daemon takes, so a wire change cannot silently produce an empty card.
- * Each call swaps the body the single per-test stub returns.
- */
 async function renderStopCard(body: unknown): Promise<string> {
-  currentBody = body;
-  const client = new MultiremiDaemonClient("https://remi.example", "tok_test");
-  const daemon = {
-    cancelFeishuBotSessionTask: (
-      revision: number, sessionKey: string,
-      options?: { chatId?: string | null; senderOpenId?: string | null; target?: string | null },
-    ) => client.cancelFeishuBotSessionTask("rt_bot", revision, sessionKey, options),
-  } as unknown as MultiremiDaemon;
-  const text: string[] = [];
-  await createFeishuTaskHandler(daemon, 4, "Concierge")(
-    {
-      chatId: "oc_group",
-      text: "贺华杰: /stop",
-      metadata: { messageId: "om_click", chatType: "group", senderOpenId: "ou_owner", rawContent: "/stop" },
-    },
-    "oc_group:thread:omt_click",
-    async (stream) => {
-      for await (const event of stream as AsyncIterable<TaskStreamEvent>) {
-        // A command reply is one final agent message.
-        if (event.kind === "message" && event.message.type === "item.completed" && event.message.item.type === "agent_message") {
-          text.push(event.message.item.text);
-        }
-      }
-    },
-  );
-  return text.join("\n");
+  const client = clientReturning(body);
+  const result = await client.cancelFeishuBotSessionTask("rt_bot", 4, "oc_group");
+  return renderFeishuStopResult(result, null, "Concierge");
 }
 
 describe("Feishu cancel wire compatibility", () => {

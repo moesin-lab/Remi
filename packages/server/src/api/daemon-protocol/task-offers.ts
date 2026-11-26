@@ -10,11 +10,14 @@ import type { RepositoryWikiServiceContract } from "@multiremi/repository-wiki/s
 import { canonicalRepositoryRemote, resolveTaskRepositoryWikiRepositories } from "@multiremi/repository-wiki/task-scope.js";
 import { invalidateRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { daemonTaskClaimResponse, cleanString } from "../wire/index.js";
+import { isIndependentChatOffer } from "../wire/tasks.js";
 import { systemClock, type DaemonProtocolClock, type DaemonProtocolTimer } from "./clock.js";
 import type { DaemonProtocolLayer } from "./index.js";
 import { DaemonProtocolSession } from "./session.js";
 import type { DaemonParsedFrame } from "./frames.js";
 import { fitTaskOfferToBudget, useTaskSessionInput } from "./offer-budget.js";
+import { authorizeReportRuntime } from './report-handlers.js';
+import type { PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
 
 export const DAEMON_OFFER_SWEEP_MS = 60_000;
 
@@ -46,6 +49,8 @@ export async function prepareTaskOffer(store: MultiremiStore, task: MultiremiTas
   }
   const hydrated = await hydrateClaimKnowledge(task, project, repository, 5_000,
     undefined, supportsWikiFetch);
+  if (store.systemPromptsRepo().dispatchPolicy(task.id)?.historicalChat &&
+    (hydrated.repos.length || hydrated.repositoryWikiContexts?.length || hydrated.project || hydrated.chatAutoCheckoutRepos?.length)) return null;
   invalidateRequestReadCache();
   const current = store.getTaskIdentity(task.id);
   const allowed = expectedStatus === "resumable" ? ["running", "awaiting_human"] : ["dispatched"];
@@ -65,8 +70,8 @@ interface RuntimePump {
   cooldownUntil: number;
   cooldownReason: string | null;
   cooldownTimer: DaemonProtocolTimer | null;
-  preparing: string | null;
-  pending: { taskId: string; agentId: string; inlineRead: { sessionId: string; seqs: number[]; toSeq: number; coldStart: boolean } | null;
+  preparing: { taskId: string; generation: string } | null;
+  pending: { taskId: string; generation: string; agentId: string; inlineRead: { sessionId: string; seqs: number[]; toSeq: number; coldStart: boolean } | null;
     session: DaemonProtocolSession; seq: number; timer: DaemonProtocolTimer } | null;
   accepted: Set<string>;
   sweep: boolean;
@@ -77,6 +82,7 @@ interface RuntimePump {
 /** The database is the queue; memory holds only leases, deadlines and single-flight state. */
 export class DaemonTaskOffers {
   private readonly pumps = new Map<string, RuntimePump>();
+  private readonly reconciled = new Map<string, DaemonProtocolSession>();
   private readonly clock: DaemonProtocolClock;
   private readonly heartbeatCounts = new Map<string, number>();
   private stopped = false;
@@ -95,6 +101,45 @@ export class DaemonTaskOffers {
   }) {
     this.clock = options.clock ?? systemClock;
     this.stopped = options.autostart === false;
+    for (const method of ['task.offer_adopt', 'task.offer_status']) {
+      options.layer.registerRpcHandler(method, async (frame, session) => {
+        const p = frame.payload;
+        if (this.stopped || !frame.rt || this.session(frame.rt) !== session || !session.supportsPromptPolicy) return { ok:false, code:'authority_revoked' };
+        authorizeReportRuntime(options.store, session, frame.rt);
+        if (method === 'task.offer_status' && p.inspect_handoff === true && session.supportsPlannedRestart && typeof p.handoff_id === 'string' && p.handoff_id.length <= 256) {
+          const scope = {workspaceId:options.store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local',runtimeId:frame.rt,daemonId:session.daemonId};
+          const handoff = p.handoff_id;
+          return withBackgroundTerm(this.generation.term, () => ({ok:true,...options.store.plannedRestarts().inspectHandoff(handoff,scope)}));
+        }
+        if (typeof p.attempt_id !== 'string' || typeof p.content_hash !== 'string' || typeof p.offer_generation !== 'string'
+          || typeof p.receipt_id !== 'string' || !p.receipt_id || p.receipt_id.length > 128) return { ok:false, code:'invalid_report' };
+        const identity = {workspace_id: options.store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local', daemon_id: session.daemonId, runtime_id:frame.rt,
+          attempt_id:p.attempt_id, content_hash:p.content_hash, offer_generation:p.offer_generation, receipt_id:p.receipt_id};
+        if (p.workspace_id !== identity.workspace_id || p.daemon_id !== identity.daemon_id || p.runtime_id !== identity.runtime_id) return {ok:false,code:'authority_revoked',retryable:false};
+        return withBackgroundTerm(this.generation.term, () => {
+          this.generation.term?.assertCurrent();
+          const policy = options.store.systemPromptsRepo();
+          if (method === 'task.offer_status') {
+            const state = policy.offerStatus(identity);
+            const handoff = state === 'adopted' && typeof p.handoff_id === 'string' && session.supportsPlannedRestart ? options.store.plannedRestarts().get(identity.attempt_id) : null;
+            return {ok:true,state,...identity,...(handoff?.handoff_id === p.handoff_id && handoff ? {handoff} : {})};
+          }
+          const grant = policy.adoptOfferResult(identity);
+          if (!grant) return {ok:false,code:'policy_offer_mismatch',retryable:false};
+          const pump = this.pumps.get(identity.runtime_id);
+          const pending = pump?.pending;
+          if (pump && pending?.taskId === identity.attempt_id && pending.generation === identity.offer_generation) {
+            this.clock.clearTimeout(pending.timer);
+            pump.pending = null;
+            pump.accepted.add(identity.attempt_id);
+            if (pending.inlineRead) options.store.recordSessionAgentInlineRead(pending.inlineRead.sessionId,pending.agentId,
+              pending.inlineRead.seqs,pending.inlineRead.toSeq,pending.inlineRead.coldStart,pending.taskId);
+            this.kick(identity.runtime_id);
+          }
+          return {ok:true,state:'adopted',grant,...identity};
+        });
+      });
+    }
     options.layer.registerSessionHooks({
       stop: () => { void this.stop(); },
       hello: (session, hello) => this.inGeneration(() => {
@@ -126,7 +171,7 @@ export class DaemonTaskOffers {
       drain: session => this.inGeneration(() => this.resume(session)),
       close: session => this.inGeneration(() => this.closed(session)),
     });
-    options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.inGeneration(() => this.ready(frame, session)));
+    options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.stopped ? null : withBackgroundTerm(this.generation.term, () => this.ready(frame, session)));
     // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
     // Keep a low-frequency safety net for missed events; recoveries expose missing wiring.
     if (options.autostart !== false) this.start();
@@ -162,7 +207,8 @@ export class DaemonTaskOffers {
       if (this.stopped) return;
       for (const session of this.options.layer.registry.listSessions()) {
         for (const rt of session.runtimeIds) {
-          this.options.store.plannedRestarts().recoverExpiredResumes(rt);
+          const owner = this.session(rt);
+          if (owner === session) this.options.store.plannedRestarts().recoverExpiredResumes(rt, new Set(this.validatedHolds(owner,rt)));
           this.kick(rt, true);
         }
       }
@@ -319,6 +365,7 @@ export class DaemonTaskOffers {
     const { store } = this.options;
     const session = this.session(runtimeId);
     if (this.stopped || !session || pump.pending || this.clock.now() < pump.cooldownUntil) return;
+    if (session.supportsPromptPolicy && this.reconciled.get(runtimeId) !== session) return;
     const maintenance = store.getPlatformMaintenance();
     if (maintenance.mode === "draining") {
       if (maintenance.expiresAt) this.scheduleRetry("platform-drain", null, Date.parse(maintenance.expiresAt));
@@ -328,23 +375,41 @@ export class DaemonTaskOffers {
     // Status/input notifications do not create work. Avoid a locked claim and
     // heartbeat write when this workspace has no queued or offered turn.
     if (!runtime || !store.hasPendingTaskOffers(runtime.workspaceId ?? "local")) return;
-    const task = store.claimTask(runtimeId, { supportsBinarySkillFiles: true });
+    const generation = crypto.randomUUID();
+    const connected = this.options.layer.registry.listSessions()
+      .flatMap(peer => peer.runtimeIds).filter(id => this.session(id));
+    const task = store.claimTask(runtimeId, { offerGeneration: generation, supportsBinarySkillFiles: true,
+      policyProtocol: session.supportsPromptPolicy ? 'adopt' : 'legacy',
+      supportsPromptPolicy: session.supportsPromptPolicy, policyCapableRuntimeIds: connected.filter(id => this.session(id)?.supportsPromptPolicy),
+      policyLegacyRuntimeIds: connected.filter(id => !this.session(id)?.supportsPromptPolicy),
+      continuePolicyScan: () => this.scheduleRetry(`policy-page:${runtimeId}`,runtimeId,this.clock.now()+1) });
     if (!task) return;
-    pump.preparing = task.id;
+    pump.preparing = { taskId: task.id, generation };
     try {
       const payload = await this.options.prepare(task, session.supportsWikiFetch);
       if (this.stopped || this.generation.term !== currentBackgroundTerm()) return;
       currentBackgroundTerm()?.assertCurrent();
       invalidateRequestReadCache();
       const current = store.getTaskIdentity(task.id);
-      if (current?.status !== "dispatched" || current.runtimeId !== runtimeId) return;
+      if (current?.status !== "dispatched" || current.runtimeId !== runtimeId || !store.systemPromptsRepo().matchesOffer(task.id, generation)) return;
       if (!payload) {
         // Preparation can decline an offer after claiming it. No frame was
         // sent, so release the claim rather than strand an unoffered dispatch.
-        this.rescind(runtimeId, pump, task.id);
+        this.rescind(runtimeId, pump, task.id, generation);
         return;
       }
-      if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id); return; }
+      if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id, generation); return; }
+      const dispatch = store.systemPromptsRepo().dispatchPolicy(task.id);
+      if (dispatch?.historicalChat) {
+        const chat = task.chatSessionId && store.getChatSession(task.chatSessionId);
+        if (!chat || chat.workspaceId !== task.workspaceId || chat.agentId !== task.agentId || chat.projectId || chat.runtimeWorkspaceId || chat.origin
+          || payload.chat_session_id !== chat.id || store.getFeishuIssueIdForChatSession(chat.id) || !isIndependentChatOffer(payload)) {
+          this.rescind(runtimeId, pump, task.id, generation);
+          return;
+        }
+      }
+      if (session.supportsPromptPolicy) payload.offer_generation = generation;
+      if (dispatch?.exclusiveDelivery) payload.exclusive_delivery = true;
       const budgeted = fitTaskOfferToBudget(payload, runtimeId, undefined, session.supportsWikiFetch);
       console.info(JSON.stringify({ event: "daemon_offer_budget", task_id: task.id, runtime_id: runtimeId, ...budgeted.report }));
       let report = budgeted.report;
@@ -354,6 +419,7 @@ export class DaemonTaskOffers {
         store.failTask(task.id, { error, failureReason: "offer_too_large" });
         pump.dirty = true;
       };
+      if (!store.recordTaskOffered(task.id, runtimeId, new Date(this.clock.now()).toISOString(), generation)) return;
       let sent = session.sendEvent({ t: "task.offer", rt: runtimeId, p: payload }, { pausable: true });
       if (!sent.ok && sent.reason === "too_large") {
         const compact = fitTaskOfferToBudget(payload, runtimeId, 16 * 1024, session.supportsWikiFetch);
@@ -363,19 +429,19 @@ export class DaemonTaskOffers {
       }
       if (!sent.ok) {
         if (sent.reason === "too_large") failSize();
-        else if (sent.reason === "closed") this.rescind(runtimeId, pump, task.id);
+        else if (sent.reason === "closed") this.rescind(runtimeId, pump, task.id, generation);
         else {
           pump.waiting = true;
-          store.requeueTaskOffer(task.id, runtimeId);
+          store.requeueTaskOffer(task.id, runtimeId, "rejected", generation);
         }
         return;
       }
-      store.recordTaskOffered(task.id, runtimeId, new Date(this.clock.now()).toISOString());
+      currentBackgroundTerm()?.assertCurrent();
       if (fromSweep) {
         console.warn(JSON.stringify({ event: "daemon_offer_sweep_recovered", runtime_id: runtimeId, task_id: task.id }));
         this.options.layer.recordOfferSweepRecovery();
       }
-      const timer = this.clock.setTimeout(this.bindGeneration(() => this.rescind(runtimeId, pump, task.id)), DAEMON_OFFER_TIMEOUT_MS);
+      const timer = this.clock.setTimeout(this.bindGeneration(() => this.rescind(runtimeId, pump, task.id, generation)), DAEMON_OFFER_TIMEOUT_MS);
       (timer as ReturnType<typeof setTimeout>).unref?.();
       const projection = payload.session_projection as { session_id?: string; to_seq: number; jsonl?: string; mode?: string } | undefined;
       const inlineRead = projection?.session_id && projection.jsonl ? { sessionId: projection.session_id, toSeq: projection.to_seq,
@@ -383,11 +449,11 @@ export class DaemonTaskOffers {
         seqs: projection.jsonl.split("\n").filter(Boolean).map(line => JSON.parse(line))
           .filter(entry => entry.type === "triggering_message" && !entry.body_folded && !entry.body_omitted_chars)
           .map(entry => Number(entry.seq)) } : null;
-      pump.pending = { taskId: task.id, agentId: task.agentId, inlineRead, session, seq: sent.seq, timer };
+      pump.pending = { taskId: task.id, generation, agentId: task.agentId, inlineRead, session, seq: sent.seq, timer };
     } catch (error) {
       if (error instanceof StaleLiveTermError || isDatabaseConnectionError(error)) throw error;
       const current = store.getTaskIdentity(task.id);
-      if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id);
+      if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id, generation);
       throw error;
     } finally { pump.preparing = null; }
   }
@@ -397,14 +463,15 @@ export class DaemonTaskOffers {
       const pump = this.pumps.get(runtimeId);
       const pending = pump?.pending;
       if (!pump || !pending || pending.session !== session || String(pending.seq) !== frame.re) continue;
+      if (session.supportsPromptPolicy && frame.payload.ok !== false) return;
       if (frame.payload.ok !== true) {
         const reason = frame.payload.reason ?? frame.payload.code;
-        this.rescind(runtimeId, pump, pending.taskId, typeof reason === "string" ? reason : null, frame.payload.ok === false);
+        this.rescind(runtimeId, pump, pending.taskId, pending.generation, typeof reason === "string" ? reason : null, frame.payload.ok === false);
         return;
       }
       this.clock.clearTimeout(pending.timer);
       pump.pending = null;
-      if (this.options.store.acceptTaskOffer(pending.taskId, runtimeId, new Date(this.clock.now()).toISOString())) {
+      if (this.options.store.acceptTaskOffer(pending.taskId, runtimeId, new Date(this.clock.now()).toISOString(), pending.generation)) {
         pump.accepted.add(pending.taskId);
         if (pending.inlineRead) {
           try { this.options.store.recordSessionAgentInlineRead(pending.inlineRead.sessionId, pending.agentId,
@@ -417,9 +484,10 @@ export class DaemonTaskOffers {
     }
   }
 
-  private rescind(runtimeId: string, pump: RuntimePump, taskId: string, reason: string | null = null, rejected = false): void {
+  private rescind(runtimeId: string, pump: RuntimePump, taskId: string, generation: string, reason: string | null = null, rejected = false): void {
     currentBackgroundTerm()?.assertCurrent();
-    if (pump.pending?.taskId === taskId) {
+    if (generation !== (pump.pending ?? pump.preparing)?.generation) return;
+    if (pump.pending?.generation === generation) {
       this.clock.clearTimeout(pump.pending.timer);
       pump.pending = null;
     }
@@ -432,7 +500,7 @@ export class DaemonTaskOffers {
       this.kick(runtimeId);
     }), DAEMON_OFFER_COOLDOWN_MS);
     (pump.cooldownTimer as ReturnType<typeof setTimeout>).unref?.();
-    this.options.store.requeueTaskOffer(taskId, runtimeId, rejected ? "rejected" : "unknown");
+    this.options.store.requeueTaskOffer(taskId, runtimeId, rejected ? "rejected" : "unknown", generation);
   }
 
   private resume(session: DaemonProtocolSession): void {
@@ -450,8 +518,8 @@ export class DaemonTaskOffers {
       const pump = this.pumps.get(runtimeId);
       if (!pump) continue;
       pump.waiting = false;
-      const taskId = pump.pending?.session === session ? pump.pending.taskId : pump.preparing;
-      if (taskId) this.rescind(runtimeId, pump, taskId);
+      const offer = pump.pending?.session === session ? pump.pending : pump.preparing;
+      if (offer) this.rescind(runtimeId, pump, offer.taskId, offer.generation);
       for (const id of pump.accepted) {
         this.options.store.releaseTaskOfferLease(id);
         const task = this.options.store.getTask(id);
@@ -463,10 +531,36 @@ export class DaemonTaskOffers {
     }
   }
 
-  private ready(frame: DaemonParsedFrame, session: DaemonProtocolSession): void {
+  private validatedHolds(session: DaemonProtocolSession,runtimeId:string): string[] {
+    const store = this.options.store;
+    return (session.heldRestartAttempts.get(runtimeId) ?? []).flatMap(entry => {
+      return store.plannedRestarts().ownsHandoff(entry.attempt_id,entry.handoff_id,runtimeId,session.daemonId) ? [entry.attempt_id] : [];
+    });
+  }
+
+  private async ready(frame: DaemonParsedFrame, session: DaemonProtocolSession): Promise<void> {
     const runtimeId = frame.rt;
     const ids = frame.payload.active_task_ids;
     if (!runtimeId || !session.runtimeIds.includes(runtimeId) || !Array.isArray(ids) || ids.some(id => typeof id !== "string")) return;
+    const store = this.options.store;
+    authorizeReportRuntime(store,session,runtimeId);
+    if (session.supportsPromptPolicy) {
+      for (const proof of Array.isArray(frame.payload.prepared_offers) ? frame.payload.prepared_offers : []) {
+        if (!proof || proof.runtime_id !== runtimeId || proof.daemon_id !== session.daemonId || typeof proof.attempt_id !== 'string') continue;
+        const policy = store.systemPromptsRepo();
+        if (!['adopted','proposed'].includes(policy.offerStatus(proof as PolicyOfferIdentity))) continue;
+        const task = store.getTaskWithAgent(proof.attempt_id);
+        if (!task || task.status !== 'dispatched') continue;
+        const payload = await this.options.prepare(task,session.supportsWikiFetch);
+        currentBackgroundTerm()?.assertCurrent();
+        if (this.session(runtimeId) !== session || !payload || !['adopted','proposed'].includes(policy.offerStatus(proof))) continue;
+        payload.offer_generation = proof.offer_generation;
+        if (policy.dispatchPolicy(proof.attempt_id)?.exclusiveDelivery) payload.exclusive_delivery = true;
+        const fitted = fitTaskOfferToBudget(payload,runtimeId,undefined,session.supportsWikiFetch);
+        session.sendEvent({t:'task.offer',rt:runtimeId,p:fitted.response},{pausable:true});
+      }
+      this.reconciled.set(runtimeId,session);
+    }
     const waits = Array.isArray(frame.payload.active_question_waits) ? frame.payload.active_question_waits.filter((value): value is import('@multiremi/contracts/daemon-protocol.js').DaemonQuestionWait =>
       !!value && typeof value === 'object' && typeof value.message_id === 'string' && typeof value.attempt_id === 'string' && typeof value.wait_id === 'string' && value.wait_id.length >= 16) : [];
     this.options.store.reconcileQuestionWaits(runtimeId, waits);
@@ -479,7 +573,22 @@ export class DaemonTaskOffers {
         }
       }
     }
-    this.options.store.recoverOrphans(runtimeId, ids as string[]);
+    const holds = Array.isArray(frame.payload.held_restart_attempts) ? frame.payload.held_restart_attempts : [];
+    session.heldRestartAttempts.set(runtimeId,holds.filter(entry => entry && typeof entry.attempt_id === 'string' && typeof entry.handoff_id === 'string'));
+    const protectedIds = [...ids as string[],...this.validatedHolds(session,runtimeId)];
+    if (session.supportsPromptPolicy && Array.isArray(frame.payload.exited_launches)) {
+      const workspace = store.getRuntimeLite(runtimeId)?.workspaceId ?? 'local';
+      for (const proof of frame.payload.exited_launches) {
+        if (!proof || proof.runtime_id !== runtimeId || proof.daemon_id !== session.daemonId || proof.workspace_id !== workspace
+          || typeof proof.attempt_id !== 'string' || protectedIds.includes(proof.attempt_id)) continue;
+        store.systemPromptsRepo().withReportPolicy(workspace,() => {
+          if (store.systemPromptsRepo().offerStatus(proof) === 'adopted' && !store.plannedRestarts().get(proof.attempt_id)) {
+            store.recoverOrphanAttempt(runtimeId,proof.attempt_id);
+          }
+        });
+      }
+    }
+    this.options.store.recoverOrphans(runtimeId, protectedIds);
     this.kick(runtimeId);
   }
 }

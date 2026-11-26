@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -120,7 +121,7 @@ async function ownChat(f: ReturnType<typeof fixture>, creatorId = f.creator.id) 
   const chat = f.store.createChatSession({ agentId: f.agent.id, creatorId });
   const first = f.store.sendChatMessage(chat.id, { body: "FIRST_UNREAD" });
   const second = f.store.sendChatMessage(chat.id, { body: "SECOND_UNREAD" });
-  const task = f.store.claimTask(f.runtime.id)!;
+  const task = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   expect(task.id).toBe(first.task.id);
   const credential = await f.store.createTaskAccessToken(task, f.runtime.ownerId!);
   return { chat, first, second, task, headers: { Authorization: `Bearer ${credential.token}` } };
@@ -222,7 +223,7 @@ it("a personal Feishu bot task reads its bound Chat with the real external creat
     expect(chat.creatorId).not.toBe(f.runtime.ownerId);
     expect(db!.query("SELECT app_id, external_session_key, chat_id, issue_id FROM multiremi_feishu_bot_chat_bindings WHERE chat_session_id = ?")
       .get(chat.id)).toMatchObject({ app_id: "cli_log_reader", external_session_key: "ou_reader", chat_id: "oc_ou_reader", issue_id: null });
-    const task = f.store.claimTask(f.runtime.id)!;
+    const task = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(task.id).toBe(first.taskId);
     const credential = await f.store.createTaskAccessToken(task, f.runtime.ownerId!);
     const headers = { Authorization: `Bearer ${credential.token}` };
@@ -239,7 +240,7 @@ it("a personal Feishu bot task reads its bound Chat with the real external creat
     f.store.consumeTaskSteerMessages(task.id, f.store.listPendingTaskSteerMessages(task.id).map(message => message.id));
     f.store.completeTask(task.id, { output: "FEISHU_DONE", sessionId: "provider-reader", workDir: "/tmp/chat-log-reader" });
     submit("ou_reader", "om_next", "FEISHU_NEXT_UNREAD");
-    const next = f.store.claimTask(f.runtime.id)!;
+    const next = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(next.chatSessionId).toBe(chat.id);
     const offer = daemonTaskClaimResponse(f.store, next, f.store.getTaskTriggerMetadata(next));
     useTaskSessionInput(f.store, next, offer);
@@ -374,7 +375,7 @@ it("bound Chat range pagination records partial offsets and repeated reads never
   const body = "LONG_CHAT_MESSAGE_".repeat(5_000);
   const chat = f.store.createChatSession({ agentId: f.agent.id, creatorId: f.creator.id });
   const sent = f.store.sendChatMessage(chat.id, { body });
-  const task = f.store.claimTask(f.runtime.id)!;
+  const task = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   expect(task.id).toBe(sent.task.id);
   const credential = await f.store.createTaskAccessToken(task, f.runtime.ownerId!);
   const headers = { Authorization: `Bearer ${credential.token}` };
@@ -543,7 +544,7 @@ it("Issue task credentials still read Issue ranges and persist unread progress",
   const session = f.store.getOrCreateDefaultIssueSession(issue.id);
   f.store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "ISSUE_UNREAD" });
   const task = f.store.createTask({ agentId: f.agent.id, issueId: issue.id, prompt: "Read issue" });
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   expect(claimed.id).toBe(task.id);
   const credential = await f.store.createTaskAccessToken(claimed, f.runtime.ownerId!);
   const to = f.store.getConversationLogHead(session.id)!.headSeq;

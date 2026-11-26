@@ -12,6 +12,8 @@ import { resolveRequestWorkspaceId } from "./helpers/workspace-context.js";
 import { createPlatformMaintenanceWriteGate } from "./helpers/platform-maintenance-gate.js";
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
+import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
+import { createJwtBrowserClientGuard } from './realtime.js';
 import { AgentTemplateError } from "./agent-templates.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
 import { SkillImportError } from "@daemon/agent-runtime/skills/skill-import.js";
@@ -37,6 +39,7 @@ import { registerCloudRuntimeRoutes } from "./routers/cloud-runtime.js";
 import { registerCloudBillingRoutes } from "./routers/cloud-billing.js";
 import { registerMeRoutes } from "./routers/me.js";
 import { registerWorkspaceRoutes } from "./routers/workspaces.js";
+import { registerSystemPromptRoutes } from "./routers/system-prompts.js";
 import { registerScmRoutes } from "./routers/scm.js";
 import { registerFeishuCompatRoutes } from "./routers/feishu-compat.js";
 import { registerMessagingRoutes } from "./routers/messaging.js";
@@ -681,7 +684,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       }
       const accessToken = await store.verifyAccessToken(token);
       if (!accessToken) {
-        const jwt = verifyJwtToken(token);
+        const jwt = verifyJwtToken(token, store);
         if (!jwt) return c.json({ error: "unauthorized" }, 401);
         c.set("multiremiAuth", buildRequestAuth(null, jwt.userId));
         await next();
@@ -768,6 +771,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
+    if (err instanceof JwtMaterialUnavailable) return c.json({ error: 'authentication state unavailable' }, 503);
     if (err instanceof ExecutionModelPolicyError) return c.json({ error: err.message, code: err.code, field: err.field }, 400);
     if (isDatabaseConnectionError(err)) {
       c.header("Retry-After", "1");
@@ -844,6 +848,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.get("/healthz", (c) => c.json(healthBody()));
   app.get("/api/config", (c) => c.json({
     ...(daemonDirectBaseUrl ? { daemon_server_url: daemonDirectBaseUrl } : {}),
+    jwt_registration_required: store.jwtMaterials.isActive(),
     cdn_domain: "",
     allow_signup: true,
     google_client_id: process.env.GOOGLE_CLIENT_ID ?? "",
@@ -963,6 +968,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   });
   registerMeRoutes(app, deps);
   registerWorkspaceRoutes(app, deps);
+  registerSystemPromptRoutes(app, deps);
   registerScmRoutes(app, deps);
   registerMessagingRoutes(app, deps);
   registerFeishuCompatRoutes(app, deps);
@@ -1262,6 +1268,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     task => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki, false, daemonTurnBridge.offerInput(task), "resumable"));
   registerBackgroundTaskHandlers(daemonProtocol, store, rt => downlinks.kick(rt, "pending"));
   const browserWebSockets: BrowserWebSocketRegistry = new Map();
+  const jwtBrowserClient = createJwtBrowserClientGuard(store);
   const daemonTrace = registerDaemonTraceHandlers(daemonProtocol, store,
     effectiveApiRole !== "ui" && options.liveHub === undefined && options.hub === undefined
       ? createHubTraceSink(liveHub as HubImpl) : undefined);
@@ -1516,6 +1523,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
               authenticated: authorization.authenticated,
               userId: authorization.userId,
               accessToken: authorization.accessToken,
+              jwtDigest: authorization.jwtDigest,
               streamEndpoint: "trace" as const,
             },
           });
@@ -1537,6 +1545,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
               authenticated: authorization.authenticated,
               userId: authorization.userId,
               accessToken: authorization.accessToken,
+              jwtDigest: authorization.jwtDigest,
               streamEndpoint: "log" as const,
             },
           });
@@ -1572,9 +1581,9 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
           return;
         }
         if (ws.data.authenticated) {
-          registerBrowserWebSocketClient(browserWebSockets, ws);
-          registerBrowserUserWebSocketClient(browserUserWebSockets, ws);
-          ws.sendText(JSON.stringify({ type: "auth_ack" }));
+          registerBrowserWebSocketClient(browserWebSockets, jwtBrowserClient(ws));
+          registerBrowserUserWebSocketClient(browserUserWebSockets, jwtBrowserClient(ws));
+          jwtBrowserClient(ws).sendText(JSON.stringify({ type: "auth_ack" }));
         }
       },
       async message(ws, message) {
@@ -1587,31 +1596,32 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
           if (!ws.data.authenticated) {
             const authorization = await authorizeBrowserWebSocketAuthFrame(event, store, authToken, ws.data.workspaceId);
             if ("error" in authorization) {
-              ws.sendText(JSON.stringify({ error: authorization.error }));
+              jwtBrowserClient(ws).sendText(JSON.stringify({ error: authorization.error }));
               ws.close();
               return;
             }
             ws.data.authenticated = true;
             ws.data.userId = authorization.userId;
             ws.data.accessToken = authorization.accessToken;
-            registerBrowserWebSocketClient(browserWebSockets, ws);
-            registerBrowserUserWebSocketClient(browserUserWebSockets, ws);
-            ws.sendText(JSON.stringify({ type: "auth_ack" }));
+            ws.data.jwtDigest = authorization.jwtDigest;
+            registerBrowserWebSocketClient(browserWebSockets, jwtBrowserClient(ws));
+            registerBrowserUserWebSocketClient(browserUserWebSockets, jwtBrowserClient(ws));
+            jwtBrowserClient(ws).sendText(JSON.stringify({ type: "auth_ack" }));
             return;
           }
           // MUL-438 v2 frames. Each endpoint serves exactly one stream kind:
           // `/ws` carries `log:*`, `/api/trace/ws` carries `trace:*`.
           if (event.type === "stream.subscribe") {
             const handler = ws.data.streamEndpoint === "trace" ? traceStreams : browserStreams;
-            await handler.handleSubscribe(ws, event);
+            await handler.handleSubscribe(jwtBrowserClient(ws), event);
             return;
           }
           if (event.type === "stream.unsubscribe") {
             const handler = ws.data.streamEndpoint === "trace" ? traceStreams : browserStreams;
-            handler.handleUnsubscribe(ws, event);
+            handler.handleUnsubscribe(jwtBrowserClient(ws), event);
             return;
           }
-          if (event.type === "ping") ws.sendText(JSON.stringify({ type: "pong" }));
+          if (event.type === "ping") jwtBrowserClient(ws).sendText(JSON.stringify({ type: "pong" }));
           return;
         }
       },
@@ -1621,7 +1631,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
         if (ws.data.kind === "daemon-protocol") ws.data.session?.handleDrain();
         if (ws.data.kind === "browser") {
           const handler = ws.data.streamEndpoint === "trace" ? traceStreams : browserStreams;
-          handler.notifyDrain(ws);
+          handler.notifyDrain(jwtBrowserClient(ws));
         }
       },
       close(ws) {
@@ -1629,10 +1639,10 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
         realtimeState.connections = Math.max(0, realtimeState.connections - 1);
         if (ws.data.kind === "daemon-protocol") ws.data.session?.handleSocketClose();
         else {
-          unregisterBrowserWebSocketClient(browserWebSockets, ws);
-          unregisterBrowserUserWebSocketClient(browserUserWebSockets, ws);
-          browserStreams.disposeClient(ws);
-          traceStreams.disposeClient(ws);
+          unregisterBrowserWebSocketClient(browserWebSockets, jwtBrowserClient(ws));
+          unregisterBrowserUserWebSocketClient(browserUserWebSockets, jwtBrowserClient(ws));
+          browserStreams.disposeClient(jwtBrowserClient(ws));
+          traceStreams.disposeClient(jwtBrowserClient(ws));
         }
       },
     },

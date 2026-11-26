@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 import { afterEach, expect, it } from "bun:test";
@@ -30,7 +31,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
       ...(fallback ? { fallbackModel: "fallback" } : {}) });
     const issue = createResponsibleTestIssue(store, { title: "Frozen retry", assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Keep frozen model" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const frozen = store.getTask(task.id)!;
     expect(frozen.executionFingerprint).toBeTruthy();
@@ -45,7 +46,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(store.refreshQueuedCapabilityWaitReasons(afterFiveMinutes).alerted).toBe(0);
     expect(store.getTask(retry.id)).toMatchObject({ status: "queued", waitReason: null, fallbackSwitched: false });
     expect(store.listTasks().filter(candidate => candidate.parentTaskId === retry.id)).toEqual([]);
-    expect(store.claimTask(runtime.id)).toMatchObject({ id: retry.id, executionModel: frozen.executionModel,
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: retry.id, executionModel: frozen.executionModel,
       executionFingerprint: frozen.executionFingerprint, executionConnection: frozen.executionConnection,
       codexProfile: frozen.codexProfile, fallbackSwitched: false });
   });
@@ -64,7 +65,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     ack();
     const agent = store.createAgent({ name: "Saved", provider: "codex", executionGroupId: group.id, model: "blocked" });
     const claimedTask = store.createTask({ agentId: agent.id, prompt: "Already claimed" });
-    expect(store.claimTask(runtime.id)?.id).toBe(claimedTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(claimedTask.id);
     const queuedTask = store.createTask({ agentId: agent.id, prompt: "Not claimed" });
     store.saveExecutionGroup("local", { ...input, model_policy: { blocked_models: ["blocked", "future"] } }, group.id);
     ack();
@@ -74,7 +75,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(catalog.blocked_models).toEqual(["blocked", "future"]);
     expect(store.getAgent(agent.id)?.model).toBe("blocked");
     expect(() => store.createTask({ agentId: agent.id, prompt: "New" })).toThrow("model blocked by policy");
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(queuedTask.id)?.status).toBe("queued");
     store.refreshQueuedCapabilityWaitReasons(Date.now() + 180_000);
     expect(store.getTask(queuedTask.id)?.waitReason).toContain("model_blocked_by_policy");
@@ -96,13 +97,13 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     const retry = store.createTask({ agentId: agent.id, prompt: "Retry frozen execution", runtimeId: runtime.id,
       executionModel: frozen.executionModel, executionConnection: frozen.executionConnection,
       codexProfile: frozen.codexProfile, executionFingerprint: frozen.executionFingerprint, pluginSnapshot: frozen.pluginSnapshot });
-    const retryClaim = store.claimTask(runtime.id);
+    const retryClaim = claimWithCurrentRuntime(store, runtime.id);
     expect(retryClaim?.id).toBe(retry.id);
     expect(retryClaim?.executionModel).toBe("blocked");
     store.cancelTask(retry.id);
     const auto = store.createAgent({ name: "Automatic", provider: "codex", executionGroupId: group.id });
     const next = store.createTask({ agentId: auto.id, prompt: "Automatic default" });
-    const claim = store.claimTask(runtime.id);
+    const claim = claimWithCurrentRuntime(store, runtime.id);
     expect(claim?.id).toBe(next.id);
     expect(claim?.executionModel).toBe("allowed");
     expect(claim?.codexProfile?.model).toBe("allowed");
@@ -149,6 +150,94 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     for (const row of body.inspection.results) expect(row).toMatchObject({ state: "manual", models: [{ id: "draft-only" }] });
     expect(store.getExecutionEndpoint(changed.id, "local")?.connection.options?.manual_models?.[0]?.id).toBe("manual");
     expect(store.getExecutionEndpointCatalog(endpoint.id, "other")).toEqual([]);
+  });
+
+  it("caches ID-only catalog reads for a migrated relay and isolates previews and stale revisions", async () => {
+    const { store, db } = fixture();
+    let model = "saved-model";
+    let beforeResponse: (() => void) | undefined;
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+      if (new URL(request.url).pathname !== "/proxy/v1/models") return new Response(null, { status: 404 });
+      beforeResponse?.();
+      return Response.json({ data: [{ id: model }] });
+    } });
+    try {
+      const baseUrl = `${upstream.url.origin}/proxy/v1/`;
+      db.run(`INSERT INTO multiremi_relay_config(workspace_id,engine,fragment,auth_token,revision,updated_at)
+        VALUES('local','claude',?,?,1,?)`, [JSON.stringify({ env: { ANTHROPIC_BASE_URL: baseUrl } }), key, new Date().toISOString()]);
+      db.run("DELETE FROM multiremi_schema_migrations WHERE id='execution_endpoints_v1'");
+      runMigrations(db, { historicalMaintenance: true });
+      const endpoint = store.getExecutionEndpoint(store.getSystemModelEndpoints("local")["anthropic-messages"]!, "local")!;
+      expect(endpoint.connection.base_url).toBe(baseUrl);
+      const app = createMultiremiApp({ store });
+      const inspect = async (overrides: Record<string, unknown> = {}) => {
+        const response = await app.request("/api/execution-endpoints/inspect", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace_id: "local", endpoint_id: endpoint.id, operation: "models", protocol: "anthropic-messages", ...overrides }) });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.inspection.results).toMatchObject([{ state: "ok", models: [{ id: model }] }]);
+        return body.persisted;
+      };
+      const catalogs = async () => {
+        const response = await app.request(`/api/execution-endpoints/${endpoint.id}/catalog?workspace_id=local`);
+        expect(response.status).toBe(200);
+        return (await response.json()).catalogs;
+      };
+      expect(await inspect()).toBe(true);
+      expect(await catalogs()).toMatchObject([{ revision: endpoint.revision, models: [{ id: model }] }]);
+      model = "editor-refresh";
+      expect(await inspect({ protocol: undefined })).toBe(true);
+      expect(await catalogs()).toMatchObject([{ protocol: "anthropic-messages", models: [{ id: model }] }]);
+      model = "saved-null";
+      expect(await inspect({ connection: null })).toBe(true);
+      const saved = await catalogs();
+      expect(saved).toMatchObject([{ models: [{ id: model }] }]);
+      model = "preview";
+      expect(await inspect({ connection: endpoint.connection })).toBe(false);
+      expect(await inspect({ api_key: "preview-key" })).toBe(false);
+      expect(await catalogs()).toEqual(saved);
+      beforeResponse = () => { store.saveExecutionEndpoint("local", { name: "Updated", connection: endpoint.connection }, endpoint.id); };
+      await inspect();
+      const updated = store.getExecutionEndpoint(endpoint.id, "local")!;
+      expect(updated.revision).toBeGreaterThan(endpoint.revision);
+      expect(await catalogs()).toEqual(saved);
+      beforeResponse = undefined;
+      expect(await inspect({ connection: updated.connection })).toBe(false);
+      expect(await catalogs()).toEqual(saved);
+    } finally {
+      upstream.stop(true);
+    }
+  });
+
+  it("refreshes and reads one saved protocol catalog with workspace-scoped human credentials", async () => {
+    const { store } = fixture();
+    const endpoint = store.saveExecutionEndpoint("local", { name: "System catalog", connection: { ...connection,
+      options: { fetch_models: false, manual_models: [{ id: "summary" }] } }, api_key: key });
+    const app = createMultiremiApp({ store, authToken: "master" });
+    const owner = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "Owner", userId: "local" });
+    const daemon = await store.createAccessToken({ workspaceId: "local", type: "daemon", name: "Daemon" });
+    const inspect = (token: string, protocol: string) => app.request("/api/execution-endpoints/inspect", {
+      method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: "local", endpoint_id: endpoint.id, operation: "models", protocol }),
+    });
+    const catalog = (token: string, workspace: string) => app.request(`/api/execution-endpoints/${endpoint.id}/catalog?workspace_id=${workspace}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect((await inspect(daemon.token, "anthropic-messages")).status).toBe(403);
+    expect((await catalog(daemon.token, "local")).status).toBe(403);
+    expect((await inspect(owner.token, "openai-chat-completions")).status).toBe(400);
+    const refresh = await inspect(owner.token, "anthropic-messages");
+    expect(refresh.status).toBe(200);
+    const inspection = await refresh.json();
+    expect(inspection.persisted).toBe(true);
+    expect(inspection.inspection.results).toMatchObject([{ protocol: "anthropic-messages", state: "manual" }]);
+    expect(JSON.stringify(inspection)).not.toContain(key);
+    const snapshot = await catalog(owner.token, "local");
+    expect(snapshot.status).toBe(200);
+    expect((await snapshot.json()).catalogs).toMatchObject([{ protocol: "anthropic-messages", models: [{ id: "summary" }] }]);
+    const other = store.createWorkspace({ name: "Other" });
+    const otherOwner = await store.createAccessToken({ workspaceId: other.id, type: "pat", name: "Other owner", userId: "local" });
+    expect((await catalog(otherOwner.token, other.id)).status).toBe(404);
   });
 
   it("requires endpoint options support before reporting a binding ready", () => {
@@ -222,7 +311,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
       models: [{ id: "discovered", label: "Discovered", provider: "codex", default: true }] } }]);
     const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: group.id });
     const task = store.createTask({ agentId: agent.id, prompt: "Check" });
-    const claim = store.claimTask(runtime.id)!;
+    const claim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claim?.id).toBe(task.id);
     expect(claim.executionConnection).toMatchObject({ endpoint_id: endpoint.id, endpoint_revision: 1, mode: "endpoint" });
     expect(claim.executionModel).toBe("discovered");
@@ -248,7 +337,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(executionGroupModelCatalog(store, "local", group.id, "local")[0]?.models.map(model => model.id)).toEqual(["native-model"]);
     const agent = store.createAgent({ name: "Native worker", provider: "codex", executionGroupId: group.id });
     store.createTask({ agentId: agent.id, prompt: "Native" });
-    const claim = store.claimTask(runtime.id)!;
+    const claim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claim?.executionConnection).toEqual({ mode: "native", provider: "codex", endpoint_id: null, endpoint_revision: null, profile: null });
     expect(claim.executionModel).toBe("native-model");
     store.updateRuntime(runtime.id, { metadata: { execution_endpoints: 0 } });

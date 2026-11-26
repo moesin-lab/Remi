@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
 import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
@@ -40,7 +41,7 @@ pendingTurnBackendTests("MUL-492 recovered nested delegation lineage", fixture =
       }
       const runtime = f.store.registerRuntime({ name: "Recovery runtime", provider: "codex" });
       if (mode === "turn_end") {
-        expect(f.store.claimTask(runtime.id)!.id).toBe(original.id);
+        expect(claimWithCurrentRuntime(f.store, runtime.id)!.id).toBe(original.id);
         f.store.startTask(original.id);
       }
       const delivery = f.transaction(() => f.store.sendEnvelopeWithinTransaction({
@@ -82,7 +83,7 @@ pendingTurnBackendTests("MUL-492 recovered nested delegation lineage", fixture =
       // Edit/delete and original completion may have returned the old source.
       // Keep those rows for the no-extra-mutation assertion while freeing claim.
       runTurnExecutionMutation(f.db as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET status = 'cancelled' WHERE issue_id = ? AND agent_id <> ? AND status = 'queued'", [issue.id, agent.id]);
-      expect(f.store.claimTask(runtime.id)!.id).toBe(recovered.id);
+      expect(claimWithCurrentRuntime(f.store, runtime.id)!.id).toBe(recovered.id);
       f.store.startTask(recovered.id);
       const before = f.store.listTasksForIssue(issue.id);
       const beforeIds = new Set(before.map(t => t.id));

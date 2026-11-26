@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from './pending-turn-test-backends.js';
 
@@ -10,7 +11,7 @@ function setup(f:PendingTurnTestFixture,transport=false,creatorId='local') {
   if(transport)db.run(`INSERT INTO multiremi_feishu_bot_chat_bindings(id,workspace_id,app_id,agent_id,external_session_key,chat_session_id,created_at,updated_at)
     VALUES(?,?,?,?,?,?,?,?)`,['source_transport','local','cli_chat_mutation',agent.id,'oc_mutation',chat.id,'2026-10-01T00:00:00.000Z','2026-10-01T00:00:00.000Z']);
   const task=store.createTask({agentId:agent.id,chatSessionId:chat.id,prompt:'Ask in original Chat'});
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);store.startTask(task.id);
   const turn=store.getTurnForAttempt(task.id)!;
   const result=store.getDaemonTurnBridge().rpc('turn.decision',{turn_id:turn.id,attempt_id:task.id,wait_id:`native_chat_${task.id}`,dedupe_key:'actual-chat-mutation',body_md:'Which approach?',options:[{label:'A',value:'A'}],metadata:{kind:'question'},timeout_ms:1000},
     {runtimeId:runtime.id,daemonId:'chat-mutation-host',workspaceId:'local'});

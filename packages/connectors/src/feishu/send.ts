@@ -131,10 +131,10 @@ export function buildContentElements(text: string): Array<Record<string, unknown
 }
 
 /** Build a Feishu interactive card with markdown content (schema 2.0). */
-export function buildMarkdownCard(text: string): Record<string, unknown> {
+export function buildMarkdownCard(text: string, displayName?: string): Record<string, unknown> {
   return {
     schema: "2.0",
-    header: buildCardHeader(),
+    header: buildCardHeader({ displayName }),
     config: { width_mode: "fill" },
     body: {
       elements: buildContentElements(text),
@@ -201,6 +201,7 @@ export async function sendMarkdownCardFeishu(
   to: string,
   text: string,
   options?: {
+    idempotencyKey?: string;
     replyToMessageId?: string;
     mentions?: MentionTarget[];
   },
@@ -210,7 +211,7 @@ export async function sendMarkdownCardFeishu(
     cardText = buildMentionedCardContent(options.mentions, text);
   }
   const card = buildMarkdownCard(cardText);
-  return sendCardFeishu(client, to, card, { replyToMessageId: options?.replyToMessageId });
+  return sendCardFeishu(client, to, card, options);
 }
 
 /** Edit an existing text message (within 24h limit). */

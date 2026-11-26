@@ -338,6 +338,7 @@ function classifyExplain(nodes: SqlNode[]): LockOrderClass[] {
 
 function classifyStatementNodes(nodes: SqlNode[]): LockOrderClass[] {
   if (nodes.length === 0 || keyword(nodes[0], "pragma")) return [];
+  if (nodes.length === 2 && keyword(nodes[0], "show") && keyword(nodes[1], "standard_conforming_strings")) return [];
   if (keyword(nodes[0], "explain")) return classifyExplain(nodes);
   // Transaction characteristics do not acquire row locks (e.g. S9-3a snapshots).
   if (keyword(nodes[0], "set") && keyword(nodes[1], "transaction")) return [];

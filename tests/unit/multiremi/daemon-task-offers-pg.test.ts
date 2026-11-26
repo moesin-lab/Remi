@@ -1,3 +1,6 @@
+import { useHistoricalCatalog } from "../../helpers/historical-prompt-catalog.js";
+import { LEGACY_BASELINE_DEFAULT_REVISION } from '@shared/system-prompt-policy-hash.js';
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -41,19 +44,43 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     const frames: Record<string, any>[] = [];
     const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return text.length; }, close() {} }, { masterToken: true, accessToken: null });
     const send = async (t: string, p: unknown, fields = {}) => { await session.handleMessage(JSON.stringify({ v: 2, t, p, ...fields })); await layer.drain(); };
-    const hello = () => send("hello", { protocol: 2, daemon_id: id, cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer"],
+    const hello = async (legacy = false) => {
+      await send("hello", { protocol: 2, daemon_id: id, cli_version: DAEMON_MIN_CLI_VERSION, caps: legacy ? ["offer"] : ["offer", "prompt.policy.adopt.v1"],
       runtimes: [{ runtime_id: id, provider: "claude", max_concurrency: 1, active_task_ids: [] }] });
+      if (!legacy) await send('runtime.ready', { active_task_ids: [] }, { rt: id });
+    };
+    const accept = async (frame: Record<string, any>) => {
+      await send('task.offer_adopt', { workspace_id: 'local', daemon_id: id, runtime_id: id, attempt_id: frame.p.attempt_id,
+        offer_generation: frame.p.offer_generation, content_hash: store.getAttemptSystemPrompt(frame.p.attempt_id)!.contentHash,
+        receipt_id: `receipt-${frame.seq}` }, { rt: id, id: `adopt-${frame.seq}` });
+      await send('res', { ok: true }, { re: String(frame.seq), ack: frame.seq });
+    };
     const close = async () => { layer.closeAll(); layer.stop(); await layer.drain(); };
-    return { id, agentId: agent.id, clock, layer, session, offers, frames, send, hello, close,
+    return { id, agentId: agent.id, clock, layer, session, offers, frames, send, hello, accept, close,
       task: (prompt = "no-op") => store.createTask({ agentId: agent.id, prompt, maxAttempts: 1 }) };
   }
+  it('skips an earlier project task while locking a fresh legacy Chat on PostgreSQL', async () => {
+    const h = fixture();
+    try {
+      const project = store.createProject({ title: 'Code' });
+      const bound = store.createChatSession({ agentId: h.agentId, projectId: project.id });
+      const queued = store.sendChatMessage(bound.id, { body: 'code' }).task;
+      const chat = store.createChatSession({ agentId: h.agentId });
+      const plain = store.sendChatMessage(chat.id, { body: 'plain' }).task;
+      const claim = store.claimTask(h.id, { policyProtocol: 'legacy', supportsPromptPolicy: false });
+      expect(claim?.id).toBe(plain.id);
+      expect(store.getTask(queued.id)?.waitReason).toBe('daemon_capability_required:prompt.policy.adopt.v1');
+      expect(store.getAttemptSystemPrompt(plain.id)?.contentHash).toBe(LEGACY_BASELINE_DEFAULT_REVISION);
+    } finally { await h.close(); }
+  });
+
   it("keeps recovered retries queued when preparation declines, then offers the same retry after cooldown", async () => {
     let decline = true;
     const h = fixture(async task => decline ? null : { id: task.id });
     try {
       const issue = createResponsibleTestIssue(store, { title: "Recover without an offer", assigneeType: "agent", assigneeId: h.agentId });
       const task = store.createTask({ agentId: h.agentId, issueId: issue.id, prompt: "recover", maxAttempts: 3 });
-      expect(store.claimTask(h.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, h.id)?.id).toBe(task.id);
       store.startTask(task.id);
       await h.hello();
       await h.send("runtime.ready", { active_task_ids: [] }, { rt: h.id });
@@ -68,20 +95,22 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     } finally { await h.close(); }
   });
 
-  it("migrates both timestamp columns and holds accepted dispatches until disconnect", async () => {
+  it("preserves both timestamps and legacy execution ownership across disconnect", async () => {
     const h = fixture();
+    const historical = useHistoricalCatalog(store);
     try {
       const columns = db.query("PRAGMA table_info(multiremi_turn_attempts)").all().map(row => row.name);
       expect(columns).toContain("offered_at"); expect(columns).toContain("accepted_at");
-      const task = h.task(); await h.hello();
+      const task = h.task(); await h.hello(true);
       const offer = h.frames.find(frame => frame.t === "task.offer")!;
       await h.send("res", { ok: true }, { re: String(offer.seq), ack: offer.seq });
       expect(store.getTask(task.id)?.offeredAt).toBeString(); expect(store.getTask(task.id)?.acceptedAt).toBeString();
       db.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
-      expect(store.claimTask(h.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, h.id)).toBeNull();
       h.session.handleSocketClose();
-      expect(store.claimTask(h.id)?.id).toBe(task.id);
-    } finally { await h.close(); }
+      expect(store.getTask(task.id)).toMatchObject({status:'dispatched',runtimeId:h.id,acceptedAt:'2000-01-01T00:00:00.000Z'});
+      expect(claimWithCurrentRuntime(store, h.id)).toBeNull();
+    } finally { historical.mockRestore(); await h.close(); }
   });
   it("requeues a rejected entity and dispatches it only after the 30s cooldown", async () => {
     const h = fixture();
@@ -108,7 +137,7 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
       expect(store.getMessage(message.id)!.body_md).toBe(huge.prompt);
       expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(512 * 1024);
       expect(store.getTask(huge.id)).toMatchObject({ status: "dispatched", failureReason: null });
-      await h.send("res", { ok: true }, { re: String(first.seq), ack: first.seq });
+      await h.accept(first);
       store.startTask(huge.id); store.completeTask(huge.id, { output: "done" });
       h.offers.kick(); await h.layer.drain();
       expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.attempt_id)).toEqual([huge.id, next.id]);

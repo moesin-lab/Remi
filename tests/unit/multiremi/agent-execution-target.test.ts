@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -19,24 +20,24 @@ describe("Agent execution target", () => {
     store.setRuntimeOffline(first.id);
     const task = store.createTask({ agentId: agent.id, prompt: "Target-only model" });
     expect(store.runtimeCanRunAgent(second, agent)).toBe(false);
-    expect(store.claimTask(second.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, second.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.claimTask(first.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, first.id)?.id).toBe(task.id);
   });
 
   it("moves queued Chat work without resuming the previous machine's session", () => {
     const { store, first, second, agent } = fixture();
     const chat = store.createChatSession({ agentId: agent.id });
     const initial = store.sendChatMessage(chat.id, { body: "First turn" }).task;
-    expect(store.claimTask(first.id)?.id).toBe(initial.id);
+    expect(claimWithCurrentRuntime(store, first.id)?.id).toBe(initial.id);
     store.startTask(initial.id);
     store.completeTask(initial.id, { output: "Done", sessionId: "first-native-session", workDir: "/first/work" });
     const queued = store.sendChatMessage(chat.id, { body: "Next turn" }).task;
     expect(queued).toMatchObject({ runtimeId: first.id, sessionId: "first-native-session", workDir: "/first/work" });
     store.updateAgent(agent.id, { runtimeId: second.id });
     expect(store.getTask(queued.id)).toMatchObject({ runtimeId: null, sessionId: null, workDir: null });
-    expect(store.claimTask(first.id)).toBeNull();
-    const claimed = store.claimTask(second.id)!;
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
+    const claimed = claimWithCurrentRuntime(store, second.id)!;
     expect(claimed.id).toBe(queued.id);
     expect(claimed.sessionId).toBeNull();
     expect(claimed.workDir).toBeNull();
@@ -45,25 +46,25 @@ describe("Agent execution target", () => {
   it("cancels frozen unstarted work when the target changes and leaves running work intact", () => {
     const { store, first, second, agent } = fixture();
     const running = store.createTask({ agentId: agent.id, prompt: "Running" });
-    store.claimTask(first.id);
+    claimWithCurrentRuntime(store, first.id);
     store.startTask(running.id);
     const pending = store.createTask({ agentId: agent.id, prompt: "Dispatched" });
-    expect(store.claimTask(first.id)?.id).toBe(pending.id);
+    expect(claimWithCurrentRuntime(store, first.id)?.id).toBe(pending.id);
     store.updateAgent(agent.id, { runtimeId: second.id });
     expect(store.getTask(pending.id)?.status).toBe("cancelled");
     expect(store.getTask(running.id)?.status).toBe("running");
-    expect(store.claimTask(first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
   });
 
   it("rechecks execution targets before returning a stale dispatch", () => {
     const { store, first, second, agent } = fixture();
     const task = store.createTask({ agentId: agent.id, prompt: "Lost response" });
-    store.claimTask(first.id);
+    claimWithCurrentRuntime(store, first.id);
     db!.run("UPDATE multiremi_agents SET runtime_id = ?, execution_group_id = ? WHERE id = ?", [second.id, second.executionGroupIds![0], agent.id]);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
-    expect(store.claimTask(first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.claimTask(second.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, second.id)?.id).toBe(task.id);
   });
 
   it("intersects target selection with local directory and project device constraints", () => {
@@ -79,8 +80,8 @@ describe("Agent execution target", () => {
     const issue = createResponsibleTestIssue(store, { title: "Bound issue", projectId: project.id });
     const projectTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Project" });
     store.updateAgent(agent.id, { runtimeId: second.id });
-    expect(store.claimTask(first.id)).toBeNull();
-    expect(store.claimTask(second.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, second.id)).toBeNull();
     expect(store.getTask(local.id)).toMatchObject({ status: "queued", runtimeId: first.id });
     expect(store.getTask(projectTask.id)?.status).toBe("queued");
   });
@@ -93,8 +94,8 @@ describe("Agent execution target", () => {
     store.updateRuntime(shared.id, { visibility: "private" });
     const renamed = store.updateAgent(agent.id, { name: "Renamed", provider: agent.provider });
     expect(renamed).toMatchObject({ name: "Renamed", runtimeId: shared.id });
-    expect(store.claimTask(shared.id)?.id).toBe(task.id);
-    expect(store.claimTask(second.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, shared.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, second.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("dispatched");
   });
 

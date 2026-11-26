@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // MUL-474 (MUL-383 S8e): deterministic fixture for the daemon task-level polls.
 //
 // The three routes under test must keep answering with the same body before and
@@ -92,7 +93,7 @@ export async function seedDaemonTaskPollFixture(
   store.heartbeatRuntime("rt_mul474_foreign", { supportsFeishuBotConfig: true });
 
   const task = store.createTask({ id: "tsk_mul474_poll", agentId: agent.id, workspaceId, prompt });
-  const claimed = store.claimTask("rt_mul474_poll");
+  const claimed = claimWithCurrentRuntime(store, "rt_mul474_poll");
   if (!claimed || claimed.id !== task.id) throw new Error("fixture could not claim its Task on the poll Runtime");
   store.startTask(task.id);
   store.reportTaskUsage(task.id, [

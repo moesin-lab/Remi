@@ -33,7 +33,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     });
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
@@ -59,7 +59,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     let calls = 0;
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
@@ -90,7 +90,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     });
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
@@ -188,7 +188,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     const events: string[] = [];
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
@@ -271,7 +271,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     const providerFinished = new Promise<void>((resolve) => { finishProvider = resolve; });
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
@@ -394,7 +394,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     const providerReachedBarrier = new Promise<void>((resolve) => { providerReady = resolve; });
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
@@ -472,7 +472,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     const calls: string[] = [];
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
@@ -680,7 +680,7 @@ describe("daemon GC and lifecycle orchestration", () => {
     const readyStates: boolean[] = [];
     Object.assign(daemon, {
       plannedRestartTransfer: () => {},
-      restartJournal: { entries: () => [], close: () => {} },
+      restartJournal: { awaitingRecovery: () => [], entries: () => [], close: () => {} },
       resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),

@@ -1,3 +1,4 @@
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 // MUL-398 A: the two `SELECT r.* FROM multiremi_autopilot_runs` statements the
 // `GET /api/workspaces/:id/repository-wikis` route executes are now projected.
 //
@@ -105,6 +106,7 @@ function createRecordingStore(): { store: MultiremiStore; sql: string[]; raw: Ru
     },
   }) as SqlDatabase;
   const store = new MultiremiStore(db);
+  classifyScmLinks(db);
   stores.set(raw, store);
   return { store, sql, raw: raw as unknown as RunWriter };
 }

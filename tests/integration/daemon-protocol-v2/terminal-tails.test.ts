@@ -122,6 +122,8 @@ it("replays real runAgent finally/workspace and finalize/progress tails once aft
       if (entry.type === "turn.input") {
         expect(entry.frame.p).toMatchObject({ turn_id: h.store.getTurnForAttempt(taskId)!.id, attempt_id: taskId });
         expect(entry.frame.p.message_ids).toHaveLength(1);
+      } else if (entry.type === 'task.offer_adopt') {
+        expect(entry.frame.p).toMatchObject({attempt_id:taskId, receipt_id:expect.any(String), content_hash:expect.any(String)});
       } else expect(entry.type).toBe("trace.append");
       expect(entry.frame.id).toEqual(expect.any(String));
       expect(entry.frame.seq).toBeUndefined();

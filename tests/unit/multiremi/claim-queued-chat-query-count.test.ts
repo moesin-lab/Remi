@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
@@ -34,24 +35,24 @@ for (const outcome of ["unknown", "rejected"] as const) {
       const session = store.getOrCreateDefaultChatSession(chat.id);
       const otherSession = store.createSession(chat.id, { title: "Contender" });
       const offered = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Original", priority: 10 });
-      expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(offered.id);
       expect(store.recordTaskOffered(offered.id, runtime.id)).toBe(true);
       expect(store.requeueTaskOffer(offered.id, runtime.id, outcome)).toBe(true);
       const other = store.createSessionTask(otherSession.id, { agentId: otherAgent.id, prompt: "Higher priority", priority: 100 });
       const authority = { runtimeId: runtime.id, workspaceId: "local", daemonId: runtime.id };
       if (outcome === "unknown") {
         expect(store.getTask(offered.id)?.offeredAt).not.toBeNull();
-        expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(offered.id);
         expect(store.requeueTaskOffer(offered.id, runtime.id, "unknown")).toBe(true);
         expect(store.getTask(other.id)?.status).toBe("queued");
         expect(() => store.startTaskFromDaemon(other.id, authority)).toThrow("server_error");
         expect(store.startTaskFromDaemon(offered.id, authority)).toBe("started");
-        expect(store.claimTask(runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
         store.completeTask(offered.id, { output: "Released" });
-        expect(store.claimTask(runtime.id)?.id).toBe(other.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(other.id);
       } else {
         expect(store.getTask(offered.id)?.offeredAt).toBeNull();
-        expect(store.claimTask(runtime.id)?.id).toBe(other.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(other.id);
         expect(() => store.startTaskFromDaemon(offered.id, authority)).toThrow("server_error");
       }
     } finally { store.stopNotificationDeliverySweeper(); await database.dispose(); }
@@ -76,7 +77,7 @@ it("empty claims batch queued Chat decision facts without usage/autopilot hydrat
       }) as typeof database.db.run;
       const original = database.db.query.bind(database.db);
       database.db.query = countedQuery(original, sql);
-      try { expect(store.claimTask(runtime.id)).toBeNull(); }
+      try { expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull(); }
       finally { database.db.query = original; database.db.run = originalRun; }
       counts.push(sql.filter(text => /^SELECT/.test(text.trim())).length);
       expect(sql.filter(text => text.includes("WHERE claim_attempt.status = 'offered'"))).toHaveLength(1);
@@ -144,7 +145,7 @@ it("successful claims evaluate the candidate predicate once regardless of queue 
       database.db.run = ((text: string, ...args: unknown[]) => {
         sql.push(text); return originalRun(text, ...args as [never]);
       }) as typeof database.db.run;
-      try { expect(store.claimTask(runtime.id)?.status).toBe("dispatched"); }
+      try { expect(claimWithCurrentRuntime(store, runtime.id)?.status).toBe("dispatched"); }
       finally { database.db.query = originalQuery; database.db.run = originalRun; }
       expect(sql.filter(text => text.includes("WHERE claim_attempt.status = 'offered'"))).toHaveLength(1);
       expect(sql.filter(text => text.includes("UPDATE multiremi_turns SET current_attempt_id=current_attempt_id"))

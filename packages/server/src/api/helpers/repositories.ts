@@ -148,6 +148,7 @@ export async function backfillWorkspaceRepositoryDefaultBranches(
   inspectRemote: GitRemoteInspector,
 ): Promise<WorkspaceRepositoryData[]> {
   const repositories = listWorkspaceRepositories(store, workspaceId);
+  if (!store.scmOwnershipReady()) return repositories;
   const missing = repositories.filter((repository) => !repository.default_branch);
   if (missing.length === 0) {
     store.reconcileScmRepositoryBindings(workspaceId);

@@ -1,3 +1,4 @@
+import { assertScmOwnershipReady, deleteScmIssueLinks } from "../scm-ownership.js";
 // Workspaces / members / users / invitations / notification preferences domain, plus the
 // workspace-scoped model-gateway relay config. Extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
@@ -692,6 +693,9 @@ export class WorkspacesRepo {
       this.ctx.lockWorkspaceRuntimeLifecycle(id);
       this.assertWorkspaceDaemonTrustRevoked(id);
       this.deleteWorkspaceScmState(id);
+      this.ctx.db.run("DELETE FROM multiremi_attempt_system_prompts WHERE workspace_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_system_prompt_versions WHERE workspace_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_system_prompt_documents WHERE workspace_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_execution_group_members WHERE workspace_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_execution_groups WHERE workspace_id = ?", [id]);
       const result = this.ctx.db.run("DELETE FROM multiremi_workspaces WHERE id = ?", [id]);
@@ -711,6 +715,9 @@ export class WorkspacesRepo {
   }
 
   private deleteWorkspaceScmState(workspaceId: string): void {
+    if (this.ctx.db.query("SELECT id FROM multiremi_scm_connections WHERE workspace_id = ? LIMIT 1").get(workspaceId)) {
+      assertScmOwnershipReady(this.ctx.db);
+    }
     const connectionIds = "SELECT id FROM multiremi_scm_connections WHERE workspace_id = ?";
     const eventIds = `SELECT id FROM multiremi_scm_events
       WHERE workspace_id = ? OR connection_id IN (${connectionIds})`;
@@ -741,9 +748,8 @@ export class WorkspacesRepo {
        WHERE workspace_id = ? OR connection_id IN (${connectionIds})`,
       [workspaceId, workspaceId],
     );
-    this.ctx.db.run(
-      `DELETE FROM multiremi_scm_issue_links
-       WHERE workspace_id = ? OR change_request_id IN (${changeRequestIds})`,
+    deleteScmIssueLinks(this.ctx.db,
+      `workspace_id = ? OR change_request_id IN (${changeRequestIds})`,
       [workspaceId, workspaceId, workspaceId],
     );
     this.ctx.db.run(

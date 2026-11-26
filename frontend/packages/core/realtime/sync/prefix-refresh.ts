@@ -6,7 +6,7 @@ import { issueKeys } from "../../issues/queries";
 import { projectKeys } from "../../projects/queries";
 import { projectDocKeys } from "../../project-docs/queries";
 import { pinKeys } from "../../pins/queries";
-import { autopilotKeys } from "../../autopilots/queries";
+import { autopilotKeys, deliveryTargetsOptions } from "../../autopilots/queries";
 import { runtimeKeys } from "../../runtimes/queries";
 import { runtimeModelsKeys } from "../../runtimes/models";
 import {
@@ -221,6 +221,20 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
 
   return {
     onAny: (msg) => {
+      if (msg.type === "autopilot:delivery_targets_changed") {
+        const payload = msg.payload as { workspace_id?: string } | null;
+        if (payload?.workspace_id) void qc.resetQueries({ queryKey: deliveryTargetsOptions(payload.workspace_id).queryKey, exact: true });
+        return;
+      }
+      if (msg.type === "change_request:updated" && msg.payload && typeof msg.payload === "object" &&
+          "affected_issue_ids" in msg.payload && Array.isArray(msg.payload.affected_issue_ids)) {
+        for (const issueId of new Set(msg.payload.affected_issue_ids)) {
+          if (typeof issueId === "string" && issueId) debouncedRefresh(`change_request:${issueId}`, () => {
+            void qc.invalidateQueries({ queryKey: scmKeys.changeRequests(issueId), exact: true });
+          });
+        }
+        return;
+      }
       if (msg.type === "daemon:maintenance_changed") {
         void qc.invalidateQueries({ queryKey: platformLifecycleKeys.status() });
         return;
@@ -253,6 +267,8 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
 
 // Event types handled by specific handlers below -- skip generic refresh
 const SPECIFIC_EVENTS = new Set([
+  "issue:worktree_changed",
+  "project:activity_changed",
   "workspace:updated",
   "issue:updated", "issue:created", "issue:deleted", "issue_labels:changed", "issue_metadata:changed",
   // Both item and index-only new signals are consumed by createInboxHandlers.
@@ -271,6 +287,7 @@ const SPECIFIC_EVENTS = new Set([
   "chat:session_updated", "chat:queue_updated",
   // A running-subagent count only patches the Chat pending list (PR 5); it is
   // no task lifecycle change, so the task lists stay as they are.
+  "task:progress",
   "task:subagents",
   // A Chat's background tasks (PR 6) patch their own list and the session count.
   "chat:background_tasks",

@@ -4,21 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createFeishuBotIdentityState,
+  createFeishuInboundDelivery,
   feishuAdmissionDenialMessage,
   flushDedupCacheSync,
   processFeishuMessageEvent,
   processFeishuMessageEventWithBotIdentity,
   setDedupCachePathForTesting,
-  setGroupPolicy,
   type FeishuAdmissionDenialReason,
   type FeishuBotIdentityState,
 } from "@connectors/feishu/receive.js";
 import { FeishuChannel } from "@connectors/feishu/channel.js";
+import type { GroupPolicy } from "@connectors/feishu/config.js";
 import { FeishuConnector } from "@connectors/feishu/index.js";
+import { createFeishuTaskHandler } from "../../../apps/remi/cli/multiremi.js";
 import type { IncomingMessage } from "@connectors/base.js";
 import type { FeishuMessageEvent } from "@connectors/feishu/types.js";
 
 let messageSequence = 0;
+let groupPolicy: GroupPolicy;
+function setGroupPolicy(policy: GroupPolicy) { groupPolicy = policy; }
 const dedupTestDir = mkdtempSync(join(tmpdir(), "remi-feishu-receive-"));
 
 beforeAll(() => {
@@ -164,6 +168,7 @@ function admission(
   authorizeSender: (senderOpenId: string) => Promise<boolean>,
 ): {
   options: {
+    groupPolicy: GroupPolicy;
     authorizeSender: (senderOpenId: string) => Promise<boolean>;
     onDenied: (_context: unknown, reason: FeishuAdmissionDenialReason) => Promise<void>;
   };
@@ -172,6 +177,7 @@ function admission(
   const deniedReasons: FeishuAdmissionDenialReason[] = [];
   return {
     options: {
+      groupPolicy,
       authorizeSender,
       onDenied: async (_context, reason) => {
         deniedReasons.push(reason);
@@ -225,7 +231,7 @@ describe("Feishu workspace membership admission", () => {
 
   it("refuses to connect when no membership authorizer was injected", () => {
     const channel = new FeishuChannel({ appId: "app", appSecret: "secret" });
-    expect(() => channel.connect()).toThrow("workspace membership authorizer is required");
+    expect(() => channel.connect()).toThrow("sender authorizer is required");
   });
 
   it("allows a workspace member in a p2p chat", async () => {
@@ -344,10 +350,9 @@ describe("Feishu workspace membership admission", () => {
     expect(gate.deniedReasons).toEqual([]);
   });
 
-  it("silently rejects ordinary group chatter before group policy and sender resolution", async () => {
+  it("checks group policy and silently drops chatter before sender resolution", async () => {
     const senderOpenId = "ou_non_member";
     const { client, getSenderCalls } = clientWithSender();
-    const gate = admission(async () => false);
     let groupPolicyCalls = 0;
     setGroupPolicy({
       getByChatId: () => {
@@ -356,6 +361,7 @@ describe("Feishu workspace membership admission", () => {
       },
     });
     const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    const gate = admission(async () => false);
 
     try {
       const result = await processFeishuMessageEvent(
@@ -372,9 +378,9 @@ describe("Feishu workspace membership admission", () => {
 
       expect(result).toBeNull();
       expect(getSenderCalls()).toBe(0);
-      expect(groupPolicyCalls).toBe(0);
+      expect(groupPolicyCalls).toBe(1);
       expect(gate.deniedReasons).toEqual([]);
-      expect(warnSpy.mock.calls.flat().join(" ")).toContain("workspace membership denied");
+      expect(warnSpy.mock.calls).toHaveLength(0);
       expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(senderOpenId);
     } finally {
       warnSpy.mockRestore();
@@ -405,7 +411,7 @@ describe("Feishu workspace membership admission", () => {
     expect(gate.deniedReasons).toEqual(["not_member"]);
   });
 
-  it("notifies a non-member who sends a slash command in a group", async () => {
+  it("silently ignores a non-member's unaddressed group command", async () => {
     const { client, getSenderCalls } = clientWithSender();
     const gate = admission(async () => false);
 
@@ -424,7 +430,7 @@ describe("Feishu workspace membership admission", () => {
 
     expect(result).toBeNull();
     expect(getSenderCalls()).toBe(0);
-    expect(gate.deniedReasons).toEqual(["not_member"]);
+    expect(gate.deniedReasons).toEqual([]);
   });
 
   it("rejects an unknown external user without entering the message pipeline", async () => {
@@ -481,7 +487,7 @@ describe("Feishu workspace membership admission", () => {
       expect(result).toBeNull();
       expect(getSenderCalls()).toBe(0);
       expect(gate.deniedReasons).toEqual(["unavailable"]);
-      expect(errorSpy.mock.calls.flat().join(" ")).toContain("membership lookup failed");
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain("sender authorization unavailable");
       expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(senderOpenId);
     } finally {
       errorSpy.mockRestore();
@@ -491,7 +497,7 @@ describe("Feishu workspace membership admission", () => {
   it("uses user-visible denial text without exposing identifiers", () => {
     for (const reason of ["not_member", "unavailable"] as const) {
       const text = feishuAdmissionDenialMessage(reason);
-      expect(text).toContain("workspace");
+      expect(text).toContain("权限");
       expect(text).not.toContain("ou_");
       expect(text).not.toContain("workspace_id");
     }
@@ -499,6 +505,85 @@ describe("Feishu workspace membership admission", () => {
 });
 
 describe("Feishu group message routing", () => {
+  it("keeps unaddressed slash messages silent for allowed and denied senders", async () => {
+    for (const allowed of [true, false]) {
+      for (const text of ["/ai", "/ai 帮我查下", "/xxx", "/stop", "/new", "/status"]) {
+        const event = messageEvent({ messageId: uniqueMessageId("silent"), senderOpenId: "ou_silent", chatType: "group", text });
+        event.message.parent_id = "quoted";
+        const effects: string[] = [];
+        const delivery = createFeishuInboundDelivery({ client: new Proxy({} as any, { get(_target, key) { effects.push(String(key)); } }),
+          botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() }, appId: "test", recovery: null,
+          authorizeSender: async () => { effects.push("authorize"); return allowed; }, onMessage: async () => { effects.push("dispatch"); } });
+        await delivery(event);
+        expect(effects).toEqual([]);
+      }
+    }
+  });
+
+  it("strips one longest literal prefix and submits the cleaned speaker text", async () => {
+    const options = { ...admission(async () => true).options, wakeWords: ["小助", "小助理", "/ai", "a+b", "É"] };
+    const submitted: string[] = [];
+    const connector = Object.create(FeishuConnector.prototype);
+    Object.assign(connector, { _groupPolicy: groupPolicy, _channel: { setMessageReceipt: async () => {} },
+      _taskStreamHandler: createFeishuTaskHandler({ submitFeishuBotMessage: async ({ text }: { text: string }) => {
+        submitted.push(text); return { deliveryQueued: true };
+      } } as any, 4, "Remi") });
+    for (const [text, expected] of [["  /AI   查下 ", "查下"], ["/ai查下", "查下"], ["小助理：查下", "：查下"],
+      ["小助理小助理 查下", "小助理 查下"], ["a+b ok", "ok"], ["/aide", null], ["/ai_1", null],
+      ["before /ai", null], ["é text", null], ["小助理  ", null]] as const) {
+      const event = messageEvent({ messageId: uniqueMessageId("wake"), senderOpenId: "ou_wake", chatType: "group", text });
+      const parsed = await processFeishuMessageEvent(clientWithSender().client, event, "ou_bot", options);
+      expect(parsed?.rawContent ?? null).toBe(expected);
+      if (parsed) {
+        await connector._handleFeishuMessage(parsed);
+        expect(submitted.pop()).toBe(`Alice: ${expected}`);
+      }
+    }
+  });
+
+  it("uses only the author's text in posts and preserves explicit and monitor bodies", async () => {
+    const options = { ...admission(async () => true).options, wakeWords: ["Remi", "[富文本消息]", "@Other", "img_"] };
+    const make = () => messageEvent({ messageId: uniqueMessageId("post"), senderOpenId: "ou_post", chatType: "group", text: "Remi help" });
+    const parse = (event: FeishuMessageEvent, monitor = false) => processFeishuMessageEvent(clientWithSender().client, event, "ou_bot",
+      { ...options, groupPolicy: { getByChatId: () => ({ monitor }) } });
+    for (const [element, expected] of [[{ tag: "text", text: "Remi /stop" }, "/stop"], [{ tag: "at", user_name: "Other" }, null],
+      [{ tag: "img" }, null]] as const) {
+      const event = make();
+      Object.assign(event.message, { message_type: "post", content: JSON.stringify({ content: [[element]] }) });
+      expect((await parse(event))?.rawContent ?? null).toBe(expected);
+    }
+    const direct = make();
+    direct.message.chat_type = "p2p";
+    expect((await parse(direct))?.rawContent).toBe("Remi help");
+    expect((await parse(make(), true))?.rawContent).toBe("Remi help");
+    const mentioned = make();
+    mentioned.message.mentions = [{ key: "@_user_1", name: "Assistant", id: { open_id: "ou_bot" } }];
+    expect((await parse(mentioned))?.rawContent).toBe("Remi help");
+    const other = make();
+    other.message.mentions = [{ key: "@_user_2", name: "Other", id: { open_id: "ou_other" } }];
+    expect(await parse(other, true)).toBeNull();
+  });
+
+  it("routes native stop messages and wake-word stop to the matching session after authorization", async () => {
+    const cancellations: string[] = [];
+    const cards: string[] = [];
+    const connector = Object.create(FeishuConnector.prototype);
+    Object.assign(connector, { _groupPolicy: groupPolicy,
+      _channel: { setMessageReceipt: async () => {}, handleTaskStream: async (_chat: string, _key: string, _stream: unknown, meta: { taskId: string }) => { cards.push(meta.taskId); } },
+      _taskStreamHandler: createFeishuTaskHandler({ executeFeishuBotCommand: async ({ semantic }: { semantic: { external_session_key: string } }) => {
+        cancellations.push(semantic.external_session_key); return { state: "committed", result: { name: "stop", cancel: { outcome: "none" } } };
+      } } as any, 4, "Remi", { appId: "app", domain: "feishu", botId: "default" }) });
+    for (const [chatType, text] of [["p2p", "/stop"], ["group", "@_user_1 /stop"], ["group", "助手 /stop"]] as const) {
+      const event = messageEvent({ messageId: uniqueMessageId("native-stop"), chatId: "oc_stop", senderOpenId: "ou_stop", chatType, text,
+        mentions: text.startsWith("@") ? [{ key: "@_user_1", name: "Remi", id: { open_id: "ou_bot" } }] : [] });
+      const options = { wakeWords: ["助手"], durableIntake: true, ...admission(async () => true).options };
+      const parsed = await processFeishuMessageEvent(clientWithSender().client, event, "ou_bot", options);
+      expect(parsed?.rawContent).toBe("/stop");
+      await connector._handleFeishuMessage(parsed);
+      expect(cancellations.pop()).toBe(chatType === "group" ? `oc_stop:thread:${event.message.message_id}` : "oc_stop");
+      expect(cards.pop()).toBe("feishu-command-stop");
+    }
+  });
   it("admits both new messages and thread replies in the configured group without a mention", async () => {
     setGroupPolicy({ getByChatId: id => id === "oc_topics" ? { monitor: true } : null });
     for (const rootId of [undefined, "om_topic_root"]) {
@@ -555,7 +640,7 @@ describe("Feishu group message routing", () => {
     expect(gate.deniedReasons).toEqual([]);
   });
 
-  it("admits a slash command when the production-default group policy returns null", async () => {
+  it("drops a slash command when the production-default group policy returns null", async () => {
     const { client, getSenderCalls } = clientWithSender();
     const gate = admission(async () => true);
 
@@ -572,13 +657,8 @@ describe("Feishu group message routing", () => {
       gate.options,
     );
 
-    expect(result).toMatchObject({
-      chatType: "group",
-      mentionedBot: false,
-      monitored: false,
-      rawContent: "/status",
-    });
-    expect(getSenderCalls()).toBe(1);
+    expect(result).toBeNull();
+    expect(getSenderCalls()).toBe(0);
     expect(gate.deniedReasons).toEqual([]);
   });
 

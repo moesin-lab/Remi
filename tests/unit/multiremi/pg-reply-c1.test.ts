@@ -1,6 +1,7 @@
 import { createResponsibleTestAutopilot } from './helpers.js';
+import { migratedStoreBackend } from "../../helpers/migrated-store-backends.js";
 import { runAutopilotRunMutation } from "@multiremi/store/autopilot-run-records.js";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { Hono } from "hono";
 import { createMultiremiApp } from "@multiremi/api/server.js";
@@ -173,6 +174,9 @@ if (adminUrl) {
 }
 
 describe.skipIf(!pgAvailable)("MUL-398 C-1 real PostgreSQL", () => {
+  const fixtures = migratedStoreBackend("postgres", { prefix: "mul398_c1", fixture: "pg-reply-c1" });
+  beforeAll(defaultLimit);
+  fixtures.install();
   it("observes ordinary 9 MiB replies by default and rejects the same SQL only when enforced", async () => {
     defaultLimit();
     const db = new PostgresSyncDatabase(adminUrl!);
@@ -215,15 +219,9 @@ describe.skipIf(!pgAvailable)("MUL-398 C-1 real PostgreSQL", () => {
 
   it("keeps canonical and Feishu message reads above 8 MiB available", async () => {
     defaultLimit();
-    const admin = new Bun.SQL(adminUrl!, { max: 1 });
-    const name = `mul398_c1_messaging_${process.pid}`;
-    let db: PostgresSyncDatabase | undefined;
+    const fixture = await fixtures.open();
+    const { store, db } = fixture;
     try {
-      await admin.unsafe(`CREATE DATABASE ${name}`);
-      const url = new URL(adminUrl!); url.pathname = `/${name}`;
-      db = new PostgresSyncDatabase(url.toString());
-      const store = new MultiremiStore(db);
-      store.ensureLocalWorkspace();
       store.messaging.upsertConnection({
         id: "mconn_c1", workspaceId: "local", provider: "feishu", channel: "feishu",
         name: "Fixture", status: "ready",
@@ -262,9 +260,7 @@ describe.skipIf(!pgAvailable)("MUL-398 C-1 real PostgreSQL", () => {
         expect((await app.request(path, { method: "HEAD", headers })).status, path).toBe(200);
       }
     } finally {
-      db?.close();
-      await admin.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-      await admin.end();
+      await fixture.close();
     }
   });
 
@@ -313,22 +309,17 @@ describe.skipIf(!pgAvailable)("MUL-398 C-1 real PostgreSQL", () => {
 
   it("completes the preflight's 20 queued half-MiB prompts under the unset default", async () => {
     defaultLimit();
-    const admin = new Bun.SQL(adminUrl!, { max: 1 });
-    const name = `mul398_c1_queued_${process.pid}`;
-    let db: PostgresSyncDatabase | undefined;
+    const fixture = await fixtures.open();
+    const { store, db } = fixture;
     const log = spyOn(console, "log").mockImplementation(() => {});
     try {
-      await admin.unsafe(`CREATE DATABASE ${name}`);
-      const url = new URL(adminUrl!); url.pathname = `/${name}`;
-      db = new PostgresSyncDatabase(url.toString());
-      const store = new MultiremiStore(db);
       const agent = store.createAgent({ name: "C1 queued", provider: "codex" });
       const autopilot = createResponsibleTestAutopilot(store, { title: "C1 queued", assigneeId: agent.id, status: "active", executionMode: "run_only" });
       const insert = `INSERT INTO multiremi_autopilot_run_records
         (id, autopilot_id, source, status, triggered_at, created_at, schedule_batch_id, schedule_prompt, payload)
         VALUES (?, ?, 'schedule', 'queued', ?, ?, 'c1_batch', ?, '{}')`;
       db.transaction(() => {
-        for (let i = 0; i < 20; i++) runAutopilotRunMutation(db!, insert, [`c1_run_${i}`, autopilot.id,
+        for (let i = 0; i < 20; i++) runAutopilotRunMutation(db, insert, [`c1_run_${i}`, autopilot.id,
           "2026-09-28T00:00:00.000Z", "2026-09-28T00:00:00.000Z", "x".repeat(512 * 1024)]);
       })();
       expect(() => store.advanceScheduledTargetRuns()).not.toThrow();
@@ -336,9 +327,8 @@ describe.skipIf(!pgAvailable)("MUL-398 C-1 real PostgreSQL", () => {
       expect(replies.some(line => line?.event === "api_large_db_reply" && line.method === "<background>" && line.bytes > 8 * MIB)).toBe(true);
       expect(replies.some(line => line?.event === "api_db_reply_rejected")).toBe(false);
     } finally {
-      log.mockRestore(); db?.close();
-      await admin.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-      await admin.end();
+      log.mockRestore();
+      await fixture.close();
     }
   });
 });

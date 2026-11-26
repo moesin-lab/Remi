@@ -122,8 +122,10 @@ export function registerExecutionMessageHook(db:SqlDatabase,hook:(id:string)=>vo
 type ExecutionLogMessageInput={senderType?:string;messageKind?:string;metadata?:Record<string,unknown>;visibility?:string;taskId?:string};
 const messageWriters=new WeakMap<SqlDatabase,(sessionId:string,id:string,agentId:string,body:string,input:ExecutionLogMessageInput)=>number>();
 export function registerExecutionMessageWriter(db:SqlDatabase,writer:(sessionId:string,id:string,agentId:string,body:string,input:ExecutionLogMessageInput)=>number):void {messageWriters.set(db,writer);}
-const changeHooks = new WeakMap<SqlDatabase, (turnId:string,created:boolean,revisions:number)=>void>();
-const changeBatches = new WeakMap<SqlDatabase, Map<string, {created:boolean;revisions:number}>>();
+type TurnChange = { created: boolean; revisions: number; activity: boolean };
+type TurnChangeHook = (turnId:string,created:boolean,revisions:number,activity:boolean)=>void;
+const changeHooks = new WeakMap<SqlDatabase, TurnChangeHook>();
+const changeBatches = new WeakMap<SqlDatabase, Map<string, TurnChange>>();
 /** Fold intermediate card notifications inside one atomic terminal transaction. */
 export function withTurnChangeBatch<T>(db:SqlDatabase, run:()=>T):T {
   const parent = changeBatches.get(db);
@@ -137,20 +139,20 @@ export function withTurnChangeBatch<T>(db:SqlDatabase, run:()=>T):T {
     }
   }
   if (!db.inTransaction) throw new Error('Turn change batching requires a transaction');
-  const batch = new Map<string, {created:boolean;revisions:number}>();
+  const batch = new Map<string, TurnChange>();
   changeBatches.set(db,batch);
   try {
     const result=run();
     changeBatches.delete(db);
-    for(const [id,change] of batch) changeHooks.get(db)?.(id,change.created,change.revisions);
+    for(const [id,change] of batch) changeHooks.get(db)?.(id,change.created,change.revisions,change.activity);
     return result;
   } finally { changeBatches.delete(db); }
 }
-export function registerTurnChangeHook(db:SqlDatabase, hook:(turnId:string,created:boolean,revisions:number)=>void):void { changeHooks.set(db,hook); }
-export function notifyTurnChanged(db:SqlDatabase,turnId:string,created=false):void {
+export function registerTurnChangeHook(db:SqlDatabase, hook:TurnChangeHook):void { changeHooks.set(db,hook); }
+export function notifyTurnChanged(db:SqlDatabase,turnId:string,created=false,activity=false):void {
   const batch=changeBatches.get(db);
-  if(batch){const previous=batch.get(turnId);batch.set(turnId,{created:created||!!previous?.created,revisions:(previous?.revisions??0)+1});}
-  else changeHooks.get(db)?.(turnId,created,1);
+  if(batch){const previous=batch.get(turnId);batch.set(turnId,{created:created||!!previous?.created,revisions:(previous?.revisions??0)+1,activity:activity||!!previous?.activity});}
+  else changeHooks.get(db)?.(turnId,created,1,activity);
 }
 export const executionParameterCount=(sql:string)=>[...maskSqlLiterals(sql).matchAll(/\?/g)].length;
 function flatParams(params: unknown[]): unknown[] { return params.length===1 && Array.isArray(params[0]) ? params[0] as unknown[] : params; }
@@ -240,7 +242,7 @@ export function runTurnExecutionMutation(db:SqlDatabase,sql:string,...arguments_
         if(turn.reply_message_id) throw new AgentReplyCommentError(error instanceof Error?error.message:String(error),{cause:error});
         throw error;
       }
-      notifyTurnChanged(db,row.turn_id);
+      notifyTurnChanged(db,row.turn_id,false,fields.some(field => ["status","progress_step","progress_total","failure_reason","started_at","completed_at","cancelled_at","failed_at"].includes(field.key)));
       if(returning)returned.push(db.query(`SELECT ${returning} FROM multiremi_turn_execution_records WHERE id=?`).get(row.id));
     }
     return {changes:targets.length,lastInsertRowid:0,rows:returned};
@@ -294,6 +296,6 @@ function insertExecution(db:SqlDatabase,sql:string,params:unknown[]):{changes:nu
     status:attemptStatus(input.status??"queued")};
   insertTurnAttempt(db, attempt);
   db.run("UPDATE multiremi_turns SET current_attempt_id=?,status=CASE WHEN status IN ('failed','cancelled') THEN 'running' ELSE status END,ended_at=NULL,ended_reason=NULL WHERE id=?",[input.id,turnId]);
-  notifyTurnChanged(db,turnId,!parent);
+  notifyTurnChanged(db,turnId,!parent,true);
   return {changes:1,lastInsertRowid:0,rows:[]};
 }

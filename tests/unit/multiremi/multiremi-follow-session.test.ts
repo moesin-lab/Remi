@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -44,7 +45,7 @@ function fixture(parentEvents = 2) {
 
 function startTurn(f: ReturnType<typeof fixture>, prompt = "Explain parent decisions", agentId = f.agent.id) {
   const task = f.store.createSessionTask(f.side.id, { agentId, prompt });
-  expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(task.id);
   const projection = f.store.buildTaskSessionProjection(task.id)!;
   f.store.startTask(task.id);
   return { task, projection, inherited: projection.inheritedSessionProjection };
@@ -254,7 +255,7 @@ describe("follow Session context", () => {
     expect(f.store.getSessionAgentLane(f.side.id, f.agent.id)?.parentCursorSeq).toBe(2);
     const retry = f.store.listTasksForIssue(f.issue.id).find((task) => task.parentTaskId === failed.task.id)!;
     expect(retry).toBeDefined();
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(retry.id);
     const retryProjection = f.store.buildTaskSessionProjection(retry.id)!.inheritedSessionProjection!;
     expect(retryProjection).toMatchObject({ fromSeq: 2, toSeq: 3 });
     expect(retryProjection.jsonl).toBe(failed.inherited!.jsonl);
@@ -333,7 +334,7 @@ describe("follow Session context", () => {
     expect(f.store.getSessionAgentLane(f.side.id, f.agent.id)?.parentCursorSeq).toBe(0);
 
     const retry = f.store.listTasksForIssue(f.issue.id).find((task) => task.parentTaskId === failed.task.id)!;
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(retry.id);
     const retryProjection = f.store.buildTaskSessionProjection(retry.id)!.inheritedSessionProjection!;
     const bothAttemptsTokens = firstTokens + retryProjection.estimatedTokens;
     expect(f.store.getSessionInheritedContext(f.side.id)?.inherited_tokens_total).toBe(bothAttemptsTokens);

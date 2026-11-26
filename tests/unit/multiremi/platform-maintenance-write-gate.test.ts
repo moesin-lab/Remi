@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { version } from "../../../package.json";
 import { createMultiremiApp, startMultiremiServer } from "@multiremi/api.js";
@@ -113,7 +114,7 @@ describe("platform maintenance HTTP write gate", () => {
     // released here to represent an already-running task when the host arrives.
     store.releasePlatformDrain(operation.id);
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "Finish this" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const input = store.getDaemonTurnBridge().offerInput(store.getTaskWithAgent(task.id)!);
     store.startTask(task.id);
     store.beginPlatformDrain({ operationId: operation.id });

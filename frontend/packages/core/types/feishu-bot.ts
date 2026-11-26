@@ -95,6 +95,7 @@ export interface FeishuBotConfig {
   app_id: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  wake_words?: string[];
   sender_access_policy?: "agent" | "allowlist";
   revision: number;
   app_secret_configured: boolean;
@@ -278,6 +279,7 @@ export interface UpsertFeishuBotRequest {
   app_id: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  wake_words?: string[];
   sender_access_policy?: "agent" | "allowlist";
   app_secret?: string;
   app_secret_op?: FeishuBotSecretOp;

@@ -48,6 +48,138 @@ export interface UpdateWorkspacePromptSettingsRequest {
   expected_revision: number;
 }
 
+export type SystemPromptSlotKey =
+  | "common"
+  | "code_delivery"
+  | "chat_delivery"
+  | "issue_delivery"
+  | "finishing";
+
+export type SystemPromptMode = "default" | "custom";
+
+export type SystemPromptOperation = "initialize" | "edit" | "reset" | "rollback";
+
+export interface SystemPromptSlots {
+  common: string;
+  code_delivery: string;
+  chat_delivery: string;
+  issue_delivery: string;
+  finishing: string;
+}
+
+export interface SystemPromptDocument {
+  id: string | null;
+  key: string;
+  workspaceId: string;
+  revision: number;
+  currentVersionId: string | null;
+  mode: string;
+}
+
+export interface SystemPromptDefaultSnapshot {
+  revision: string;
+  contentHash: string;
+  content: SystemPromptSlots;
+}
+
+export interface SystemPromptLimits {
+  maxCodePoints: number;
+}
+
+export interface SystemPromptState {
+  document: SystemPromptDocument;
+  content: SystemPromptSlots;
+  currentDefault: SystemPromptDefaultSnapshot;
+  baseDefault: SystemPromptDefaultSnapshot;
+  defaultUpdated: boolean;
+  limits: SystemPromptLimits;
+}
+
+export interface SystemPromptActor {
+  type: string;
+  operatorId: string | null;
+  userId: string | null;
+  displayName: string | null;
+}
+
+export interface SystemPromptVersionSummary {
+  id: string;
+  documentId: string;
+  workspaceId: string;
+  versionNumber: number;
+  mode: string;
+  operation: string;
+  contentHash: string;
+  baseDefaultRevision: string;
+  restoredFromVersionId: string | null;
+  parentVersionId: string | null;
+  actor: SystemPromptActor;
+  createdAt: string;
+  changeNote: string | null;
+  requestId: string | null;
+  isCurrent: boolean;
+}
+
+export interface SystemPromptVersionDetail extends SystemPromptVersionSummary {
+  content: SystemPromptSlots;
+  baseDefaultSnapshot: SystemPromptSlots | null;
+}
+
+export interface SystemPromptVersionsPage {
+  versions: SystemPromptVersionSummary[];
+  nextCursor: string | null;
+}
+
+export interface SystemPromptMutationResponse extends SystemPromptState {
+  version: SystemPromptVersionDetail;
+  replayed: boolean;
+}
+
+export interface SystemPromptPreviewResponse extends PlatformPromptTemplatePreview {
+  content: SystemPromptSlots;
+  scenario: string;
+  excludesLocalContext: boolean;
+}
+
+export interface UpdateSystemPromptRequest {
+  content: SystemPromptSlots;
+  expectedRevision: number;
+  requestId: string;
+  changeNote?: string | null;
+  baseDefaultRevision?: string;
+}
+
+export interface ResetSystemPromptRequest {
+  expectedRevision: number;
+  requestId: string;
+  changeNote?: string | null;
+}
+
+export interface RestoreSystemPromptRequest {
+  versionId: string;
+  expectedRevision: number;
+  requestId: string;
+  changeNote?: string | null;
+}
+
+export interface PreviewSystemPromptRequest {
+  content?: SystemPromptSlots;
+  scenario?: string;
+}
+
+export interface TurnSystemPromptPolicy {
+  format: number;
+  workspaceId: string;
+  documentId: string | null;
+  versionId: string | null;
+  versionNumber: number | null;
+  mode: string;
+  defaultRevision: string;
+  content?: SystemPromptSlots;
+  contentHash: string;
+  legacyCompatible: boolean;
+}
+
 export type BotMenuUserIdType = "open_id" | "union_id" | "user_id";
 
 export interface BotMenuBehavior {

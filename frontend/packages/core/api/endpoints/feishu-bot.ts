@@ -200,7 +200,7 @@ export class FeishuBotEndpoints {
       method: "PUT",
       body: JSON.stringify(input),
     });
-    return parseWithFallback(raw, FeishuBotConfigSchema, EMPTY_FEISHU_BOT_CONFIG, {
+    return parseStrictResponse(raw, FeishuBotConfigSchema, {
       endpoint: "PUT /api/workspaces/:id/feishu-bot",
     });
   }

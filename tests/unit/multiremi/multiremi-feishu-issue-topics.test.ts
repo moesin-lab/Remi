@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { reportFrame } from "../../fixtures/report-session.js";
@@ -787,7 +788,7 @@ describe("Feishu Issue topics", () => {
         const wake = kind === "round"
           ? store.prepareFeishuIssueRoundPushes({ issue, leaderTask: sourceTask })[0]!
           : (() => {
-            expect(store.claimTask("rt_bot")?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
+            expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
             const question = store.getDaemonTurnBridge().rpc("turn.decision", { turn_id: store.getTurnForAttempt(sourceTask.id)!.id,
               attempt_id: sourceTask.id, wait_id: `changed-provider-wait:${legacyPin}`, dedupe_key: "changed-provider-question",
               body_md: "Continue?", options: [], metadata: { kind: "question", questions: [{ question: "Continue?" }] } },
@@ -800,7 +801,7 @@ describe("Feishu Issue topics", () => {
         if (legacyPin) {
           mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET runtime_id = 'rt_bot' WHERE id = ?", [wake.id]);
         }
-        expect(store.claimTask("rt_claude")?.id).toBe(wake.id);
+        expect(claimWithCurrentRuntime(store, "rt_claude")?.id).toBe(wake.id);
         expect(store.getTask(wake.id)?.runtimeId).toBe("rt_claude");
         if (kind === "round") expect(store.claimFeishuBotOutbound("local", "rt_bot", undefined, true)?.taskId).toBe(wake.id);
         else {

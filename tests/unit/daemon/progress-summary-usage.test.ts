@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { TaskProgressSummarizer, PROGRESS_SUMMARY_DEFAULTS } from "@multiremi/worker/progress-summarizer.js";
 import { TaskUsageLedger } from "@multiremi/worker/task-usage-ledger.js";
@@ -15,7 +16,7 @@ describe("task auxiliary consumption accounting", () => {
     const runtime = store.registerRuntime({ name: "summary", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "summary", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "main", workspaceId: "local" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     const ledger = new TaskUsageLedger("workspace:local:relay:claude", "accepted-run");
     store.startTask(task.id, ledger.runId);
     const report = (snapshot: ReturnType<typeof ledger.observe>) => { if (snapshot) store.reportTaskUsageSnapshot(task.id, snapshot); };
@@ -96,7 +97,7 @@ describe("task auxiliary consumption accounting", () => {
     const runtime = store.registerRuntime({ name: "summary", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "summary", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "main", workspaceId: "local" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     const ledger = new TaskUsageLedger(null, "accepted-helper-failure");
     store.startTask(task.id, ledger.runId);
     const save = (snapshot: ReturnType<typeof ledger.observe>) => { if (snapshot) store.reportTaskUsageSnapshot(task.id, snapshot); };

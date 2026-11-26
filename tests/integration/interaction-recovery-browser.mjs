@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 /** Node/Playwright half of smoke-interaction-recovery.ts. Start through that harness. */
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
@@ -127,7 +128,7 @@ try {
   await store.cancelTask(quick.task_id);
   const blocked = await store.createIssue({ title: "MUL8 recover original run", workspaceId: workspace.id, createdBy: user.id, assigneeType: "agent", assigneeId: changedAssignee.id, status: "todo" });
   const previous = await store.createTask({ agentId: agent.id, issueId: blocked.id, prompt: "ORIGINAL RECOVERY INSTRUCTIONS: retain Session and tool context.", maxAttempts: 1, assignmentAuthorType: "member", assignmentAuthorId: user.id });
-  assert.equal((await store.claimTask(runtime.id))?.id, previous.id);
+  assert.equal((await claimWithCurrentRuntime(store, runtime.id))?.id, previous.id);
   await store.startTask(previous.id);
   await store.failTask(previous.id, { error: "Synthetic worker disconnected; original instructions retained.", failureReason: "runtime_disconnected" });
   assert.equal((await store.getTask(previous.id))?.status, "failed");
@@ -160,7 +161,7 @@ try {
   assert.equal(await panel.getByRole("button", { name: "Retry run", exact: true }).count(), 0);
   check("retry creates one queued run using the original agent, Session and instructions despite changed assignee");
 
-  assert.equal((await store.claimTask(runtime.id))?.id, retryTask.id);
+  assert.equal((await claimWithCurrentRuntime(store, runtime.id))?.id, retryTask.id);
   await store.startTask(retryTask.id);
   await panel.getByText("Agent is working", { exact: true }).waitFor();
   await store.completeTask(retryTask.id, { output: "MUL8_RECOVERY_RESULT: synthetic execution finished, human review remains.", sessionId: "interaction-smoke-provider-session" });

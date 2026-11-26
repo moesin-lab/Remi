@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import type { TaskUsageUnit } from "@multiremi/contracts/usage-accounting.js";
@@ -37,7 +38,7 @@ describe.skipIf(!adminUrl)("normalized usage on PostgreSQL", () => {
     const runtime = store.registerRuntime({ name: "boundary-pg", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "boundary-pg", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const tasks = [0, 1].map(index => store.createTask({ agentId: agent.id, prompt: `Boundary ${index}`, workspaceId: "local" }));
-    store.claimTask(runtime.id); store.startTask(tasks[0]!.id);
+    claimWithCurrentRuntime(store, runtime.id); store.startTask(tasks[0]!.id);
     const connections: PostgresSyncDatabase[] = [];
     try {
       assertUsageIdentityBoundaries(store, db!, tasks[0]!.id, tasks[1]!.id, runtime.id, "postgres-boundaries", () => {
@@ -80,7 +81,7 @@ describe.skipIf(!adminUrl)("normalized usage on PostgreSQL", () => {
     const runtime = store.registerRuntime({ name: `charge-pg-${order}`, provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: `charge-pg-${order}`, provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "Charge scope", workspaceId: "local" });
-    store.claimTask(runtime.id); store.startTask(task.id);
+    claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
     assertRequestChargeIdentity(store, task.id, runtime.id, `postgres-price-${order}`, order, () => new MultiremiStore(db!));
   });
 
@@ -88,7 +89,7 @@ describe.skipIf(!adminUrl)("normalized usage on PostgreSQL", () => {
     const runtime = store.registerRuntime({ name: "usage-pg", provider: "codex", workspaceId: "local" });
     const agent = store.createAgent({ name: "usage-pg", provider: "codex", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "Account for real events", workspaceId: "local" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(task.id);
     store.cancelTask(task.id);
     const unit: TaskUsageUnit = { unitId: "request-one", revision: 1, provider: "codex", model: null,
@@ -122,7 +123,7 @@ describe.skipIf(!adminUrl)("normalized usage on PostgreSQL", () => {
     const runtime = store.registerRuntime({ name: "legacy-pg", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "legacy-pg", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "Legacy revision", workspaceId: "local" });
-    store.claimTask(runtime.id); store.startTask(task.id);
+    claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
     expect(Date.now()).toBeGreaterThan(2_147_483_647);
     for (const inputTokens of [10, 20, 30]) store.reportTaskUsage(task.id, [{ provider: "claude", model: "legacy-model", inputTokens, outputTokens: 2 }]);
     expect(db!.query("SELECT revision FROM multiremi_usage_runs WHERE task_id=? AND run_id='legacy'").get(task.id)).toEqual({ revision: 3 });
@@ -191,7 +192,7 @@ describe.skipIf(!adminUrl)("normalized usage on PostgreSQL", () => {
     store.setUsagePrice("local", { provider: "claude", model: tokens.model!, connection_id: null, requested_model_alias: false,
       currency: "USD", input_per_million: 2, output_per_million: 0, cache_read_per_million: 0, cache_write_per_million: 0,
       unsplit_per_million: null, source: "configured", source_url: null, effective_from: "2026-09-01T00:00:00.000Z", effective_to: null });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(task.id);
     store.reportTaskUsageSnapshot(task.id, { version: 2, runId: "charge-run", revision: 1, complete: true, units: [money] });
     store.reportTaskUsageSnapshot(task.id, { version: 2, runId: "charge-run", revision: 2, complete: true, units: [tokens] });

@@ -1,4 +1,5 @@
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
+import { assertCredentialIssuerAvailable } from '../helpers/login.js';
 import type { Context, Hono } from "hono";
 import {
   denyCurrentUserWorkspaceAccess,
@@ -46,6 +47,7 @@ export function registerTokenRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({ tokens, total: tokens.length });
   });
   app.post("/api/multiremi/tokens", async (c) => {
+    assertCredentialIssuerAvailable(store);
     const body = await readJson<CreateAccessTokenInput>(c);
     if (isTaskTokenCreateInput(body)) return c.json({ error: "task tokens are minted by daemon task claim" }, 400);
     const workspaceId = resolveRequestWorkspaceId(c, store, body.workspaceId ?? body.workspace_id);
@@ -99,6 +101,7 @@ export function registerTokenRoutes(app: Hono, deps: RouterDeps): void {
     return c.json(tokens.map(personalTokenResponse));
   });
   app.post("/api/tokens", async (c) => {
+    assertCredentialIssuerAvailable(store);
     const body = await readJson<CreateAccessTokenInput>(c);
     if (isTaskTokenCreateInput(body)) return c.json({ error: "task tokens are minted by daemon task claim" }, 400);
     // The dashboard "add computer" dialog posts no workspace in the body; fall
@@ -120,6 +123,7 @@ export function registerTokenRoutes(app: Hono, deps: RouterDeps): void {
     return c.json(personalTokenResponse(await store.createAccessToken(input)), 201);
   });
   app.post("/api/tokens/current/renew", async (c) => {
+    assertCredentialIssuerAvailable(store);
     const current = currentAccessToken(c);
     if (current) {
       const authHeader = c.req.header("Authorization") ?? "";

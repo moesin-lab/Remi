@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
 import { reportFrame } from "../../fixtures/report-session.js";
@@ -654,7 +655,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       runtimeId: runtime.id,
       prompt: "still running",
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const app = createMultiremiApp({ store });
 
@@ -1359,7 +1360,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
 
   it("keeps HTTP heartbeat upgrade-only while v2 delivers pending requests", async () => {
     const store = createSnapshotStore();
-    const runtime = store.registerRuntime({ id: "rt_heartbeat_flow", name: "Heartbeat runtime", provider: "codex" });
+    const runtime = store.registerRuntime({ id: "rt_heartbeat_flow", name: "Heartbeat runtime", provider: "codex", daemonId: "dmn_rt_heartbeat_flow" });
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "Do not steal heartbeat requests" });
     store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Claim task" });

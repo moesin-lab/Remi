@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { it, expect, spyOn } from 'bun:test';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
@@ -7,7 +8,7 @@ pendingTurnBackendTests('MUL-506 independent QA probes', (fixture, backend) => {
         const f = fixture(), a = f.store.createAgent({ name: 'QA owner', provider: 'codex' }), issue = f.store.createIssue({ title: 'QA probes', assigneeType: 'agent', assigneeId: a.id }), session = f.store.getOrCreateDefaultIssueSession(issue.id);
         f.store.registerRuntime({ id: 'rt_qa', daemonId: 'daemon_qa', name: 'QA fixture', provider: 'codex', workspaceId: 'local' });
         const message = { session_id: session.id, sender: { type: 'member' as const, id: 'mem_local_local' }, to: { type: 'agent' as const, ref: a.id }, message_kind: 'request' as const, wake_requested: 'now' as const, body_md: 'start' };
-        const sent = f.store.sendMessage(message), attempt = f.store.claimTask('rt_qa')!;
+        const sent = f.store.sendMessage(message), attempt = claimWithCurrentRuntime(f.store, 'rt_qa')!;
         f.store.startTask(attempt.id);
         const bridge = f.store.getDaemonTurnBridge(), scope = { workspaceId: 'local', runtimeId: 'rt_qa', daemonId: 'daemon_qa' }, offer = bridge.offerInput(f.store.getTaskWithAgent(attempt.id)!);
         return { ...f, a, issue, session, message, sent, attempt, bridge, scope, offer };
@@ -31,7 +32,7 @@ pendingTurnBackendTests('MUL-506 independent QA probes', (fixture, backend) => {
         const initial = f.bridge.offerInput(f.store.getTaskWithAgent(f.attempt.id)!);
         f.store.recordSessionAgentRangeRead(f.session.id, f.a.id, { seq: 1, offset: 0 }, { seq: initial.input_to_seq + 1, offset: 0 });
         expect(f.bridge.complete({ payload: { turn_id: f.sent.turn_id!, attempt_id: f.attempt.id, input_to_seq: initial.input_to_seq, reply: { body_md: 'first provider complete', message_kind: 'reply' } }, completionFields: null }, f.scope).ok).toBe(true);
-        const other = f.store.claimTask('rt_qa')!;
+        const other = claimWithCurrentRuntime(f.store, 'rt_qa')!;
         f.store.startTask(other.id);
         const offer = f.bridge.offerInput(f.store.getTaskWithAgent(other.id)!);
         expect(offer.input_messages.find(m => m.id === scoped.message.id)?.body_md).toContain('没看');
@@ -47,7 +48,7 @@ pendingTurnBackendTests('MUL-506 scoped decision QA', (fixture, backend) => {
         it(`${kind} answer resumes the original delegated lane without creating a second pending turn`, () => {
             const f = fixture(), a = f.store.createAgent({ name: 'Scoped QA', provider: 'codex' }), issue = f.store.createIssue({ title: 'Scoped question', assigneeType: 'agent', assigneeId: a.id }), s = f.store.getOrCreateDefaultIssueSession(issue.id);
             f.store.registerRuntime({ id: 'rt_scope', daemonId: 'daemon_scope', name: 'QA scoped fixture', provider: 'codex', workspaceId: 'local' });
-            const sent = f.store.sendMessage({ session_id: s.id, sender: { type: 'member', id: 'mem_local_local' }, to: { type: 'agent', ref: a.id }, message_kind: 'request', wake_requested: 'now', body_md: 'scope work', execution_scope: 'dlg_qa' }), attempt = f.store.claimTask('rt_scope')!;
+            const sent = f.store.sendMessage({ session_id: s.id, sender: { type: 'member', id: 'mem_local_local' }, to: { type: 'agent', ref: a.id }, message_kind: 'request', wake_requested: 'now', body_md: 'scope work', execution_scope: 'dlg_qa' }), attempt = claimWithCurrentRuntime(f.store, 'rt_scope')!;
             f.store.startTask(attempt.id);
             const bridge = f.store.getDaemonTurnBridge(), scope = { workspaceId: 'local', runtimeId: 'rt_scope', daemonId: 'daemon_scope' }, decision = bridge.rpc('turn.decision', { turn_id: sent.turn_id, attempt_id: attempt.id, wait_id: `scoped-native-wait:${kind}`, dedupe_key: 'scoped_permission', body_md: 'Permit?', options: [{ label: 'Yes', value: 'yes' }], metadata: kind === 'permission' ? { kind, options: [{ optionId: 'yes', name: 'Yes', kind: 'allow_once' }] } : { kind, questions: [{ question: 'Permit?', options: [{ label: 'Yes' }] }] } }, scope);
             expect(decision.ok).toBe(true);
@@ -61,7 +62,7 @@ pendingTurnBackendTests('MUL-506 cross issue decision QA', (fixture, backend) =>
     it('an unassigned source Issue hands its Q to the human stage, and the answer resumes its turn', () => {
         const f = fixture(), a = f.store.createAgent({ name: 'QA child worker', provider: 'codex' }), b = f.store.createAgent({ name: 'QA parent owner', provider: 'codex' }), parent = f.store.createIssue({ title: 'QA decision parent', assigneeType: 'agent', assigneeId: b.id }), child = f.store.createIssue({ title: 'QA unassigned source', parentIssueId: parent.id }), s = f.store.getOrCreateDefaultIssueSession(child.id);
         f.store.registerRuntime({ id: 'rt_cross', daemonId: 'daemon_cross', name: 'QA cross fixture', provider: 'codex', workspaceId: 'local', maxConcurrency: 8 });
-        const sent = f.store.sendMessage({ session_id: s.id, sender: { type: 'member', id: 'mem_local_local' }, to: { type: 'agent', ref: a.id }, message_kind: 'request', wake_requested: 'now', body_md: 'do work' }), attempt = f.store.claimTask('rt_cross')!;
+        const sent = f.store.sendMessage({ session_id: s.id, sender: { type: 'member', id: 'mem_local_local' }, to: { type: 'agent', ref: a.id }, message_kind: 'request', wake_requested: 'now', body_md: 'do work' }), attempt = claimWithCurrentRuntime(f.store, 'rt_cross')!;
         f.store.startTask(attempt.id);
         const d = f.store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: sent.turn_id, attempt_id: attempt.id, wait_id: 'cross-issue-native-wait', dedupe_key: 'cross-issue-question', body_md: 'Which branch?', options: [], metadata: { kind: 'question', questions: [{ question: 'Which branch?' }] } }, { runtimeId: 'rt_cross', daemonId: 'daemon_cross', workspaceId: 'local' });
         expect(d.ok).toBe(true);
@@ -81,13 +82,13 @@ pendingTurnBackendTests('MUL-506 cold retry input QA', (fixture, backend) => {
     it('a fresh cold attempt receives the context the previous provider acknowledged', () => {
         const f = fixture(), a = f.store.createAgent({ name: 'QA cold', provider: 'codex' }), issue = f.store.createIssue({ title: 'Cold context', assigneeType: 'agent', assigneeId: a.id }), s = f.store.getOrCreateDefaultIssueSession(issue.id);
         f.store.registerRuntime({ id: 'rt_cold', daemonId: 'daemon_cold', name: 'QA cold fixture', provider: 'codex', workspaceId: 'local' });
-        const sent = f.store.sendMessage({ session_id: s.id, sender: { type: 'member', id: 'mem_local_local' }, to: { type: 'agent', ref: a.id }, message_kind: 'request', wake_requested: 'now', body_md: 'critical original instructions' }), attempt = f.store.claimTask('rt_cold')!;
+        const sent = f.store.sendMessage({ session_id: s.id, sender: { type: 'member', id: 'mem_local_local' }, to: { type: 'agent', ref: a.id }, message_kind: 'request', wake_requested: 'now', body_md: 'critical original instructions' }), attempt = claimWithCurrentRuntime(f.store, 'rt_cold')!;
         f.store.startTask(attempt.id);
         const bridge = f.store.getDaemonTurnBridge(), scope = { workspaceId: 'local', runtimeId: 'rt_cold', daemonId: 'daemon_cold' }, offer = bridge.offerInput(f.store.getTaskWithAgent(attempt.id)!);
         expect(bridge.rpc('turn.input', { turn_id: sent.turn_id, attempt_id: attempt.id, input_to_seq: offer.input_to_seq, message_ids: offer.input_messages.map(m => m.id) }, scope).ok).toBe(true);
         f.store.cancelTurn(sent.turn_id!);
         const retried = f.store.retryTurn(sent.turn_id!, true), replacement = f.store.getTaskWithAgent(retried.current_attempt_id!)!;
-        const claimed = f.store.claimTask('rt_cold');
+        const claimed = claimWithCurrentRuntime(f.store, 'rt_cold');
         expect(claimed?.id).toBe(replacement.id);
         f.store.startTask(replacement.id);
         const coldOffer = bridge.offerInput(f.store.getTaskWithAgent(replacement.id)!);
@@ -130,15 +131,15 @@ pendingTurnBackendTests('MUL-506 retry report link QA', (fixture, backend) => {
         const rtA = f.store.registerRuntime({ id: 'rt_report_a', daemonId: 'daemon_report_a', name: 'QA reporter', provider: 'codex', workspaceId: 'local' }), rtB = f.store.registerRuntime({ id: 'rt_report_b', daemonId: 'daemon_report_b', name: 'QA worker', provider: 'codex', workspaceId: 'local' });
         const a = f.store.createAgent({ name: 'Report origin', provider: 'codex', runtimeId: rtA.id }), b = f.store.createAgent({ name: 'Retried delegate', provider: 'codex', runtimeId: rtB.id }), parent = f.store.createIssue({ title: 'Report target', assigneeType: 'agent', assigneeId: a.id }), child = f.store.createIssue({ title: 'Retried report source', assigneeType: 'agent', assigneeId: b.id });
         const source = f.store.createTask({ agentId: a.id, issueId: parent.id, prompt: 'delegate' });
-        expect(f.store.claimTask(rtA.id)?.id).toBe(source.id);
+        expect(claimWithCurrentRuntime(f.store, rtA.id)?.id).toBe(source.id);
         f.store.startTask(source.id);
         const delegated = f.store.createTask({ agentId: b.id, issueId: child.id, parentTaskId: source.id, prompt: 'deliver' });
-        expect(f.store.claimTask(rtB.id)?.id).toBe(delegated.id);
+        expect(claimWithCurrentRuntime(f.store, rtB.id)?.id).toBe(delegated.id);
         f.store.startTask(delegated.id);
         f.store.failTask(delegated.id, { error: 'temporary provider outage', failureReason: 'runtime_offline' });
         const current = f.store.getTurn(delegated.id)!;
         expect(current.current_attempt_id).not.toBe(delegated.id);
-        const retry = f.store.claimTask(rtB.id)!;
+        const retry = claimWithCurrentRuntime(f.store, rtB.id)!;
         expect(retry.id).toBe(current.current_attempt_id!);
         f.store.startTask(retry.id);
         const run = f.db.run.bind(f.db), fault = spyOn(f.db, 'run').mockImplementation((sql: string, params?: any) => { if (sql.includes('INSERT INTO multiremi_conversation_log') && params?.[3] === 'message' && params?.[5] === 'agent' && params?.[24] === 'reply')

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask, issueMessagesPath, turnApiPath } from "./unified-test-paths.js";
 /**
@@ -72,7 +73,7 @@ async function dispatch(store: MultiremiStore, source: MultiremiTask, issue: Mul
 }
 
 function claimReturn(store:MultiremiStore,runtimeId:string,attemptId:string){
-  for(let i=0;i<3;i++){const task=store.claimTask(runtimeId);if(!task||task.id===attemptId)return task;
+  for(let i=0;i<3;i++){const task=claimWithCurrentRuntime(store, runtimeId);if(!task||task.id===attemptId)return task;
     store.startTask(task.id);store.completeTask(task.id,{output:"Reviewed owner status"});}
   throw new Error("Return attempt was not offered");
 }
@@ -81,7 +82,7 @@ function reportSnapshot(event:ReturnType<MultiremiStore["listSessionEvents"]>[nu
     source:event.metadata.message_source,address:event.metadata.address_context};
 }
 function finishLeaderRound(store: MultiremiStore, f: ReturnType<typeof fixture>): void {
-  expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+  expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
   store.buildTaskSessionProjection(f.leaderTask.id);
   store.startTask(f.leaderTask.id);
   store.completeTask(f.leaderTask.id, { output: "Task completed." });
@@ -224,7 +225,7 @@ async function startThroughDaemon(
 ): Promise<void> {
   // The v2 offer pump claims through this same Store operation; this suite's
   // subject is the result-comment lifecycle, not the removed HTTP claim route.
-  const claimed = store.claimTask(runtimeId);
+  const claimed = claimWithCurrentRuntime(store, runtimeId);
   expect(claimed?.id).toBe(task.id);
   await reportThroughDaemon(store, daemonToken, task.id, "start");
 }
@@ -608,7 +609,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         const f = fixture(store);
         const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
         finishLeaderRound(store, f);
-        expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+        expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
         store.buildTaskSessionProjection(childTask.id);
         store.startTask(childTask.id);
         const first = store.createIssueComment(f.child.id, {
@@ -667,7 +668,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         const f = fixture(store);
         const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
         finishLeaderRound(store, f);
-        expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+        expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
         store.buildTaskSessionProjection(childTask.id);
         store.startTask(childTask.id);
         const injector = instrumentDb(store, () => {});
@@ -761,7 +762,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
           expect(await denied.json()).toEqual({ error: "Session is archived" });
         }
         expect(store.listTasks()).toHaveLength(tasksBefore);
-        expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+        expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
         store.buildTaskSessionProjection(childTask.id);
         store.startTask(childTask.id);
         store.completeTask(childTask.id, { output: "Report from the archived round." });
@@ -809,7 +810,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
             && store.getTurnForAttempt(task.id)?.trigger_message_id === lateReport.id);
         expect(reRing).toMatchObject({ status: "queued", issueSessionId: f.leaderSession.id, wakeSource: "re_ring" });
         expect(store.getTurnForAttempt(reRing!.id)?.execution_scope).toBe(returnTurn.execution_scope);
-        expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(reRing!.id);
+        expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(reRing!.id);
         const reRingProjection = store.buildTaskSessionProjection(reRing!.id);
         if (!reRingProjection) throw new Error("Late delegation re-ring projection was not built");
         expect(reRingProjection.jsonl).toContain(lateReport.body_md);

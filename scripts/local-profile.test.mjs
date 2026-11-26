@@ -138,6 +138,13 @@ for (const name of ['spawn', 'exec', 'execSync', 'execFile', 'execFileSync', 'fo
 }
 syncBuiltinESMExports();
 globalThis.fetch = async (url) => {
+  if (String(url).endsWith('/api/config')) {
+    appendFileSync(process.env.TEST_COMMAND_LOG, JSON.stringify({ command: 'fetch', url: String(url) }) + '\n');
+    if (process.env.TEST_JWT_STATUS === 'unreachable') throw new Error('injected unreachable API');
+    return { ok: process.env.TEST_JWT_STATUS !== 'unavailable', json: async () => (
+      process.env.TEST_JWT_STATUS === 'unknown' ? {} : { jwt_registration_required: process.env.TEST_JWT_STATUS === 'active' }
+    ) };
+  }
   const deployment = JSON.parse(readFileSync(join(process.env.TEST_PROFILE_ROOT, 'deployment.json'), 'utf8'));
   if (process.env.TEST_FAIL === 'web_health' && String(url).includes(':13000/') && deployment.ref === process.env.TEST_NEW_COMMIT) return { status: 503, ok: false };
   return { status: 200, ok: true, arrayBuffer: async () => Buffer.from('release archive') };
@@ -209,7 +216,7 @@ function fixture(t) {
     });
     assert.ifError(result.error);
     const calls = readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
-    return { ...result, calls };
+    return { ...result, calls: calls.filter((call) => call.command !== 'fetch'), requests: calls.filter((call) => call.command === 'fetch') };
   }
   const profileRoot = (profile = 'stable') => join(profilesRoot, profile);
   const readProfile = (name, profile = 'stable') => JSON.parse(readFileSync(join(profileRoot(profile), name), 'utf8'));
@@ -368,6 +375,35 @@ test('token signs a 24-hour local session with only the selected profile secret'
   assert.ok(!result.stdout.includes(stableEnv.MULTIREMI_TOKEN));
   assert.ok(!result.stdout.includes(stableEnv.JWT_SECRET));
 });
+
+for (const profile of ['stable', 'dev']) {
+  for (const [state, diagnostic] of [
+    ['active', /Offline JWT mint is disabled/u],
+    ['unknown', /Offline JWT mint is disabled/u],
+    ['unreachable', /Cannot verify JWT registration state/u],
+    ['unavailable', /Cannot verify JWT registration state/u],
+  ]) {
+    test(`${profile} token rejects ${state} registration state without emitting a token or secrets`, (t) => {
+      const f = fixture(t);
+      succeeds(f.run(profile, 'prepare'));
+      const profileEnv = parseEnv(readFileSync(join(f.profileRoot(profile), 'api.env'), 'utf8'));
+      const shellSecret = 'never-output-shell-signing-secret';
+      const result = f.run(profile, 'token', {
+        environment: { TEST_JWT_STATUS: state, JWT_SECRET: shellSecret },
+      });
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '', 'a rejected mint must not emit a credential');
+      assert.deepEqual(result.requests, [{ command: 'fetch', url: `http://127.0.0.1:${profile === 'stable' ? 16120 : 16220}/api/config` }], 'the selected profile API must actually be probed');
+      assert.match(result.stderr, diagnostic);
+      assert.doesNotMatch(result.stderr, /[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/u, 'a rejected mint must not put a JWT in diagnostics');
+      for (const value of [profileEnv.JWT_SECRET, profileEnv.MULTIREMI_TOKEN, profileEnv.MULTIREMI_SHARE_SECRET, shellSecret]) {
+        assert.ok(value, 'the fixture must contain the credentials being checked');
+        assert.ok(!(result.stdout + result.stderr).includes(value), 'rejection output must not disclose credentials');
+      }
+      assert.equal(result.calls.length, 0, 'a rejected mint must not invoke Docker or Git');
+    });
+  }
+}
 
 test('token reads quoted profile secrets and fails without a signing secret', (t) => {
   const f = fixture(t);

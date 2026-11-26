@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue, createHistoricalTestIssue, seedHistoricalIssueFacts, acceptTestIssueDelivery, replayHistoricalTestChildDone } from './helpers.js';
 // MUL-400 S1 (E1 + E2): a parent issue's status is derived from its children,
 // and every child ending reports to the parent owner.
@@ -24,8 +25,8 @@ function activityOf(store: Store, issueId: string, type: string): Array<{ data: 
 
 /** Claim + start one specific task, whatever else is queued for the runtime. */
 function runTask(store: Store, runtimeId: string, taskId: string) {
-  let claimed = store.claimTask(runtimeId);
-  while (claimed && claimed.id !== taskId) claimed = store.claimTask(runtimeId);
+  let claimed = claimWithCurrentRuntime(store, runtimeId);
+  while (claimed && claimed.id !== taskId) claimed = claimWithCurrentRuntime(store, runtimeId);
   if (!claimed) throw new Error(`Could not claim task ${taskId}`);
   return store.startTask(taskId);
 }
@@ -1272,7 +1273,7 @@ describe("MUL-400 E2 — child endings notify the parent owner", () => {
     store.completeTask(running.id, { output: "Current round finished." });
     const queued = store.listTasksForIssue(parent.id).filter(task => task.status === "queued");
     expect(queued).toHaveLength(1);
-    expect(store.claimTask(runtime.id)?.id).toBe(queued[0]!.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(queued[0]!.id);
     const offered = store.getDaemonTurnBridge().offerInput(store.getTaskWithAgent(queued[0]!.id)!);
     expect(offered.input_messages.filter(message => message.message_kind === "status")).toHaveLength(4);
 

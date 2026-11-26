@@ -6,6 +6,9 @@ import { runMigrations } from '@multiremi/store/migrations.js';
 import { expandJwtMaterials } from '@multiremi/store/jwt-material-schema.js';
 import { compactJwtDigest, JwtMaterials, JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
+import { MultiremiStore } from '@multiremi/store.js';
+import { createJwtBrowserClientGuard } from '@multiremi/api/realtime.js';
+import type { MultiremiWebSocketClient } from '@multiremi/api/helpers/realtime-types.js';
 
 let sqlite: ReturnType<typeof openSqliteDatabase>;
 let db: SqlDatabase;
@@ -45,6 +48,26 @@ function issue(override = {}) {
   return withSecurityWrite(db, undefined, { expectedRevision: 0, workspaceIds: [], numberKeys: [],
     domainTargets: ['authority:material', 'jwt:jwt-fixture'] }, tx => materials.issue(tx, { ...input, ...override }, { exp }, signing));
 }
+function raceSecurityRevision(conflicts: number) {
+  let attempts = 0;
+  const errors: unknown[] = [];
+  const racingDb = new Proxy(db, {
+    get(target, key) {
+      if (key === 'transaction') return <T>(callback: () => T) => () => {
+        attempts++;
+        // Commit another writer's revision after the pre-read, before the real
+        // transaction takes its lock. It must survive that attempt's rollback.
+        if (attempts <= conflicts) target.run('UPDATE multiremi_security_state SET security_revision=security_revision+1 WHERE singleton=1');
+        try { return target.transaction(callback)(); }
+        catch (error) { errors.push(error); throw error; }
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { materials: new JwtMaterials(racingDb), errors, get attempts() { return attempts; } };
+}
+
 function sign(claims: Record<string, unknown>) {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const body = Buffer.from(JSON.stringify(claims)).toString('base64url');
@@ -59,6 +82,28 @@ test('records the exact compact digest and current version with source binding i
     .toEqual({ credential_id: input.credentialId, material_version: 1, subject_id: input.subjectId, purpose: 'dashboard', family_id: 'family' });
   expect(() => issue()).toThrow('credential_version_conflict');
   expect(db.query('SELECT count(*) AS n FROM multiremi_jwt_materials').get().n).toBe(1);
+});
+
+test('validateDigest retries a transient security revision conflict and accepts current material', () => {
+  const digest = compactJwtDigest(issue());
+  const race = raceSecurityRevision(1);
+  expect(race.materials.validateDigest(digest, signing)).toEqual({ userId: input.subjectId, digest });
+  expect(race.attempts).toBe(2);
+  expect(race.errors).toEqual([expect.objectContaining({ code: 'authority_revision_conflict' })]);
+  expect(db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get().security_revision).toBe(1);
+  expect(db.inTransaction).toBe(false);
+});
+
+test('validateDigest throws unavailable after three consecutive security revision conflicts', () => {
+  const digest = compactJwtDigest(issue());
+  const race = raceSecurityRevision(3);
+  expect(() => race.materials.validateDigest(digest, signing)).toThrow(JwtMaterialUnavailable);
+  expect(race.attempts).toBe(3);
+  expect(race.errors).toEqual(Array.from({ length: 3 }, () => expect.objectContaining({ code: 'authority_revision_conflict' })));
+  expect(db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get().security_revision).toBe(3);
+  expect(db.inTransaction).toBe(false);
+  // The material is still valid; exhaustion reports contention, not revocation.
+  expect(materials.validateDigest(digest, signing)).toEqual({ userId: input.subjectId, digest });
 });
 
 test('valid signatures cannot register on first use and changes to a registered compact are rejected', () => {
@@ -118,6 +163,43 @@ test('expiry, future times and non-dashboard issuance cannot become dashboard au
       domainTargets: ['authority:material', 'jwt:jwt-fixture'] }, tx => materials.issue(tx, input, claims, signing))).toThrow();
   }
   expect(materials.validate(issue({ purpose: 'cli' }), signing)).toBeNull();
+});
+
+test('final socket send checks current ancestry after an asynchronous projection completes', async () => {
+  const token = issue();
+  const store = new MultiremiStore(db);
+  db.run("UPDATE multiremi_security_state SET feature_activation=1,bootstrap_completed=1,minimum_enforcement_version='fixture'");
+  const env = { JWT_SECRET: process.env.JWT_SECRET, MULTIREMI_JWT_SIGNING_DOMAIN: process.env.MULTIREMI_JWT_SIGNING_DOMAIN,
+    MULTIREMI_JWT_KEY_EPOCH: process.env.MULTIREMI_JWT_KEY_EPOCH };
+  Object.assign(process.env, { JWT_SECRET: signing.secret, MULTIREMI_JWT_SIGNING_DOMAIN: signing.domainId, MULTIREMI_JWT_KEY_EPOCH: signing.keyEpoch });
+  const sent: string[] = [];
+  const closes: Array<number | undefined> = [];
+  const client: MultiremiWebSocketClient = { data: { kind: 'browser', connectedAt: 'fixture', workspaceId: 'local',
+    authenticated: true, userId: 'local', accessToken: null, jwtDigest: compactJwtDigest(token) },
+    sendText: message => { sent.push(message); }, close: code => { closes.push(code); } };
+  try {
+    const wrap = createJwtBrowserClientGuard(store);
+    const guarded = wrap(client);
+    expect(wrap(client)).toBe(guarded);
+    guarded.sendText('before');
+    expect(sent).toEqual(['before']);
+    let resume!: () => void;
+    const projection = new Promise<void>(resolve => { resume = resolve; });
+    const delivery = (async () => { await projection; guarded.sendText('after'); })();
+    db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='identity'");
+    resume();
+    await delivery;
+    expect(sent).toEqual(['before']);
+    expect(closes).toEqual([1008]);
+    db.run('DELETE FROM multiremi_security_state');
+    guarded.sendText('unavailable');
+    expect(sent).toEqual(['before']);
+    expect(closes).toEqual([1008, 1011]);
+  } finally {
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test('primary state unavailability raises an explicit unavailable failure', () => {

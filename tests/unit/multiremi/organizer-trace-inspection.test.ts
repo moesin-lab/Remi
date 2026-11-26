@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { turnApiPath } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -32,7 +33,7 @@ describe("organizer trace inspection", () => {
       const issue = createResponsibleTestIssue(store, { title: "Organizer stats", workspaceId: "local" });
       const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "inspect" });
       store.appendTaskMessages(task.id, [{ type: "text", content: "legacy" }, { type: "tool_use", tool: "Bash" }]);
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       store.completeTask(task.id, { output: "" });
       db!.transaction(() => store.recordAttemptOutcomeWithinTransaction(task.id, counts))();

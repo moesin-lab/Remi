@@ -168,8 +168,8 @@ function AgentStreamRow({ task }: { task: AgentTask }) {
               </span>
             </span>
           )}
-          {!ended && !blocker && stepSummary && (
-            <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+          {!ended && !blocker && (
+            <span aria-hidden={stepSummary ? undefined : true} className="flex h-4 min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
               <span className="truncate">{stepSummary}</span>
             </span>
           )}

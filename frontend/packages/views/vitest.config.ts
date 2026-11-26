@@ -24,6 +24,7 @@ const pureTests = [
   "projects/components/project-issue-filters.test.ts",
   "projects/components/project-issue-metrics.test.ts",
   "inbox/components/inbox-display.test.ts",
+  "settings/lib/system-prompt-utils.test.ts",
   "locales/parity.test.ts",
   "locales/step-copy-parity.test.ts",
 ];

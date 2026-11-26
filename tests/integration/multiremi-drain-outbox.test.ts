@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 // MUL-74 / MUL-197 end-to-end: a real server + worker daemon + fake provider.
 // Covers: drain pauses new claims while heartbeats continue and ack the
 // generation; an already-claimed task keeps running through a drain; a 10-30s
@@ -826,7 +827,7 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
     });
     const agent = store.createAgent({ name: "Terminal Replay Bot", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, prompt: "already finished locally" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const bridge = store.getDaemonTurnBridge();
     const input = bridge.offerInput(store.getTaskWithAgent(task.id)!);

@@ -22,3 +22,4 @@ export { isHistoricalIssueQuestionRecord } from './question.js';
 export * from "./platform-failure.js";
 export * from "./root-authority.js";
 export * from "./root-delivery.js";
+export * from "./system-prompt-policy.js";

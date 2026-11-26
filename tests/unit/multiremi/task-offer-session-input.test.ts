@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -34,7 +35,7 @@ test("50 unread entries and huge Wiki offer only trigger messages and the unread
   });
   const trigger = f.store.createIssueComment(f.issue.id, { authorType: "member", authorId: "local", body: "TRIGGER " + "内容".repeat(10_000) });
   const task = f.store.createTask({ agentId: f.agent.id, issueId: f.issue.id, triggerCommentId: trigger.id, prompt: trigger.body });
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   const response = daemonTaskClaimResponse(f.store, claimed, f.store.getTaskTriggerMetadata(claimed));
   useTaskSessionInput(f.store, claimed, response);
   response.repository_wiki_contexts = [{ repository: { id: "repo_1" }, docs: [{ id: "doc_1", body: "大Wiki".repeat(200_000) }] }];
@@ -69,7 +70,7 @@ test("coalesced rich mentions retain all triggering messages, while historical r
   for (const body of ["FIRST_TRIGGER", "SECOND_TRIGGER"]) f.store.createIssueComment(f.issue.id, {
     authorType: "member", authorId: "local", body: `[@Input](mention://agent/${f.agent.id}) ${body}`,
   });
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   const response = daemonTaskClaimResponse(f.store, claimed, f.store.getTaskTriggerMetadata(claimed));
   useTaskSessionInput(f.store, claimed, response);
   const prompt = buildTaskPrompt(normalizeDaemonClaimTask(response)!);
@@ -120,7 +121,7 @@ test("cold start puts Issue title and description in the instructions and reads 
   f.store.createIssueComment(f.issue.id, { authorType: "member", authorId: "local", body: "FIRST_UNREAD" });
   const trigger = f.store.createIssueComment(f.issue.id, { authorType: "member", authorId: "local", body: "TRIGGER" });
   f.store.createTask({ agentId: f.agent.id, issueId: f.issue.id, triggerCommentId: trigger.id, prompt: trigger.body });
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   const response = daemonTaskClaimResponse(f.store, claimed, f.store.getTaskTriggerMetadata(claimed));
   useTaskSessionInput(f.store, claimed, response);
   fitTaskOfferToBudget(response, f.runtime.id);
@@ -169,7 +170,7 @@ test("coalesced Chat input includes all triggering messages once without a dupli
   const first = f.store.sendChatMessage(chat.id, { body: "FIRST_CHAT_TRIGGER" });
   const second = f.store.sendChatMessage(chat.id, { body: "SECOND_CHAT_TRIGGER" });
   expect(second.task.id).toBe(first.task.id);
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   f.store.startTask(claimed.id);
   const response = daemonTaskClaimResponse(f.store, claimed, f.store.getTaskTriggerMetadata(claimed));
   useTaskSessionInput(f.store, claimed, response);
@@ -229,7 +230,7 @@ test("task-token range reads are recorded without including bodies or credential
   const own = f.store.createIssueComment(f.issue.id, { authorType: "agent", authorId: f.agent.id, body: "OWN_HISTORY" });
   const peer = f.store.createIssueComment(f.issue.id, { authorType: "member", authorId: "local", body: "unread".repeat(2_000) });
   f.store.createTask({ agentId: f.agent.id, issueId: f.issue.id, prompt: "read" });
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   const credential = await f.store.createTaskAccessToken(claimed, "local");
   const app = createMultiremiApp({ store: f.store });
   const info = spyOn(log, "info").mockImplementation(() => {});
@@ -262,7 +263,7 @@ for (const mode of ["sql", "openviking"] as const) test(`Wiki offers read metada
   const projectDoc = f.store.createProjectDoc(project.id, { kind: "wiki", slug: "guide", title: "Guide", body: "project body".repeat(70_000) });
   const repoDoc = f.store.createRepositoryWikiDoc("local", "repo_wiki", { path: "guide.md", title: "Guide", body: "repository body" });
   f.store.createTask({ agentId: f.agent.id, issueId: f.issue.id, prompt: "read" });
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   const noBodyReads = new Proxy({} as OpenVikingClientContract, {
     get(_, operation) { throw new Error(`Metadata offers must not access OpenViking: ${String(operation)}`); },
   });

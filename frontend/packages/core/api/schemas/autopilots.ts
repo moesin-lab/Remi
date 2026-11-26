@@ -51,7 +51,13 @@ export const AutopilotEventConfigSchema = z.union([
   AutopilotScmEventConfigSchema,
 ]);
 
+export const DeliveryTargetsSchema = z.object({
+  targets: z.array(z.object({ id: z.string().min(1), title: z.string(), channel: z.string() })),
+});
+
 export const AutopilotSchema = z.object({
+  delivery_chat_session_id: z.string().min(1).nullable().optional(),
+  warnings: z.array(z.object({ code: z.string(), message: z.string() })).optional(),
   id: z.string(),
   workspace_id: z.string(),
   title: z.string(),

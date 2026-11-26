@@ -8,6 +8,16 @@ summary: 区分平台登录账号与统一工作区操作者，说明历史数�
 
 Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后的人类操作者共享全部工作区。工作区内统一使用 `local` 操作身份，每个工作区有一个稳定的内部 operator 记录，成员角色不再决定人类权限。本页描述实现契约，不代表已完成所有路由的安全审计或生产登录验证。
 
+## Root 内核事务接口
+
+`store.rootManagement.registeredCredentials.verify(raw)` 校验已登记的 PAT 或 task 材料；`verifyJwt(compact, signing)` 校验登记过的 dashboard JWT。证明仅在创建它的 `RootManagement` 实例内有效。读取使用 `resolveCurrent(proof, use)`。写入先取 `plan(proof, use)`，以 `plan.fenceTerm` 进入同一个 Store 连接上的 `withSecurityWrite`，再调用 `authorizeWrite(tx, proof, use)`。在实际写入处调用 `requireMutationActor(tx, actor, use)` 复核 action、use、目标类型和 ID。其 `credentialOrigin` 提供材料 ID/version、family 和来源节点。授权检查保留实际 transport 与 subject。
+
+路由可直接调用 `store.withAuthorizedMutation(proof, use, plan, (tx, actor) => ..., fence?)`，传入资源的 workspace、编号键和域目标计划。Store 合并凭据检查的域目标，并在自己的连接上完成授权和回调。投递方使用 `store.withSecurityWrite(fence, plan, callback)` 及同一 Store 的 `readAttemptEligibility(tx, id)`、`readCurrentTaskLease(tx, id)`、`writeCurrentTaskLease(tx, expectedVersion, lease)`。
+
+`planAttemptAdmission` 规划首次创建或直接重试的锁。`verifyAttemptInvocation` 核验真实调用者与目标 turn；`approveAttemptInputs` 在同一事务中冻结目标、新执行及获准输入。`withAttemptAdmission` 在真实 INSERT 前后分别调用 `admitAttempt` 与 `consumeAdmission`。后者核对已存行和当前来源，消费限当前事务的一次性 ticket。level 10 的 `multiremi_attempt_input_approvals` 保存获准快照与持续来源，`multiremi_attempt_eligibility` 按 attempt 唯一记录初始资格。历史缺行、普通 attempt 和 resume 均不能据此取得新资格。
+
+`readAttemptEligibility(db, tx, attemptId)` 和 `readCurrentTaskLease(db, tx, attemptId)` 使用同一个 `attempt:<id>` 域目标。`writeCurrentTaskLease(db, tx, expectedVersion, lease)` 需要最外层以当前 background term 取得 F，再取得 S；首次 dispatched 使用版本 0，后续 CAS 返回新版本。`multiremi_current_task_leases` 按 attempt 唯一绑定 consumer、run generation、runtime/daemon/incarnation、lease、fence 与过期时间。pending-start 只使用首次 receipt 的固定 deadline，running 复核实时 lease。收据留存的历史 lease/fence 不充当当前授权。
+
 ## 登录与请求身份
 
 - [登录路由](../../packages/server/src/api/routers/auth.ts)把飞书 `open_id`、`union_id` 交给 [WorkspacesRepo.getOrCreateUser](../../packages/server/src/store/repos/workspaces-repo.ts)。身份按 `union_id`、`open_id` 解析；兼容邮箱匹配时不会复用已绑定其他外部身份的用户；否则创建独立用户记录。
@@ -18,6 +28,8 @@ Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后
 - [MultiremiRequestAuth](../../packages/server/src/api/wire/context.ts)保存解析后的访问令牌及用户身份，不缓存统一的 workspace/role。部署主令牌和无鉴权本地模式保留无真实用户、回退 `local` 管理员的兼容路径；不能将这种路径的行为当作普通用户授权结果。
 
 ## 工作区与凭据边界
+
+人类为 `run_only` Autopilot 选择投递 Chat 时，`delivery_authorized_by` 保存该工作区共享 operator 的成员 ID。退出登录或撤销个人 PAT 后，这份工作区授权仍然有效。要撤销单个任务的投递，在编辑页清除投递目标，或向 `PATCH /api/autopilots/:id` 提交 `{"delivery_chat_session_id": null}`。运行完成前清空绑定，本轮也停止投递。若完成前目标 Chat 已归档、目标 Agent 已移出工作区，或授予权限的历史成员已归档，该轮只在 Autopilot 内记录 `skipped`，不会向目标 Chat 写消息或创建飞书出站记录。
 
 | 边界 | 当前行为与源码 |
 |---|---|
@@ -102,6 +114,7 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 - 公开错误信封统一为 `{error: {code, message, retryable, requestId, currentRevision?}}`，覆盖 `root_required`、`root_attempt_not_eligible`、`root_authority_revoked`、`root_runtime_untrusted`、`root_invoker_untrusted`、`root_input_unapproved`、`root_execution_protected`、`authority_revision_conflict`、`credential_version_conflict`、`receipt_conflict`、`authority_depth_exceeded` 与 `security_state_unavailable`；daemon 协议新增非重试拒绝码 `root_delivery_unsupported` 与 `root_delivery_invalid`。
 - 公开上下文区分 `transport_identity`、`authenticated_subject`（真实 `user:<id>` 或 `agent:<id>`）、`is_agent_origin`、`agent_granted_root` 与 `current_attempt_effective_root` / `effective_reason_code`。任务与 Agent 派生 PAT 保留 Agent 身份标记，不显示为真实人类登录会话；旧 attempt 不因后续授予而升权。
 - root 执行在 CLI 与共享承载层固定走本 run 不可变进程环境（`MULTIREMI_ROOT_CARRIER=immutable_run_env`，见 [task-context-file.ts](../../packages/shared/src/task-context-file.ts) 的 `resolveTaskContext`/`buildRootImmutableRunEnv`/`assertOrdinaryTaskContextOnly` 与 [task-context.ts](../../apps/remi/cli/core/task-context.ts)），不读取也不回退旧 `MULTIREMI_TASK_CONTEXT_FILE` 磁盘上下文文件；缺失或违规载体按 fail-closed 拒绝。
+- `GET /api/config` 新增只读布尔字段 `jwt_registration_required`（从主库 `multiremi_security_state.feature_activation` 读取，读取故障返回 `503`；不新增路由或公开错误码；前端 `AppConfigSchema` 仅接受精确布尔值，缺失或畸形保留 `undefined`，绝不默认按 `false` 处理）。`scripts/local-profile.mjs <stable|dev> token` 离线签发前强制探测所选 profile 的 `http://127.0.0.1:16120/api/config`（`stable`）或 `http://127.0.0.1:16220/api/config`（`dev`），5 秒超时、`redirect: "error"`，绝不根据本地 env 自断关闭态：仅在 `jwt_registration_required === false` 时保留旧 24 小时离线 `local` JWT 签发；网络/非成功响应报错 `Cannot verify JWT registration state; start the selected profile API and authenticate online`，`true`/缺失/unknown 报错 `Offline JWT mint is disabled when registration is required or unknown; use online authentication with a trusted source adapter`。在激活域内，HTTP/Cookie 与浏览器 WebSocket（含最终 `sendText`）按主库登记材料的当前版本与祖先校验精确 compact JWT；`POST /auth/password` 首次密码登录在后端整合后将经持久 `RootManagement` 验证密码并登记 exact compact JWT，而续期/派生/PAT/daemon 签发在对应可信来源适配器落地前仍保持 `503` 门禁。
 - 当前客户端/公开契约分片仅冻结公开 DTO、wire 判别器与 CLI/UI 声明；`/api/root/*` 后端路由挂载、服务端鉴权接线、daemon 生产 receiver/协议 handler 与真实 PostgreSQL / 浏览器联调仍待 MUL-1 整合分支（#174）相关开发线完成与独立验收，不视为已激活或已可用的在线路径。
 
 ## 验证入口

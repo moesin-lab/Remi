@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from '../multiremi/helpers.js';
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -39,7 +40,7 @@ async function world(kind: "chat" | "issue", pause = "") {
   const send = (text: string) => store.sendMessage({ session_id: session.id, sender: { type: "member", id: "mem_local_local" },
     to: { type: "agent", ref: agent.id }, message_kind: "request", wake_requested: "now", body_md: text });
   const sent = send(`${marker}\nprivate unrelated text`);
-  const task = store.claimTask(runtime.id)!;
+  const task = claimWithCurrentRuntime(store, runtime.id)!;
   store.recordTaskOffered(task.id, runtime.id); store.acceptTaskOffer(task.id, runtime.id); store.startTask(task.id);
   const bridge = store.getDaemonTurnBridge(); bridge.offerInput(store.getTaskWithAgent(task.id)!);
   const access = await store.createTaskAccessToken(store.getTask(task.id)!, "local");
@@ -262,7 +263,7 @@ for (const prompt of ["PR404/RESP/PRESENTER", "PR404/RESP/ASK PR404/RESP/PRESENT
     f.store.updateIssue(f.task.issueId!, { assigneeType: "agent", assigneeId: worker.id });
     f.store.registerRuntime({ id: "rt_ppe_fixture", name: "PPE", provider: "codex", daemonId: "ppe-fixture-daemon", maxConcurrency: 4 });
     const source = f.store.createTask({ agentId: worker.id, issueId: f.task.issueId!, prompt: "PPE question" });
-    expect(f.store.claimTask("rt_ppe_fixture")?.id).toBe(source.id); f.store.startTask(source.id);
+    expect(claimWithCurrentRuntime(f.store, "rt_ppe_fixture")?.id).toBe(source.id); f.store.startTask(source.id);
     const created = f.bridge.rpc("turn.decision", { turn_id: f.store.getTurnForAttempt(source.id)!.id, attempt_id: source.id,
       wait_id: "ppe-presenter-native", dedupe_key: "ppe-presentation", body_md: "Should we continue?", options: [],
       metadata: { kind: "question", questions: [{ question: "Should we continue?", options: [{ label: "Yes" }, { label: "No" }] }] } },

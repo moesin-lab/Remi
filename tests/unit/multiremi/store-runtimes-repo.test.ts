@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // Sibling test for packages/server/src/store/repos/runtimes-repo.ts.
 // Drives the carved-out repo directly over its StoreContext (not through the
 // MultiremiStore facade) so a broken delegation cannot mask a broken move.
@@ -191,7 +192,7 @@ describe("RuntimesRepo", () => {
       runtimeId: runtime.id,
       prompt: "keep the runtime alive while work is in flight",
     });
-    expect(store!.claimTask(runtime.id)?.id).toBe(runningTask.id);
+    expect(claimWithCurrentRuntime(store!, runtime.id)?.id).toBe(runningTask.id);
     store!.startTask(runningTask.id);
     repo.createRuntimeUpdateRequest(runtime.id, { targetVersion: "2.0.0" });
     expect(repo.deleteRuntime(runtime.id)).toBeFalse();

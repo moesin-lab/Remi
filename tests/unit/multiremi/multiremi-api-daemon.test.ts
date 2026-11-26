@@ -1,8 +1,10 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
 import { turnApiPath, mutateExecutionFixture } from "./unified-test-paths.js";
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
 import { requestRuntimeRpc } from "../../fixtures/runtime-downlinks.js";
 import { reportFrame } from "../../fixtures/report-session.js";
+import { readOfferedTurnInput } from "../../fixtures/turn-report.js";
 // HTTP surface the daemon itself calls: install commands and token minting,
 // claim/start/complete, task reports, orphan recovery, GC checks, task history.
 import { afterEach, describe, expect, it } from "bun:test";
@@ -26,8 +28,7 @@ async function completeTurn(store: MultiremiStore, taskId: string, fields: Recor
   if(task.status==="running") {
     store.recordSessionAgentRangeRead(offer.input_messages[0]!.session_id,task.agentId,
       {seq:1,offset:0},{seq:offer.input_to_seq+1,offset:0});
-    expect(bridge.rpc("turn.input",{...offer,message_ids:offer.input_messages.map(message=>message.id)},
-      {runtimeId:task.runtimeId!,daemonId:store.getRuntimeLite(task.runtimeId!)?.daemonId??"fixture-reports",workspaceId:task.workspaceId}).ok).toBe(true);
+    readOfferedTurnInput(store, taskId);
   }
   const {output,...completion}=fields;
   return reportFrame(store,"turn.complete",{...completion,turn_id:offer.turn_id,attempt_id:taskId,
@@ -136,7 +137,7 @@ describe("Multiremi API — daemon endpoints", () => {
     const agent = store.createAgent({ name: "Workspace Codex", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "Show workspace", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const app = createMultiremiApp({ store });
 
     const report = await reportFrame(store, "task.workspace", { task_id: task.id, runtime_id: runtime.id,
@@ -187,7 +188,7 @@ describe("Multiremi API — daemon endpoints", () => {
     store.reportSubjectReclaimed(runtime.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false });
     const nextRuntime = store.registerRuntime({ id: "rt_workspace_next", name: "codex (next)", provider: "codex" });
     const nextTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "continue" });
-    expect(store.claimTask(nextRuntime.id)?.id).toBe(nextTask.id);
+    expect(claimWithCurrentRuntime(store, nextRuntime.id)?.id).toBe(nextTask.id);
     const nextReport = await reportFrame(store, "task.workspace", { task_id: nextTask.id, runtime_id: nextRuntime.id,
         root_path: `/home/next/.remi/multiremi/workspaces/${issue.key}`,
         branch_name: `agent/${issue.key}`,
@@ -208,7 +209,7 @@ describe("Multiremi API — daemon endpoints", () => {
     const agent = store.createAgent({ name: "Intake PM", provider: "claude" });
     const issue = createResponsibleTestIssue(store, { title: "Triage request", workspaceId: "local", issueKind: "intake" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, taskKind: "quick_create", prompt: "triage" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const app = createMultiremiApp({ store });
 
     const report = await reportFrame(store, "task.workspace", { task_id: task.id, runtime_id: runtime.id,
@@ -1086,7 +1087,7 @@ describe("Multiremi API — daemon endpoints", () => {
     const lease = await app.request(`/api/daemon/tasks/${task.id}/dispatch-lease`, { method: "POST" });
     expect(lease.status).toBe(426);
     expect(await lease.json()).toEqual({ code: "daemon_protocol_upgrade_required", min_version: 2 });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
 
     const start = await reportFrame(store, "task.start", { task_id: task.id,  }, { headers: undefined, authToken: "" });
     expect(start.ok).toBe(true);
@@ -1129,7 +1130,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(terminalFailBody.result).toEqual(completeBody.result);
 
     const branchAliasTask = store.createTask({ agentId: agent.id, prompt: "branch alias should not work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(branchAliasTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(branchAliasTask.id);
     expect((await reportFrame(store, "task.start", { task_id: branchAliasTask.id })).ok).toBe(true);
     expect(store.getTask(branchAliasTask.id)?.status).toBe("running");
     const branchAliasComplete = await completeTurn(store,branchAliasTask.id,{output:"branch alias",branch_name:"https://example.test/pull/branch-alias"});
@@ -1139,7 +1140,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(store.getTask(branchAliasTask.id)?.branchName).not.toBe("https://example.test/pull/branch-alias");
 
     const failingTask = store.createTask({ agentId: agent.id, prompt: "fail me" });
-    expect(store.claimTask(runtime.id)?.id).toBe(failingTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(failingTask.id);
     store.recordTaskOffered(failingTask.id, runtime.id);
     const fail = await reportFrame(store, "task.fail", { task_id: failingTask.id, error: "boom",
         failure_reason: "codex_semantic_inactivity",
@@ -1160,7 +1161,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(failedTask?.completedAt).toBe(failedTask?.failedAt);
 
     const camelReasonTask = store.createTask({ agentId: agent.id, prompt: "camel reason should not work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(camelReasonTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(camelReasonTask.id);
     store.recordTaskOffered(camelReasonTask.id, runtime.id);
     const camelReasonFail = await reportFrame(store, "task.fail", { task_id: camelReasonTask.id, error: "camel boom", failureReason: "codex_semantic_inactivity" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
     expect(camelReasonFail.ok).toBe(true);
@@ -1186,7 +1187,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(await waitQueued.json()).toEqual({ error: "mark task waiting_local_directory: no rows in result set" });
 
     // PR 6 §2.8: a waiting task takes a new reason when its folder's holder parks.
-    const waitingTask = store.claimTask(runtime.id)!;
+    const waitingTask = claimWithCurrentRuntime(store, runtime.id)!;
     expect(waitingTask.id).toBe(queuedTask.id);
     const markWaiting = (reason: string) => app.request(`/api/daemon/tasks/${waitingTask.id}/wait-local-directory`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }),
@@ -1243,10 +1244,10 @@ describe("Multiremi API — daemon endpoints", () => {
     const waiting = store.createTask({ agentId: waitingAgent.id, issueId: waitingIssue.id, prompt: "waiting" });
     const app = createMultiremiApp({ store });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(running.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(running.id);
     store.pinTaskSession(running.id, "sess-running", "/tmp/running");
     store.startTask(running.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(waiting.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(waiting.id);
     store.markTaskWaitingLocalDirectory(waiting.id, "/tmp/project");
 
     // Exercise this HTTP contract directly. The runtime.ready fixture also
@@ -1393,7 +1394,7 @@ describe("Multiremi API — daemon endpoints", () => {
     const issue = createResponsibleTestIssue(store, { title: "GC issue", workspaceId: "local" });
     const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", title: "GC chat" });
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "quick create gc" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const completedTask = store.completeTask(task.id, { output: "done" });
 

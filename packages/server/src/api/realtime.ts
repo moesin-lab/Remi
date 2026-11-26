@@ -3,6 +3,8 @@
 // authorizers. Moved verbatim out of api/helpers.ts by the D5 split; the
 // WebSocket upgrade wiring itself stays in api/server.ts.
 import { hasJwtWorkspaceAccess, verifyJwtToken } from "./helpers.js";
+import { jwtDigestIsCurrent } from './helpers/jwt.js';
+import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
 import type {
   BrowserUserWebSocketRegistry,
   BrowserWebSocketRegistry,
@@ -19,6 +21,30 @@ import type {
   MultiremiTask,
 } from "@multiremi/contracts/types.js";
 
+
+export function createJwtBrowserClientGuard(store: MultiremiStore): (client: MultiremiWebSocketClient) => MultiremiWebSocketClient {
+  const clients = new WeakMap<MultiremiWebSocketClient, MultiremiWebSocketClient>();
+  return client => {
+    let guarded = clients.get(client);
+    if (!guarded) {
+      guarded = {
+        data: client.data,
+        sendText(message) {
+          if (client.data.kind === 'browser' && client.data.jwtDigest) {
+            try {
+              if (!jwtDigestIsCurrent(store, client.data.jwtDigest)) { client.close(1008, 'authentication expired'); return; }
+            } catch { client.close(1011, 'authentication unavailable'); return; }
+          }
+          client.sendText(message);
+        },
+        getBufferedAmount: () => client.getBufferedAmount?.() ?? 0,
+        close: (code, reason) => client.close(code, reason),
+      };
+      clients.set(client, guarded);
+    }
+    return guarded;
+  };
+}
 
 export function registerBrowserWebSocketClient(registry: BrowserWebSocketRegistry, client: MultiremiWebSocketClient): void {
   if (client.data.kind !== "browser" || !client.data.authenticated) return;
@@ -394,16 +420,19 @@ export async function authorizeBrowserWebSocketUpgrade(
   authToken: string,
   workspaceId: string,
 ): Promise<
-  | { authenticated: boolean; userId: string | null; accessToken: MultiremiAccessToken | null }
+  | { authenticated: boolean; userId: string | null; accessToken: MultiremiAccessToken | null; jwtDigest?: string }
   | { response: Response }
 > {
   const token = bearerToken(req);
-  if (!token) return { authenticated: false, userId: null, accessToken: null };
+  if (!token) {
+    if (req.headers.has('Authorization')) return { response: Response.json({ error: 'invalid token' }, { status: 401 }) };
+    return { authenticated: false, userId: null, accessToken: null };
+  }
   const authorized = await authorizeBrowserWebSocketToken(token, store, authToken, workspaceId);
   if ("error" in authorized) {
     return { response: Response.json({ error: authorized.error }, { status: authorized.status }) };
   }
-  return { authenticated: true, userId: authorized.userId, accessToken: authorized.accessToken };
+  return { authenticated: true, userId: authorized.userId, accessToken: authorized.accessToken, jwtDigest: authorized.jwtDigest };
 }
 
 export async function authorizeBrowserWebSocketAuthFrame(
@@ -411,7 +440,7 @@ export async function authorizeBrowserWebSocketAuthFrame(
   store: MultiremiStore,
   authToken: string,
   workspaceId: string,
-): Promise<{ userId: string; accessToken: MultiremiAccessToken | null } | { error: string }> {
+): Promise<{ userId: string; accessToken: MultiremiAccessToken | null; jwtDigest?: string } | { error: string }> {
   const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, any> : {};
   const token = cleanString(payload.token);
   if (event.type !== "auth" || !token) return { error: "expected auth message as first frame" };
@@ -426,8 +455,8 @@ export async function authorizeBrowserWebSocketToken(
   authToken: string,
   workspaceId: string,
 ): Promise<
-  | { userId: string; accessToken: MultiremiAccessToken | null }
-  | { error: string; status: 401 | 403 }
+  | { userId: string; accessToken: MultiremiAccessToken | null; jwtDigest?: string }
+  | { error: string; status: 401 | 403 | 503 }
 > {
   if (authToken && token === authToken) return { userId: "local", accessToken: null };
   const accessToken = await store.verifyAccessToken(token);
@@ -443,12 +472,16 @@ export async function authorizeBrowserWebSocketToken(
     }
     return { userId: "local", accessToken };
   }
-  const jwt = verifyJwtToken(token);
+  let jwt;
+  try { jwt = verifyJwtToken(token, store); } catch (error) {
+    if (error instanceof JwtMaterialUnavailable) return { error: 'authentication state unavailable', status: 503 };
+    throw error;
+  }
   if (!jwt) return { error: "invalid token", status: 401 };
   if (!hasJwtWorkspaceAccess(store, jwt.userId, workspaceId)) {
     return { error: "not a member of this workspace", status: 403 };
   }
-  return { userId: "local", accessToken: null };
+  return { userId: "local", accessToken: null, jwtDigest: jwt.jwtDigest };
 }
 
 

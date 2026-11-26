@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
@@ -17,7 +18,7 @@ pendingTurnBackendTests('MUL-493 B4 Chat terminal re-ring', fixture => {
     });
     const first = send('First now request');
     expect(first.message.seq).toBe(1);
-    const attempt = store.claimTask(runtime.id)!;
+    const attempt = claimWithCurrentRuntime(store, runtime.id)!;
     expect(attempt.issueId).toBeNull();
     store.startTask(attempt.id);
     const bridge = store.getDaemonTurnBridge();
@@ -67,7 +68,7 @@ pendingTurnBackendTests('MUL-493 B4 Chat terminal re-ring', fixture => {
       const successor = turns.find(turn => turn.id !== f.first.turn_id)!;
       expect(successor.status).toBe('pending');
       expect(successor.trigger_message_id).toBe(f.late.message.id);
-      const attempt = f.store.claimTask(f.runtime.id)!;
+      const attempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
       expect(attempt.id).toBe(successor.current_attempt_id!);
       f.store.startTask(attempt.id);
       const offer = f.bridge.offerInput(f.store.getTaskWithAgent(attempt.id)!);
@@ -106,7 +107,7 @@ pendingTurnBackendTests('MUL-493 B4 Chat terminal re-ring', fixture => {
     const rings = fixture().db.query("SELECT payload FROM multiremi_system_events WHERE event='re_ring' AND resource_id=?")
       .all(successor.id) as Array<{ payload: string }>;
     expect(rings.map(row => JSON.parse(row.payload).action)).toEqual(['coalesced']);
-    const attempt = f.store.claimTask(f.runtime.id)!;
+    const attempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     f.store.startTask(attempt.id);
     const offer = f.bridge.offerInput(f.store.getTaskWithAgent(attempt.id)!);
     // The successor's member input is the unread steer, then the one released row (the reply sits between).

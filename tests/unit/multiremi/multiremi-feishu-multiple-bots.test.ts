@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
@@ -36,11 +37,13 @@ describe("multiple Feishu bots", () => {
   it("keeps the original config and exposes independent credentials, routes and stop intent", async () => {
     const { store, agents, body, request } = setup();
     expect((await request("feishu-bot", "PUT", body(0))).status).toBe(200);
-    const created = await request("feishu-bots", "POST", body(1));
+    const created = await request("feishu-bots", "POST", { ...body(1), wake_words: ["second"] });
     expect(created.status).toBe(201);
     const second = await created.json();
     expect(second.bot_id).toStartWith("bot_");
     expect(second.name).toBe("Bot 1");
+    expect(store.getFeishuBotDaemonConfig("local", "rt_one")?.wake_words).toEqual([]);
+    expect(store.getFeishuBotDaemonConfig("local", "rt_two")?.wake_words).toEqual(["second"]);
     const bot = store.feishuBotFor(second.bot_id);
     expect(store.getFeishuBotDaemonConfig("local", "rt_two")?.bot_id).toBe(second.bot_id);
     expect(store.getFeishuBotDaemonConfig("local", "rt_one")?.app_secret).toBe("test-secret-0");
@@ -160,7 +163,7 @@ describe("multiple Feishu bots", () => {
       revision: 1, externalMessageId: "om_shared", externalSessionKey: "oc_shared", chatId: "oc_shared", chatType: "p2p", text: "hello", deliveryMode: "native_cot_v1",
     }));
     for (const task of tasks) {
-      expect(store.claimTask("rt_one")?.id).toBe(task.taskId);
+      expect(claimWithCurrentRuntime(store, "rt_one")?.id).toBe(task.taskId);
       store.startTask(task.taskId);
       store.completeTask(task.taskId, { output: `Reply for ${task.agentId}` });
     }

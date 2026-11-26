@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
@@ -151,7 +152,7 @@ describe("Multiremi multi-user auth", () => {
     const issue = createResponsibleTestIssue(store, { title: "secret work", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "x" });
     const runtime = store.registerRuntime({name:"Private trace daemon",provider:"claude"});
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const traces = new InMemoryTraceStore();
     traces.append(task.id,[{type:"item.completed",item:commandItem("cmd_secret","cat ~/.aws/credentials")}]);

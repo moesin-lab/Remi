@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -44,11 +45,11 @@ describe("Chat queues", () => {
     expect(second.task.id).toBe(first.task.id); expect(third.task.id).toBe(first.task.id);
     expect(store.listChatMessages(chat.id).map(message=>message.body)).toEqual(["first input","later input","third input"]);
     expect(store.listConversationLogEntries(chat.id).filter(entry=>entry.kind==="turn")).toHaveLength(1);
-    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id); expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id); expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.buildTaskSessionProjection(first.task.id);store.startTask(first.task.id);
     store.completeTask(first.task.id,{output:"first answer",sessionId:"first-provider-session",workDir:"/tmp/first-chat"});
     const next=store.sendChatMessage(chat.id,{content:"next round"});
-    const claimed=store.claimTask(runtime.id)!;
+    const claimed=claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(next.task.id);expect(claimed.sessionId).toBe("first-provider-session");expect(claimed.workDir).toBe("/tmp/first-chat");
     expect(store.getAgent(agent.id)?.maxConcurrentTasks).toBe(4);
   });
@@ -56,11 +57,11 @@ describe("Chat queues", () => {
   it("keeps a resume-unsafe retry cold even without an execution fingerprint", () => {
     const { store, runtime, chat } = setup();
     const first = store.sendChatMessage(chat.id, { content: "warmup" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(first.task.id);
     store.completeTask(first.task.id, { output: "warm", sessionId: "previous-session", workDir: "/tmp/previous" });
     const next = store.sendChatMessage(chat.id, { content: "fails" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(next.task.id);
     const queued = store.sendChatMessage(chat.id, { content: "after retry" });
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET execution_fingerprint = NULL WHERE id = ?", [next.task.id]);
@@ -72,7 +73,7 @@ describe("Chat queues", () => {
     expect(store.getPendingChatTask(chat.id)?.id).toBe(retry.id);
     expect(queued.task.id).toBe(next.task.id);
     expect(store.listQueuedChatTasks(chat.id)).toEqual([]);
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(retry.id);
     expect(claimed.sessionId).toBeNull();
     expect(claimed.workDir).toBeNull();
@@ -86,7 +87,7 @@ describe("Chat queues", () => {
   it("preserves explicit runtime and session input on tasks created outside Chat messages", () => {
     const { store, agent, runtime, chat } = setup();
     const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, prompt: "explicit", runtimeId: runtime.id, sessionId: "explicit-session", workDir: "/tmp/explicit" });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(task.id);
     expect(claimed.sessionId).toBe("explicit-session");
     expect(claimed.workDir).toBe("/tmp/explicit");
@@ -109,7 +110,7 @@ describe("Chat queues", () => {
     expect(new MultiremiStore(db!).getChatSession(chat.id)?.pinned).toBe(true);
     for (let index = 0; index < 2; index++) {
       const sent = store.sendChatMessage(chat.id, { content: `input ${index}` });
-      store.claimTask(runtime.id);
+      claimWithCurrentRuntime(store, runtime.id);
       store.startTask(sent.task.id);
       store.completeTask(sent.task.id, { output: `answer ${index}`, sessionId: `session-${index}` });
     }
@@ -119,11 +120,11 @@ describe("Chat queues", () => {
     expect(store.getChatSession(chat.id)?.unreadCount).toBe(0);
     const first = store.sendChatMessage(chat.id, { content: "running" });
     const second = store.sendChatMessage(chat.id, { content: "waiting" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.updateChatSession(chat.id, { status: "archived" });
     expect(store.getTask(first.task.id)?.status).toBe("cancelled");
     expect(store.getTask(second.task.id)?.status).toBe("cancelled");
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     const app = createMultiremiApp({ store });
     const archived = await app.request("/api/chat/sessions?status=archived");
     expect((await archived.json()).map((entry: any) => entry.id)).toEqual([chat.id]);
@@ -142,7 +143,7 @@ describe("Chat queues", () => {
     const { store, runtime, chat } = setup();
     const first = store.sendChatMessage(chat.id, { content: "running" });
     const second = store.sendChatMessage(chat.id, { content: "waiting" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(first.task.id);
 
     const events: Array<{ type: string; inTransaction: boolean }> = [];
@@ -164,7 +165,7 @@ describe("Chat queues", () => {
     // Delete path: same contract.
     const other = setup();
     const one = other.store.sendChatMessage(other.chat.id, { content: "running" });
-    other.store.claimTask(other.runtime.id);
+    claimWithCurrentRuntime(other.store, other.runtime.id);
     other.store.startTask(one.task.id);
     const deletedEvents: Array<{ type: string; inTransaction: boolean }> = [];
     const unsubscribeDelete = other.store.onWorkspaceEvent((event) => {
@@ -184,7 +185,7 @@ describe("Chat queues", () => {
   it("drops the chat-cancel queue when the archive transaction rolls back", () => {
     const { store, runtime, chat } = setup();
     const first = store.sendChatMessage(chat.id, { content: "running" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(first.task.id);
 
     const events: Array<{ type: string; action: string }> = [];
@@ -226,7 +227,7 @@ describe("Chat queues", () => {
     const { store, runtime, chat } = setup();
     const first = store.sendChatMessage(chat.id, { content: "running" });
     const second = store.sendChatMessage(chat.id, { content: "waiting" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(first.task.id);
     const observed: Array<{ deleted: boolean; statuses: string[] }> = [];
     store.onTaskEvent(({ type }) => {
@@ -239,7 +240,7 @@ describe("Chat queues", () => {
     expect(second.task.id).toBe(first.task.id);
     expect(observed).toEqual([{deleted:true,statuses:["cancelled","cancelled"]}]);
     expect(store.getTask(second.task.id)?.chatSessionId).toBe(chat.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(() => store.sendChatMessage(chat.id, { content: "late" })).toThrow("Chat session not found");
   });
 
@@ -247,7 +248,7 @@ describe("Chat queues", () => {
   it("keeps same-millisecond messages and previews in insertion order through the canonical message route", async () => {
     const { store, runtime, chat } = setup();
     const first = store.sendChatMessage(chat.id, { content: "first" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(first.task.id);
     store.completeTask(first.task.id, { output: "answer", sessionId: "ordered-session" });
     const answer = store.listChatMessages(chat.id)[1]!;
@@ -307,7 +308,7 @@ pendingTurnBackendTests("Chat queue unified API", fixture => {
     const chat = store.createChatSession({ agentId: agent.id });
     const first = store.createTask({ agentId: agent.id, chatSessionId: chat.id, prompt: "restore explicit input",
       runtimeId: runtime.id, sessionId: "explicit-session", workDir: "/tmp/explicit" });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(first.id);
     expect(claimed.runtimeId).toBe(runtime.id);
     expect(claimed.sessionId).toBe("explicit-session");
@@ -316,7 +317,7 @@ pendingTurnBackendTests("Chat queue unified API", fixture => {
     store.startTask(first.id);
     store.completeTask(first.id, { output: "restored", sessionId: "completed-session", workDir: "/tmp/completed" });
     const next = store.sendChatMessage(chat.id, { body: "continue" });
-    const resumed = store.claimTask(runtime.id)!;
+    const resumed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(resumed.id).toBe(next.task.id);
     expect(resumed.sessionId).toBe("completed-session");
     expect(resumed.workDir).toBe("/tmp/completed");

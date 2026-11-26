@@ -53,6 +53,88 @@ export const EMPTY_PLATFORM_PROMPT_TEMPLATE: PlatformPromptTemplatePreview = {
   sha256: { instructions: "", input: "" },
 };
 
+export const SystemPromptSlotsSchema = z.object({
+  common: z.string(),
+  code_delivery: z.string(),
+  chat_delivery: z.string(),
+  issue_delivery: z.string(),
+  finishing: z.string(),
+}).loose();
+
+export const SystemPromptDocumentSchema = z.object({
+  id: z.string().nullable(),
+  key: z.string(),
+  workspaceId: z.string(),
+  revision: z.number().int().nonnegative(),
+  currentVersionId: z.string().nullable(),
+  mode: z.string(),
+}).loose();
+
+export const SystemPromptDefaultSnapshotSchema = z.object({
+  revision: z.string(),
+  contentHash: z.string(),
+  content: SystemPromptSlotsSchema,
+}).loose();
+
+export const SystemPromptLimitsSchema = z.object({
+  maxCodePoints: z.number().int().positive(),
+}).loose();
+
+export const SystemPromptStateSchema = z.object({
+  document: SystemPromptDocumentSchema,
+  content: SystemPromptSlotsSchema,
+  currentDefault: SystemPromptDefaultSnapshotSchema,
+  baseDefault: SystemPromptDefaultSnapshotSchema,
+  defaultUpdated: z.boolean(),
+  limits: SystemPromptLimitsSchema,
+}).loose();
+
+export const SystemPromptActorSchema = z.object({
+  type: z.string(),
+  operatorId: z.string().nullable().default(null),
+  userId: z.string().nullable().default(null),
+  displayName: z.string().nullable().default(null),
+}).loose();
+
+export const SystemPromptVersionSummarySchema = z.object({
+  id: z.string(),
+  documentId: z.string(),
+  workspaceId: z.string(),
+  versionNumber: z.number().int().nonnegative(),
+  mode: z.string(),
+  operation: z.string(),
+  contentHash: z.string(),
+  baseDefaultRevision: z.string(),
+  restoredFromVersionId: z.string().nullable().default(null),
+  parentVersionId: z.string().nullable().default(null),
+  actor: SystemPromptActorSchema,
+  createdAt: z.string(),
+  changeNote: z.string().nullable().default(null),
+  requestId: z.string().nullable().default(null),
+  isCurrent: z.boolean(),
+}).loose();
+
+export const SystemPromptVersionDetailSchema = SystemPromptVersionSummarySchema.extend({
+  content: SystemPromptSlotsSchema,
+  baseDefaultSnapshot: SystemPromptSlotsSchema.nullable().default(null),
+}).loose();
+
+export const SystemPromptVersionsPageSchema = z.object({
+  versions: z.array(SystemPromptVersionSummarySchema),
+  nextCursor: z.string().nullable().default(null),
+}).loose();
+
+export const SystemPromptMutationResponseSchema = SystemPromptStateSchema.extend({
+  version: SystemPromptVersionDetailSchema,
+  replayed: z.boolean().default(false),
+}).loose();
+
+export const SystemPromptPreviewResponseSchema = PlatformPromptTemplatePreviewSchema.extend({
+  content: SystemPromptSlotsSchema,
+  scenario: z.string().default("issue"),
+  excludesLocalContext: z.boolean().default(true),
+}).loose();
+
 const BotMenuBehaviorSchema = z.object({
   type: z.enum(["target", "event_key", "send_message"]),
   url: z.string().optional(),

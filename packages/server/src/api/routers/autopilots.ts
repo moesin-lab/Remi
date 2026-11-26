@@ -54,7 +54,7 @@ import { listWorkspaceRepositories } from "../helpers/repositories.js";
 /** Task and daemon credentials cannot grant (or revoke) a cross-Chat delivery capability. */
 function autopilotDeliveryInput(c: Context, store: RouterDeps["store"], input: CreateAutopilotInput | UpdateAutopilotInput, workspaceId: string): UpdateAutopilotInput | Response {
   if (!hasRequestField(input, "deliveryChatSessionId", "delivery_chat_session_id")) return { deliveryAuthorizedBy: undefined };
-  if (!isHumanOperatorRequest(c)) return c.json({ error: "Autopilot delivery requires a human operator" }, 403);
+  if (!isHumanOperatorRequest(c)) return c.json({ error: "Autopilot delivery requires a human operator", code: "autopilot_delivery_human_required" }, 403);
   if (input.deliveryChatSessionId !== undefined && input.delivery_chat_session_id !== undefined
     && input.deliveryChatSessionId !== input.delivery_chat_session_id) return c.json({ error: "Conflicting Autopilot delivery targets" }, 400);
   const target = input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id;
@@ -167,6 +167,25 @@ function taskAutopilotTriggerResponseOptions(
 
 export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
   const { store, scheduler } = deps;
+
+  app.get("/api/autopilot-delivery-targets", (c) => {
+    if (!isHumanOperatorRequest(c)) {
+      return c.json({ error: "Autopilot delivery requires a human operator", code: "autopilot_delivery_human_required" }, 403);
+    }
+    const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    if (denied) return denied;
+    const targets = store.listChatSessions(workspaceId, { origin: "user" })
+      .filter((session) => session.status === "active"
+        && !(loadChatSessionForCurrentUser(c, store, session.id) instanceof Response))
+      .map((session) => ({
+        id: session.id,
+        title: session.title,
+        channel: store.isFeishuTransportChatSession(session.id) ? "feishu" : "web_chat",
+      }));
+    return c.json({ targets });
+  });
 
   app.get("/api/multiremi/autopilots", (c) => {
     const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId"));

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { InMemoryDaemonTraceReader, type DaemonTraceReader } from "@multiremi/api/trace/daemon-trace-reader.js";
 import { InMemoryTraceStore } from "@multiremi/worker/trace-store.js";
@@ -241,14 +242,14 @@ describe("TraceReader states and hot routing", () => {
     const runtime = store.registerRuntime({ id: "rt_pointer", name: "Pointer runtime", provider: "codex", workspaceId: "local" });
     const agent = store.createAgent({ name: "Pointer agent", provider: "codex", workspaceId: "local", runtimeId: runtime.id });
     const emptyTask = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "empty" });
-    expect(store.claimTask(runtime.id)?.id).toBe(emptyTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(emptyTask.id);
     expect(store.getTaskTrace(emptyTask.id)).toMatchObject({ location: "daemon", runtimeId: runtime.id });
     store.startTask(emptyTask.id);
     store.completeTask(emptyTask.id, { output: "done", traceEventCount: 0 });
     expect(store.getTaskTrace(emptyTask.id)).toMatchObject({ location: "none", runtimeId: null });
 
     const abandoned = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "abandon" });
-    expect(store.claimTask(runtime.id)?.id).toBe(abandoned.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(abandoned.id);
     store.markTaskTraceLost(abandoned.id);
     // The lost row keeps its runtime: usage accounting still attributes the task to it.
     expect(store.getTaskTrace(abandoned.id)).toMatchObject({ location: "lost", runtimeId: runtime.id });
@@ -262,7 +263,7 @@ describe("TraceReader states and hot routing", () => {
     const claim = (runtimeId: string, prompt: string) => {
       const agent = store.createAgent({ name: `Agent ${prompt}`, provider: "codex", workspaceId: "local", runtimeId });
       const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt });
-      expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id);
       return task.id;
     };
     const lostTask = claim(gone.id, "gone");
@@ -325,7 +326,7 @@ describe("TraceReader states and hot routing", () => {
     const runtime = store.registerRuntime({ id: "rt_missing_pointer", name: "Desktop daemon", provider: "codex", workspaceId: "local" });
     const agent = store.createAgent({ name: "Pointer gap", provider: "codex", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "running" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     const reader = new TraceReader({ store, daemon: new InMemoryDaemonTraceReader(() => null), getPointer: () => null });
     expect(await reader.readTurn(task.id)).toMatchObject({
       state: "unreachable", reason: "pointer_missing", runtime_id: runtime.id, runtime_name: "Desktop daemon",

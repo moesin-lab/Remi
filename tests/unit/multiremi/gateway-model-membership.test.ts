@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 import { createResponsibleTestIssue } from './helpers.js';
@@ -134,13 +135,13 @@ describe("Codex native model membership through API and dispatch", () => {
       expect(dispatches).toEqual([]);
 
       const runnable = store.createTask({ agentId: allowed.id, prompt: "Do not starve behind unavailable model" });
-      expect(store.claimTask(runtime.id)?.id).toBe(runnable.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(runnable.id);
       expect(store.getTask(waiting.id)?.status).toBe("queued");
       expect(dispatches).toEqual([runnable.id]);
 
       await discover(inventory);
       expect(store.runtimeCanRunAgent(runtime, saved)).toBe(true);
-      const resumed = store.claimTask(runtime.id);
+      const resumed = claimWithCurrentRuntime(store, runtime.id);
       expect(resumed?.id).toBe(waiting.id);
       expect(resumed?.agent?.model).toBe("inventory-only-route");
       expect(resumed?.agent?.thinkingLevel).toBeFalsy();
@@ -158,10 +159,10 @@ describe("Codex native model membership through API and dispatch", () => {
     await discover(inventory);
     const agent = store.createAgent({ name: "Lost claim response", provider: "codex", model: "inventory-only-route" });
     const task = store.createTask({ agentId: agent.id, prompt: "Not started" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     await discover();
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
     expect(store.getAgent(agent.id)?.model).toBe("inventory-only-route");
   });
@@ -213,7 +214,7 @@ describe("Codex native model membership through API and dispatch", () => {
         expect(allowed.status).toBe(201);
         const agent = await allowed.json();
         const task = store.createTask({ agentId: agent.id, prompt: "Run actual fallback member" });
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         store.startTask(task.id);
         store.heartbeatRuntime(runtime.id);
         expect(store.getTask(task.id)?.status).toBe("running");
@@ -221,7 +222,7 @@ describe("Codex native model membership through API and dispatch", () => {
       store.updateRuntimeModels(runtime.id, inventory.map(id => ({ id, label: id, provider: "openai", default: false,
         catalog: { status: "ready" as const } })));
       await discover(inventory);
-      expect(store.claimTask(runtime.id)?.id).toBe(waiting.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(waiting.id);
     });
   }
 
@@ -244,7 +245,7 @@ describe("Codex native model membership through API and dispatch", () => {
       const saved = store.createAgent(selected);
       const task = store.createTask({ agentId: saved.id, prompt: "Must wait" });
       expect(store.runtimeCanRunAgent(runtime, saved)).toBe(false);
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
       expect(store.getTask(task.id)?.status).toBe("queued");
     }
   });
@@ -274,7 +275,7 @@ describe("Codex native model membership through API and dispatch", () => {
         const saved = store.createAgent(selection);
         const waiting = store.createTask({ agentId: saved.id, prompt: "Wait for authoritative refresh" });
         expect(store.runtimeCanRunAgent(runtime, saved)).toBe(false);
-        expect(store.claimTask(runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
         expect(store.getTask(waiting.id)?.status).toBe("queued");
       }
     } finally { release(); }
@@ -296,6 +297,6 @@ describe("Codex native model membership through API and dispatch", () => {
     expect(response.status).toBe(201);
     const agent = await response.json();
     const task = store.createTask({ agentId: agent.id, prompt: "Keep Claude gateway behavior" });
-    expect(store.claimTask(claude.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(task.id);
   });
 });

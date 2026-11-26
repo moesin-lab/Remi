@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { it, expect } from 'bun:test';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
@@ -21,7 +22,7 @@ pendingTurnBackendTests('MUL-506 actual fallback replacement QA', (fixture, back
             });
             const issue = createResponsibleTestIssue(store, { title: 'Fallback same-turn recovery', assigneeType: 'agent', assigneeId: agent.id });
             const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: 'Finish original instructions after fallback' });
-            expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+            expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
             store.startTask(task.id);
             const bridge = store.getDaemonTurnBridge();
             const scope = { workspaceId: 'local', runtimeId: runtime.id, daemonId: runtime.daemonId! };
@@ -46,7 +47,7 @@ pendingTurnBackendTests('MUL-506 actual fallback replacement QA', (fixture, back
             expect(store.listTurns({ workspace_id: 'local', issue_id: issue.id })).toHaveLength(1);
             expect(store.getIssue(issue.id)?.status).toBe(before.status);
             expect(store.getIssue(issue.id)?.updatedAt).toBe(before.updatedAt);
-            const claimed = store.claimTask(runtime.id);
+            const claimed = claimWithCurrentRuntime(store, runtime.id);
             expect(claimed?.id).toBe(replacement.id);
             expect(store.getIssue(issue.id)?.status).toBe(before.status);
             store.startTask(replacement.id);

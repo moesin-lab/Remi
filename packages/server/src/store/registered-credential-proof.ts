@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { serializeRootDeliveryTuple } from '../worker/root-delivery-envelope.js';
 import { assertUnrevokedAncestry } from './authority-provenance.js';
+import { JwtMaterials, type JwtSigningDomain } from './jwt-materials.js';
+import { approvedAttemptSources } from './task-authority.js';
 import { readCurrentMaterialBinding, type MaterialIdentity } from './credential-version-bindings.js';
 import type { SqlDatabase } from './db/postgres.js';
 import type { CredentialOrigin, CredentialProof } from './root-authority-contract.js';
@@ -15,7 +17,7 @@ interface Evidence {
 
 export interface CurrentMaterial extends CredentialOrigin {
   readonly subject: MaterialIdentity['subject'];
-  readonly type: 'task' | 'pat';
+  readonly type: 'task' | 'pat' | 'jwt';
   readonly purpose: string;
   readonly attemptId: string | null;
   readonly expiresAtMs: number;
@@ -23,8 +25,21 @@ export interface CurrentMaterial extends CredentialOrigin {
 
 export class RegisteredCredentialProofs {
   private readonly proofs = new WeakMap<CredentialProof, Evidence>();
+  private readonly jwtProofs = new WeakMap<CredentialProof, { digest: string; signing: JwtSigningDomain; subjectId: string;
+    locator: { credential_id: string; authority_node_id: string } }>();
 
   constructor(private readonly db: SqlDatabase) {}
+
+  verifyJwt(raw: string, signing: JwtSigningDomain): CredentialProof {
+    const identity = new JwtMaterials(this.db).validate(raw, signing);
+    if (!identity) return {kind:'invalid'};
+    const material = this.db.query('SELECT credential_id,material_version,authority_node_id FROM multiremi_jwt_materials WHERE compact_digest=?').get(identity.digest);
+    if (!material) return {kind:'invalid'};
+    const proof = Object.freeze({kind:'dependent', proofVersion:Object.freeze({id:material.credential_id,version:Number(material.material_version)})}) as CredentialProof;
+    this.jwtProofs.set(proof, {digest:identity.digest, signing:{...signing}, subjectId:identity.userId,
+      locator:{credential_id:material.credential_id,authority_node_id:material.authority_node_id}});
+    return proof;
+  }
 
   verify(raw: string | null): CredentialProof {
     if (raw === null) return {kind:'absent'};
@@ -51,14 +66,40 @@ export class RegisteredCredentialProofs {
 
   plan(proof: CredentialProof) {
     const evidence = this.proofs.get(proof);
-    if (!evidence) throw new SecurityAbort('root_authority_revoked');
+    const jwt = this.jwtProofs.get(proof);
+    if (!jwt && !evidence) throw new SecurityAbort('root_authority_revoked');
     const row = this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get();
     if (!row) throw new SecurityAbort('security_state_unavailable');
-    return {expectedRevision:Number(row.security_revision),workspaceIds:[],numberKeys:[],domainTargets:
-      [`authority:${evidence.nodeId}`,`credential:${evidence.identity.credentialId}`,`grant:${evidence.identity.subject.type}:${evidence.identity.subject.id}`].sort()};
+    const subject = jwt ? {type:'user',id:jwt.subjectId} : evidence!.identity.subject;
+    const targets = jwt ? [`authority:${jwt.locator.authority_node_id}`, `jwt:${jwt.locator.credential_id}`]
+      : [`authority:${evidence!.nodeId}`,`credential:${evidence!.identity.credentialId}`];
+    targets.push(`grant:${subject.type}:${subject.id}`);
+    const grant = this.db.query(`SELECT g.authority_node_id FROM multiremi_root_subject_state s JOIN multiremi_root_grants g
+      ON g.grant_id=s.active_grant_id WHERE s.subject_type=? AND s.subject_id=?`).get(subject.type, subject.id);
+    if (grant) targets.push(`authority:${grant.authority_node_id}`);
+    let fenceTerm: string|undefined;
+    if (evidence?.attemptId) {
+      targets.push(`attempt:${evidence.attemptId}`);
+      const entry = this.db.query('SELECT runtime_id,manifest_json FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(evidence.attemptId);
+      if (entry?.runtime_id) targets.push(`management:runtime:${entry.runtime_id}`);
+      if (entry?.manifest_json) {
+        const approval = approvedAttemptSources(this.db,JSON.parse(entry.manifest_json));
+        for (const source of approval?.sources ?? []) targets.push(`authority:${source.id}`);
+        const lease = this.db.query('SELECT fence_term FROM multiremi_current_task_leases WHERE attempt_id=?').get(evidence.attemptId);
+        if (lease) fenceTerm=String(lease.fence_term);
+      }
+    }
+    return {fenceTerm,expectedRevision:Number(row.security_revision),workspaceIds:[],numberKeys:[],domainTargets:[...new Set(targets)].sort()};
   }
 
   requireCurrent(tx: SecurityTx, proof: CredentialProof): CurrentMaterial {
+    const jwt = this.jwtProofs.get(proof);
+    if (jwt) {
+      const current = new JwtMaterials(this.db).currentInTransaction(tx,jwt.digest,jwt.signing,jwt.locator);
+      if (!current || current.userId!==jwt.subjectId) return abortSecurityWrite(this.db,tx,'root_authority_revoked');
+      return {subject:{type:'user',id:jwt.subjectId}, type:'jwt', purpose:'dashboard', attemptId:null,
+        credential:current.credential,familyId:current.familyId,node:current.node, expiresAtMs:current.expiresAtMs};
+    }
     const evidence = this.proofs.get(proof);
     if (!evidence) return abortSecurityWrite(this.db,tx,'root_authority_revoked');
     const identity = evidence.identity;

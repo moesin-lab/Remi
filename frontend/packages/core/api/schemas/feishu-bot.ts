@@ -43,6 +43,7 @@ export const FeishuBotConfigSchema = z.object({
   name: z.string().optional(),
   /** Chat question handler for Feishu Chats without an Issue; Issues never read it. */
   responsible_member_id: z.string().nullable().optional().default(null),
+  wake_words: z.array(z.string()).default([]),
   sender_access_policy: z.enum(["agent", "allowlist"]).optional().catch(undefined),
   configured: z.boolean().default(false),
   workspace_id: z.string().default(""),
@@ -199,6 +200,7 @@ export const FeishuBotRegistrationSessionSchema = z.object({
 }).loose();
 
 export const EMPTY_FEISHU_BOT_CONFIG: FeishuBotConfig = {
+  wake_words: [],
   configured: false,
   workspace_id: "",
   agent_id: null,

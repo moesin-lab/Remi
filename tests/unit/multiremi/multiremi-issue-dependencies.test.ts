@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { acceptTestIssueDelivery, seedHistoricalIssueFacts, testWorkspaceMember } from './helpers.js';
@@ -172,7 +173,7 @@ describe("MUL-452 E3 replay", () => {
       assigneeType: "agent", assigneeId: agent.id,
     });
     const task = store.createTask({ agentId: agent.id, issueId: prerequisite.id, prompt: "Finish intake" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const hooks = spyOn(store, "runCollectedChildStatusChanges").mockImplementation(() => {});
     try { store.completeTask(task.id, { output: "Generated work" }); } finally { hooks.mockRestore(); }
@@ -205,7 +206,7 @@ describe("MUL-452 E3 replay", () => {
     const dependent = createResponsibleTestIssue(store, { title: "Terminal check dependent", status: "backlog",
       blockedBy: [prerequisite.id], assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: prerequisite.id, prompt: "Finish intake" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "Generated work" });
     expect(store.getIssue(prerequisite.id)?.status).toBe('in_review');
@@ -848,8 +849,8 @@ describe("MUL-400 E3 — automatic start", () => {
   }
 
   function runTask(store: Store, runtimeId: string, taskId: string) {
-    let claimed = store.claimTask(runtimeId);
-    while (claimed && claimed.id !== taskId) claimed = store.claimTask(runtimeId);
+    let claimed = claimWithCurrentRuntime(store, runtimeId);
+    while (claimed && claimed.id !== taskId) claimed = claimWithCurrentRuntime(store, runtimeId);
     if (!claimed) throw new Error(`Could not claim task ${taskId}`);
     return store.startTask(taskId);
   }
@@ -1402,8 +1403,8 @@ describe("MUL-400 E3 — task-creation gate", () => {
     const prereq = createDependencyPrerequisite(store, { title: "Prerequisite", status: "in_progress" });
     const dependent = createResponsibleTestIssue(store, { title: "Existing work", status: "in_progress" });
     const first = store.createTask({ agentId: agent.id, issueId: dependent.id, prompt: "run" });
-    let claimed = store.claimTask(runtime.id);
-    while (claimed && claimed.id !== first.id) claimed = store.claimTask(runtime.id);
+    let claimed = claimWithCurrentRuntime(store, runtime.id);
+    while (claimed && claimed.id !== first.id) claimed = claimWithCurrentRuntime(store, runtime.id);
     store.startTask(first.id);
     store.failTask(first.id, { error: "boom" });
 
@@ -1852,7 +1853,7 @@ describe("MUL-400 E3 — fix round 4: atomic automatic start", () => {
     expect(active[0]!.id).toBe(task.id);
     expect(allActivityRows(store, dependent.id, "dependency_auto_started")).toEqual([]);
     expect(allActivityRows(store, dependent.id, "dependency_auto_start_skipped")).toEqual([]);
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     expect(store.getIssue(dependent.id)!.status).toBe("in_progress");
   });
@@ -1980,7 +1981,7 @@ describe("MUL-400 E3 — fix round 4: atomic automatic start", () => {
     const {store,runtime,agent}=storeWithAgent("Automatic waiting retry");
     const issue=createResponsibleTestIssue(store, {title:"Running work",status:"in_progress"});
     const first=store.createTask({agentId:agent.id,issueId:issue.id,prompt:"First",maxAttempts:2});
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);store.startTask(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);store.startTask(first.id);
     const blocker=createResponsibleTestIssue(store, {title:"Blocker",status:"in_progress"});
     store.createIssueDependency(issue.id,{dependsOnIssueId:blocker.id,type:"blocked_by"});
     store.updateIssue(issue.id,{status:"backlog"});

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
@@ -50,8 +51,8 @@ describe("Session workspace leases", () => {
 
     expect(first.holdsWorkspace).toBe(false);
     expect(second.holdsWorkspace).toBe(false);
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
   });
 
   it("claims a workspace Task and a discussion Task concurrently", () => {
@@ -75,8 +76,8 @@ describe("Session workspace leases", () => {
 
     expect(work.holdsWorkspace).toBe(true);
     expect(discussion.holdsWorkspace).toBe(false);
-    expect(store.claimTask(runtime.id)?.id).toBe(work.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(discussion.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(work.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(discussion.id);
   });
 
   it("allows two workspace-holding Sessions to run concurrently", () => {
@@ -98,9 +99,9 @@ describe("Session workspace leases", () => {
       prompt: "Implement B",
     });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     expect(store.getTaskQueueBlocker(second.id)).toBeNull();
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
   });
 
   it("coalesces unread requests before a dispatched turn starts", () => {
@@ -121,11 +122,11 @@ describe("Session workspace leases", () => {
       prompt: "Second",
     });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     expect(second.id).toBe(first.id);
     expect(store.getTask(second.id)?.status).toBe("dispatched");
     expect(store.getTaskQueueBlocker(second.id)).toBeNull();
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.listConversationLogEntries(session.id).filter(row => row.kind === "message")
       .map(row => row.body_md)).toEqual(["First", "Second"]);
   });
@@ -148,8 +149,8 @@ describe("Session workspace leases", () => {
       prompt: "Second",
     });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(second.id).toBe(first.id);
     expect(store.getTask(second.id)?.status).toBe("dispatched");
     expect(store.getTaskQueueBlocker(second.id)).toBeNull();
@@ -172,8 +173,8 @@ describe("Session workspace leases", () => {
     expect(first.issueSessionId).toBe(store.getOrCreateDefaultIssueSession(issue.id).id);
     expect(second.issueSessionId).toBe(first.issueSessionId);
     expect(second.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(second.id)?.status).toBe("dispatched");
   });
 });

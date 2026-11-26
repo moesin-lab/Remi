@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -22,7 +23,7 @@ function fixture(owner: "chat" | "issue" = "chat") {
   const chat = owner === "chat" ? store.createChatSession({ agentId: leader.id }) : null;
   const session = store.createIssueSession(issue.id, { chatId: chat?.id, title: "Concurrent delivery" });
   const main = store.createTask({ agentId: leader.id, issueId: issue.id, issueSessionId: session.id, prompt: "coordinate" });
-  expect(store.claimTask(runtime.id)?.id).toBe(main.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(main.id);
   store.buildTaskSessionProjection(main.id);
   store.startTask(main.id);
   const delegate = (agentId: string, delegationId: string) => store.createTask({
@@ -66,8 +67,8 @@ describe("parallel agent execution", () => {
     const f = fixture("issue");
     const first = f.delegate(f.worker.id, "dlg_first");
     const second = f.delegate(f.worker.id, "dlg_second");
-    f.store.claimTask(f.runtime.id);
-    f.store.claimTask(f.runtime.id);
+    claimWithCurrentRuntime(f.store, f.runtime.id);
+    claimWithCurrentRuntime(f.store, f.runtime.id);
     f.store.startTask(first.id);
     f.store.startTask(second.id);
     f.store.createIssueComment(f.issue.id, { taskId: first.id, authorType: "agent", authorId: f.worker.id, body: "first answer" });
@@ -84,9 +85,9 @@ describe("parallel agent execution", () => {
     const next = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, issueSessionId: f.session.id, prompt: "follow up" });
     const worker = f.delegate(f.worker.id, "dlg_work");
     const qa = f.delegate(f.qa.id, "dlg_qa");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(worker.id);
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(qa.id);
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(worker.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(qa.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
     expect(f.store.getTaskQueueBlocker(worker.id)).toBeNull();
     expect(next.id).toBe(f.main.id);
     expect(f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(f.main.id)!).input_messages
@@ -96,15 +97,15 @@ describe("parallel agent execution", () => {
       { seq: f.store.getConversationLogHead(f.main.issueSessionId!)!.headSeq + 1, offset: 0 }, f.main.id);
     readOfferedTurnInput(f.store, f.main.id);
     f.store.completeTask(f.main.id, { output: "delegated" });
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
   });
 
   it("isolates two delegations to the same agent, including continuation checkpoints", () => {
     const f = fixture();
     const first = f.delegate(f.worker.id, "dlg_one");
     const second = f.delegate(f.worker.id, "dlg_two");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(first.id);
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(second.id);
     expect(f.store.buildTaskSessionProjection(first.id)?.mode).toBe("bootstrap");
     f.store.buildTaskSessionProjection(second.id);
     f.store.startTask(first.id);
@@ -116,7 +117,7 @@ describe("parallel agent execution", () => {
     expect(f.store.getSessionAgentLane(session, f.worker.id, "dlg_two")?.providerSessionId).toBe("provider_two");
     expect(f.store.getSessionAgentLane(session, f.worker.id)?.providerSessionId).toBeNull();
     const continued = f.delegate(f.worker.id, "dlg_one");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(continued.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(continued.id);
     expect(f.store.getTask(continued.id)?.sessionId).toBe("provider_one");
     expect(f.store.buildTaskSessionProjection(continued.id)?.mode).toBe("delta");
     expect(daemonTaskClaimResponse(f.store, f.store.getTaskWithAgent(continued.id)!).execution_scope).toBe("dlg_one");
@@ -125,16 +126,16 @@ describe("parallel agent execution", () => {
   it("serializes a continued task without blocking an independent lane", () => {
     const f = fixture();
     const first = f.delegate(f.worker.id, "dlg_serial");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(first.id);
     f.store.buildTaskSessionProjection(first.id);
     f.store.startTask(first.id);
 
     const continued = f.delegate(f.worker.id, "dlg_serial");
     const independent = f.delegate(f.worker.id, "dlg_independent");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(independent.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(independent.id);
     f.store.buildTaskSessionProjection(independent.id);
     f.store.startTask(independent.id);
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
 
     expect(continued.id).toBe(first.id);
     f.store.recordSessionAgentRangeRead(first.issueSessionId!, f.worker.id, { seq: 1, offset: 0 },
@@ -145,9 +146,9 @@ describe("parallel agent execution", () => {
       sessionId: "provider_serial",
       workDir: "/tmp/serial",
     });
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
     const next = f.delegate(f.worker.id, "dlg_serial");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(next.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(next.id);
     expect(f.store.getTask(next.id)?.sessionId).toBe("provider_serial");
     expect(f.store.buildTaskSessionProjection(next.id)?.mode).toBe("delta");
     expect(f.store.getTask(independent.id)?.status).toBe("running");
@@ -158,15 +159,15 @@ describe("parallel agent execution", () => {
     const f = fixture();
     const first = f.delegate(f.worker.id, "dlg_retry");
     const second = f.delegate(f.worker.id, "dlg_stable");
-    f.store.claimTask(f.runtime.id);
-    f.store.claimTask(f.runtime.id);
+    claimWithCurrentRuntime(f.store, f.runtime.id);
+    claimWithCurrentRuntime(f.store, f.runtime.id);
     f.store.startTask(first.id);
     f.store.startTask(second.id);
     f.store.completeTask(second.id, { output: "stable", sessionId: "stable_provider", workDir: "/tmp/stable" });
     f.store.failTask(first.id, { error: "offline", failureReason: "runtime_offline" });
     const retry = f.store.listTasks().find((task) => task.parentTaskId === first.id && task.attempt === 2)!;
     expect(retry.delegationId).toBe("dlg_retry");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(retry.id);
     expect(daemonTaskClaimResponse(f.store, f.store.getTaskWithAgent(retry.id)!).execution_scope).toBe("dlg_retry");
     expect(f.store.getSessionAgentLane(first.issueSessionId!, f.worker.id, "dlg_stable")?.providerSessionId).toBe("stable_provider");
   });
@@ -175,8 +176,8 @@ describe("parallel agent execution", () => {
     const f = fixture();
     const changed = f.delegate(f.worker.id, "dlg_changed");
     const stable = f.delegate(f.worker.id, "dlg_still_stable");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(changed.id);
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(stable.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(changed.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(stable.id);
     f.store.buildTaskSessionProjection(changed.id);
     f.store.buildTaskSessionProjection(stable.id);
     f.store.startTask(changed.id);
@@ -206,7 +207,7 @@ describe("parallel agent execution", () => {
         agentId: f.worker.id,
         executionScope: "dlg_changed",
       });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(continued.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(continued.id);
     expect(f.store.buildTaskSessionProjection(continued.id)?.mode).toBe("bootstrap");
   });
 
@@ -214,15 +215,15 @@ describe("parallel agent execution", () => {
     const f = fixture();
     const worker = f.delegate(f.worker.id, "dlg_work");
     const qa = f.delegate(f.qa.id, "dlg_qa");
-    f.store.claimTask(f.runtime.id);
-    f.store.claimTask(f.runtime.id);
+    claimWithCurrentRuntime(f.store, f.runtime.id);
+    claimWithCurrentRuntime(f.store, f.runtime.id);
     f.store.startTask(worker.id);
     f.store.startTask(qa.id);
     f.store.completeTask(f.main.id, { output: "waiting for results" });
     f.store.completeTask(worker.id, { output: "worker result" });
     const returned = f.store.getTask(worker.id)!.delegationReturnTaskId!;
     expect(returned).toBeTruthy();
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(returned);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(returned);
     expect(f.store.getTask(qa.id)?.status).toBe("running");
   });
 
@@ -231,9 +232,9 @@ describe("parallel agent execution", () => {
     const runtime = store.registerRuntime({ id: "wiki", name: "wiki", provider: "claude", maxConcurrency: 2 });
     const agent = store.createAgent({ name: "Wiki", provider: "claude", maxConcurrentTasks: 3 });
     const tasks = ["repo1", "repo2", "repo3"].map((prompt) => store.createTask({ agentId: agent.id, prompt }));
-    expect(store.claimTask(runtime.id)?.id).toBe(tasks[0]!.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(tasks[1]!.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(tasks[0]!.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(tasks[1]!.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
   });
 
   it("gives Issue tasks to a baseline daemon without a redundant parallel capability flag", () => {
@@ -243,7 +244,7 @@ describe("parallel agent execution", () => {
     const baseline = f.store.registerRuntime({ id: "baseline", name: "baseline", provider: "claude",
       metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
     const task = f.delegate(f.worker.id, "dlg_new");
-    expect(f.store.claimTask(baseline.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, baseline.id)?.id).toBe(task.id);
     expect(daemonTaskClaimResponse(f.store, f.store.getTaskWithAgent(task.id)!).execution_scope).toBe("dlg_new");
   });
 });

@@ -1,3 +1,5 @@
+import { adoptFixtureOffer } from "../../fixtures/task-offer.js";
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -44,7 +46,7 @@ function fixture() {
   const session = store.getOrCreateDefaultIssueSession(issue.id);
   const claim = () => {
     store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "read context" });
-    const task = store.claimTask(runtime.id)!;
+    const task = claimWithCurrentRuntime(store, runtime.id)!;
     const response = daemonTaskClaimResponse(store, task, store.getTaskTriggerMetadata(task));
     useTaskSessionInput(store, task, response);
     return { task, response, range: JSON.parse((response.session_projection as any).jsonl.split("\n")[0]) };
@@ -71,7 +73,7 @@ test("first upgraded Issue wakeup initializes once from its legacy checkpoint; a
   expect(f.store.getSessionAgentReadProgress(f.session.id, f.agent.id).seq).toBe(legacy.range.to_seq);
   const newcomer = f.store.createAgent({ name: "New reader", provider: "claude", runtimeId: f.runtime.id });
   f.store.createTask({ agentId: newcomer.id, issueId: f.issue.id, prompt: "first visit" });
-  const task = f.store.claimTask(f.runtime.id)!;
+  const task = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   const response = daemonTaskClaimResponse(f.store, task, f.store.getTaskTriggerMetadata(task));
   useTaskSessionInput(f.store, task, response);
   expect(JSON.parse((response.session_projection as any).jsonl.split("\n")[0]).from_seq).toBe(0);
@@ -84,7 +86,7 @@ test("first upgraded Chat wakeup retains its completed legacy projection without
   const f = fixture();
   const chat = f.store.createChatSession({ agentId: f.agent.id });
   const claim = () => {
-    const task = f.store.claimTask(f.runtime.id)!;
+    const task = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     const response = daemonTaskClaimResponse(f.store, task, f.store.getTaskTriggerMetadata(task));
     useTaskSessionInput(f.store, task, response);
     return { task, range: JSON.parse((response.session_projection as any).jsonl.split("\n")[0]) };
@@ -200,7 +202,8 @@ for (const scenario of ["adjacent", "gap", "folded", "budget-folded", "reject"] 
     { masterToken: true, accessToken: null });
   try {
     await session.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2, daemon_id: "reader-daemon",
-      cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer"], runtimes: [{ runtime_id: f.runtime.id, provider: "claude", max_concurrency: 1, active_task_ids: [] }] } }));
+      cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer", "prompt.policy.adopt.v1"], runtimes: [{ runtime_id: f.runtime.id, provider: "claude", max_concurrency: 1, active_task_ids: [] }] } }));
+    await session.handleMessage(JSON.stringify({ v: 2, t: "runtime.ready", rt: f.runtime.id, p: { active_task_ids: [] } }));
     await layer.drain();
     expect(frames).toContainEqual(expect.objectContaining({ t: "welcome" }));
     expect(session.runtimeIds).toContain(f.runtime.id);
@@ -209,6 +212,7 @@ for (const scenario of ["adjacent", "gap", "folded", "budget-folded", "reject"] 
     const offered = frames.find(frame => frame.t === "task.offer")!;
     expect(offered.p.id).toBe(task.id);
     expect(f.store.getSessionAgentReadProgress(f.session.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
+    if (scenario !== "reject") await adoptFixtureOffer(session, f.store, offered, "reader-daemon");
     await session.handleMessage(JSON.stringify({ v: 2, t: "res", re: String(offered.seq), ack: offered.seq,
       p: scenario === "reject" ? { ok: false, code: "capacity" } : { ok: true } }));
     await layer.drain();
@@ -240,7 +244,8 @@ for (const accepted of [false, true]) test(`a recovery bootstrap resets old read
     { masterToken: true, accessToken: null });
   try {
     await connection.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2, daemon_id: "reader-daemon",
-      cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer"], runtimes: [{ runtime_id: f.runtime.id, provider: "claude", max_concurrency: 1, active_task_ids: [] }] } }));
+      cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer", "prompt.policy.adopt.v1"], runtimes: [{ runtime_id: f.runtime.id, provider: "claude", max_concurrency: 1, active_task_ids: [] }] } }));
+    await connection.handleMessage(JSON.stringify({ v: 2, t: "runtime.ready", rt: f.runtime.id, p: { active_task_ids: [] } }));
     await layer.drain();
     const offered = frames.find(frame => frame.t === "task.offer")!;
     expect(offered.p.id).toBe(task.id);
@@ -251,6 +256,7 @@ for (const accepted of [false, true]) test(`a recovery bootstrap resets old read
     expect(range.instruction).not.toContain("你上次读到");
     expect(offered.p.session_projection.jsonl).not.toContain("OLD_CONTEXT");
     expect(f.store.getSessionAgentReadProgress(f.session.id, f.agent.id)).toEqual(previous);
+    if (accepted) await adoptFixtureOffer(connection, f.store, offered, "reader-daemon");
     await connection.handleMessage(JSON.stringify({ v: 2, t: "res", re: String(offered.seq), ack: offered.seq,
       p: accepted ? { ok: true } : { ok: false, code: "capacity" } }));
     await layer.drain();
@@ -278,7 +284,7 @@ for (const accepted of [false, true]) test(`a recovery bootstrap resets old read
 test("Chat range reads use the same persistent high-water independent of provider completion", async () => {
   const f = fixture(); const chat = f.store.createChatSession({ agentId: f.agent.id });
   const task = f.store.sendChatMessage(chat.id, { body: "CHAT_UNREAD" }).task;
-  const claimed = f.store.claimTask(f.runtime.id)!;
+  const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
   const credential = await f.store.createTaskAccessToken(claimed, "local");
   const to = f.store.getConversationLogHead(chat.id)!.headSeq;
   const app = createMultiremiApp({ store: f.store });

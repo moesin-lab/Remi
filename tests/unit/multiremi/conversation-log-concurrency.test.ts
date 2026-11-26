@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue, replayHistoricalTestChildDone } from './helpers.js';
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import type { Database } from "bun:sqlite";
@@ -449,14 +450,14 @@ function verifyFinalReplyReference(db: SqlDatabase, backend: "sqlite" | "pg"): v
   const agent = store.createAgent({ name: "Reply agent", provider: "claude", runtimeId: runtime.id, workspaceId: "local" });
   const issue = createResponsibleTestIssue(store, { title: "Reply reference", workspaceId: "local" });
   const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "reply", workspaceId: "local" });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   store.startTask(task.id);
   store.completeTask(task.id, { output: "Final answer" });
   const comment = store.listIssueComments(issue.id).find(comment=>comment.taskId===task.id)!;
   expect(store.findTurnEntry(task.id)?.metadata.final_entry_id).toBe(comment.id);
 
   const failed = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "retry", workspaceId: "local" });
-  expect(store.claimTask(runtime.id)?.id).toBe(failed.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(failed.id);
   store.startTask(failed.id);
   rejectWrite(db, backend, "multiremi_conversation_log", "INSERT", "NEW.kind = 'message' AND NEW.body_md = 'Blocked answer'");
   store.completeTask(failed.id, { output: "Blocked answer" });
@@ -476,7 +477,7 @@ function startLeaderRound(store: MultiremiStore, runtimeId: string) {
   const issue = createResponsibleTestIssue(store, { title: "Reply commit", workspaceId: "local", assigneeType: "squad", assigneeId: squad.id });
   const session = store.getOrCreateDefaultIssueSession(issue.id);
   const task = store.createSessionTask(session.id, { agentId: leader.id, prompt: "Lead the round" });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   store.startTask(task.id);
   return { issue, task, teammate };
 }
@@ -510,7 +511,7 @@ function verifyReplyCommitsWithFinalEntry(db: SqlDatabase, backend: "sqlite" | "
   const session = store.getOrCreateDefaultIssueSession(issue.id);
   const completeRound = (output: string) => {
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Answer" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output });
     return task;
@@ -630,7 +631,7 @@ function verifyChatTurnTiming(db: SqlDatabase): void {
   const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local" });
   const sent = store.sendChatMessage(chat.id, { content: "Complete me" });
   expect(store.getTurnForAttempt(sent.task.id)?.status).toBe("pending");
-  expect(store.claimTask(runtime.id)?.id).toBe(sent.task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sent.task.id);
   store.startTask(sent.task.id);
   expect(store.findTurnEntry(sent.task.id)?.metadata.status).toBe("running");
   db.transaction(()=>store.createPendingAgentIssueUpdateWithinTransaction(chat.id, "W10 system update"))();
@@ -655,7 +656,7 @@ function verifyChatTurnTiming(db: SqlDatabase): void {
   const failedChat = store.createChatSession({ agentId: agent.id, workspaceId: "local" });
   const failing = store.sendChatMessage(failedChat.id, { content: "Fail once" });
   mutateExecutionFixture(db, "UPDATE multiremi_turn_execution_records SET max_attempts = 1 WHERE id = ?", [failing.task.id]);
-  expect(store.claimTask(runtime.id)?.id).toBe(failing.task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(failing.task.id);
   store.startTask(failing.task.id);
   store.failTask(failing.task.id, { error: "terminal failure", failureReason: "terminal_failure" });
   const failedTurn = store.findTurnEntry(failing.task.id)!;
@@ -672,14 +673,14 @@ function verifyChatTurnTiming(db: SqlDatabase): void {
 
   const retryChat = store.createChatSession({ agentId: agent.id, workspaceId: "local" });
   const initial = store.sendChatMessage(retryChat.id, { content: "Retry me" });
-  expect(store.claimTask(runtime.id)?.id).toBe(initial.task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(initial.task.id);
   store.startTask(initial.task.id);
   store.failTask(initial.task.id, { error: "context overflow", failureReason: "agent_error.context_overflow" });
   const retry = store.getTask(store.getTurnForAttempt(initial.task.id)!.current_attempt_id!)!;
   expect(retry).toBeDefined();
   expect(retry.id).not.toBe(initial.task.id);
   expect(store.findTurnEntry(initial.task.id)?.id).toBe(store.findTurnEntry(retry.id)?.id);
-  expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
   store.startTask(retry.id);
   store.completeTask(retry.id, { output: "Retry answer" });
   const retryTurns = store.listConversationLogEntries(retryChat.id).filter((entry) => entry.kind === "turn");

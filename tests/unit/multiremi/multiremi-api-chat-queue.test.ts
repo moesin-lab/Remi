@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { createMultiremiApp } from '@multiremi/api.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
@@ -30,7 +31,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue API', fixture => {
       const sent = await request('POST', `/api/sessions/${chat.id}/messages`, { body_md: 'Run this', to: { type: 'agent', ref: agent.id } });
       expect(sent.status).toBe(200);
       const { turn_id } = await sent.json();
-      const attempt = store.claimTask(runtime.id)!;
+      const attempt = claimWithCurrentRuntime(store, runtime.id)!;
       store.startTask(attempt.id);
       return { turnId: turn_id as string, attemptId: attempt.id };
     };
@@ -251,7 +252,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue API', fixture => {
     expect(result.released.map((entry: any) => entry.message.metadata.queued_message_id)).toEqual([queued.id]);
     expect(result.released[0].message.attachments).toEqual([]);
     // The agent cancelling its own turn is not a member stop: the queue pauses as turn_ended.
-    const attempt = f.store.claimTask(f.runtime.id)!;
+    const attempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     f.store.startTask(attempt.id);
     await f.enqueue('after agent stop');
     const task = await f.store.createAccessToken({ type: 'task', name: 'Chat task', taskId: attempt.id, agentId: f.agent.id, userId: 'alice', workspaceId: 'local' });

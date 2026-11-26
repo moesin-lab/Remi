@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from "bun:test";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -48,7 +49,7 @@ pendingTurnBackendTests("execution binding catalog maintenance upgrade", (fixtur
     expect(f.store.getRuntimeBindingModelCatalog(group.id, runtime.id)).toEqual(model_catalog);
     const agent = f.store.createAgent({ name: "Discovered automatic model", provider: "codex", executionGroupId: group.id });
     const task = f.store.createTask({ agentId: agent.id, prompt: "Freeze the discovered model after upgrade" });
-    const claimed = f.store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(f.store, runtime.id)!;
     expect(claimed.id).toBe(task.id);
     expect(claimed.executionModel).toBe("discovered-model");
     expect(claimed.codexProfile?.model).toBe("discovered-model");

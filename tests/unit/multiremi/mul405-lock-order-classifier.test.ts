@@ -5,6 +5,8 @@ import {
 } from "@multiremi/store/lock-order-sentinel.js";
 
 const cases: Array<[string, string, LockOrderClass[]]> = [
+  ["expand configuration read", "SHOW standard_conforming_strings", []],
+  ["configuration read followed by domain write", "SHOW standard_conforming_strings; UPDATE multiremi_issues SET id=id", ["D"]],
   ["security state read", "SELECT * FROM multiremi_security_state", []],
   ["security singleton insert", 'INSERT INTO "public"."multiremi_security_state"(singleton) VALUES(1)', ["S"]],
   ["security singleton delete", 'DELETE FROM ONLY public.multiremi_security_state WHERE singleton=1', ["S"]],

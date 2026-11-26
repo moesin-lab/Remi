@@ -14,7 +14,8 @@ export function wakeDaemonWorkspaceEvent(event: PeerWorkspaceEvent, options: {
   // `task:subagents`, is the browser's; the change that caused it already woke
   // the runtime it concerns. Queue invalidation only refreshes the browser;
   // releasing a queued row uses the normal message/enqueued-task notifications.
-  if (event.type === "daemon:heartbeat" || event.type === "activity:created" || event.type === "chat:background_tasks" || event.type === "chat:queue_updated") return;
+  if (event.type === "daemon:heartbeat" || event.type === "activity:created" || event.type === "chat:background_tasks" || event.type === "chat:queue_updated"
+    || event.type === "issue:worktree_changed" || event.type === "project:activity_changed") return;
   const runtime = event.type.startsWith("runtime:") ? event.payload.runtime : undefined;
   const state = event.type.startsWith("agent_plugin:runtime_") ? event.payload.state : undefined;
   const nested = runtime ?? state;
@@ -35,6 +36,7 @@ export function wakeDaemonWorkspaceEvent(event: PeerWorkspaceEvent, options: {
 
   switch (event.type) {
     case "daemon:task_input":
+      if (runtimeId && event.payload.runtime_only === true) { downlink("pending"); return; }
       // Human-request settlement is consumed by both the task runtime and its bot host.
       // They can be different machines; retain the workspace scope for this multi-recipient input.
       options.downlinks.kickWorkspace(event.workspaceId, rt => options.runtimeWorkspace(rt) ?? "local", "pending");

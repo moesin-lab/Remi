@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 /**
@@ -400,8 +401,8 @@ describe.skipIf(!pgAvailable)("MUL-409: in-transaction issue creation on Postgre
       };
     }
     try {
-      if (rollback) expect(() => store.claimTask(runtimeId)).toThrow(/mul409 probe rollback injection/);
-      else expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+      if (rollback) expect(() => claimWithCurrentRuntime(store, runtimeId)).toThrow(/mul409 probe rollback injection/);
+      else expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id);
     } finally {
       StoreContext.prototype.appendIssueActivity = original;
       stop();

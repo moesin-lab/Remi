@@ -56,7 +56,7 @@ export function registerExecutionConfigRoutes(
     return ws instanceof Response ? ws : c.json({ endpoints: store.listExecutionEndpoints(ws) });
   });
   app.post("/api/execution-endpoints/inspect", async (c) => {
-    const body = await readJsonStrict<{ workspace_id?: string; endpoint_id?: string; connection: unknown; api_key?: string;
+    const body = await readJsonStrict<{ workspace_id?: string; endpoint_id?: string; connection?: unknown; api_key?: string;
       operation: "models" | "detect" | "test"; protocol?: EndpointProtocol; model?: string }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const ws = workspace(c, true, body.workspace_id);
@@ -76,9 +76,9 @@ export function registerExecutionConfigRoutes(
       const result = await inspectEndpoint(connection, key?.trim() ?? "", {
         operation: body.operation, protocol: body.protocol, model: body.model, signal: c.req.raw.signal,
       });
-      const persisted = saved && !body.api_key && JSON.stringify(connection) === JSON.stringify(saved.connection);
+      const persisted = saved !== null && body.connection == null && body.api_key === undefined;
       if (persisted) store.recordExecutionEndpointInspection(saved.id, ws, saved.revision, result);
-      return c.json({ inspection: result, persisted: Boolean(persisted) });
+      return c.json({ inspection: result, persisted });
     } catch (error) { return failure(c, error); }
   });
   app.get("/api/execution-endpoints/:id/catalog", (c) => {

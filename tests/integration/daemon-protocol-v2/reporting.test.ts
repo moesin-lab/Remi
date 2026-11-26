@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { ensureUsageAccountingStartup } from "@multiremi/store/usage-migration.js";
 import { turnCompletion } from "../../fixtures/turn-report.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
@@ -26,7 +27,7 @@ function runtime(h: DaemonProtocolHarness): string { return (h.daemon as any).op
 function task(h: DaemonProtocolHarness) {
   const agent = h.store.createAgent({ name: "Report injection", provider: "claude", maxConcurrentTasks: 5 });
   const value = h.store.createTask({ agentId: agent.id, prompt: "report injection" });
-  expect(h.store.claimTask(runtime(h))?.id).toBe(value.id);
+  expect(claimWithCurrentRuntime(h.store, runtime(h))?.id).toBe(value.id);
   return value;
 }
 async function readInput(h: DaemonProtocolHarness, id: string) {
@@ -211,7 +212,7 @@ describe("v2 report reconciliation with real sockets and DB", () => {
           h.store.registerRuntime({ id: "historical-runtime", name: "historical", provider: "claude", daemonId: "dmn_fixture", workspaceId: "local" });
           const agent = h.store.createAgent({ name: "Historical", provider: "claude" });
           const t = h.store.createTask({ agentId: agent.id, prompt: "history" });
-          h.store.claimTask("historical-runtime"); h.store.startTask(t.id); historicalTask = t.id;
+          claimWithCurrentRuntime(h.store, "historical-runtime"); h.store.startTask(t.id); historicalTask = t.id;
           const input = h.store.getDaemonTurnBridge().offerInput(h.store.getTaskWithAgent(t.id)!);
           expect(h.store.getDaemonTurnBridge().rpc("turn.input", { ...input, message_ids: input.input_messages.map(m => m.id) },
             { runtimeId: "historical-runtime", daemonId: "dmn_fixture", workspaceId: "local" })).toMatchObject({ ok: true });
@@ -258,7 +259,7 @@ describe("v2 report reconciliation with real sockets and DB", () => {
     const h=await fixture();await h.startDaemon();
     const agent=h.store.createAgent({name:'Orphaned unread',provider:'claude'});
     const t=h.store.createTask({agentId:agent.id,prompt:'x'.repeat(20000)});
-    expect(h.store.claimTask(runtime(h))?.id).toBe(t.id);h.store.startTask(t.id);
+    expect(claimWithCurrentRuntime(h.store, runtime(h))?.id).toBe(t.id);h.store.startTask(t.id);
     const input=h.store.getDaemonTurnBridge().offerInput(h.store.getTaskWithAgent(t.id)!);
     outbox(h).enqueue(t.id,'turn.complete',{runtime_id:runtime(h),turn_id:input.turn_id,input_to_seq:input.input_to_seq,reply:{body_md:'saved before restart',message_kind:'final'}});
     await outbox(h).waitForTaskDrain(t.id);
@@ -272,7 +273,7 @@ describe("v2 report reconciliation with real sockets and DB", () => {
     const h = await fixture(); await h.startDaemon();
     const agent = h.store.createAgent({ name: "Paused unread", provider: "claude" });
     const t = h.store.createTask({ agentId: agent.id, prompt: "x".repeat(20000) });
-    expect(h.store.claimTask(runtime(h))?.id).toBe(t.id); h.store.startTask(t.id);
+    expect(claimWithCurrentRuntime(h.store, runtime(h))?.id).toBe(t.id); h.store.startTask(t.id);
     const input = h.store.getDaemonTurnBridge().offerInput(h.store.getTaskWithAgent(t.id)!);
     await expect(outbox(h).enqueueAndWait(t.id, "turn.complete", {
       runtime_id: runtime(h), turn_id: input.turn_id, input_to_seq: input.input_to_seq,
@@ -415,7 +416,7 @@ describe("v2 report reconciliation with real sockets and DB", () => {
           h.store.registerRuntime({ id: "offline-runtime", name: "offline", provider: "claude", daemonId: "dmn_fixture", workspaceId: "local" });
           const agent = h.store.createAgent({ name: "Offline executor", provider: "claude" });
           const t = h.store.createTask({ agentId: agent.id, prompt: "already finished" });
-          h.store.claimTask("offline-runtime"); h.store.startTask(t.id); historicalTask = t.id;
+          claimWithCurrentRuntime(h.store, "offline-runtime"); h.store.startTask(t.id); historicalTask = t.id;
           const legacy = new MultiremiTaskReportOutbox({ path: `${h.root}/claude-outbox.db`, canSend: () => false, deliver: async () => {} });
           legacy.enqueue(t.id, "turn.complete", turnCompletion(h.store, t.id, "offline result", {  })); await legacy.close();
         },

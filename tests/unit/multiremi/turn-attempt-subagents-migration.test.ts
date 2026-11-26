@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 /**
  * PR 5: `20261017_turn_attempt_subagents` adds `running_subagents` and
@@ -84,7 +85,7 @@ for (const backend of backends) {
         expect(reopened.findTurnEntry(old.id)!.metadata).toMatchObject({ late_subagents: null });
 
         // After the upgrade the attempt takes a running count and the completion fact.
-        expect(reopened.claimTask(runtime.id)?.id).toBe(old.id);
+        expect(claimWithCurrentRuntime(reopened, runtime.id)?.id).toBe(old.id);
         reopened.startTask(old.id);
         expect(reopened.recordRunningSubagents(old.id, 2)).toBe(true);
         expect(reopened.listTurns({ workspace_id: "local", issue_id: issue.id }).find((row) => row.id === turnId))

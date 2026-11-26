@@ -59,6 +59,17 @@ describe("FeishuBotEndpoints.getFeishuBot (role-polymorphic GET)", () => {
 });
 
 describe("FeishuBotEndpoints control routes", () => {
+  it("saves wake words on the selected bot and rejects a malformed saved list", async () => {
+    const input = { agent_id: "agt", runtime_id: "rt", app_id: "app", domain: "feishu" as const, enabled: true, wake_words: ["Ask"] };
+    const { api, fetchMock } = endpoints({ wake_words: ["Ask"] });
+    expect((await api.saveFeishuBot("ws", input, "second")).wake_words).toEqual(["Ask"]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/workspaces/ws/feishu-bot?bot_id=second", {
+      method: "PUT", body: JSON.stringify(input),
+    });
+    fetchMock.mockResolvedValueOnce({ wake_words: null });
+    await expect(api.saveFeishuBot("ws", { ...input, wake_words: [] }, "second")).rejects.toThrow();
+  });
+
   it("reads and replaces Agent routes without changing transport field names", async () => {
     const response = {
       workspace_id: "ws_1",

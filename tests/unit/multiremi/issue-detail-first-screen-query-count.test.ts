@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue, testWorkspaceMember } from './helpers.js';
 // MUL-385: guards for the Issue detail first-screen routes.
 //
@@ -239,7 +240,7 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     // The child owner's native question climbs to the parent owner first: an Agent stage counts nowhere.
     const runtime = store.registerRuntime({ name: "Count native host", provider: "codex", daemonId: "count-native" });
     const task = store.createTask({ issueId: child.id, agentId: worker.id, prompt: "Ask the parent" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const created = store.getDaemonTurnBridge().rpc("turn.decision", { turn_id: turn.id, attempt_id: task.id,

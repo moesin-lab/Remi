@@ -1,3 +1,5 @@
+import { adoptFixtureOffer, fixtureOfferReceipt } from "../../fixtures/task-offer.js";
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, beforeAll, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -125,9 +127,10 @@ async function fleet(opened?: Awaited<ReturnType<typeof openFleetDatabase>>) {
       { accessToken: null, masterToken: true });
     sessions.push(session);
     await session.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2, daemon_id: `dm_cost_${index}`,
-      cli_version: DAEMON_MIN_CLI_VERSION, caps: [],
+      cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer", "prompt.policy.adopt.v1"],
       runtimes: runtimeIds.slice(index * 2, index * 2 + 2).map((runtime_id, position) => ({ runtime_id,
         provider: position ? "codex" : "claude", max_concurrency: 4, active_task_ids: [], capabilities })) } }));
+    for (const rt of runtimeIds.slice(index * 2, index * 2 + 2)) await session.handleMessage(JSON.stringify({ v: 2, t: "runtime.ready", rt, p: { active_task_ids: [] } }));
     await layer.drain();
     await heartbeat(index, true);
     await layer.drain();
@@ -230,6 +233,8 @@ test("usage reports preserve accounting and replay without runtime history or da
   const f = await fleet();
   const task = f.store.createTask({ agentId: f.agent.id, prompt: "account for isolated work" });
   await f.layer.drain();
+  const offered = f.frames[0]!.find(frame => frame.t === 'task.offer' && frame.p.attempt_id === task.id)!;
+  await adoptFixtureOffer(f.sessions[0]!, f.store, offered, 'dm_cost_0');
   f.store.startTask(task.id);
   await f.layer.drain();
   const snapshots = spyOn(f.store, "pendingRuntimeRequests");
@@ -246,7 +251,7 @@ test("usage reports preserve accounting and replay without runtime history or da
   const report = async (count: number) => {
     const current = seq++;
     await f.sessions[0]!.handleMessage(JSON.stringify({ v: 2, t: "task.usage", rt: f.runtimeIds[0], seq: current,
-      p: { task_id: task.id, usageSnapshot: { version: 2, runId: "cost-run", revision: 1, complete: false, units: units.slice(0, count) } } }));
+      p: { ...fixtureOfferReceipt(f.store, task.id), task_id: task.id, usageSnapshot: { version: 2, runId: "cost-run", revision: 1, complete: false, units: units.slice(0, count) } } }));
     expect(f.frames[0]!.find(frame => frame.t === "res" && frame.re === String(current))?.p).toEqual({ ok: true });
   };
   try {
@@ -289,7 +294,7 @@ test("model changes check only their runtime and empty claims do not hydrate his
     expect(claims.mock.calls.map(args => args[0])).toEqual([f.runtimeIds[0]]);
     expect(historicalAggregates(sql)).toEqual([]);
     const sweep = await countSql(f.database, f.layer, () => {
-      for (const id of f.runtimeIds) expect(f.store.claimTask(id, { supportsBinarySkillFiles: true })).toBeNull();
+      for (const id of f.runtimeIds) expect(claimWithCurrentRuntime(f.store, id, { supportsBinarySkillFiles: true })).toBeNull();
     });
     expect(historicalAggregates(sweep)).toEqual([]);
   } finally { snapshots.mockRestore(); claims.mockRestore(); }

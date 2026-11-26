@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, mutateExecutionFixture, sentTask } from "./unified-test-paths.js";
@@ -7,6 +8,7 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { PostgresSyncDatabase, type SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { IssuesRepo } from "@multiremi/store/repos/issues-repo.js";
+import { IssueWorkspacesRepo } from "@multiremi/store/repos/issue-workspaces-repo.js";
 import { inboxReportBody } from "./inbox-test-assertions.js";
 
 const pgUrl = process.env.MULTIREMI_TEST_POSTGRES_URL;
@@ -303,7 +305,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       store.updateIssue(f.parent.id, { assigneeType: "squad", assigneeId: squad.id });
       store.updateIssue(f.issue.id, { assigneeType: "agent", assigneeId: f.agent.id });
       const leaderTask = store.createTask({ agentId: leader.id, issueId: f.parent.id, prompt: "Coordinate child work" });
-      expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+      expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id);
       store.buildTaskSessionProjection(leaderTask.id);
       store.startTask(leaderTask.id);
       const token = await store.createTaskAccessToken(store.getTask(leaderTask.id)!, "local");
@@ -377,21 +379,21 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       db.run("UPDATE multiremi_issue_workspaces SET runtime_id = NULL, status = 'runtime_offline' WHERE issue_id = ?", [f.issue.id]);
       const before = await graph();
       const observed = observe();
-      const originalRun = db.run;
+      const readWorkspace = IssueWorkspacesRepo.prototype.get;
       let injected = false;
-      db.run = function run(sql, ...params) {
-        const result = originalRun.call(this, sql, ...params);
-        if (failure && sql.includes("SET status = 'cleaned'")) {
+      const readback = spyOn(IssueWorkspacesRepo.prototype, "get").mockImplementation(function (this: IssueWorkspacesRepo, issueId) {
+        const result = readWorkspace.call(this, issueId);
+        if (failure && issueId === f.issue.id && result?.status === "cleaned") {
           injected = true;
           throw new Error("MUL-467 failure after orphan abandonment");
         }
         return result;
-      };
+      });
       resetTransactionDepth();
       try {
         expect((await request(`/api/issues/${f.issue.id}/workspace/abandon`, "POST")).status).toBe(failure ? 500 : 200);
       } finally {
-        db.run = originalRun;
+        readback.mockRestore();
         observed.stop();
       }
       if (failure) {
@@ -405,7 +407,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         expect(rows[0]).toMatchObject({ status: "cleaned", runtime_id: null });
         expect((rows[0] as { cleaned_at: string | null }).cleaned_at).not.toBeNull();
       }
-      expect(observed.events).toEqual([]);
+      expect(observed.events).toEqual(failure ? [] : [{ type: "issue:worktree_changed", inTransaction: false }]);
       assertSingleTransaction();
     });
   });

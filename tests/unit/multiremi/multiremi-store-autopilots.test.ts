@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue, createHistoricalTestIssue, acceptTestIssueDelivery } from './helpers.js';
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
@@ -115,7 +116,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     ]);
 
     store.updateIssue(run.issueId!, { status: "in_progress" });
-    expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(run.taskId!);
     store.startTask(run.taskId!);
     store.completeTask(run.taskId!, { output: "fixed" });
 
@@ -171,12 +172,12 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     store.onWorkspaceEvent((event) => events.push(event));
 
     const completedRun = store.runAutopilot(completedAutopilot.id, { source: "schedule" });
-    expect(store.claimTask(runtime.id)?.id).toBe(completedRun.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(completedRun.taskId!);
     store.startTask(completedRun.taskId!);
     store.completeTask(completedRun.taskId!, { output: "Published 12 project updates.\nNo blockers." });
 
     const failedRun = store.runAutopilot(failedAutopilot.id, { source: "api" });
-    expect(store.claimTask(runtime.id)?.id).toBe(failedRun.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(failedRun.taskId!);
     store.startTask(failedRun.taskId!);
     store.failTask(failedRun.taskId!, { error: "Dependency service unavailable", failureReason: "agent_error" });
 
@@ -279,7 +280,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const issue = createResponsibleTestIssue(store, { title: "Atomic task transition", status: "backlog" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Run atomically" });
     expect(store.getIssue(issue.id)?.status).toBe("todo");
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     db!.run("DELETE FROM multiremi_system_events");
     db!.exec(`
       CREATE TRIGGER reject_system_event_insert
@@ -626,7 +627,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(metricValue(store, "multiremi_autopilot_created_total", { cadence: "manual" })).toBe(1);
 
     const completedRun = store.runAutopilot(autopilot.id, { source: "webhook" });
-    expect(store.claimTask(runtime.id)?.id).toBe(completedRun.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(completedRun.taskId!);
     store.startTask(completedRun.taskId!);
     store.completeTask(completedRun.taskId!, { output: "done" });
 
@@ -662,7 +663,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       createdById: agent.id,
     });
     const failedRun = store.runAutopilot(failingAutopilot.id, { source: "schedule" });
-    expect(store.claimTask(runtime.id)?.id).toBe(failedRun.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(failedRun.taskId!);
     store.startTask(failedRun.taskId!);
     store.failTask(failedRun.taskId!, { error: "task crashed" });
 
@@ -958,7 +959,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const task = store.getTask(run.taskId!)!;
     expect(task.assignmentSourceEventId).toBe(initialEvent.id);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "reviewed" });
     expect(store.listIssueComments(issue.id).some((comment) => comment.taskId === task.id && comment.body === "reviewed"))
@@ -1128,7 +1129,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(1);
 
     // A failed build never blocks a retry.
-    expect(store.claimTask(runtime.id)?.id).toBe(first.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.taskId!);
     store.startTask(first.taskId!);
     store.failTask(first.taskId!, { error: "clone failed" });
     expect(store.getAutopilotRun(first.id)?.status).toBe("failed");
@@ -1137,12 +1138,12 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(retry.deduplicated).toBeUndefined();
 
     // A completed HEAD build targets a moving revision — rebuilds stay allowed.
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.taskId!);
     store.startTask(retry.taskId!);
     store.completeTask(retry.taskId!, { output: "ok" });
     const rebuild = store.runAutopilot(autopilot.id, manualInput);
     expect(rebuild.id).not.toBe(retry.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(rebuild.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(rebuild.taskId!);
     store.startTask(rebuild.taskId!);
     store.completeTask(rebuild.taskId!, { output: "ok" });
 
@@ -1155,7 +1156,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     };
     const pinned = store.runAutopilot(autopilot.id, pinnedInput);
     expect(pinned.deduplicated).toBeUndefined();
-    expect(store.claimTask(runtime.id)?.id).toBe(pinned.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(pinned.taskId!);
     store.startTask(pinned.taskId!);
     store.completeTask(pinned.taskId!, { output: "ok" });
     expect(store.isRepositoryWikiRunPublished(pinned.id)).toBe(false);
@@ -1165,7 +1166,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
 
     // A document attributed to the retry task is store-owned publication
     // evidence, so later delivery for the same revision reuses that run.
-    expect(store.claimTask(runtime.id)?.id).toBe(unpublishedRetry.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(unpublishedRetry.taskId!);
     store.startTask(unpublishedRetry.taskId!);
     store.createRepositoryWikiDoc("local", "repo_x", {
       path: "task-attributed.md",
@@ -1189,7 +1190,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       dedupeKey: "repo_x:incremental_update:def456",
     };
     const noOp = store.runAutopilot(autopilot.id, noOpInput);
-    expect(store.claimTask(runtime.id)?.id).toBe(noOp.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(noOp.taskId!);
     store.startTask(noOp.taskId!);
     store.completeTask(noOp.taskId!, { output: "no changes required" });
     expect(store.isRepositoryWikiRunPublished(noOp.id)).toBe(true);

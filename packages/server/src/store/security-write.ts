@@ -20,6 +20,7 @@ export class SecurityAbort extends Error {
 }
 
 interface Frame {
+  readonly fenceTerm?: string;
   readonly tx: SecurityTx;
   readonly targets: ReadonlySet<string>;
   readonly afterCommit: Array<() => void>;
@@ -79,13 +80,18 @@ export function abortSecurityWrite(db: SqlDatabase, tx: SecurityTx, code: Failur
   return reject(requireActive(db, tx), code);
 }
 
+export function requireSecurityFence(db: SqlDatabase, tx: SecurityTx, term: string): void {
+  const frame = requireActive(db, tx);
+  if (!term || frame.fenceTerm !== term) reject(frame, 'security_tx_invalid');
+}
+
 export function withSecurityWrite<T>(db: SqlDatabase, fenceTerm: string | undefined, plan: SecurityLockPlan,
   callback: (tx: SecurityTx) => T): T {
   if (db.inTransaction !== false || active.has(db)) return reject(active.get(db), 'security_tx_invalid');
   if (db.dialect !== 'sqlite' && db.dialect !== 'postgres') throw new SecurityAbort('security_state_unavailable');
   const workspaces = ordered(plan.workspaceIds);
   const numbers = ordered(plan.numberKeys);
-  const frame: Frame = { tx: Object.freeze({}) as SecurityTx, targets: new Set(ordered(plan.domainTargets)), afterCommit: [] };
+  const frame: Frame = { fenceTerm, tx: Object.freeze({}) as SecurityTx, targets: new Set(ordered(plan.domainTargets)), afterCommit: [] };
   const result = db.transaction(() => {
     if (fenceTerm !== undefined && !db.query(`UPDATE multiremi_live_terms SET term = term
       WHERE scope = 'background_jobs' AND term = ? RETURNING term`).get(fenceTerm)) {

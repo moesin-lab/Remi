@@ -1,11 +1,19 @@
+import { scmOwnershipReady } from "./scm-ownership.js";
+import { listProjectActivity, type ProjectActivityScope } from "./project-activity.js";
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
+import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
+import { RootManagement } from './root-management.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
-import type { SecurityLockPlan } from './security-write.js';
+import { SecurityAbort, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
+import type { AuthorityKernel, AuthorityUse, CredentialProof } from './root-authority-contract.js';
+import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease, type TaskLease } from './task-authority.js';
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
+import { SystemPromptsRepo } from "@multiremi/store/repos/system-prompts-repo.js";
+import type { SystemPromptActor, SystemPromptEditInput, SystemPromptRestoreInput, SystemPromptWriteInput } from "@multiremi/contracts/system-prompt-policy.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
 import { ExecutionEndpointsRepo } from "@multiremi/store/repos/execution-endpoints-repo.js";
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
@@ -536,6 +544,8 @@ export class MultiremiStore {
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
   private accessTokens: AccessTokensRepo;
+  readonly jwtMaterials: JwtMaterials;
+  readonly rootManagement: RootManagement;
   private passwordAccounts: PasswordAccountsRepo;
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
@@ -586,6 +596,7 @@ export class MultiremiStore {
   private runtimes: RuntimesRepo;
   private executionBindingStates: ExecutionBindingStatesRepo;
   private executionProfiles: ExecutionProfilesRepo;
+  private systemPrompts: SystemPromptsRepo;
   private daemonProfiles: DaemonProfilesRepo;
   private runtimeProvisions: RuntimeProvisionsRepo;
   private daemonRetirement: DaemonRetirementRepo;
@@ -613,6 +624,8 @@ export class MultiremiStore {
     this.ctx = new StoreContext(this.db, () => this);
     this.feedback = new FeedbackRepo(this.db);
     this.accessTokens = new AccessTokensRepo(this.db);
+    this.jwtMaterials = new JwtMaterials(this.db);
+    this.rootManagement = new RootManagement(this.db);
     this.issueShares = new IssueSharesRepo(this.db);
     this.notificationChannels = new NotificationChannelsRepo(this.ctx);
     this.notificationDispatcher = new OutboundNotificationDispatcher({
@@ -661,6 +674,7 @@ export class MultiremiStore {
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
     this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
     this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
+    this.systemPrompts = new SystemPromptsRepo(this.ctx);
     this.daemonProfiles = new DaemonProfilesRepo(this.ctx);
     this.runtimeProvisions = new RuntimeProvisionsRepo(this.ctx);
     this.daemonRetirement = new DaemonRetirementRepo(this.ctx);
@@ -691,6 +705,10 @@ export class MultiremiStore {
     return () => {
       this.ctx.taskEnqueuedListeners.delete(listener);
     };
+  }
+
+  listProjectActivity(scope: ProjectActivityScope, params: Record<string,string>) {
+    return listProjectActivity(this.db, scope, params);
   }
 
   onTaskEvent(listener: TaskEventListener): () => void {
@@ -966,6 +984,23 @@ runMigrations(this.db);
   executionProfilesRepo() {
     return this.executionProfiles;
   }
+
+  systemPromptsRepo() { return this.systemPrompts; }
+  getSystemPrompt(workspaceId: string) { return this.systemPrompts.getSystemPrompt(workspaceId); }
+  editSystemPrompt(workspaceId: string, input: SystemPromptEditInput, actor: SystemPromptActor) {
+    return this.systemPrompts.editSystemPrompt(workspaceId, input, actor);
+  }
+  resetSystemPrompt(workspaceId: string, input: SystemPromptWriteInput, actor: SystemPromptActor) {
+    return this.systemPrompts.resetSystemPrompt(workspaceId, input, actor);
+  }
+  restoreSystemPrompt(workspaceId: string, input: SystemPromptRestoreInput, actor: SystemPromptActor) {
+    return this.systemPrompts.restoreSystemPrompt(workspaceId, input, actor);
+  }
+  listSystemPromptVersions(workspaceId: string, options: { cursor?: string; limit?: number } = {}) {
+    return this.systemPrompts.listSystemPromptVersions(workspaceId, options);
+  }
+  getSystemPromptVersion(workspaceId: string, versionId: string) { return this.systemPrompts.getSystemPromptVersion(workspaceId, versionId); }
+  getAttemptSystemPrompt(taskId: string) { return this.systemPrompts.getAttemptSystemPrompt(taskId); }
   listExecutionProfiles(workspaceId: string) {
     return this.executionProfiles.list(workspaceId);
   }
@@ -1490,6 +1525,27 @@ runMigrations(this.db);
 
   loginWithPassword(email: string, password: string) {
     return this.passwordAccounts.login(email, password);
+  }
+
+  async loginWithRegisteredPassword(email: string, password: string, signing: JwtSigningDomain) {
+    try {
+      const credential = this.db.query('SELECT user_id FROM multiremi_password_credentials WHERE login_email = ?').get(email);
+      if (!credential) return null;
+      const user = this.workspaces.getUser(credential.user_id);
+      if (!user) return null;
+      const proof = await this.rootManagement.verifyIndependentPassword(user.id, password);
+      if (proof.kind !== 'independent') return null;
+      const ceiling = this.db.query(`SELECT MIN(n.expires_at_ms) AS ceiling FROM multiremi_authority_nodes n
+        JOIN multiremi_password_authority_versions p ON n.node_id IN (p.identity_node_id,p.password_node_id)
+        WHERE p.user_id = ? AND p.version = ?`).get(user.id, proof.proofVersion.version);
+      const expiresAtMs = Math.floor(Math.min(Number(ceiling?.ceiling), Date.now() + 30 * 24 * 60 * 60_000) / 1000) * 1000;
+      const token = this.rootManagement.issueIndependentDashboardSession(proof, expiresAtMs,
+        (tx, source, claims) => this.jwtMaterials.issue(tx, source, claims, signing));
+      return { user, token };
+    } catch (error) {
+      if (error instanceof SecurityAbort || error instanceof JwtMaterialUnavailable) throw error;
+      throw new JwtMaterialUnavailable();
+    }
   }
 
   getUser(id: string): MultiremiUser | null {
@@ -2346,6 +2402,10 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).getDaemonConfig(workspaceId, runtimeId);
   }
 
+  authorizeFeishuBotSender(workspaceId: string, runtimeId: string, input: Parameters<FeishuBotRepo["authorizeSender"]>[2]) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).authorizeSender(workspaceId, runtimeId, input);
+  }
+
   submitFeishuBotMessage(
     workspaceId: string,
     runtimeId: string,
@@ -2580,13 +2640,19 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
   }
 
+  executeFeishuBotCommand(workspaceId: string, runtimeId: string, daemonId: string, input: import('@multiremi/contracts/types.js').FeishuBotCommandRequest) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).executeCommand(workspaceId, runtimeId, daemonId, input);
+  }
+
   resetFeishuBotSession(
     workspaceId: string,
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
+    cancelCurrent = false,
   ): boolean {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId, cancelCurrent);
   }
 
   cancelFeishuBotSessionTask(
@@ -2604,8 +2670,9 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): ReturnType<FeishuBotRepo["inspectSession"]> {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId);
   }
 
   feishuBotDirectiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {
@@ -2712,6 +2779,10 @@ runMigrations(this.db);
     return this.scm.deleteRepositoryBinding(connectionId, repositoryId);
   }
 
+  scmOwnershipReady(): boolean {
+    return scmOwnershipReady(this.db);
+  }
+
   reconcileScmRepositoryBindings(workspaceId: string): MultiremiScmRepositoryBinding[] {
     return this.scm.reconcileRepositoryBindings(workspaceId);
   }
@@ -2786,6 +2857,14 @@ runMigrations(this.db);
 
   listScmChangeRequestsForIssue(issueId: string): MultiremiScmChangeRequest[] | null {
     return this.scm.listChangeRequestsForIssue(issueId);
+  }
+
+  prepareScmChangeRequestBinding(...args: Parameters<ScmRepo["prepareChangeRequestBinding"]>) {
+    return this.scm.prepareChangeRequestBinding(...args);
+  }
+
+  bindScmChangeRequestByReference(input: Parameters<ScmRepo["bindChangeRequestByReference"]>[0]) {
+    return this.scm.bindChangeRequestByReference(input);
   }
 
   linkScmChangeRequestToIssue(issueId: string, changeRequestId: string): {
@@ -3286,6 +3365,10 @@ runMigrations(this.db);
 
   getRuntimeForDispatch(id: string): MultiremiRuntime | null {
     return this.runtimes.getRuntimeForDispatch(id);
+  }
+
+  heartbeatForClaim(id: string, workspaceId: string) {
+    return this.runtimes.heartbeatForClaim(id, workspaceId);
   }
 
   /** The Runtime row without the derived usage/model/group reads. */
@@ -3873,8 +3956,8 @@ runMigrations(this.db);
     return this.issueWorkspaces.abandon(issueId, workspaceId);
   }
 
-  reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
-    const workspace = this.issueWorkspaces.report(input);
+  reportIssueWorkspace(input: ReportIssueWorkspaceInput, workspaceId?: string): MultiremiIssueWorkspace {
+    const workspace = this.issueWorkspaces.report(input, workspaceId);
     // A live Issue workspace is pinned to its daemon. Its readiness changes
     // eligibility for sibling providers on that host, not unrelated machines.
     const runtime = this.runtimes.getRuntimeLite(input.runtimeId)!;
@@ -4592,7 +4675,9 @@ runMigrations(this.db);
   }
 
   updateIssueSession(id: string, input: UpdateIssueSessionInput): MultiremiIssueSession {
-    return this.sessions.updateIssueSession(id, input);
+    const session = this.sessions.updateIssueSession(id, input);
+    if (input.title !== undefined && session.issueId && !session.chatId) this.ctx.notifyIssueProjectActivity(session.workspaceId, session.issueId);
+    return session;
   }
 
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant {
@@ -5728,6 +5813,24 @@ runMigrations(this.db);
     return withAttemptAdmission(this.db, fence, plan, write, operation);
   }
 
+  withSecurityWrite<T>(fence:string|undefined, plan:SecurityLockPlan, operation:(tx:SecurityTx)=>T):T {
+    return withSecurityWrite(this.db,fence,plan,operation);
+  }
+
+  withAuthorizedMutation<T>(proof:CredentialProof, use:AuthorityUse, plan:SecurityLockPlan,
+    operation:(tx:SecurityTx, actor:ReturnType<AuthorityKernel['authorizeWrite']>)=>T, fence?:string):T {
+    if (use.use==='read') throw new SecurityAbort('root_required');
+    const authority=this.rootManagement.plan(proof,use);
+    if (authority.expectedRevision!==plan.expectedRevision) throw new SecurityAbort('authority_revision_conflict');
+    if (fence && authority.fenceTerm && authority.fenceTerm!==fence) throw new SecurityAbort('security_tx_invalid');
+    const domainTargets=[...new Set([...plan.domainTargets,...authority.domainTargets])].sort();
+    return this.withSecurityWrite(fence??authority.fenceTerm,{...plan,domainTargets},tx=>operation(tx,this.rootManagement.authorizeWrite(tx,proof,use)));
+  }
+
+  readAttemptEligibility(tx:SecurityTx,attemptId:string) { return readAttemptEligibility(this.db,tx,attemptId); }
+  readCurrentTaskLease(tx:SecurityTx,attemptId:string) { return readCurrentTaskLease(this.db,tx,attemptId); }
+  writeCurrentTaskLease(tx:SecurityTx,expectedVersion:number,lease:TaskLease) { return writeCurrentTaskLease(this.db,tx,expectedVersion,lease); }
+
   createTask(input: CreateTaskInput, options?: { requireIdleIssue?: boolean }): MultiremiTask {
     return this.tasks.createTask(input, options);
   }
@@ -6018,18 +6121,18 @@ runMigrations(this.db);
     return this.tasks.claimTask(runtimeId, options);
   }
 
-  recordTaskOffered(taskId: string, runtimeId: string, at?: string): boolean {
-    return this.tasks.recordTaskOffered(taskId, runtimeId, at);
+  recordTaskOffered(taskId: string, runtimeId: string, at?: string, generation?: string): boolean {
+    return this.tasks.recordTaskOffered(taskId, runtimeId, at, generation);
   }
 
-  acceptTaskOffer(taskId: string, runtimeId: string, at?: string): boolean {
-    return this.tasks.acceptTaskOffer(taskId, runtimeId, at);
+  acceptTaskOffer(taskId: string, runtimeId: string, at?: string, generation?: string): boolean {
+    return this.tasks.acceptTaskOffer(taskId, runtimeId, at, generation);
   }
 
   releaseTaskOfferLease(taskId: string): void { this.tasks.releaseTaskOfferLease(taskId); }
 
-  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown"): boolean {
-    return this.tasks.requeueTaskOffer(taskId, runtimeId, outcome);
+  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown", generation?: string): boolean {
+    return this.tasks.requeueTaskOffer(taskId, runtimeId, outcome, generation);
   }
 
   startTask(taskId: string, usageRunId?: string, expectedRuntimeId?: string): MultiremiTask {

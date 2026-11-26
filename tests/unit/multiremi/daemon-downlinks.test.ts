@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { startMultiremiServer } from "../../fixtures/daemon-protocol.js";
 import { openRuntimeDownlinks } from "../../fixtures/runtime-downlinks.js";
@@ -61,7 +62,7 @@ describe("A-4 native pending delivery", () => {
     store.registerRuntime({ id: rt, name: rt, provider: "claude" });
     const agent = store.createAgent({ name: "Ready cancel", provider: "claude", runtimeId: rt });
     const task = store.createTask({ agentId: agent.id, prompt: "Already done" });
-    store.claimTask(rt); store.startTask(task.id); store.completeTask(task.id, { output: "done" });
+    claimWithCurrentRuntime(store, rt); store.startTask(task.id); store.completeTask(task.id, { output: "done" });
     const connection = await openRuntimeDownlinks(store, rt);
     new DaemonTaskOffers({ store, layer: connection.layer, prepare: async () => null,
       onRuntimeReady: (runtimeId, ids) => connection.downlinks.runtimeReady(runtimeId, ids) });

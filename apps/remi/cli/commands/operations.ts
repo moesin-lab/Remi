@@ -544,12 +544,14 @@ function autopilotSpecs(): CommandSpec[] {
   const base = async (i: CommandInvocation, client: CliApiClient) => `/api/autopilots/${encodePath(await resolveListedId(
     client, i, positional(i, 0, "autopilot"), "autopilot", "/api/autopilots", ["autopilots"],
   ))}`;
+  const deliveryHelp = "If warnings include autopilot_delivery_unbound, relay the warning and Autopilot ID in the original Chat; open Autopilots -> task details -> choose current Chat and save. Do not invent a URL.";
   return [
     group("autopilot", "Manage scheduled and webhook automations"),
+    op({ id: "autopilot.delivery-targets", path: ["autopilot", "delivery-targets"], description: "List eligible report delivery Chats and their channels (human only)", method: "GET", apiPath: "/api/autopilot-delivery-targets", auth: HUMAN, query: (i) => ({ workspace_id: requiredWorkspace(i) }), collections: ["targets"] }),
     op({ id: "autopilot.list", path: ["autopilot", "list"], description: "List autopilots", method: "GET", apiPath: "/api/autopilots", auth: HUMAN, query: (i) => queryOptions(i, { workspace_id: requiredWorkspace(i) }), collections: ["autopilots"] }),
     op({ id: "autopilot.get", path: ["autopilot", "get"], description: "Get an autopilot", method: "GET", apiPath: base, auth: HUMAN, positionals: [ref("autopilot")] }),
-    op({ id: "autopilot.create", path: ["autopilot", "create"], description: "Create an autopilot; --data may set delivery_chat_session_id for server-delivered run_only reports", method: "POST", apiPath: "/api/autopilots", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
-    op({ id: "autopilot.update", path: ["autopilot", "update"], description: "Update an autopilot; delivery_chat_session_id binds a report Chat, null clears it (human only)", method: "PATCH", apiPath: base, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
+    op({ id: "autopilot.create", path: ["autopilot", "create"], description: `Create an autopilot; --data may set delivery_chat_session_id for run_only reports (human only). ${deliveryHelp}`, method: "POST", apiPath: "/api/autopilots", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
+    op({ id: "autopilot.update", path: ["autopilot", "update"], description: `Update an autopilot; delivery_chat_session_id binds a report Chat (human only), null clears it; omission preserves it. ${deliveryHelp}`, method: "PATCH", apiPath: base, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.delete", path: ["autopilot", "delete"], description: "Delete an autopilot", method: "DELETE", apiPath: base, mutation: "destructive", auth: HUMAN, positionals: [ref("autopilot")] }),
     autopilotRunGuard(),
     op({ id: "autopilot.run.list", path: ["autopilot", "run", "list"], description: "List autopilot runs including queued schedule targets", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs`, auth: HUMAN, positionals: [ref("autopilot")], options: [{ name: "limit", type: "integer", description: "Page size (up to 200)" }, { name: "offset", type: "integer", description: "Number of runs to skip" }], query: (i) => ({ limit: integerOption(i, "limit"), offset: integerOption(i, "offset") }), collections: ["runs"] }),
@@ -640,7 +642,22 @@ function scmSpecs(): CommandSpec[] {
     op({ id: "scm.event.list", path: ["scm", "event", "list"], description: "List normalized SCM events", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/events`, auth: HUMAN, collections: ["events"] }),
     op({ id: "scm.event.get", path: ["scm", "event", "get"], description: "Get an SCM event and evidence", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/events/${encodePath(positional(i, 0, "event"))}`, auth: HUMAN, positionals: [ref("event")] }),
     op({ id: "scm.change-request.checks", path: ["scm", "change-request", "checks"], description: "Read live head checks by repository ID, owner/name or Git URL; observations do not authorize merge", method: "GET", apiPath: i => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/repositories/${encodePath(positional(i, 0, "repository"))}/change-requests/${encodePath(positional(i, 1, "number"))}/checks`, auth: HUMAN_TASK, positionals: [{ ...ref("repository"), description: "Repository ID, owner/name, or Git URL (HTTPS/SSH)" }, ref("number")] }),
-    op({ id: "scm.change-request.list", path: ["scm", "change-request", "list"], description: "List change requests linked to an issue", method: "GET", apiPath: (i) => `/api/issues/${encodePath(positional(i, 0, "issue"))}/change-requests`, auth: HUMAN_TASK, positionals: [ref("issue")], collections: ["changeRequests"] }),
+    op({ id: "scm.change-request.list", path: ["scm", "change-request", "list"], description: "List linked change requests using the internal iss_... Issue ID from the task context", method: "GET", apiPath: (i) => `/api/issues/${encodePath(positional(i, 0, "issue-id"))}/change-requests`, auth: HUMAN_TASK, positionals: [{ ...ref("issue-id"), description: "Internal iss_... ID from the task context" }], collections: ["changeRequests"] }),
+    op({ id: "scm.change-request.bind", path: ["scm", "change-request", "bind"], description: "Bind a PR/MR by URL or repository and number using the internal iss_... Issue ID from the task context", method: "PUT", apiPath: i => `/api/issues/${encodePath(positional(i, 0, "issue-id"))}/change-requests/by-reference`, mutation: "write", auth: HUMAN_TASK, positionals: [{ ...ref("issue-id"), description: "Internal iss_... ID from the task context" }],
+      options: [
+        { name: "url", type: "string", valueName: "url", conflictsWith: ["repository", "number"], description: "PR/MR HTTPS URL on a configured SCM host" },
+        { name: "repository", type: "string", valueName: "repository", conflictsWith: ["url"], description: "Repository ID, owner/name, or Git URL" },
+        { name: "number", type: "string", valueName: "number", conflictsWith: ["url"], description: "Positive PR/MR number within the repository" },
+      ], body: i => {
+        const url = stringOption(i, "url");
+        const repository = stringOption(i, "repository");
+        const number = stringOption(i, "number");
+        if (url && !repository && !number) return { url };
+        if (!url && repository && number && /^[1-9]\d*$/u.test(number) && Number.isSafeInteger(Number(number))) {
+          return { repository, number: Number(number) };
+        }
+        throw new CliError("usage", "Provide --url or both --repository and --number, exclusively");
+      } }),
     op({ id: "scm.change-request.link", path: ["scm", "change-request", "link"], description: "Link a change request to an issue", method: "PUT", apiPath: changeRequestPath, mutation: "write", auth: HUMAN_TASK, positionals: [ref("issue"), ref("change-request")] }),
     op({ id: "scm.change-request.unlink", path: ["scm", "change-request", "unlink"], description: "Unlink a change request from an issue", method: "DELETE", apiPath: changeRequestPath, mutation: "destructive", auth: HUMAN_TASK, positionals: [ref("issue"), ref("change-request")] }),
   ];
@@ -1510,6 +1527,19 @@ function op(definition: OperationDefinition): CommandSpec {
       });
       if (definition.id === "runtime.model.catalog") {
         renderModelCatalog(invocation, response.data);
+      } else if (["autopilot.create", "autopilot.update", "autopilot.get", "autopilot.list"].includes(definition.id)) {
+        renderAutopilots(invocation, response.data);
+      } else if (definition.id === "autopilot.delivery-targets") {
+        new CliRenderer().render(omitSecretFields(sanitizeCliDetails(response.data)), {
+          mode: outputMode(invocation),
+          rows: value => extractRecords(value, ["targets"]),
+          columns: [
+            { header: "ID", value: row => row.id },
+            { header: "TITLE", value: row => row.title },
+            { header: "CHANNEL", value: row => row.channel },
+          ],
+          emptyMessage: "No eligible delivery Chats.",
+        });
       } else if (definition.id === "scm.change-request.checks") {
         renderScmChecks(invocation, response.data);
       } else if (definition.id === "runtime.list" && outputMode(invocation) === "table") {
@@ -1610,6 +1640,30 @@ function changeRequestPath(invocation: CommandInvocation): string {
 
 function renderSafe(invocation: CommandInvocation, value: unknown, collections: readonly string[] = []): void {
   renderResource(invocation, omitSecretFields(sanitizeCliDetails(value)), collections);
+}
+
+function renderAutopilots(invocation: CommandInvocation, value: unknown): void {
+  const safe = omitSecretFields(sanitizeCliDetails(value));
+  const rows = extractRecords(isRecord(safe) && isRecord(safe.autopilot) ? safe.autopilot : safe, ["autopilots"]);
+  new CliRenderer().render(safe, {
+    mode: outputMode(invocation),
+    rows: () => rows,
+    columns: [
+      { header: "ID", value: row => row.id },
+      { header: "TITLE", value: row => row.title },
+      { header: "MODE", value: row => row.execution_mode },
+      { header: "DELIVERY CHAT", value: row => row.delivery_chat_session_id ?? (row.execution_mode === "run_only" ? "Internal Chat only" : "-") },
+    ],
+  });
+  if (outputMode(invocation) !== "table") return;
+  for (const row of rows) {
+    for (const warning of extractRecords(row.warnings, [])) {
+      console.log(`Warning [${String(warning.code)}] Autopilot ${String(row.id)}: ${String(warning.message)}`);
+      if (warning.code === "autopilot_delivery_unbound") {
+        console.log("Autopilots -> task details -> choose current Chat and save.");
+      }
+    }
+  }
 }
 
 function renderScmChecks(invocation: CommandInvocation, value: unknown): void {

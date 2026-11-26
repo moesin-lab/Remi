@@ -17,6 +17,7 @@ export * from "./users";
 export * from "./project-docs";
 export * from "./knowledge";
 export * from "./projects";
+export * from "./project-activity";
 export * from "./lark";
 export * from "./repositories";
 export * from "./workspaces";

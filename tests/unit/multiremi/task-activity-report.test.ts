@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 /**
  * PR 5 (spec §5): the daemon's best-effort `task.activity` frame stores the
  * running-subagent count on the attempt it reports for.
@@ -58,7 +59,7 @@ async function withWorld(backend: (typeof backends)[number], body: (world: World
 function runChatTask(world: World, agentId = world.agentId, runtimeId = world.runtimeId) {
   const chat = world.store.createChatSession({ agentId, workspaceId: "local", creatorId: "local" });
   const task = world.store.sendChatMessage(chat.id, { content: "spawn two subagents" }).task;
-  expect(world.store.claimTask(runtimeId)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(world.store, runtimeId)?.id).toBe(task.id);
   world.store.startTask(task.id);
   return { chat, task };
 }
@@ -66,7 +67,7 @@ function runChatTask(world: World, agentId = world.agentId, runtimeId = world.ru
 function runIssueTask(world: World) {
   const issue = createResponsibleTestIssue(world.store, { title: "Activity issue", workspaceId: "local" });
   const task = world.store.createTask({ agentId: world.agentId, workspaceId: "local", issueId: issue.id, prompt: "work" });
-  expect(world.store.claimTask(world.runtimeId)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(world.store, world.runtimeId)?.id).toBe(task.id);
   world.store.startTask(task.id);
   return task;
 }
@@ -344,7 +345,7 @@ describe("task.activity in the server", () => {
       const project = world.store.createProject({ title: "Activity project" });
       const chat = world.store.createChatSession({ agentId: world.agentId, workspaceId: "local", creatorId: "local", projectId: project.id });
       const task = world.store.sendChatMessage(chat.id, { content: "spawn" }).task;
-      expect(world.store.claimTask(world.runtimeId)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(world.store, world.runtimeId)?.id).toBe(task.id);
       world.store.startTask(task.id);
       let layer: DaemonProtocolLayer | undefined;
       const server = startMultiremiServer({ store: world.store, scheduler: null, backgroundJobs: false, hostname: "127.0.0.1",

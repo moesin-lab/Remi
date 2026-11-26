@@ -201,6 +201,9 @@ export const DAEMON_UPLINK_RPC_FRAMES = [
   "turn.restart.checkpoint",
   "turn.restart.suspend",
   "turn.restart.resume",
+  "turn.restart.resume_bound",
+  "task.offer_adopt",
+  "task.offer_status",
   "turn.input",
   "turn.decision",
   "turn.decision.get",
@@ -417,6 +420,7 @@ export interface DaemonHelloRuntime {
   max_concurrency: number;
   /** Tasks this process is executing right now; used to reconcile after a reconnect. */
   active_task_ids: string[];
+  held_restart_attempts?: Array<{attempt_id:string;handoff_id:string}>;
   /** Only provider callbacks still held by this process; durable outbox tasks are excluded. */
   active_question_waits?: DaemonQuestionWait[];
   /** Missing fields explicitly mean unsupported, including after a restart. */
@@ -589,6 +593,9 @@ export interface DaemonTurnWrapUpPayload {
 }
 
 export interface DaemonTurnCompletePayload {
+  receipt_id?: string;
+  offer_generation?: string;
+  content_hash?: string;
   /** Provider unavailable or two reminders exhausted: preserve the reply and unread interval. */
   input_unread_fallback?: boolean;
   turn_id: string;

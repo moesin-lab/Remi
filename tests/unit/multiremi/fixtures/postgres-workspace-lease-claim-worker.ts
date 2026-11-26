@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../../helpers/claim-with-current-runtime.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
 
@@ -19,7 +20,7 @@ self.onmessage = (message: MessageEvent<ClaimWorkerMessage>) => {
     }
     if (message.data.type === "claim") {
       if (!store) throw new Error("claim worker is not initialized");
-      const claimed = store.claimTask(message.data.runtimeId);
+      const claimed = claimWithCurrentRuntime(store, message.data.runtimeId);
       self.postMessage({ phase: "claimed", taskId: claimed?.id ?? null });
       return;
     }

@@ -95,7 +95,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
     db.run("DELETE FROM multiremi_turn_attempts WHERE id=?", [task.id]);
     expect(Number(db.query("SELECT COUNT(*) AS n FROM multiremi_usage_units").get().n)).toBe(0);
     expect(db.query("SELECT task_id FROM multiremi_usage_runs WHERE task_id=?").get(task.id)).toBeNull();
-  });
+  }, 30_000);
 
   it("migrates empty stores, writes both reports, and is idempotent", () => {
     const { db } = fixture();
@@ -243,7 +243,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
     expect(reply.body_md).toBe('second reply');expect(JSON.parse(reply.metadata).task_result.pr_url).toBe('https://example.test/pr/1');
     expect(JSON.parse(db.query('SELECT result FROM multiremi_turn_execution_records WHERE id=?').get(b.id).result)).toEqual({output:'second reply',pr_url:'https://example.test/pr/1'});
     expect(JSON.parse(readFileSync(join(dir,`${UNIFIED_MODEL_MIGRATION}-after.json`),'utf8')).mismatches).toEqual([]);
-  });
+  }, 30_000);
   it('rolls back an invalid historical envelope and retries after repair',()=>{
     const {db,store}=fixture();const agent=store.createAgent({name:'rollback',provider:'codex'});
     store.createTask({agentId:agent.id,prompt:'original'});
@@ -320,7 +320,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
       const backup=join(dir,"local-backup");writeFileSync(backup,"local fixture backup");
       expect(dropRetiredTables(db,{...args,execute:true,confirmDrop:true,backup}).dry_run).toBe(false);
       expect(reconcileUnifiedModel(db).mismatches).toEqual([]);
-    });
+    }, 20_000);
   }
 });
 

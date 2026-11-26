@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import { describe, expect, it } from "bun:test";
 import { startMultiremiServer } from "@multiremi/api/server.js";
@@ -23,7 +24,7 @@ for (const backend of ["sqlite", "pg"] as const) {
           const agent = store.createAgent({ name: "Trace owner", provider: "codex", runtimeId });
           const issue = createResponsibleTestIssue(store, { title: "Default trace" });
           const task = store.createSessionTask(store.getOrCreateDefaultIssueSession(issue.id).id, { agentId: agent.id, prompt: "Default trace" });
-          expect(store.claimTask(runtimeId)?.id).toBe(task.id); store.startTask(task.id);
+          expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id); store.startTask(task.id);
           let layer!: DaemonProtocolLayer;
           // No reader, sink or Hub injection: exercise production assembly.
           const server = startMultiremiServer({ store, apiRole: role, port: 0, hostname: "127.0.0.1",

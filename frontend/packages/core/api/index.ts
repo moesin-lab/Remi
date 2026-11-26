@@ -5,6 +5,7 @@ export {
   PreviewUnsupportedError,
 } from "./client";
 export type { ApiClientOptions } from "./client";
+export { UnconfirmedAutopilotCreateError } from "./endpoints/autopilots";
 export { toSafeErrorDetails } from "./http";
 export type { SafeErrorDetails } from "./http";
 export {

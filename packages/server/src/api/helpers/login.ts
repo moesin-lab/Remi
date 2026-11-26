@@ -5,6 +5,13 @@ import { setCookie } from "hono/cookie";
 import { createHmac } from "node:crypto";
 import { MultiremiStore } from "@multiremi/store/store.js";
 import { resolveDefaultWorkspaceIdForUser } from "./workspace-context.js";
+import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
+
+// The session/PAT source adapter is not available yet. Never turn a JWT or
+// login-shaped response into a new independent credential in the active domain.
+export function assertCredentialIssuerAvailable(store: MultiremiStore): void {
+  if (store.jwtMaterials.isActive()) throw new JwtMaterialUnavailable();
+}
 
 export const LOCAL_AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 
@@ -21,6 +28,7 @@ export function sendLocalAuthCode(
   store: MultiremiStore,
   body: { email?: string; name?: string },
 ): { ok: true; sent: true; email: string; code: string; expires_at: string } | { error: string; status: 400 } {
+  assertCredentialIssuerAvailable(store);
   const email = normalizeAuthEmail(body.email);
   if (typeof email !== "string") return email;
   const code = createLocalAuthCode(email);
@@ -93,6 +101,7 @@ export async function localAuthResponse(
   token_type: "bearer";
   user: ReturnType<MultiremiStore["getCurrentUser"]>;
 }> {
+  assertCredentialIssuerAvailable(store);
   // Provision/resolve the distinct user for this identity, then sign a token that
   // carries that user's real id — never the "local" catch-all. Multiple people
   // logging in each get their own record and their own token.

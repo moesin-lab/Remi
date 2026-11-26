@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect } from "bun:test";
 import type { TaskUsageUnit, UsageReport } from "@multiremi/contracts/usage-accounting.js";
 import type { MultiremiStore } from "@multiremi/store.js";
@@ -6,7 +7,7 @@ export function assertDefaultDetailPage(store: MultiremiStore, prefix: string): 
   const runtime = store.registerRuntime({ name: prefix, provider: "claude", workspaceId: "local" });
   const agent = store.createAgent({ name: prefix, provider: "claude", workspaceId: "local", runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, prompt: "Bounded default page fixture", workspaceId: "local" });
-  store.claimTask(runtime.id); store.startTask(task.id);
+  claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
   const units: TaskUsageUnit[] = Array.from({ length: 400 }, (_, index) => ({ unitId: `request-${index}`, revision: 1, provider: "claude", model: `model-${index % 20}`, modelSource: "provider_reported",
     scope: "request", source: "provider_request", accuracy: "exact", inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, actualUnsplitTokens: 0, reportedTotalTokens: 1,
     contextTokens: null, contextWindow: null, costAmount: null, costCurrency: null, occurredAt: `2026-10-${String(Math.floor(index / 20) + 1).padStart(2, "0")}T12:00:00.000Z` }));
@@ -26,7 +27,7 @@ export function assertDayModelPagination(store: MultiremiStore, prefix: string):
   const runtime = store.registerRuntime({ name: prefix, provider: "claude", workspaceId: "local" });
   const agent = store.createAgent({ name: prefix, provider: "claude", workspaceId: "local", runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, prompt: "Joint aggregation fixture", workspaceId: "local" });
-  store.claimTask(runtime.id); store.startTask(task.id);
+  claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
   const unit = (overrides: Partial<TaskUsageUnit> = {}): TaskUsageUnit => ({ unitId: "a", revision: 1, provider: "claude", model: "reported-a", modelSource: "provider_reported",
     scope: "request", source: "provider_request", accuracy: "exact", inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0,
     actualUnsplitTokens: 0, reportedTotalTokens: 12, contextTokens: null, contextWindow: null, costAmount: null, costCurrency: null, occurredAt: "2026-10-01T15:59:00.000Z", ...overrides });

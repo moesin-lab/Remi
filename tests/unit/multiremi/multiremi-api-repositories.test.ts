@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
@@ -194,7 +195,7 @@ describe("Multiremi API - workspace repositories", () => {
       },
     });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(firstBody.task_id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(firstBody.task_id);
     store.startTask(firstBody.task_id);
     const building = await summary();
     expect(building.status).toBe("building");
@@ -220,7 +221,7 @@ describe("Multiremi API - workspace repositories", () => {
     expect(retryBody.run_id).not.toBe(firstBody.run_id);
     expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(2);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(retryBody.task_id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retryBody.task_id);
     store.startTask(retryBody.task_id);
     store.completeTask(retryBody.task_id, { output: "wiki updated" });
     const healthy = await summary();
@@ -298,7 +299,7 @@ describe("Multiremi API - workspace repositories", () => {
     const firstRun = store.getAutopilotRun(firstBody.id)!;
     expect(firstRun).toMatchObject({ repositoryId: null, dedupeKey: null });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(firstRun.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(firstRun.taskId!);
     store.startTask(firstRun.taskId!);
     store.createRepositoryWikiDoc(workspace.id, "repo_private", {
       path: "user-write.md",

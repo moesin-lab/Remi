@@ -35,8 +35,9 @@ vi.mock("@multiremi/core/paths", async importOriginal => {
 
 // The markdown pipeline and the attachment cards are exercised by their own
 // suites; here they only need to make their input assertable.
+const markdownRender = vi.hoisted(() => vi.fn());
 vi.mock("../../common/markdown", () => ({
-  Markdown: ({ children }: { children: string }) => <span>{children}</span>,
+  Markdown: ({ children }: { children: string }) => { markdownRender(children); return <span>{children}</span>; },
 }));
 vi.mock("../../common/question-card", async importOriginal => ({
   ...await importOriginal<typeof import("../../common/question-card")>(),
@@ -119,6 +120,22 @@ describe("cached message observer visibility", () => {
       expect(getQuestion).not.toHaveBeenCalled();
     } finally { view.unmount(); client.clear(); }
   });
+  it("skips historical Markdown when the live task changes", () => {
+    const client = new QueryClient();
+    const entries = [{ session_id: "cs-1", seq: 1, id: "history", revision: 1,
+      kind: "message", author_type: "member", body_md: "Historical message", body_html: null, render_version: null }];
+    const replica = new MemorySessionReplica({ "cs-1": { entries: entries as SessionLogEntry[] } });
+    const content = (pending: ChatPendingTask | null) => <QueryClientProvider client={client}>
+      <ChatMessageList sessionId="cs-1" replica={replica} optimisticRows={[]} pendingTask={pending} availability={undefined} />
+    </QueryClientProvider>;
+    const view = render(content(null));
+    expect(screen.getByText("Historical message")).toBeInTheDocument();
+    markdownRender.mockClear();
+    view.rerender(content({ task_id: "optimistic-new", status: "running" } as ChatPendingTask));
+    expect(screen.getByTestId("status-pill")).toBeInTheDocument();
+    expect(markdownRender).not.toHaveBeenCalledWith("Historical message");
+  });
+
   it("does not load older log rows while the window is hidden", () => {
     const client = new QueryClient();
     const replica = new MemorySessionReplica({ "cs-1": { entries: [] } });

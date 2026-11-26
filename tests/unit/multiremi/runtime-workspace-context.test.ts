@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 import { afterEach, expect, test } from "bun:test";
@@ -44,7 +45,7 @@ for (const [prefix, suffix, wrapper] of [
     const { store, user, workspace, app, headers, runtime } = await setup();
     const agent = store.createAgent({ name: "Audit agent", provider: "claude", workspaceId: workspace.id, ownerId: user.id });
     const task = store.createTask({ agentId: agent.id, workspaceId: workspace.id, prompt: "Audit usage" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.reportTaskUsage(task.id, [{ provider: "claude", model: "sonnet", inputTokens: 21, outputTokens: 8 }]);
     const path = `${prefix}/${runtime.id}${suffix}`;
     const control = await app.request(`${path}?workspace_id=${workspace.id}`, { headers });

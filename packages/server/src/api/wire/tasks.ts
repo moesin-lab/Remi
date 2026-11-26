@@ -426,6 +426,8 @@ export function daemonTaskClaimResponse(
     triggerMetadata = null;
   }
   const response = daemonTaskWireResponse(task, triggerMetadata);
+  const policy = store.getAttemptSystemPrompt(task.id);
+  if (policy) response.system_prompt_policy = policy;
   if (task.chatProjectId && task.chatProjectId === task.project?.id) response.chat_project_id = task.chatProjectId;
   response.runtime_workspace_id = task.runtimeWorkspaceId ?? null;
   // Path metadata only. Instruction/configuration contents are read on the host.
@@ -879,6 +881,15 @@ export function daemonTaskMessageWireResponse(
   if (message.status) response.status = message.status;
   if (message.meta) response.meta = message.meta;
   return response;
+}
+
+export function isIndependentChatOffer(payload: Record<string, unknown>): boolean {
+  if (payload.kind !== 'chat' || typeof payload.chat_session_id !== 'string' || !payload.chat_session_id) return false;
+  if (payload.issue_id !== '' && payload.issue_id != null) return false;
+  return ['issue', 'issue_session_id', 'issue_session', 'bound_issue', 'bound_issue_log', 'execution_scope', 'inherited_session_projection', 'project', 'project_id', 'chat_project_id',
+    'runtime_workspace_id', 'runtime_workspace', 'autopilot_run_id', 'autopilot_id', 'scm_revision', 'quick_create_prompt'].every(key => payload[key] == null)
+    && ['repos', 'project_resources', 'project_contexts', 'project_wiki_docs', 'chat_auto_checkout_repos', 'repository_wiki_contexts'].every(key =>
+      payload[key] == null || (Array.isArray(payload[key]) && payload[key].length === 0));
 }
 
 function daemonTaskKind(

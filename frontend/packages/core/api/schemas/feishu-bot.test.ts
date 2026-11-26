@@ -39,6 +39,11 @@ describe("Issue notification recipient schema", () => {
 });
 
 describe("FeishuBotConfigSchema", () => {
+  it("defaults omitted wake words and rejects malformed lists", () => {
+    expect(FeishuBotConfigSchema.parse({}).wake_words).toEqual([]);
+    expect(FeishuBotConfigSchema.parse({ wake_words: ["小助理"] }).wake_words).toEqual(["小助理"]);
+    expect(FeishuBotConfigSchema.safeParse({ wake_words: [1] }).success).toBe(false);
+  });
   it("parses sender access policy and tolerates older or unknown server values", () => {
     expect(FeishuBotConfigSchema.parse({ sender_access_policy: "agent" }).sender_access_policy).toBe("agent");
     expect(FeishuBotConfigSchema.parse({ sender_access_policy: "allowlist" }).sender_access_policy).toBe("allowlist");

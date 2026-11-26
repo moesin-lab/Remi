@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
+import { issueKeys } from "@multiremi/core/issues/queries";
 import type { AgentTask } from "@multiremi/core/types/agent";
 import enAgents from "../../locales/en/agents.json";
 import enCommon from "../../locales/en/common.json";
@@ -108,6 +109,17 @@ describe("session agent stream row", () => {
     expect(await screen.findByText("Agent a1 is working")).toBeInTheDocument();
     expect(await screen.findByText("Running focused tests")).toBeInTheDocument();
     expect(getTaskTrace).not.toHaveBeenCalled();
+  });
+
+  it("keeps the same summary line when progress clears and returns", async () => {
+    listTasksByIssue.mockResolvedValue([task({ progress_summary: "First step" })]);
+    const { qc } = renderRow();
+    const line = (await screen.findByText("First step")).parentElement!;
+    qc.setQueryData(issueKeys.tasks("issue-1"), [task({ progress_summary: "" })]);
+    await waitFor(() => expect(line).toHaveAttribute("aria-hidden", "true"));
+    expect(line).toHaveClass("h-4");
+    qc.setQueryData(issueKeys.tasks("issue-1"), [task({ progress_summary: "Next step" })]);
+    expect((await screen.findByText("Next step")).parentElement).toBe(line);
   });
 
   it("keeps a queued agent visibly queued instead of calling it working", async () => {

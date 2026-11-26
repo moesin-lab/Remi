@@ -1,10 +1,13 @@
+import { removeScmSchema } from "../../fixtures/scm-schema-upgrade.js";
+import { assertScmOwnershipReady, classifyScmLinks } from "@multiremi/store/scm-ownership.js";
+import { verifyFeishuWakeWordUpgrade } from "../../fixtures/feishu-wake-word-schema-upgrade.js";
 import { verifyPlannedRestartSchemaUpgrade } from "../../fixtures/planned-restart-schema-upgrade.js";
 import { afterEach, describe, expect, it } from 'bun:test';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
-import { assertSchemaCompatible, assertSchemaBeforeExpand, ensureSchemaMeta, readSchemaLevels } from '@multiremi/store/schema-levels.js';
+import { assertSchemaCompatible, assertSchemaBeforeExpand, ensureSchemaMeta, readSchemaLevels, SCHEMA_EXPAND_LEVEL } from '@multiremi/store/schema-levels.js';
 import { runSchemaContracts, runSchemaExpands, validateSchemaMigrations, type SchemaMigration } from '@multiremi/store/schema-migration-runner.js';
-import { contractSchema } from '@multiremi/store/schema-contracts.js';
+import { assertSchemaContractClientsOffline, contractSchema } from '@multiremi/store/schema-contracts.js';
 import { runMigrations, runStartupMigrations } from '@multiremi/store/migrations.js';
 
 let database: ReturnType<typeof openSqliteDatabase>;
@@ -19,6 +22,22 @@ const contract = (level: number, run: SchemaMigration['run'] = () => {}): Schema
 });
 
 describe('schema compatibility protocol', () => {
+  it('directs an offline refusal to the original maintenance command', () => {
+    const clientsOnline = { query: () => ({ get: () => ({ count: 1 }) }) } as unknown as SqlDatabase;
+    expect(() => assertSchemaContractClientsOffline(clientsOnline, 'classify-scm-links')).toThrow('Retry remi db classify-scm-links with the same arguments');
+    expect(() => assertSchemaContractClientsOffline(clientsOnline)).toThrow('run remi db contract');
+  });
+  it('holds a completed level 7 cutover on upgrade until explicit review', () => {
+    const database = db();
+    runMigrations(database);
+    classifyScmLinks(database);
+    database.exec('DROP TABLE multiremi_scm_audit_state; DROP TABLE multiremi_scm_rollback_review; DELETE FROM multiremi_schema_steps WHERE level >= 8; UPDATE multiremi_schema_meta SET expand_level = 7');
+    runStartupMigrations(database);
+    expect(() => assertScmOwnershipReady(database)).toThrow('cutover incomplete');
+    expect(database.query('SELECT complete FROM multiremi_scm_ownership_cutover').get()).toEqual({ complete: 1 });
+    expect(() => classifyScmLinks(database)).toThrow('baseline unavailable');
+    expect(() => assertScmOwnershipReady(database)).toThrow('cutover incomplete');
+  });
   it('allows newer additions but refuses an incompatible contract floor', () => {
     expect(() => assertSchemaCompatible({ expandLevel: 5, contractLevel: 1 }, { minLevel: 1, maxLevel: 1 })).not.toThrow();
     expect(() => assertSchemaCompatible({ expandLevel: 5, contractLevel: 2 }, { minLevel: 1, maxLevel: 1 })).toThrow('Start a newer compatible release');
@@ -31,16 +50,23 @@ describe('schema compatibility protocol', () => {
     const database = db();
     expect(readSchemaLevels(database)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(database);
-    expect(readSchemaLevels(database)).toEqual({ expandLevel: 4, contractLevel: 0 });
+    expect(() => assertScmOwnershipReady(database)).toThrow('cutover incomplete');
+    classifyScmLinks(database);
+    classifyScmLinks(database);
+    expect(() => assertScmOwnershipReady(database)).not.toThrow();
+    expect(database.query('SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover').all()).toEqual([{ cursor_id: '', complete: 1 }]);
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     runMigrations(database);
-    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(12);
+    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(19);
+    expect(database.query('SELECT attempt_id FROM multiremi_attempt_eligibility').all()).toEqual([]);
+    expect(database.query('SELECT attempt_id FROM multiremi_current_task_leases').all()).toEqual([]);
     expect(database.query('SELECT domain_id FROM multiremi_jwt_signing_domains').all()).toEqual([]);
     expect(database.query('SELECT credential_id FROM multiremi_jwt_current').all()).toEqual([]);
     expect(database.query('SELECT grant_id FROM multiremi_root_grants').all()).toEqual([]);
     expect(database.query('SELECT active_grant_id FROM multiremi_root_subject_state').all()).toEqual([]);
-    database.exec('UPDATE multiremi_schema_meta SET expand_level=5, contract_level=5');
+    database.exec('UPDATE multiremi_schema_meta SET expand_level=11, contract_level=11');
     const before = database.query('SELECT total_changes() AS count').get();
-    expect(() => runMigrations(database)).toThrow('contract_level=5 exceeds code maxLevel=4');
+    expect(() => runMigrations(database)).toThrow('contract_level=11 exceeds code maxLevel=10');
     expect(database.query('SELECT total_changes() AS count').get()).toEqual(before);
   });
   it('requires maintenance for populated pre-protocol databases and never replays enrolled history', () => {
@@ -63,14 +89,18 @@ describe('schema compatibility protocol', () => {
     const database = db();
     runMigrations(database);
     // Reproduce the previously enrolled B1 schema, before A3's additive table.
-    database.exec("DROP TABLE multiremi_live_terms");
+    removeScmSchema(database);
+    database.exec("DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json; DROP TABLE multiremi_live_terms");
     database.exec("DELETE FROM multiremi_schema_steps WHERE level>=2");
     database.exec("UPDATE multiremi_schema_meta SET expand_level=1");
     runStartupMigrations(database);
-    expect(readSchemaLevels(database)).toEqual({ expandLevel: 4, contractLevel: 0 });
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     expect(database.query("SELECT name FROM sqlite_master WHERE name='multiremi_live_terms'").get()).not.toBeNull();
     expect(database.query("SELECT id FROM multiremi_schema_steps WHERE level=2").get().id).toBe('20261118_live_term_fence');
   });
+  it('upgrades existing bot rows and accepts old writers after level 5', () => {
+    verifyFeishuWakeWordUpgrade(db());
+  }, 30_000);
   it('upgrades level 2 planned restart schema atomically and preserves old drains', () => {
     verifyPlannedRestartSchemaUpgrade(db());
   });

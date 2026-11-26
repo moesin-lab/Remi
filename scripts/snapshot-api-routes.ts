@@ -699,7 +699,7 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     prompt: "Snapshot prompt",
     runtimeId: runtime.id,
   });
-  store.claimTask(runtime.id);
+  store.claimTask(runtime.id, { supportsPromptPolicy: true });
   store.startTask(task.id);
   store.appendTaskMessages(task.id, [{ type: "assistant", content: "working" }]);
   store.reportProgress(task.id, "halfway", 1, 2);
@@ -1385,7 +1385,7 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   const child = await checked("POST", "/api/issues", { title: "Snapshot child", workspace_id: refs.workspaceId, parent_issue_id: root.id, assignee_type: "agent", assignee_id: worker.id }, pat.token, 201);
   const sourceTask = store.createTask({ agentId: worker.id, issueId: child.id, prompt: "Question and summary" });
   const ownerTask = store.createTask({ agentId: owner.id, issueId: root.id, prompt: "Check the child result" });
-  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id, { supportsPromptPolicy: true }); if (!claimed) break; store.startTask(claimed.id); }
   const sourceToken = await store.createTaskAccessToken(store.getTask(sourceTask.id)!, user.id);
   const ownerToken = await store.createTaskAccessToken(store.getTask(ownerTask.id)!, user.id);
   const turn = store.getTurnForAttempt(sourceTask.id)!;
@@ -1410,7 +1410,7 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
     message.metadata.question_present_request === true && message.metadata.root_question_id === question.id
     && message.metadata.question_route_revision === humanQuestion.route_revision);
   if (!presentation || typeof presentation.metadata.delivery_turn_id !== "string") throw new Error("Snapshot Remi presentation notification has no bound turn");
-  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id, { supportsPromptPolicy: true }); if (!claimed) break; store.startTask(claimed.id); }
   const presentationTurn = store.getTurn(presentation.metadata.delivery_turn_id)!;
   if (presentationTurn.session_id !== presentation.session_id || presentationTurn.execution_scope !== String(presentation.metadata.execution_scope ?? "")) throw new Error("Snapshot Remi notification lane changed");
   const presentationToken = await store.createTaskAccessToken(store.getTask(presentationTurn.current_attempt_id!)!, user.id);
@@ -1442,7 +1442,7 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   const continuationAgent = store.createAgent({ name: "Continuation source", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace" });
   const continuationTask = store.createTask({ agentId: continuationAgent.id, issueId: continuationIssue.id, prompt: "Continue only after explicit authorization" });
   const continuationOwnerTask = store.createTask({ agentId: owner.id, issueId: continuationIssue.id, prompt: "Handle the continuation question" });
-  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id, { supportsPromptPolicy: true }); if (!claimed) break; store.startTask(claimed.id); }
   const continuationOwnerToken = await store.createTaskAccessToken(store.getTask(continuationOwnerTask.id)!, user.id);
   const continuationTurn = store.getTurnForAttempt(continuationTask.id)!;
   const bridge = store.getDaemonTurnBridge();
@@ -1462,7 +1462,7 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   const replay = (await checked("POST", `/api/messages/${continuationQuestion.id}/question/continue`, { expected_route_revision: saved.route_revision }, pat.token)).question;
   if (replay.recovery.consumer_turn_id !== continued.recovery.consumer_turn_id) throw new Error("Snapshot duplicate continuation created another consumer");
   const consumer = store.getTurn(continued.recovery.consumer_turn_id)!;
-  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+  for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id, { supportsPromptPolicy: true }); if (!claimed) break; store.startTask(claimed.id); }
   const consumerTask = store.getTaskWithAgent(consumer.current_attempt_id!)!;
   const consumerToken = await store.createTaskAccessToken(consumerTask, user.id);
   const input = bridge.offerInput(consumerTask);
@@ -1830,7 +1830,7 @@ flow("daemon", async (rec, refs, store) => {
     runtimes: [{ name: "flow-runtime", type: "claude", version: "9.9.9", status: "online", maxConcurrency: 1 }],
   });
   await rec.json("POST", "/api/daemon/heartbeat", { runtime_id: refs.runtimeId });
-  store.claimTask(refs.runtimeId, { supportsBinarySkillFiles: true });
+  store.claimTask(refs.runtimeId, { supportsPromptPolicy: true, supportsBinarySkillFiles: true });
   await rec.report("runtime.model_list_result", { runtime_id: refs.runtimeId,
     models: [{ id: "claude-sonnet-4", label: "Claude Sonnet 4" }],
   });
@@ -1882,7 +1882,7 @@ flow("daemon-task-lifecycle", async (rec, refs, store) => {
   let claimed = false;
   // The seeded chat session has its own queued task, so claim until ours lands.
   for (let attempt = 0; attempt < 6; attempt++) {
-    const claim = store.claimTask(refs.runtimeId, { supportsBinarySkillFiles: true });
+    const claim = store.claimTask(refs.runtimeId, { supportsPromptPolicy: true, supportsBinarySkillFiles: true });
     if (claim?.id === id) { claimed = true; break; }
   }
   if (!claimed) throw new Error("Snapshot lifecycle task was not actually claimed");
@@ -1893,7 +1893,7 @@ flow("daemon-task-lifecycle", async (rec, refs, store) => {
   await rec.report("task.start", { task_id: id });
   await rec.report("task.progress", { task_id: id, summary: "half", step: 1, total: 2 });
   const assembledPrompt = "# Bootstrap Prompt\n\n## Current Request\nSnapshot lifecycle task";
-  await rec.report("task.prompt", { task_id: id,
+  await rec.report("task.prompt", { task_id: id, system_prompt_policy: store.getAttemptSystemPrompt(id),
     mode: "bootstrap",
     prompt: assembledPrompt,
     sha256: createHash("sha256").update(assembledPrompt).digest("hex"),

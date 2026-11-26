@@ -246,6 +246,7 @@
       }
     },
     "concierge": {
+      "wake_words": "群聊响应词（每行一个）",
       "title": "飞书个人机器人",
       "description": "为当前机器人选择应答的智能体、承载它的 Runtime 和飞书应用凭据。每个机器人独立保存、启停和设置会话路由。",
       "member_available": "{{name}} 在线。在飞书里私聊它即可访问当前 workspace。",

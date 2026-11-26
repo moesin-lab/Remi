@@ -17,7 +17,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 调查速度、吞吐或卡顿 | [性能](performance.md) | 静态事实、待测假设、事务约束与采样方法 |
 | 判断能力是否存在 | [能力定位](../MULTIREMI_PARITY_MATRIX.md) | 当前实现和验证入口；不从旧完成标记推断 |
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
-| 查询 PR 的 CI 状态 | [SCM 实时检查查询](scm-checks.md) | 任务凭据、分页与 head 稳定性；观测不授权合并 |
+| 按外部引用绑定 PR/MR 或查询 CI 状态 | [SCM 显式绑定与实时检查查询](scm-checks.md) | 同步解析、原子绑定、任务凭据、分页与 head 稳定性；观测不授权合并 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
 | 改用量采集、统计报表或模型价格 | [统一用量与价格](../usage-accounting.md)、[公开参考价格导入](../usage-reference-prices.md) | actual/context/unknown、run 幂等、执行归属、双时轴和受控历史迁移 |
 | 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、Agent 与模型、集成、权限和运行维护 |
@@ -29,6 +29,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 登录账号与共享操作者、资源 guard 和生产启动约束 |
 | 修改 ACP 后端或 token-sync | [Codex 接入](../design/acp-codex-via-codex-acp.md)、[Claude Code 接入](../design/acp-claude-via-claude-agent-acp.md)、[Grok 接入](../design/acp-grok-via-native-cli.md)、[认证插件与同步](../design/1passport-bytedance-sso.md) | 实际启动、认证、会话和凭据隔离边界 |
 | 改原生子代理、子会话路由、Claude 迟到回答（自主轮）或子代理呈现 | [ADR 0021](../adr/0021-subagent-sessions-and-autonomous-rounds.md)、[Chat 契约](../chat.md#子代理)、[前端](frontend.md) | 子会话登记与帧隔离、权限路由、`owesAutonomousRound` 与 60 s 等待、桥补丁 `claude-subagents-v1`、`late_subagents` / `running_subagents`、两个开关 |
+| 改工作区系统默认行为、编辑/重置与版本历史 | [系统默认行为](system-prompts.md) | 五槽编辑边界、默认升级、原子版本与按尝试生效 |
 | 改 agent 每轮收到的内容、会话设定（`AGENTS.md`）、Skill 加载或工作区/Project 提示词 | [ADR 0023](../adr/0023-turn-input-and-provider-agents-md.md)、[daemon 协议](../daemon-protocol-v2.md)、[Runtime 工作区](runtime-workspaces.md) | 两部分的划分、指令文件位置与刷新、标签与未读说明、Skill 原生目录与同步、提示词合并迁移、实际发出内容的记录 |
 | 改后台任务、驻留进程、门铃或后台任务呈现 | [ADR 0022](../adr/0022-background-tasks-keep-alive-on-demand.md)、[Chat 契约](../chat.md#后台任务)、[daemon 协议](../daemon-protocol-v2.md)、[前端](frontend.md) | 驻留条件与资源交接、接手与释放（一个会话一个进程）、门铃与 attach、任务上下文文件、上限与崩溃清扫、共享本地文件夹锁、`lane.background` 能力位与下行、三个开关 |
 | 改 Chat 斜杠命令（拦截、`/compact` 轮、技能命令名、命令目录的带回与接口、「/」菜单） | [ADR 0025](../adr/0025-chat-slash-commands.md)、[Chat 契约](../chat.md#斜杠命令)、[daemon 协议](../daemon-protocol-v2.md) | 桥怎么认开头的命令、按 provider 的拦截与隐藏名单和说明行、`/compact` 轮的完成条件、`SKILL.md` 的 `name`、`available_commands` 终态字段、会话线目录与 `GET /api/chat/slash-commands`、菜单的分组匹配与插入（[slash-menu.ts](../../frontend/packages/core/chat/slash-menu.ts)、[slash-command-suggestion.tsx](../../frontend/packages/views/editor/extensions/slash-command-suggestion.tsx)） |

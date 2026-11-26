@@ -8,7 +8,7 @@
 import type { FeishuChannelConfig, FeishuSenderAuthorizer, GroupPolicy } from "./config.js";
 import { createLogger } from "@shared/logger.js";
 import { createFeishuClient } from "./client.js";
-import { startWebSocketListener, setGroupPolicy, flushDedupCacheSync, type FeishuWSHandle, type ParsedFeishuMessage } from "./receive.js";
+import { startWebSocketListener, flushDedupCacheSync, type FeishuWSHandle, type ParsedFeishuMessage } from "./receive.js";
 import { sendMarkdownCardFeishu, sendCardFeishu } from "./send.js";
 import { FeishuStreamingSession, buildFinalCard, type TokenProvider } from "./streaming.js";
 import { handleAgentStream } from "./adapters/stream-handler.js";
@@ -73,6 +73,7 @@ export interface HandleTaskStreamOpts {
 
 export class FeishuChannel {
   private readonly _config: FeishuChannelConfig;
+  private groupPolicy?: GroupPolicy;
   private _wsHandle: FeishuWSHandle | null = null;
   private _messageHandlers: MessageHandler[] = [];
   private _activeSessions = new Map<string, FeishuStreamingSession | FeishuTaskPresentation>();
@@ -88,7 +89,7 @@ export class FeishuChannel {
 
   /** Inject group policy (remi's GroupConfigStore). Must be called before connect(). */
   setGroupPolicy(policy: GroupPolicy): this {
-    setGroupPolicy(policy);
+    this.groupPolicy = policy;
     return this;
   }
 
@@ -104,7 +105,7 @@ export class FeishuChannel {
     return this;
   }
 
-  /** Inject the Multiremi workspace membership gate. */
+  /** Apply the sender policy for this bot assignment. */
   setSenderAuthorizer(authorizer: FeishuSenderAuthorizer): this {
     this._senderAuthorizer = authorizer;
     return this;
@@ -116,7 +117,7 @@ export class FeishuChannel {
       throw new Error("FeishuChannel: appId and appSecret are required");
     }
     if (!this._senderAuthorizer) {
-      throw new Error("FeishuChannel: workspace membership authorizer is required");
+      throw new Error("FeishuChannel: sender authorizer is required");
     }
 
     this._wsHandle = startWebSocketListener(
@@ -127,6 +128,7 @@ export class FeishuChannel {
         }
       },
       this._senderAuthorizer,
+      this.groupPolicy,
     );
 
     return this._wsHandle.ready.then(() => new Promise<void>(() => {

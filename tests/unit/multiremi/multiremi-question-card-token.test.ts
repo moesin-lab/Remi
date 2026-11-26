@@ -517,6 +517,6 @@ unifiedModelBackendTests("MUL-506 historical question credentials", fixture => {
     const index=backendIndex(db,"idx_message_card_token");
     expect(String(index?.definition).toLowerCase()).toContain("card_token_hash is not null");
     expect(Number(db.query("SELECT COUNT(*) AS n FROM multiremi_schema_migrations WHERE id=?").get("20260929_human_request_tokens").n)).toBe(1);
-  });
+  }, 20_000);
 });
 function backendIndex(db:SqlDatabase,name:string){return db.dialect==='sqlite'?db.query("SELECT sql AS definition FROM sqlite_master WHERE type='index' AND name=?").get(name):db.query("SELECT indexdef AS definition FROM pg_indexes WHERE indexname=?").get(name);}

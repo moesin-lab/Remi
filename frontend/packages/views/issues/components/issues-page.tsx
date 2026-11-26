@@ -134,8 +134,8 @@ export function IssuesPage() {
   // "no issues" would be worse. Hold the loading state until both land.
   const snapshotPending = snapshotIsLoadBearing && snapshotQuery.isPending;
   const loading = (usesAssigneeBoard
-    ? assigneeGroupsQuery.isLoading
-    : statusIssuesQuery.isLoading) || snapshotPending;
+    ? assigneeGroupsQuery.isLoading && !assigneeGroupsQuery.data
+    : statusIssuesQuery.isLoading && !statusIssuesQuery.data) || snapshotPending;
   // MUL-472 item 5: prove this list is showing the rows the page's own request
   // returned (`status === "success"` and not `keepPreviousData` leftovers).
   const perfMarker = useListPerfMarker({
@@ -244,7 +244,7 @@ export function IssuesPage() {
       <ViewStoreProvider store={useIssueViewStore}>
         <IssuesHeader scopedIssues={headerIssues} />
 
-        {loading || archivedCountQuery.isLoading ? contentSkeleton : headerIssues.length === 0 && archivedCount === 0 ? (
+        {loading ? contentSkeleton : headerIssues.length === 0 && archivedCount === 0 ? (
           <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-2 text-muted-foreground">
             <ListTodo className="h-10 w-10 text-muted-foreground/40" />
             <p className="text-sm">{t(($) => $.page.empty_title)}</p>

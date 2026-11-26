@@ -1,6 +1,8 @@
+import type { AgentTask } from "../../types/agent";
 import type { QueryClient } from "@tanstack/react-query";
 import { createLogger } from "../../logger";
 import { getCurrentWsId } from "../../platform/workspace-storage";
+import { deliveryTargetsOptions } from "../../autopilots/queries";
 import { chatKeys } from "../../chat/queries";
 import { chatWorkSessionKeys } from "../../chat/work-sessions";
 import { issueKeys } from "../../issues/queries";
@@ -87,6 +89,39 @@ export function applyChatDoneToCache(
  * owns message content and its realtime subscription.
  */
 export function createChatHandlers({ qc }: SyncContext): SyncModule {
+  const socketWorkspaceId = getCurrentWsId();
+  const pendingProgress = new Map<string, Map<string, string | null>>();
+  const queryCache = qc.getQueryCache();
+  const unsubscribeProgress = queryCache.subscribe(event => {
+    const { query } = event;
+    const summaries = pendingProgress.get(query.queryHash);
+    if (!summaries) return;
+    if (event.type === "removed") {
+      pendingProgress.delete(query.queryHash);
+      return;
+    }
+    if (event.type !== "updated" || query.state.fetchStatus !== "idle") return;
+    pendingProgress.delete(query.queryHash);
+    if (socketWorkspaceId !== getCurrentWsId()) return;
+    const tasks = qc.getQueryData<AgentTask[]>(query.queryKey);
+    let missing = summaries.size;
+    let changed = false;
+    const merged = tasks?.map(task => {
+      const summary = summaries.get(task.id);
+      if (summary === undefined) return task;
+      missing--;
+      if (task.progress_summary === summary) return task;
+      changed = true;
+      return { ...task, progress_summary: summary };
+    });
+    if (changed) qc.setQueryData(query.queryKey, merged);
+    if (missing) void qc.invalidateQueries({ queryKey: query.queryKey, exact: true });
+  });
+  const refreshTargets = (payload: { workspace_id?: string }) => {
+    const id = payload.workspace_id ?? socketWorkspaceId ?? getCurrentWsId();
+    if (id) void qc.resetQueries(deliveryTargetsOptions(id));
+    return id === getCurrentWsId();
+  };
   const invalidateIssueDecisionSurfaces = () => {
     const wsId = getCurrentWsId();
     if (!wsId) return;
@@ -96,11 +131,15 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
     void qc.invalidateQueries({ queryKey: ["question", wsId] });
   };
   // Helpers reused by chat lifecycle handlers.
+  let unifiedTimer: ReturnType<typeof setTimeout> | undefined;
   const invalidateUnified = () => {
     const wsId = getCurrentWsId();
-    if (!wsId) return;
-    void qc.invalidateQueries({ queryKey: ["turns", wsId] });
-    void qc.invalidateQueries({ queryKey: ["inbox", wsId] });
+    if (!wsId || unifiedTimer !== undefined) return;
+    unifiedTimer = setTimeout(() => {
+      unifiedTimer = undefined;
+      void qc.invalidateQueries({ queryKey: ["turns", wsId] });
+      void qc.invalidateQueries({ queryKey: ["inbox", wsId] });
+    }, 100);
   };
   const invalidatePendingAggregate = () => {
     const id = getCurrentWsId();
@@ -146,6 +185,11 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
   };
 
   return {
+    dispose: () => {
+      clearTimeout(unifiedTimer);
+      unsubscribeProgress();
+      pendingProgress.clear();
+    },
     handlers: {
       // Every follow-up queue change (enqueue, edit, delete, steer, release,
       // pause) arrives here. Released rows come in through the log stream.
@@ -232,7 +276,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         // pending_decision_count. The task event only identifies the source
         // Issue, so invalidate active detail/decision surfaces in this
         // workspace and let their authoritative endpoints resolve ancestry.
-        invalidateIssueDecisionSurfaces();
+        if (payload.issue_id) invalidateIssueDecisionSurfaces();
         if (invalidateWorkSessionTask(payload)) {
           void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
           return;
@@ -253,10 +297,27 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
 
       "task:progress": (p) => {
         if (!p || typeof p !== "object") return;
-        const payload = p as TaskProgressPayload;
+        const payload = p as TaskProgressPayload & { issue_id?: string };
+        const summary = payload.progress_summary;
+        if (typeof payload.task_id !== "string" || (typeof summary !== "string" && summary !== null)) return;
+        if (typeof payload.issue_id === "string" && payload.issue_id) {
+          const queryKey = issueKeys.tasks(payload.issue_id);
+          const query = queryCache.find({ queryKey, exact: true });
+          const tasks = qc.getQueryData<AgentTask[]>(queryKey);
+          const target = tasks?.find(task => task.id === payload.task_id);
+          if (query && query.state.fetchStatus !== "idle") {
+            const summaries = pendingProgress.get(query.queryHash) ?? new Map<string, string | null>();
+            summaries.set(payload.task_id, summary);
+            pendingProgress.set(query.queryHash, summaries);
+          } else if (query && !target) {
+            void qc.invalidateQueries({ queryKey, exact: true });
+          }
+          if (tasks && target && target.progress_summary !== summary) {
+            qc.setQueryData(queryKey, tasks.map(task => task === target ? { ...task, progress_summary: summary } : task));
+          }
+        }
         if (invalidateWorkSessionTask(payload)) return;
-        if (typeof payload.chat_session_id !== "string" || typeof payload.task_id !== "string"
-          || (typeof payload.progress_summary !== "string" && payload.progress_summary !== null)) return;
+        if (typeof payload.chat_session_id !== "string") return;
         refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -324,7 +385,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         invalidateUnified();
         const payload = p as TaskAwaitingHumanPayload;
         void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
-        invalidateIssueDecisionSurfaces();
+        if (payload.issue_id) invalidateIssueDecisionSurfaces();
         if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         refetchUnheldPendingTask(qc, payload.chat_session_id);
@@ -397,11 +458,13 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       "chat:session_updated": (p) => {
         const payload = p as {
           chat_session_id: string;
+          workspace_id?: string;
           title?: string;
           updated_at?: string;
           status?: ChatSession["status"];
           pinned?: boolean;
         };
+        if (!refreshTargets(payload)) return;
         chatWsLogger.info("chat:session_updated (global)", {
           chat_session_id: payload.chat_session_id,
           titleLength: payload.title?.length,
@@ -428,7 +491,8 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
 
       // A confirmed hard delete removes cached history and the selected draft.
       "chat:session_deleted": (p) => {
-        const payload = p as { chat_session_id: string };
+        const payload = p as { chat_session_id: string; workspace_id?: string };
+        if (!refreshTargets(payload)) return;
         chatWsLogger.info("chat:session_deleted (global)", payload);
         const id = getCurrentWsId();
         if (id) {

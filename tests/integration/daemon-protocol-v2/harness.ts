@@ -183,6 +183,7 @@ export class DaemonProtocolHarness {
   private createDaemons!: () => MultiremiDaemon[];
   private requestMetrics?: RequestMetricsOptions;
   private offerSweepMs?: number;
+  private manualOfferClock = false;
   private apiRole: "all" | "runtime" = "all";
   private peerChannel: PeerChannel | null = null;
   private peerSecret = "";
@@ -193,7 +194,8 @@ export class DaemonProtocolHarness {
   get url() { return `http://127.0.0.1:${this.server.port}`; }
 
   static async create(options: {
-    database?: "sqlite";
+    manualOfferClock?: boolean;
+    database?: "sqlite" | "migrated";
     providers?: string[];
     runtimeId?: string;
     daemonOptions?: Pick<MultiremiDaemonOptions,
@@ -216,12 +218,13 @@ export class DaemonProtocolHarness {
     onReady?: (daemon: MultiremiDaemon, harness: DaemonProtocolHarness) => void;
     onRoundCard?: (taskId: string) => void;
   } = {}): Promise<DaemonProtocolHarness> {
-    const h = new DaemonProtocolHarness(process.env.MULTIREMI_TEST_POSTGRES_URL && options.database !== "sqlite"
+    const h = new DaemonProtocolHarness(options.database === "migrated" || (process.env.MULTIREMI_TEST_POSTGRES_URL && options.database !== "sqlite")
       ? await openIntegrationDatabase() : undefined);
     try {
       h.store.ensureLocalWorkspace();
       const daemonId = options.omitDaemonId ? "protocol-fixture-device" : "dmn_fixture";
       h.apiRole = options.apiRole ?? "all";
+      h.manualOfferClock = options.manualOfferClock ?? false;
       h.requestMetrics = options.requestMetrics;
       h.offerSweepMs = options.offerSweepMs;
       h.peerChannel = options.peerChannel ?? null;
@@ -293,6 +296,7 @@ export class DaemonProtocolHarness {
     this.server = startMultiremiServer({
       store: this.store, scheduler: null, backgroundJobs: false, hostname: "127.0.0.1", port,
       authToken: "fixture-master", apiRole: this.apiRole, requestMetrics: this.requestMetrics, daemonOfferSweepMs: this.offerSweepMs,
+      daemonWorkClock: this.manualOfferClock ? this.clock : undefined,
       liveHub: this.liveHub,
       peerChannel: this.peerChannel, peerSecret: this.peerSecret,
       onDaemonProtocol: layer => {

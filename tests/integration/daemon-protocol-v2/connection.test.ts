@@ -555,8 +555,9 @@ describe("daemon protocol v2 real connection", () => {
         (daemon as unknown as { options: { runtimeId: string } }).options.runtimeId = deletedId;
       } });
       const runtimesChanged = spyOn(h.client, "runtimesChanged");
-      await h.startDaemon();
+      await h.startDaemon({waitForSocket:false});
       await waitFor(() => recovering, "orphan recovery after runtime_gone");
+      expect(h.ledger.filter(entry => entry.type === 'runtime.ready')).toHaveLength(0);
       // The new identity is registered, but the supervisor readiness barrier
       // keeps its hello and any offer behind the in-flight recovery callback.
       expect(h.ledger.filter(entry => entry.type === "hello")).toHaveLength(1);
@@ -608,7 +609,9 @@ describe("daemon protocol v2 real connection", () => {
       await new Promise<void>((resolve, reject) => { incumbent.addEventListener("open", () => resolve(), { once: true }); incumbent.addEventListener("error", reject, { once: true }); });
       incumbent.send(JSON.stringify({ v: 2, t: "hello", ts: Date.now(), p: { protocol: 2, daemon_id: "dmn_incumbent", cli_version: DAEMON_MIN_CLI_VERSION, launched_by: null, runtimes: [{ runtime_id: "rt_contended", provider: "claude", max_concurrency: 1, active_task_ids: [] }], caps: [] } }));
       await waitFor(() => h.layer.registry.daemonIdForRuntime("rt_contended") === "dmn_incumbent", "incumbent runtime ownership");
-      await h.startDaemon();
+      await h.startDaemon({waitForSocket:false});
+      await waitFor(() => heldHeartbeat !== null,'contended runtime heartbeat awaiting confirmation');
+      expect(h.ledger.filter(entry => entry.type === 'runtime.ready')).toHaveLength(0);
       const later = h.layer.registry.get("dmn_fixture")! as typeof h.sessions[number];
       expect(later.unavailableRuntimeIds).toEqual(["rt_contended"]);
       incumbent.close();

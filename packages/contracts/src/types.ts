@@ -1406,6 +1406,7 @@ export interface AnswerIssueDecisionInput {
 export type MultiremiTaskPromptMode = "bootstrap" | "delta";
 
 export interface MultiremiTaskPromptArtifact {
+  systemPromptPolicy?: import("./system-prompt-policy.js").SystemPromptPolicyBinding | null;
   taskId: string;
   mode: MultiremiTaskPromptMode;
   prompt: string;
@@ -1416,6 +1417,7 @@ export interface MultiremiTaskPromptArtifact {
 }
 
 export interface RecordTaskPromptInput {
+  systemPromptPolicy?: import("./system-prompt-policy.js").SystemPromptPolicyBinding | null;
   mode: MultiremiTaskPromptMode;
   prompt: string;
   sha256: string;
@@ -1473,6 +1475,8 @@ export interface MultiremiBoundIssue {
 }
 
 export interface MultiremiTask {
+  /** Workspace behavior snapshot frozen atomically with this attempt's claim. */
+  systemPromptPolicy?: import("./system-prompt-policy.js").SystemPromptPolicyBinding | null;
   runtimeWorkspaceId?: string | null;
   id: string;
   /** Canonical turn containing this execution attempt. */

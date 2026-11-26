@@ -666,6 +666,107 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.system-prompt.get": {
+      "command": "remi workspace system-prompt get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-prompt.set": {
+      "command": "remi workspace system-prompt set",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-prompt.reset": {
+      "command": "remi workspace system-prompt reset",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.reset",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-prompt.history": {
+      "command": "remi workspace system-prompt history",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.history",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-prompt.version": {
+      "command": "remi workspace system-prompt version",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.version",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-prompt.restore": {
+      "command": "remi workspace system-prompt restore",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.restore",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-prompt.diff": {
+      "command": "remi workspace system-prompt diff",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.diff",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-prompt.preview": {
+      "command": "remi workspace system-prompt preview",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.preview",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.prompt.get": {
       "command": "remi workspace prompt get",
       "auth": [

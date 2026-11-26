@@ -898,7 +898,9 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       workDir: "/tmp/detached-chat-work",
     });
     const pending = store.sendChatMessage(chat.id, { body: "Continue our conversation" });
-    expect(store.claimTask(runtime.id)?.id).toBe(pending.task.id);
+    const generation = 'detached-private-chat-proposal';
+    expect(store.claimTask(runtime.id,{policyProtocol:'adopt',supportsPromptPolicy:true,offerGeneration:generation})?.id).toBe(pending.task.id);
+    expect(store.recordTaskOffered(pending.task.id,runtime.id,'2020-01-01T00:00:00.000Z',generation)).toBe(true);
     // Ownership migration retains old bindings as audit data, never as this turn's conversation.
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ?, execution_fingerprint = ? WHERE id = ?",
       ["2020-01-01T00:00:00.000Z", CHAT_ISSUE_DECOUPLED_FINGERPRINT, pending.task.id]);

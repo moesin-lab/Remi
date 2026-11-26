@@ -197,9 +197,7 @@ export interface CommentUnresolvedPayload {
   comment: Comment;
 }
 
-export interface WorkspaceUpdatedPayload {
-  workspace: Workspace;
-}
+export type WorkspaceUpdatedPayload = { workspace: Workspace } | { workspace_id: string } | { id: string };
 
 export interface WorkspaceDeletedPayload {
   workspace_id: string;

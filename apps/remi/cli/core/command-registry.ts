@@ -159,6 +159,9 @@ const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
   "workspace.ssh-mesh.rotate",
   "workspace.ssh-mesh.update",
   "workspace.storage.set",
+  "workspace.system-prompt.set",
+  "workspace.system-prompt.reset",
+  "workspace.system-prompt.restore",
 ]);
 
 const TASK_PARITY_DENIED_COMMAND_PREFIXES = [

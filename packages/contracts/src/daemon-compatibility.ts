@@ -11,6 +11,8 @@ export const DAEMON_CAPABILITY_REGISTRY = {
   "trace.subscribe": { aliases: [], introduced: "0.2.82", contract: null },
   "wiki.fetch": { aliases: [], introduced: "0.2.85", contract: null },
   "lane.background": { aliases: [], introduced: "0.2.90", contract: null },
+  "prompt.policy.v1": { aliases: [], introduced: "0.2.95", contract: null },
+  "prompt.policy.adopt.v1": { aliases: [], introduced: "0.2.95", contract: null },
 } as const;
 
 export type DaemonCapabilityName = keyof typeof DAEMON_CAPABILITY_REGISTRY;

@@ -10,7 +10,7 @@ import { persistIssuedMaterialBinding } from './credential-version-bindings.js';
 import { readCurrentTaskLease, writeCurrentTaskLease } from './task-authority.js';
 import { RootManagement } from './root-management.js';
 import { beginMachineChallenge, bindMachineConnection, releaseMachineConnection, requireCurrentMachine, verifyConnectionChallenge, verifyMachineChallenge, type MachineConnection } from './machine-proof.js';
-import { abortSecurityWrite, withSecurityTarget, type SecurityTx } from './security-write.js';
+import { abortSecurityWrite, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
 import { prepareMachineConnection, attachMachineConnection, sessionMachineConnection } from './machine-proof.js';
 
 type Lease = { start_deadline: string; lease_id: string; fence_term: string };
@@ -186,12 +186,7 @@ export class RootReceiptStore {
     return this.checked(tx, machine, request.receipt_id, 'replay', check, (row, tuple) => {
       if (tuple.receipt_version !== request.expected_receipt_version || tuple.delivery_version !== request.expected_delivery_version ||
           row.lease_id !== request.run_lease_id || row.fence_term !== request.fence_term) throw new Error('receipt_conflict');
-      const stored = this.db.query('SELECT envelope,business_payload_json FROM multiremi_delivery_receipts WHERE receipt_id=?').get(tuple.receipt_id);
-      const business = JSON.parse(stored.business_payload_json);
-      if (rootBusinessPayloadDigest(business) !== tuple.business_payload_digest ||
-          `sha256:${createHash('sha256').update(stored.envelope).digest('hex')}` !== row.envelope_digest) throw new Error('receipt_conflict');
-      return { tuple, envelope: stored.envelope, envelope_digest: row.envelope_digest, frozen_business_payload: business,
-        start_deadline: row.start_deadline, lease_id: row.lease_id, fence_term: row.fence_term, run_state: row.run_state };
+      return this.storedEnvelope(tuple, row);
     });
   }
 
@@ -216,6 +211,66 @@ export class RootReceiptStore {
       return { ok: true, ack_state: 'confirmed', run_state: row.run_state, start_deadline: row.start_deadline,
         lease_id: row.lease_id, fence_term: row.fence_term, idempotent_replay: row.ack_state === 'confirmed' };
     });
+  }
+
+  private storedEnvelope(tuple: RootDeliveryTuple, row: StoredReceipt): RootDeliveryEnvelopePayload {
+    const stored = this.db.query('SELECT envelope,business_payload_json FROM multiremi_delivery_receipts WHERE receipt_id=?').get(tuple.receipt_id);
+    const business = JSON.parse(stored.business_payload_json);
+    if (rootBusinessPayloadDigest(business) !== tuple.business_payload_digest ||
+        `sha256:${createHash('sha256').update(stored.envelope).digest('hex')}` !== row.envelope_digest) throw new Error('receipt_conflict');
+    return { tuple, envelope: stored.envelope, envelope_digest: row.envelope_digest, frozen_business_payload: business,
+      start_deadline: row.start_deadline, lease_id: row.lease_id, fence_term: row.fence_term, run_state: row.run_state };
+  }
+
+  commitFirstOffer(candidate: PreparedRootDelivery, lease: Lease): RootDeliveryEnvelopePayload {
+    const { tuple } = candidate;
+    if (!preparedDeliveries.has(candidate) || tuple.handoff_id !== null || tuple.handoff_generation !== 0 || tuple.run_generation !== 1) {
+      throw new Error('receipt_conflict');
+    }
+    const existing = () => this.db.query('SELECT receipt_id FROM multiremi_delivery_receipts WHERE attempt_id=? AND run_generation=?')
+      .get(tuple.attempt_id, tuple.run_generation)?.receipt_id;
+    const replay = (receiptId: string) => {
+      const plan = this.planRecovery(receiptId);
+      return withSecurityWrite(this.db, lease.fence_term, plan, tx => withSecurityTarget(this.db, tx, `receipt:${receiptId}`, () => {
+        this.authority.requireReceiptAuthority(tx, receiptId);
+        const row: StoredReceipt = this.db.query('SELECT * FROM multiremi_delivery_receipts WHERE receipt_id=?').get(receiptId);
+        const committed: RootDeliveryTuple = JSON.parse(row.binding_json);
+        if (committed.receipt_id !== receiptId || serializeRootDeliveryTuple(committed) !== row.binding_json ||
+            !isDeepStrictEqual(committed, { ...tuple, receipt_id: receiptId, material_expires_at: committed.material_expires_at })) {
+          throw new Error('receipt_conflict');
+        }
+        return this.storedEnvelope(committed, row);
+      }));
+    };
+    const previous = existing();
+    if (previous) return replay(previous);
+    const plan = this.authority.planFirstOffer(candidate);
+    const concurrent = new Error('first_offer_already_committed');
+    try {
+      return withSecurityWrite(this.db, lease.fence_term, plan, tx => {
+        if (existing()) throw concurrent;
+        return this.activate(tx, candidate, lease, (activeTx, prepared) => {
+          const bound = this.db.query(`INSERT INTO multiremi_usage_task_scopes(task_id,workspace_id,agent_id,runtime_id,active_run_id,runtime_provenance)
+            SELECT a.id,t.workspace_id,t.agent_id,a.runtime_id,?,'live_task' FROM multiremi_turn_attempts a
+            JOIN multiremi_turns t ON t.current_attempt_id=a.id AND t.id=a.turn_id
+            WHERE a.id=? AND a.runtime_id=? AND a.status='accepted'
+            AND NOT EXISTS (SELECT 1 FROM multiremi_usage_runs r WHERE r.task_id=a.id)
+            ON CONFLICT(task_id) DO UPDATE SET active_run_id=excluded.active_run_id,runtime_id=excluded.runtime_id,runtime_provenance='live_task'
+            WHERE multiremi_usage_task_scopes.active_run_id IS NULL AND multiremi_usage_task_scopes.agent_id=excluded.agent_id
+              AND multiremi_usage_task_scopes.workspace_id=excluded.workspace_id
+              AND (multiremi_usage_task_scopes.runtime_id IS NULL OR multiremi_usage_task_scopes.runtime_id=excluded.runtime_id)
+            RETURNING task_id`).get(tuple.consumer_id,tuple.attempt_id,tuple.runtime_id);
+          if (!bound) throw new Error('stale_execution');
+          this.db.query('INSERT INTO multiremi_usage_runs(task_id,run_id,revision,complete) VALUES(?,?,-1,0)').run(tuple.attempt_id,tuple.consumer_id);
+          return this.authority.issue(activeTx, prepared);
+        });
+      });
+    } catch (error) {
+      if (error !== concurrent) throw error;
+      const winner = existing();
+      if (!winner) throw error;
+      return replay(winner);
+    }
   }
 
   activate(tx: SecurityTx, candidate: PreparedRootDelivery, lease: Lease,

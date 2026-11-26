@@ -307,14 +307,13 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       return {subject:{type:'agent',id:agent.id},invocation};
     },resolveExecution(){return {execution,manifest};}},()=>createReplacementAttemptWithinTransaction(db,turnId,{id:target.attemptId,
       previousStatus:'lost',reason:'trusted retry',execution:{runtimeId:'rt_auth'}}));
-    db.run("INSERT INTO multiremi_usage_runs VALUES('tsk_admitted','consumer',0,0)");
+
     const task=store.getTask(target.attemptId)!;
     await expect(store.createTaskAccessToken(task,'local')).rejects.toThrow('root_authority_revoked');
     const expiresAt=new Date(Date.now()+300000).toISOString();
-    db.query(`INSERT INTO multiremi_usage_task_scopes(task_id,workspace_id,agent_id,runtime_id,active_run_id) VALUES(?,'local',?,'rt_auth','consumer')
-      ON CONFLICT(task_id) DO UPDATE SET runtime_id='rt_auth',active_run_id='consumer'`).run(task.id,agent.id);
+
     const business={turn_id:turnId};
-    const tuple={...fixtureDeliveryTuple,business_payload_digest:rootBusinessPayloadDigest(business),attempt_id:task.id,consumer_id:'consumer',handoff_id:null,runtime_id:'rt_auth',daemon_id:'daemon',incarnation:'inc',
+    const tuple={...fixtureDeliveryTuple,business_payload_digest:rootBusinessPayloadDigest(business),attempt_id:task.id,consumer_id:'consumer',handoff_id:null,handoff_generation:0,runtime_id:'rt_auth',daemon_id:'daemon',incarnation:'inc',
       recipient_key_id:'key',recipient_key_fingerprint:`sha256:${createHash('sha256').update(createPublicKey(recipient).export({type:'spki',format:'der'})).digest('hex')}`,
       grant_id:'grant-agent',grant_generation:1,execution_config_epoch:1,execution_digest:execution.executionDigest,input_revision:1,input_digest:manifest.digest,checkpoint_digest:null,material_expires_at:expiresAt};
     const algorithm={name:'RSA-OAEP',hash:'SHA-256'};
@@ -341,16 +340,18 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     }
     expect(()=>withSecurityWrite(db,'1',offerPlan,tx=>service.issue(tx,candidate))).toThrow('credential_version_conflict');
     const receipts=new RootReceiptStore(db,service);
-    const activate=(expectedLeaseVersion:number)=>withSecurityWrite(db,'1',offerPlan,tx=>receipts.activate(tx,candidate,offerLease,(activeTx,prepared)=>{
-      expect(readAttemptEligibility(db,activeTx,target.attemptId)).toMatchObject({eligibility:'root',grant_id:'grant-agent',runtime_trust_id:'trust'});
-      db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(task.id);
-      return service.issue(activeTx,prepared);
-    },expectedLeaseVersion));
-    expect(()=>activate(1)).toThrow('authority_revision_conflict');
+    expect(()=>receipts.commitFirstOffer(candidate,offerLease)).toThrow('stale_execution');
+    db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(task.id);
+    const wrongRecipient=await PreparedRootDelivery.prepare({...tuple,recipient_key_id:'retired'},business,enc);
+    expect(()=>receipts.commitFirstOffer(wrongRecipient,offerLease)).toThrow();
+    expect(db.query('SELECT run_id FROM multiremi_usage_runs WHERE task_id=?').get(task.id)).toBeNull();
     expect(db.query('SELECT id FROM multiremi_access_tokens WHERE token_hash=?').get(candidate.tokenHash)).toBeNull();
     expect(db.query('SELECT family_id FROM multiremi_credential_families WHERE family_id=?').get(candidate.familyId)).toBeNull();
-    activate(0);
-    expect(()=>activate(0)).toThrow('receipt_conflict');
+    const firstOffer=receipts.commitFirstOffer(candidate,offerLease);
+    const resend=await PreparedRootDelivery.prepare({...tuple,receipt_id:'other-receipt'},business,enc);
+    expect(receipts.commitFirstOffer(resend,{...offerLease,lease_id:'other-lease'})).toEqual(firstOffer);
+    expect(()=>receipts.commitFirstOffer(wrongRecipient,offerLease)).toThrow('receipt_conflict');
+    expect(db.query('SELECT id FROM multiremi_access_tokens WHERE id=?').get(resend.credentialId)).toBeNull();
     expect(Number(db.query('SELECT lease_version FROM multiremi_current_task_leases WHERE attempt_id=?').get(task.id).lease_version)).toBe(1);
     const repo=store.rootReceipts;
     const local={runtime_id:tuple.runtime_id,daemon_id:tuple.daemon_id,consumer_id:tuple.consumer_id,incarnation:tuple.incarnation,
@@ -563,6 +564,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>updateTitle(installed.env.MULTIREMI_TOKEN,'stale write')).toThrow();
     expect(store.getIssue(issue.id)?.title).toBe('after recovery');
     for (const recover of [status,replay,acknowledge]) expect(recover).toThrow();
+    expect(()=>receipts.commitFirstOffer(resend,offerLease)).toThrow();
     expect(()=>start('birth')).toThrow();
     expect(service.resolveCurrent(passwordProof,use).effectiveRoot).toBe(true);
     expect(revoke).toThrow();

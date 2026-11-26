@@ -474,7 +474,7 @@ describe("MUL-1 §10.1 public contracts and fixtures", () => {
 
     // Even if a root task.offer accidentally reached the legacy ordinary parser, it fails closed.
     expect(() => normalizeDaemonTurnOffer(fixtureRootTaskOfferPayload as unknown as Record<string, unknown>)).toThrow(
-      /invalid turn offer payload/,
+      /root_delivery_unsupported/,
     );
 
     // Ordinary offer without root indicators classifies as standard.

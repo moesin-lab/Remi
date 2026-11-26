@@ -280,8 +280,12 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
       if (dialect === "sqlite") db.exec("PRAGMA foreign_keys = OFF");
       try {
         db.transaction(() => {
-          if (dialect === "postgres") db.exec(`TRUNCATE TABLE ${tables.map(quote).join(", ")}`);
-          else for (const table of tables) db.exec(`DELETE FROM ${quote(table)}`);
+          if (dialect === "postgres") {
+            for (const table of ["multiremi_live_terms", "multiremi_security_state"]) {
+              if (tables.includes(table)) db.query(`SELECT 1 FROM ${quote(table)} FOR UPDATE`).all();
+            }
+            db.exec(`TRUNCATE TABLE ${tables.map(quote).join(", ")}`);
+          } else for (const table of tables) db.exec(`DELETE FROM ${quote(table)}`);
           for (const table of order) db.exec(`INSERT INTO ${quote(table)} SELECT * FROM ${quote(snapshots.get(table)!)}`);
           const restoredCounts = counts();
           for (const [index, table] of tables.entries()) {

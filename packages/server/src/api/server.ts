@@ -6,7 +6,7 @@ import { startHubRoleGuard, locksForRole } from "./hub/hub-role-guard.js";
 import { reconcileCurrentDaemonBuild } from "../releases/current-daemon-build.js";
 import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
-import { Hono, type Handler } from "hono";
+import { Hono, type Context, type Handler } from "hono";
 import { registerDaemonTraceHandlers } from "./daemon-protocol/trace-handlers.js";
 import { resolveRequestWorkspaceId } from "./helpers/workspace-context.js";
 import { createPlatformMaintenanceWriteGate } from "./helpers/platform-maintenance-gate.js";
@@ -37,7 +37,7 @@ import { registerDaemonRoutes } from "./routers/daemon.js";
 import { registerStorageRoutes } from "./routers/storage.js";
 import { registerCloudRuntimeRoutes } from "./routers/cloud-runtime.js";
 import { registerCloudBillingRoutes } from "./routers/cloud-billing.js";
-import { bindRootProof } from "./helpers/root-access.js";
+import { bindRootProof, requestHasRootRead } from "./helpers/root-access.js";
 import { registerRootRoutes, rootError } from "./routers/root.js";
 import { registerMeRoutes } from "./routers/me.js";
 import { registerWorkspaceRoutes } from "./routers/workspaces.js";
@@ -636,6 +636,14 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.get("/", (c) => c.json({ service: "multiremi-api", ui: "frontend/apps/web" }));
   app.get("/favicon.ico", (c) => c.body(null, 204));
 
+  const permitsRootWorkspaceDeletion = (c: Context) => {
+    if (c.req.method !== 'DELETE') return false;
+    const match = /^\/api\/workspaces\/([^/]+)$/.exec(c.req.path);
+    if (!match || !match[1]) return false;
+    let id: string;
+    try { id = decodeURIComponent(match[1]); } catch { return false; }
+    return requestHasRootRead(c, store, 'workspace.delete.authority', 'workspace', id);
+  };
   if (authToken) {
     app.use("*", async (c, next) => {
       // Public routes that must work WITHOUT auth, otherwise enabling
@@ -703,7 +711,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       else bindRootProof(c, store, token, false);
       if (accessToken.type === "task") {
         const denyCategory = taskTokenHardDenyCategory(c.req.raw);
-        if (denyCategory) {
+        if (denyCategory && !(denyCategory === 'workspace_lifecycle' && permitsRootWorkspaceDeletion(c))) {
           recordTaskTokenWrite(c.req.raw, accessToken, 403, denyCategory);
           return c.json({ error: "forbidden for task token", code: "task_token_hard_denied" }, 403);
         }
@@ -753,7 +761,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         else bindRootProof(c, store, rawToken, false);
         if (accessToken.type === "task") {
           const denyCategory = taskTokenHardDenyCategory(c.req.raw);
-          if (denyCategory) {
+          if (denyCategory && !(denyCategory === 'workspace_lifecycle' && permitsRootWorkspaceDeletion(c))) {
             recordTaskTokenWrite(c.req.raw, accessToken, 403, denyCategory);
             return c.json({ error: "forbidden for task token", code: "task_token_hard_denied" }, 403);
           }

@@ -13,6 +13,7 @@ import { createPlatformMaintenanceWriteGate } from "./helpers/platform-maintenan
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
+import { SecurityAbort } from '@multiremi/store/security-write.js';
 import { createJwtBrowserClientGuard } from './realtime.js';
 import { AgentTemplateError } from "./agent-templates.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
@@ -37,7 +38,7 @@ import { registerDaemonRoutes } from "./routers/daemon.js";
 import { registerStorageRoutes } from "./routers/storage.js";
 import { registerCloudRuntimeRoutes } from "./routers/cloud-runtime.js";
 import { registerCloudBillingRoutes } from "./routers/cloud-billing.js";
-import { bindRootProof, requestHasRootRead } from "./helpers/root-access.js";
+import { bindDelegatedPatForRootControl, bindRootProof, requestHasRootRead } from "./helpers/root-access.js";
 import { registerRootRoutes, rootError } from "./routers/root.js";
 import { registerMeRoutes } from "./routers/me.js";
 import { registerWorkspaceRoutes } from "./routers/workspaces.js";
@@ -697,6 +698,10 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       }
       const accessToken = await store.verifyAccessToken(token);
       if (!accessToken) {
+        if (header !== undefined && bindDelegatedPatForRootControl(c, store, token)) {
+          await next();
+          return;
+        }
         const jwt = verifyJwtToken(token, store);
         if (!jwt) return c.json({ error: "unauthorized" }, 401);
         c.set("multiremiAuth", buildRequestAuth(null, jwt.userId));
@@ -752,6 +757,10 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       const header = c.req.header("Authorization");
       const rawToken = parseBearerToken(header);
       const accessToken = rawToken ? await store.verifyAccessToken(rawToken) : null;
+      if (!accessToken && bindDelegatedPatForRootControl(c, store, rawToken)) {
+        await next();
+        return;
+      }
       if (header !== undefined && !accessToken) return c.json({ error: "unauthorized" }, 401);
       if (accessToken) {
         if (accessToken.type === "daemon" && !isDaemonTokenAllowedRequest(c.req.raw)) {
@@ -787,7 +796,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
-    if (c.req.path.startsWith("/api/root/")) {
+    if (c.req.path.startsWith("/api/root/") || err instanceof SecurityAbort) {
       const response = rootError(c, err);
       if (response) return response;
     }

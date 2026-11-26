@@ -363,11 +363,13 @@ export class RootManagement {
           current_attempt_effective_root: current?.transport === 'task' && effective,
           effective_root: effective, effective_reason_code: current?.reason ?? (active ? 'unverified_human_auth' : 'feature_disabled'),
           grant_id: current?.recordedGrant?.grantId ?? null, grant_generation: current?.recordedGrant?.generation ?? null,
-          capabilities: { can_manage_root: effective, can_edit_root_execution: false, can_manage_runtime_trust: effective,
+          capabilities: { can_manage_root: effective, can_edit_root_execution: effective, can_manage_runtime_trust: effective,
             can_revoke_credential_family: effective, can_read_root_audit: effective },
           allowed_operations: [...(effective ? ['root.grant.list', 'root.grant.revoke', 'root.runtime-trust.list',
             'root.runtime-trust.get', 'root.credential-family.revoke', 'root.audit.list'] : []),
-            ...(effective ? ['root.grant.create', 'root.runtime-trust.grant', 'root.runtime-trust.revoke'] : [])],
+            ...(effective ? ['root.grant.create', 'root.grant.preview', 'root.agent-configuration.approve', 'root.delegation.revoke',
+              'root.runtime-trust.grant', 'root.runtime-trust.revoke'] : []),
+            ...(effective && current?.transport === 'task' ? ['root.agent-pat.create'] : [])],
         };
       };
       if (!proof) return read(null);

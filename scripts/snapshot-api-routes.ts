@@ -997,6 +997,7 @@ const ID_BY_COLLECTION: Record<string, keyof SeedRefs> = {
 };
 
 const BY_NAME: Record<string, keyof SeedRefs> = {
+  agentId: "agentId",
   attachmentId: "attachmentId",
   chatSessionId: "chatSessionId",
   decisionId: "decisionId",
@@ -1022,6 +1023,7 @@ const BY_NAME: Record<string, keyof SeedRefs> = {
 
 function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
   if (name === "id" && pattern.startsWith("/api/runtime-workspaces/")) return "rws_snapshot";
+  if (name === "nodeId" && pattern.startsWith("/api/root/delegations/")) return "origin_snapshot";
   switch (name) {
     case "number":
       return "42";

@@ -526,8 +526,12 @@ The `remi root` domain exposes explicit system root inspection and management:
 ```text
 remi root context
 remi root grant list [--subject-type user|agent] [--subject-id <id>] [--status active|revoked|expired]
-remi root grant create --subject-type user|agent --subject-id <id> --reason <text> --expected-revision <n> [--idempotency-key <key>] [--expires-at <iso>] [--runtime-trust <id>...]
+remi root grant preview --agent-id <id> --runtime-trust <id>...
+remi root agent-configuration approve --agent-id <id> --file <file>
+remi root grant create --subject-type user|agent --subject-id <id> --reason <text> --expected-revision <n> [--idempotency-key <key>] [--expires-at <iso>] [--runtime-trust <id>...] [--accepted-dependency-digest <digest>]
 remi root grant revoke <grant> --reason <text> --expected-revision <n> [--reason-code <code>] [--idempotency-key <key>] --yes
+remi root agent-pat create --expires-at <iso> [--idempotency-key <key>]
+remi root delegation revoke --origin-id <id> --file <file> --yes
 remi root runtime-trust list [--runtime <id>] [--status active|revoked|expired]
 remi root runtime-trust get <runtime>
 remi root runtime-trust grant <runtime> --daemon <id> --incarnation <id> --recipient-key-id <id> --recipient-key-fingerprint <fp> --reason <text> --expected-revision <n>

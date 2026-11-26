@@ -2020,6 +2020,77 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "root.grant.preview": {
+      "command": "remi root grant preview",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.preview",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.agent-configuration.approve": {
+      "command": "remi root agent-configuration approve",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.agent-configuration.approve",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.agent-pat.create": {
+      "command": "remi root agent-pat create",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.agent-pat.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.delegation.revoke": {
+      "command": "remi root delegation revoke",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.delegation.revoke",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "root.grant.create": {
       "command": "remi root grant create",
       "aliases": [],
@@ -13076,6 +13147,9 @@
     "GET /api/remi/releases/latest/version": {
       "command": "platform.release.version"
     },
+    "GET /api/root/agents/:agentId/grant-preview": {
+      "command": "root.grant.preview"
+    },
     "GET /api/root/audit": {
       "command": "root.audit.list"
     },
@@ -14452,8 +14526,17 @@
     "POST /api/projects/:id/restore": {
       "command": "project.restore"
     },
+    "POST /api/root/agent-pats": {
+      "command": "root.agent-pat.create"
+    },
+    "POST /api/root/agents/:agentId/configuration/approve": {
+      "command": "root.agent-configuration.approve"
+    },
     "POST /api/root/credential-families/:familyId/revoke": {
       "command": "root.credential-family.revoke"
+    },
+    "POST /api/root/delegations/:nodeId/revoke": {
+      "command": "root.delegation.revoke"
     },
     "POST /api/root/grants": {
       "command": "root.grant.create"

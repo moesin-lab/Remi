@@ -125,7 +125,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const recipient=await service.verifyIndependentPassword(subject.id,'test-dashboard-password');
     const createUse={action:'root.grant.create',use:'management',actualTarget:subject};
     const rejected = await api('/api/root/grants', compact, { subject: { type: 'agent', id: 'agt_fixture' } });
-    expect(await rejected.json()).toMatchObject({ error: { code: 'root_required' } });
+    expect(await rejected.json()).toMatchObject({ error: { code: 'invalid_request' } });
     for (const [credential, bearer] of [[proof, compact], [patProof, 'fixture-pat']] as const) {
       const origin=service.resolveCurrent(credential,createUse).credentialOrigin!;
       const createPlan=service.plan(credential,createUse);
@@ -494,6 +494,20 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       const patProof=service.registeredCredentials.verify(raw);
       expect(service.resolveCurrent(patProof,use)).toMatchObject({subject:beneficiary,transport:'agent_pat',effectiveRoot:true});
       expect(await store.verifyAccessToken(raw)).toBeNull();
+      const patRequest = { expires_at: new Date(use.expiresAtMs).toISOString(), idempotency_key: 'http-pat' };
+      expect((await api('/api/root/agent-pats', undefined, patRequest)).status).toBe(403);
+      const patResponse = await api('/api/root/agent-pats', token.token, patRequest);
+      expect(patResponse.status).toBe(201);
+      expect(patResponse.headers.get('Cache-Control')).toBe('no-store');
+      const issuedPat = await patResponse.json();
+      expect(issuedPat.token.startsWith('mul_')).toBe(true);
+      const replay = await api('/api/root/agent-pats', token.token, patRequest);
+      expect(await replay.json()).toMatchObject({ error: { code: 'credential_version_conflict' } });
+      expect(Number(db.query('SELECT COUNT(*) AS total FROM multiremi_delegated_pats').get().total)).toBe(2);
+      expect(await (await api('/api/root/context', issuedPat.token)).json()).toMatchObject({
+        transport_identity: 'agent_pat', authenticated_subject: beneficiary, effective_root: true,
+      });
+      expect((await api('/api/tokens', issuedPat.token)).status).toBe(401);
       const peer=store.createAgent({name:'delegation target',provider:'codex',runtimeId:execution.runtimeId});
       const childDigest=hash('shared fixture for child grant');
       const childKernel=new RootManagement(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:childDigest,trustVersions:[{id:'trust',version:1}],
@@ -510,6 +524,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       db.query('UPDATE multiremi_usage_runs SET complete=1 WHERE task_id=? AND run_id=?').run(task.id,tuple.consumer_id);
       expect(service.registeredCredentials.verify(token.token).kind).toBe('invalid');
       expect(service.resolveCurrent(patProof,use).effectiveRoot).toBe(true);
+      expect((await api('/api/root/grants', issuedPat.token)).status).toBe(200);
       const childStatus=()=>service.listRootGrants(patProof,{limit:100,cursor:'',subjectType:'agent',subjectId:peer.id,status:''}).grants.find(grant=>grant.id===child.id);
       expect(childStatus()?.effective).toBe(true);
       const childOrigin=db.query(`SELECT node_id FROM multiremi_durable_delegations WHERE beneficiary_id=? AND action='root.grant.create'`).get(peer.id).node_id;
@@ -524,6 +539,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
         tx=>service.revokeAttemptDelegations(tx,task.id,'security_compromised'));
       expect(service.registeredCredentials.verify(raw).kind).toBe('invalid');
       expect(()=>service.resolveCurrent(patProof,use)).toThrow('root_authority_revoked');
+      expect((await api('/api/root/grants', issuedPat.token)).status).toBe(401);
       return;
     }
     expect(Number(db.query('SELECT COUNT(*) AS total FROM multiremi_usage_runs WHERE task_id=?').get(task.id).total)).toBe(1);

@@ -100,6 +100,59 @@ export function rootCommandSpecs(): CommandSpec[] {
       },
     ),
     spec(
+      "root.grant.preview", ["root", "grant", "preview"], "Preview an Agent grant's current dependencies",
+      "read", ROOT_AUTH, true, [], [
+        { name: "agent-id", type: "string", required: true, description: "Target Agent ID" },
+        { name: "runtime-trust", type: "string", repeatable: true, description: "Runtime trust ID" },
+      ], async invocation => {
+        const client = await clientFor(invocation);
+        const agentId = requireStringField(stringOption(invocation, "agent-id"), "--agent-id");
+        const response = await client.request<Record<string, unknown>>({ method: "GET", path: ROOT_API_PATHS.agentGrantPreview(agentId),
+          query: { runtime_trust_id: stringOptions(invocation, "runtime-trust") } });
+        renderRootDocument(invocation, response.data);
+      },
+    ),
+    spec(
+      "root.agent-configuration.approve", ["root", "agent-configuration", "approve"], "Approve versioned Agent execution dependencies",
+      "write", ROOT_AUTH, true, [], [...INPUT_OPTIONS,
+        { name: "agent-id", type: "string", required: true, description: "Target Agent ID" },
+      ], async invocation => {
+        const client = await clientFor(invocation);
+        const agentId = requireStringField(stringOption(invocation, "agent-id"), "--agent-id");
+        const response = await client.request<Record<string, unknown>>({ method: "POST", path: ROOT_API_PATHS.agentConfigurationApprove(agentId),
+          body: await requestBody(invocation) });
+        renderRootDocument(invocation, response.data);
+      },
+    ),
+    spec(
+      "root.agent-pat.create", ["root", "agent-pat", "create"], "Issue a persistent PAT for the authenticated running Agent",
+      "write", ["task"], true, [], [
+        { name: "expires-at", type: "string", required: true, description: "ISO-8601 expiry" },
+        { name: "idempotency-key", type: "string", description: "Idempotency key" },
+      ], async invocation => {
+        const client = await clientFor(invocation);
+        const idempotencyKey = stringOption(invocation, "idempotency-key") ?? randomUUID();
+        const response = await client.request<Record<string, unknown>>({ method: "POST", path: ROOT_API_PATHS.agentPatCreate,
+          idempotencyKey, body: { idempotency_key: idempotencyKey, expires_at: stringOption(invocation, "expires-at") } });
+        renderRootDocument(invocation, response.data);
+      },
+    ),
+    spec(
+      "root.delegation.revoke", ["root", "delegation", "revoke"], "Revoke a durable Agent delegation and its descendants",
+      "destructive", ROOT_AUTH, true, [], [...INPUT_OPTIONS, YES_OPTION,
+        { name: "origin-id", type: "string", required: true, description: "Durable origin node ID" },
+      ], async invocation => {
+        const originId = requireStringField(stringOption(invocation, "origin-id"), "--origin-id");
+        const client = await clientFor(invocation);
+        const input = await requestBody(invocation);
+        const idempotencyKey = stringField(input.idempotency_key) ?? randomUUID();
+        requireConfirmation(invocation);
+        const response = await client.request<Record<string, unknown>>({ method: "POST", path: ROOT_API_PATHS.delegationRevoke(originId),
+          idempotencyKey, body: { ...input, idempotency_key: idempotencyKey } });
+        renderRootDocument(invocation, response.data);
+      },
+    ),
+    spec(
       "root.grant.create",
       ["root", "grant", "create"],
       "Explicitly grant system root authority to a real user or agent subject",
@@ -437,6 +490,14 @@ export function rootCommandSpecs(): CommandSpec[] {
       },
     ),
   ];
+}
+
+function renderRootDocument(invocation: CommandInvocation, value: Record<string, unknown>): void {
+  if (outputMode(invocation) === "table") {
+    console.log(JSON.stringify(value, null, 2));
+    return;
+  }
+  renderResource(invocation, value);
 }
 
 function spec(

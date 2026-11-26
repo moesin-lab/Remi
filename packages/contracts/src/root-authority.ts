@@ -479,6 +479,10 @@ export interface ListRootAuditResponse {
 export const ROOT_API_PATHS = {
   context: "/api/root/context",
   grants: "/api/root/grants",
+  agentGrantPreview: (agentId: string) => `/api/root/agents/${encodeURIComponent(agentId)}/grant-preview`,
+  agentConfigurationApprove: (agentId: string) => `/api/root/agents/${encodeURIComponent(agentId)}/configuration/approve`,
+  agentPatCreate: "/api/root/agent-pats",
+  delegationRevoke: (nodeId: string) => `/api/root/delegations/${encodeURIComponent(nodeId)}/revoke`,
   grantRevoke: (grantId: string) => `/api/root/grants/${encodeURIComponent(grantId)}/revoke`,
   runtimeTrustList: "/api/root/runtime-trust",
   runtimeTrustGet: (runtimeId: string) => `/api/root/runtime-trust/${encodeURIComponent(runtimeId)}`,

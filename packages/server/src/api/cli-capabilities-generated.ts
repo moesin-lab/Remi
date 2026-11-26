@@ -1398,6 +1398,61 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "root.grant.preview": {
+      "command": "remi root grant preview",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.preview",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.agent-configuration.approve": {
+      "command": "remi root agent-configuration approve",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.agent-configuration.approve",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.agent-pat.create": {
+      "command": "remi root agent-pat create",
+      "auth": [
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.agent-pat.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.delegation.revoke": {
+      "command": "remi root delegation revoke",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.delegation.revoke",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "root.grant.create": {
       "command": "remi root grant create",
       "auth": [

@@ -9,6 +9,7 @@ export type RegisteredProof = Extract<CredentialProof, { proofVersion: unknown }
 declare module 'hono' {
   interface ContextVariableMap {
     multiremiMasterRootTransport: boolean;
+    multiremiDelegatedPatTransport: boolean;
     multiremiRootProof: () => RegisteredProof | null;
   }
 }
@@ -23,6 +24,23 @@ export function registeredRootProof(store: MultiremiStore, token: string, jwt: b
 
 export function bindRootProof(c: Context, store: MultiremiStore, token: string, jwt: boolean): void {
   c.set('multiremiRootProof', () => registeredRootProof(store, token, jwt));
+}
+
+export function bindDelegatedPatForRootControl(c: Context, store: MultiremiStore, token: string): boolean {
+  if (!token.startsWith('mul_') || !(c.req.path.startsWith('/api/root/') || c.req.path === '/api/cli/capabilities')) return false;
+  const proof = registeredRootProof(store, token, false);
+  if (!proof) return false;
+  try {
+    const authority = store.rootManagement.resolveCurrent(proof, { action: 'credential.pat.authenticate', use: 'read',
+      actualTarget: { type: 'credential', id: proof.proofVersion.id } });
+    if (authority.transport !== 'agent_pat' || !authority.effectiveRoot) return false;
+  } catch (error) {
+    if (error instanceof SecurityAbort && ['root_authority_revoked', 'credential_version_conflict'].includes(error.code)) return false;
+    throw error;
+  }
+  c.set('multiremiDelegatedPatTransport', true);
+  c.set('multiremiRootProof', () => proof);
+  return true;
 }
 
 export function requireRootProof(c: Context): RegisteredProof {
@@ -53,5 +71,25 @@ export function runRootMutation<T>(store: MultiremiStore, proof: RegisteredProof
   return store.withAuthorizedMutation(proof, use, { ...plan, workspaceIds: [...new Set([...plan.workspaceIds, ...workspaceIds])].sort() }, (tx, actor) => {
     const current = store.rootManagement.requireMutationActor(tx, actor, use);
     return operation(tx, actor, current);
+  });
+}
+
+export function guardRootResourceWrite<T>(c: Context, store: MultiremiStore, workspaceId: string,
+  type: string, id: string, operation: () => T, options?: { version?: number; proof?: RegisteredProof | null }): T {
+  if (!options?.proof && !store.jwtMaterials.isActive()) return operation();
+  const root = store.rootManagement;
+  const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type, id } };
+  const proof = options?.proof ?? effectiveRootProof(c, store, use);
+  const match = c.req.header('If-Match')?.match(/^"(0|[1-9]\d*)"$/);
+  const expectedVersion = options?.version ?? (match ? Number(match[1]) : Number.NaN);
+  if (proof) return runRootMutation(store, proof, use, (tx, actor) => {
+    root.guardProtectedMutation(tx, actor, use, expectedVersion);
+    return operation();
+  }, [workspaceId]);
+  const expectedRevision = root.readContext(null, 'open_local').security_revision;
+  return store.withSecurityWrite(undefined, { expectedRevision, workspaceIds: [workspaceId], numberKeys: [],
+    domainTargets: [`management:${type}:${id}`] }, tx => {
+    root.guardProtectedMutation(tx, null, use, expectedVersion);
+    return operation();
   });
 }

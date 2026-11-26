@@ -141,6 +141,10 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 子 grant 仍使用 `grant(tx,actor,input)`，Agent 来源必须指定有限 `expires_at`。`revokeDurableDelegation(tx,actor,nodeId,input)` 单独撤销一条来源；`revokeAttemptDelegations(tx,attemptId,reason)` 供执行安全终止事务调用，对应 attempt 的已签发后代随即失效。正常终态不调用安全撤销接口。
 
+生产 HTTP 使用 `POST /api/root/agents/:agentId/configuration/approve` 提交 `expected_epoch`、`sources`、`executions`。首次审批使用 `expected_epoch: null`。通过 `GET /api/root/agents/:agentId/grant-preview` 对重复的 `runtime_trust_id` 查询参数取预览，再将返回的 `digest`、`expected_revision` 与这些 trust ID 提交到 `POST /api/root/grants`。审批与签发均在事务内重读实际依赖。
+
+已准入的 running task 可向 `POST /api/root/agent-pats` 提交有限的 `expires_at` 和 `idempotency_key`。成功提交后响应一次性交付 `token`、`family_id` 和 `origin_id`。重复签发请求返回凭据版本冲突。Agent PAT 以真实 Agent 身份访问 root 管理与 CLI 能力查询，普通 PAT 路由维持既有凭据边界。`POST /api/root/delegations/:nodeId/revoke` 使用审计原因、原因代码、期望安全 revision 与幂等键撤销指定来源。
+
 ### 已准入 attempt 的首次 offer
 
 机器投递使用 `await PreparedRootDelivery.prepare(tuple, payload, publicKey)` 生成不可替换的候选。调用方先用 `rootManagement.planFirstOffer(candidate)` 合并自己的 run/Q 锁计划，再在带当前 fence 的 `withSecurityWrite` 中调用 `rootReceipts.activate(tx, candidate, lease, callback)`。`callback(activeTx, prepared)` 在同一事务完成 run/Q CAS 后返回 `rootManagement.issue(activeTx, prepared)`。只有实际 `activate` 回调中的原始对象能签发。发送方在最外层事务提交后才能交付 envelope。

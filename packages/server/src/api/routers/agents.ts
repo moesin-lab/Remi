@@ -1,5 +1,6 @@
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
+import { guardRootResourceWrite } from "../helpers/root-access.js";
 import {
   createAgentFromTemplate,
 } from "../agent-templates.js";
@@ -45,6 +46,7 @@ import type {
   CreateAgentInput,
   SetAgentSkillsInput,
   UpdateAgentInput,
+  MultiremiAgent,
   MultiremiAgentRole,
 } from "@multiremi/contracts/types.js";
 import { isAgentRole } from "@multiremi/store/agent-role.js";
@@ -52,6 +54,9 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  function writeAgent<T>(c: Context, agent: MultiremiAgent, operation: () => T): T {
+    return guardRootResourceWrite(c, store, agent.workspaceId, 'agent', agent.id, operation);
+  }
 
   app.get("/api/multiremi/agents", (c) => {
     const workspaceId = requestedAgentWorkspaceId(c, store);
@@ -106,7 +111,8 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
       issueCreationRequiresProposal: currentTaskIssueCreationRestricted(c, store),
     });
     if (targetChanged) {
-      agent = store.updateAgent(agent.id, targetUpdate);
+      const target = agent;
+      agent = writeAgent(c, target, () => store.updateAgent(target.id, targetUpdate));
       if (before) publishAgentLifecycleEvent(c, store, "agent:status", agent);
     }
     if (!before) {
@@ -130,14 +136,14 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const input = withAgentUpdateRequestContext(c, store, loaded.agent, body);
     if (input instanceof Response) return input;
-    const agent = store.updateAgent(loaded.agent.id, input);
+    const agent = writeAgent(c, loaded.agent, () => store.updateAgent(loaded.agent.id, input));
     publishAgentLifecycleEvent(c, store, "agent:status", agent, loaded.agent.workspaceId);
     return c.json({ agent });
   });
   app.delete("/api/multiremi/agents/:id", (c) => {
     const loaded = loadAgentForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    const agent = store.archiveAgent(loaded.agent.id);
+    const agent = writeAgent(c, loaded.agent, () => store.archiveAgent(loaded.agent.id));
     publishAgentLifecycleEvent(c, store, "agent:archived", agent);
     return c.json({ agent });
   });
@@ -158,7 +164,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadAgentForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const body = await readJson<SetAgentSkillsInput>(c);
-    const skills = store.setAgentSkills(loaded.agent.id, body);
+    const skills = writeAgent(c, loaded.agent, () => store.setAgentSkills(loaded.agent.id, body));
     return c.json({ skills, total: skills.length });
   });
   app.get("/api/agents/:id/tasks", (c) => {
@@ -178,7 +184,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<SetAgentSkillsInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const skills = store.setAgentSkills(loaded.agent.id, body);
+      const skills = writeAgent(c, loaded.agent, () => store.setAgentSkills(loaded.agent.id, body));
       publishAgentSkillsEvent(c, store, loaded.agent, skills);
       return c.json(skills.map(skillSummaryCompatibilityResponse));
     } catch (error) {
@@ -191,7 +197,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<SetAgentSkillsInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const skills = store.addAgentSkills(loaded.agent.id, body.skillIds ?? body.skill_ids ?? []);
+      const skills = writeAgent(c, loaded.agent, () => store.addAgentSkills(loaded.agent.id, body.skillIds ?? body.skill_ids ?? []));
       publishAgentSkillsEvent(c, store, loaded.agent, skills);
       return c.json(skills.map(skillSummaryCompatibilityResponse));
     } catch (error) {
@@ -211,7 +217,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<{ custom_env?: Record<string, string>; customEnv?: Record<string, string>; env?: Record<string, string> }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const nextEnv = mergeAgentEnv(agent.customEnv, body.custom_env ?? body.customEnv ?? body.env ?? {});
-    const updated = store.updateAgent(agent.id, { customEnv: nextEnv });
+    const updated = writeAgent(c, agent, () => store.updateAgent(agent.id, { customEnv: nextEnv }));
     return c.json(agentEnvResponse(updated.id, updated.customEnv));
   });
   app.get("/api/agents", (c) => {
@@ -271,7 +277,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const input = withAgentUpdateRequestContext(c, store, loaded.agent, body);
     if (input instanceof Response) return input;
-    const agent = store.updateAgent(loaded.agent.id, input);
+    const agent = writeAgent(c, loaded.agent, () => store.updateAgent(loaded.agent.id, input));
     publishAgentLifecycleEvent(c, store, "agent:status", agent, loaded.agent.workspaceId);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });
@@ -283,7 +289,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<{ enabled?: boolean }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     if (typeof body.enabled !== "boolean") return c.json({ error: "enabled must be a boolean" }, 400);
-    const agent = store.setAgentSupervisor(loaded.agent.id, body.enabled);
+    const agent = writeAgent(c, loaded.agent, () => store.setAgentSupervisor(loaded.agent.id, body.enabled));
     publishAgentLifecycleEvent(c, store, "agent:status", agent);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });
@@ -297,21 +303,22 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     if (!isAgentRole(body.role)) {
       return c.json({ error: "role must be normal, maintainer, or supervisor" }, 400);
     }
-    const agent = store.setAgentRole(loaded.agent.id, body.role);
+    const role = body.role;
+    const agent = writeAgent(c, loaded.agent, () => store.setAgentRole(loaded.agent.id, role));
     publishAgentLifecycleEvent(c, store, "agent:status", agent);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });
   app.post("/api/agents/:id/archive", (c) => {
     const loaded = loadAgentForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    const agent = store.archiveAgent(loaded.agent.id);
+    const agent = writeAgent(c, loaded.agent, () => store.archiveAgent(loaded.agent.id));
     publishAgentLifecycleEvent(c, store, "agent:archived", agent);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });
   app.post("/api/agents/:id/restore", (c) => {
     const loaded = loadAgentForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    const agent = store.restoreAgent(loaded.agent.id);
+    const agent = writeAgent(c, loaded.agent, () => store.restoreAgent(loaded.agent.id));
     publishAgentLifecycleEvent(c, store, "agent:restored", agent);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });

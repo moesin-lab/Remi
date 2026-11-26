@@ -1,21 +1,21 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 864,
+    "routeCount": 868,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 618,
+      "compat": 622,
       "root": 20
     },
-    "getRoutes": 376,
-    "getRoutesWithBody": 372,
+    "getRoutes": 377,
+    "getRoutesWithBody": 373,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 488,
+    "mutationRoutes": 491,
     "mutationRoutesCovered": 304,
     "flows": [
       "agents-compat",
@@ -389,6 +389,7 @@
     "GET /api/remi/releases/download/:tag/:filename",
     "GET /api/remi/releases/latest/:filename",
     "GET /api/remi/releases/latest/version",
+    "GET /api/root/agents/:agentId/grant-preview",
     "GET /api/root/audit",
     "GET /api/root/context",
     "GET /api/root/grants",
@@ -779,7 +780,10 @@
     "POST /api/projects/:id/knowledge/publish",
     "POST /api/projects/:id/resources",
     "POST /api/projects/:id/restore",
+    "POST /api/root/agent-pats",
+    "POST /api/root/agents/:agentId/configuration/approve",
     "POST /api/root/credential-families/:familyId/revoke",
+    "POST /api/root/delegations/:nodeId/revoke",
     "POST /api/root/grants",
     "POST /api/root/grants/:id/revoke",
     "POST /api/root/runtime-trust",
@@ -1233,6 +1237,7 @@
     "GET /api/remi/releases/download/:tag/:filename",
     "GET /api/remi/releases/latest/:filename",
     "GET /api/remi/releases/latest/version",
+    "GET /api/root/agents/:agentId/grant-preview",
     "GET /api/root/audit",
     "GET /api/root/context",
     "GET /api/root/grants",
@@ -22015,6 +22020,20 @@
       }
     },
     {
+      "key": "get-sweep GET /api/root/agents/:agentId/grant-preview",
+      "route": "GET /api/root/agents/:agentId/grant-preview",
+      "path": "/api/root/agents/agt_snapshot/grant-preview",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000003"
+        }
+      }
+    },
+    {
       "key": "get-sweep GET /api/root/audit",
       "route": "GET /api/root/audit",
       "path": "/api/root/audit",
@@ -22024,7 +22043,7 @@
           "code": "root_required",
           "message": "root_required",
           "retryable": false,
-          "requestId": "00000000-0000-4000-8000-000000000003"
+          "requestId": "00000000-0000-4000-8000-000000000004"
         }
       }
     },
@@ -22071,7 +22090,7 @@
           "code": "root_required",
           "message": "root_required",
           "retryable": false,
-          "requestId": "00000000-0000-4000-8000-000000000004"
+          "requestId": "00000000-0000-4000-8000-000000000005"
         }
       }
     },
@@ -22085,7 +22104,7 @@
           "code": "root_required",
           "message": "root_required",
           "retryable": false,
-          "requestId": "00000000-0000-4000-8000-000000000005"
+          "requestId": "00000000-0000-4000-8000-000000000006"
         }
       }
     },
@@ -22099,7 +22118,7 @@
           "code": "root_required",
           "message": "root_required",
           "retryable": false,
-          "requestId": "00000000-0000-4000-8000-000000000006"
+          "requestId": "00000000-0000-4000-8000-000000000007"
         }
       }
     },

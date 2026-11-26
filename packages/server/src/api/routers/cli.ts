@@ -16,6 +16,7 @@ import {
 } from "../wire/index.js";
 import { compatibilityWorkspaceId, denyCurrentUserWorkspaceAccess } from "../helpers.js";
 import { restrictedTaskIssueCreationAgent } from "../helpers.js";
+import { requireRootProof } from "../helpers/root-access.js";
 import type { RouterDeps } from "./deps.js";
 
 export const CLI_SHARE_HEADER = "X-Remi-Share";
@@ -42,6 +43,15 @@ export function registerCliRoutes(app: Hono, deps: RouterDeps): void {
   });
 
   app.get("/api/cli/capabilities", (c) => {
+    if (c.get('multiremiDelegatedPatTransport')) {
+      const root = deps.store.rootManagement.readContext(requireRootProof(c), 'agent_pat');
+      return c.json({ protocol_version: CLI_PROTOCOL_VERSION, manifest_version: String(CLI_CAPABILITIES_RUNTIME.schema_version),
+        server_version: multiremiVersion, identity: 'agent_pat', root,
+        commands: Object.entries(CLI_CAPABILITIES_RUNTIME.commands).map(([id, command]) => ({
+          id, command: command.command, capability: command.capability, outputs: command.output,
+          allowed: id === 'root.context' || (root.allowed_operations as readonly string[]).includes(id),
+        })) });
+    }
     const resolved = resolveCliIdentity(c, deps);
     if (resolved instanceof Response) return resolved;
     const denied = denyCliWorkspaceAccess(c, deps, resolved);

@@ -1,6 +1,7 @@
 import { endpointProtocolBaseUrl, type EndpointConnection, type EndpointProtocol } from "@multiremi/contracts/execution-endpoint.js";
 import type { EndpointModel } from "@multiremi/contracts/endpoint-options.js";
 import { readCapped } from "./http.js";
+import { chatCompletionsUrl, v1BaseUrl } from "./protocol-url.js";
 
 export interface EndpointProbeResult {
   protocol: EndpointProtocol;
@@ -64,14 +65,15 @@ export async function inspectEndpoint(connection: EndpointConnection, key: strin
     throw new Error("Model test requires one configured protocol and a model ID");
   const results = await Promise.all(protocols.map(async protocol => {
     const started = performance.now();
-    const base = endpointProtocolBaseUrl(connection, protocol).replace(/\/$/, "");
+    const base = endpointProtocolBaseUrl(connection, protocol).replace(/\/+$/, "");
     const google = protocol === "google-generative";
-    const modelUrl = connection.options?.models_url ?? `${base}${google ? "/v1beta/models" : protocol === "anthropic-messages" && !base.endsWith("/v1") ? "/v1/models" : "/models"}`;
+    const protocolBase = protocol === "anthropic-messages" ? v1BaseUrl(base) : base;
+    const modelUrl = connection.options?.models_url ?? `${protocolBase}${google ? "/v1beta/models" : "/models"}`;
     const model = input.operation === "test" ? input.model!.trim() : "__remi_protocol_probe__";
     const url = input.operation === "models" ? modelUrl : google
       ? `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`
-      : `${base}${protocol === "anthropic-messages" ? (base.endsWith("/v1") ? "/messages" : "/v1/messages")
-        : protocol === "openai-responses" ? "/responses" : "/chat/completions"}`;
+      : protocol === "openai-chat-completions" ? chatCompletionsUrl(base, true)
+      : `${protocolBase}${protocol === "openai-responses" ? "/responses" : "/messages"}`;
     const result: EndpointProbeResult = { protocol, operation: input.operation, state: "error", url, http_status: null,
       duration_ms: 0, models: [], ...(input.operation === "test" ? { model } : {}) };
     if (input.operation === "models" && connection.options?.fetch_models === false)

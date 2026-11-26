@@ -5,6 +5,16 @@ import { RuntimesEndpoints } from "./runtimes";
 
 const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 afterEach(() => vi.unstubAllGlobals());
+it("inspects a saved endpoint by reference and rejects a malformed success response", async () => {
+  const fetch = vi.fn().mockResolvedValue(response({ persisted: true, inspection: { checked_at: "now", location: "server", results: [] } }));
+  vi.stubGlobal("fetch", fetch);
+  const client = new RuntimesEndpoints(new HttpClient("https://api.test"));
+  const input = { endpoint_id: "ep_one", operation: "models", protocol: "anthropic-messages" } as const;
+  expect((await client.inspectExecutionEndpoint("ws", input)).persisted).toBe(true);
+  expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({ ...input, workspace_id: "ws" });
+  fetch.mockResolvedValue(response({ inspection: {} }));
+  await expect(client.inspectExecutionEndpoint("ws", input)).rejects.toBeInstanceOf(ApiContractError);
+});
 it("rejects invalid profile catalogs and never accepts a secret in profile responses", async () => {
   const fetch = vi.fn().mockResolvedValue(response({ profiles: [{ id: "p" }] }));
   vi.stubGlobal("fetch", fetch);

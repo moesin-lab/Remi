@@ -4,15 +4,17 @@ import { closeSync, fsyncSync, linkSync, openSync, readFileSync, unlinkSync, wri
 import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { join } from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { birth, readFrame, runPaths } from './root-run-supervisor.mjs';
 import { RootRunController } from './root-run-controller.mjs';
+import { rootRunHost } from './root-run-relay.mjs';
 
 process.umask(0o077);
-const { directory, hostModule, tuple, lease, term, daemonUid, keyServiceUid, daemonGid, keyServiceGid } = JSON.parse(process.argv[2]);
+const config = JSON.parse(process.argv[2]);
+const { directory, tuple, lease, term, daemonUid, keyServiceUid, daemonGid, keyServiceGid } = config;
 const paths = runPaths(directory, tuple);
-const host = await import(pathToFileURL(hostModule));
+const host = rootRunHost(config);
 async function authorize(request) {
   const status = await host.readStatus(tuple);
   if (!status.ok || !status.committed || !isDeepStrictEqual(status.tuple, tuple) || !request.lease || !request.term ||
@@ -60,7 +62,7 @@ async function park(status) {
   // The host allocator gives each root run a dedicated execution UID.
   const uidLock = openSync(join(directory, `uid-${plan.uid}`), 'wx', 0o600);
   closeSync(uidLock);
-  launch = { file: plan.file, args: plan.args, cwd: plan.cwd };
+  launch = plan;
   receiver = fork(fileURLToPath(new URL('./root-run-receiver.mjs', import.meta.url)), [String(plan.uid), String(plan.gid)],
     { execArgv: [], cwd: '/', env: {}, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   receiver.once('exit', () => process.exit());
@@ -102,6 +104,8 @@ async function handle(request) {
   const fresh = await authorize(request);
   if (fresh.run_state !== 'running' || fresh.ack_state !== 'confirmed') throw Error();
   return controller.startOnce(request, async () => {
+    if (!isDeepStrictEqual(await host.planRun(tuple, fresh), launch)) throw Error();
+    if ((await authorize(request)).run_state !== 'running') throw Error();
     const reply = await command({ op: 'start', launch });
     if (reply.started !== true) throw Error();
     return new Date().toISOString();

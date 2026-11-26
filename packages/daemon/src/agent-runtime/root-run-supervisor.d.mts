@@ -31,7 +31,7 @@ export interface RootRunHandle {
 export function birth(pid: number): string;
 
 export class RootRunSupervisor {
-  constructor(config: RootRunEndpoint | { directory: string; hostModule: string; node: string }, controllerId?: string);
+  constructor(config: RootRunEndpoint, controllerId?: string);
   ensureInstalled(tuple: RootDeliveryTuple, lease: string, term: string): Promise<RootExecutionLocator>;
   attach(tuple: RootDeliveryTuple, locator: RootExecutionLocator, lease: string, term: string): Promise<RootRunHandle>;
   startOnce(handle: RootRunHandle): Promise<string>;

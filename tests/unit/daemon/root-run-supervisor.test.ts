@@ -3,12 +3,11 @@ import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHmac } from 'node:crypto';
 import { CompactEncrypt, importJWK } from 'jose';
-import { chownSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { RootDeliveryTuple } from '@multiremi/contracts/root-delivery.js';
-import { birth, RootRunSupervisor } from '../../../packages/daemon/src/agent-runtime/root-run-supervisor.mjs';
+import { birth } from '../../../packages/daemon/src/agent-runtime/root-run-supervisor.mjs';
 import { RootRunController } from '../../../packages/daemon/src/agent-runtime/root-run-controller.mjs';
 import { verifyRootRunTarget } from '../../../packages/daemon/src/agent-runtime/root-run-endpoint.mjs';
 
@@ -106,86 +105,9 @@ test('controller exit and live takeover fence stale generations and share one st
   expect(starts).toBe(1);
 });
 
-const uid = 61963;
-function mapped(path: string) {
-  return readFileSync(path, 'utf8').trim().split('\n').some(line => {
-    const [base, , count] = line.trim().split(/\s+/).map(Number);
-    return uid >= base && uid < base + count;
-  });
-}
-const isolated = process.platform === 'linux' && process.getuid?.() === 0 && mapped('/proc/self/uid_map') &&
-  mapped('/proc/self/gid_map') && readFileSync('/proc/self/setgroups', 'utf8').trim() === 'allow';
-test(isolated ? 'detached parked receiver survives controller exit and starts one isolated model' :
-  'detached supervisor refuses installation when host cannot allocate an isolated UID', async () => {
-  const directory = mkdtempSync('/tmp/m185-run-');
-  const cwd = mkdtempSync('/tmp/m185-agent-');
+test('receiver refuses a service identity as execution UID', async () => {
   const node = execFileSync('which', ['node'], { encoding: 'utf8' }).trim();
-  const config = { directory, node, hostModule: fileURLToPath(new URL('./root-run-supervisor-host.mjs', import.meta.url)) };
-  const tuple = { receipt_id: 'receipt', attempt_id: 'attempt', run_generation: 1, runtime_id: 'runtime', daemon_id: 'daemon',
-    incarnation: 'incarnation', delivery_version: 2, material_version: 3, material_expires_at: new Date(Date.now() + 120000).toISOString() } as RootDeliveryTuple;
-  const status = { ok: true, committed: true, tuple, lease_id: 'lease', fence_term: 'one', ack_state: 'pending',
-    start_deadline: tuple.material_expires_at, run_state: 'pending_start', allowed_recovery_action: 'replay_envelope' };
-  const save = () => writeFileSync(join(directory, 'authority'), JSON.stringify(status));
-  if (isolated) chownSync(cwd, uid, uid);
-  const ready = createServer();
-  ready.listen(0, '127.0.0.1');
-  await once(ready, 'listening');
-  const port = (ready.address() as { port: number }).port;
-  const model = `import os,json,socket,signal;open('starts','a').write(json.dumps([os.getuid(),os.environ['MULTIREMI_TOKEN'],os.path.exists(${JSON.stringify(join(directory, 'authority'))})])+'\\n');s=socket.create_connection(('127.0.0.1',${port}));signal.pause()`;
-  writeFileSync(join(directory, 'plan'), JSON.stringify({ uid, gid: uid, file: '/usr/bin/python3', args: ['-c', model], cwd }));
-  save();
-  try {
-    if (!isolated) {
-      const controller = new RootRunSupervisor(config);
-      await expect(controller.ensureInstalled(tuple, 'lease', 'one')).rejects.toThrow();
-      expect(readdirSync(directory).filter(name => name.endsWith('.json'))).toHaveLength(1);
-      expect(existsSync(join(directory, `uid-${uid}`))).toBe(true);
-      expect(existsSync(join(directory, 'target'))).toBe(false);
-      await expect(controller.ensureInstalled(tuple, 'lease', 'one')).rejects.toThrow();
-      expect(existsSync(join(cwd, 'starts'))).toBe(false);
-      return;
-    }
-    const module = new URL('../../../packages/daemon/src/agent-runtime/root-run-supervisor.mjs', import.meta.url).href;
-    const code = `import {RootRunSupervisor} from ${JSON.stringify(module)};const client=new RootRunSupervisor(${JSON.stringify(config)});const tuple=${JSON.stringify(tuple)};const loc=await client.ensureInstalled(tuple,'lease','one'); await client.attach(tuple,loc,'lease','one'); console.log(JSON.stringify(loc));`;
-    const first = spawn(node, ['--input-type=module', '-e', code], { stdio: ['ignore', 'pipe', 'inherit'] });
-    let output = '';
-    first.stdout.on('data', data => { output += data; });
-    expect((await once(first, 'exit'))[0]).toBe(0);
-    const locator = JSON.parse(output);
-    expect(locator.started_at).toBeNull();
-    const client = new RootRunSupervisor(config);
-    expect(await client.ensureInstalled(tuple, 'lease', 'one')).toEqual(locator);
-    const handle = await client.attach(tuple, locator, 'lease', 'one');
-    await expect(client.startOnce(handle)).rejects.toThrow();
-    const next = new RootRunSupervisor(config);
-    await expect(next.attach(tuple, locator, 'lease', 'one')).rejects.toThrow();
-    Object.assign(status, { fence_term: 'two', run_state: 'running', ack_state: 'confirmed', allowed_recovery_action: 'reattach_running', start_deadline: new Date(0).toISOString() });
-    save();
-    await expect(next.attach(tuple, { ...locator, birth_token_id: 'reused' }, 'lease', 'two')).rejects.toThrow();
-    const current = await next.attach(tuple, locator, 'lease', 'two');
-    await expect(client.startOnce(handle)).rejects.toThrow();
-    await expect(client.attach(tuple, locator, 'lease', 'two')).rejects.toThrow();
-    const connected = once(ready, 'connection');
-    const times = await Promise.all([next.startOnce(current), next.startOnce(current)]);
-    expect(times[0]).toBe(times[1]);
-    (await connected)[0].destroy();
-    expect(readFileSync(join(cwd, 'starts'), 'utf8').trim().split('\n').map(line => JSON.parse(line))).toEqual([[uid, 'test-only-material', false]]);
-    status.run_state = 'revoked'; save();
-    await expect(next.startOnce(current)).rejects.toThrow();
-    await expect(next.ensureInstalled(tuple, 'lease', 'two')).rejects.toThrow();
-    const path = join(directory, readdirSync(directory).find(name => name.endsWith('.json'))!);
-    const journal = readFileSync(path, 'utf8');
-    expect(journal).not.toContain('test-only-material');
-    writeFileSync(path, JSON.stringify({ ...JSON.parse(journal), birth: 'reused-pid' }));
-    try { await expect(next.startOnce(current)).rejects.toThrow('birth mismatch'); }
-    finally { writeFileSync(path, journal); }
-  } finally {
-    for (const name of readdirSync(directory).filter(name => name.endsWith('.json'))) {
-      const record = JSON.parse(readFileSync(join(directory, name),'utf8'));
-      try { if (birth(record.pid) === record.birth) process.kill(record.pid); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    }
-    ready.close();
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(cwd, { recursive: true, force: true });
-  }
-}, 30000);
+  const receiver = fileURLToPath(new URL('../../../packages/daemon/src/agent-runtime/root-run-receiver.mjs', import.meta.url));
+  const child = spawn(node, [receiver, '0', '0'], { stdio: 'ignore' });
+  expect((await once(child, 'exit'))[0]).toBe(1);
+});

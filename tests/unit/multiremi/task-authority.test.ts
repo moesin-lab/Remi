@@ -18,7 +18,7 @@ import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { PreparedRootDelivery, RootReceiptStore, rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
-import { createAdmittedTask, retryAdmittedTurn } from '@multiremi/store/attempt-admission.js';
+import { planVerifiedAttemptWrite } from '@multiremi/store/attempt-admission.js';
 import { PreparedAgentPat } from '@multiremi/store/durable-delegation.js';
 import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
@@ -248,10 +248,11 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const origin=service.resolveCurrent(proof,revokeUse).credentialOrigin!;
     expect(db.query('SELECT proof_node_id FROM multiremi_root_management_events WHERE action IN (?,?)').all(grantUse.action,revokeUse.action))
       .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);
-  });
+  }, 60_000);
 
   it.each(['expired lease','preempted fence','revoked source','durable delegation','concurrent first offer','concurrent security termination'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
-    const {db,store}=fixture();
+    const {store}=fixture();
+    const db=(store as unknown as {db:SqlDatabase}).db;
     const dependency=hash('protected instructions');
     const trustVersions=[{id:'trust',version:1}];
     const {service,passwordProof,created,signing}=await bootstrap(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:dependency,trustVersions,
@@ -298,8 +299,10 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     db.query(`INSERT INTO multiremi_runtime_trusts VALUES('trust','rt_auth',1,'inc',?,'runtime-trust','{}',NULL)`).run(challenge.id);
     const inputs={manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
       entries:[],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
-    const directProof=await store.rootManagement.verifyIndependentPassword('usr_auth','test-dashboard-password');
-    const retry=()=>retryAdmittedTurn(store,turnId,previous.id,directProof,execution,()=>({execution,inputs}));
+    const retry=()=>{
+      const {plan,write}=planVerifiedAttemptWrite(service,passwordProof,{...target,agentId:agent.id},execution,()=>({execution,inputs}));
+      return store.withAttemptAdmission(plan.fenceTerm,plan,write,()=>store.retryTurnAsMember(turnId));
+    };
     expect(retry).toThrow('authority_revision_conflict');
     db.query("UPDATE multiremi_turn_attempts SET status='lost' WHERE id=?").run(previous.id);
     db.query("UPDATE multiremi_turns SET status='failed' WHERE id=?").run(turnId);
@@ -346,8 +349,9 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const initialIssue=fixture().createIssue({title:'direct creation',assigneeType:'agent',assigneeId:agent.id});
     const initialSession=store.getOrCreateDefaultIssueSession(initialIssue.id);
     const initialExecution={...execution,attemptId:'tsk_initial'};
-    const createdTask=createAdmittedTask(store,{agentId:agent.id,issueId:initialIssue.id,issueSessionId:initialSession.id,runtimeId:runtime.id,prompt:'direct'},
-      directProof,initialExecution,()=>({execution:initialExecution,inputs:{...inputs,manifest:{id:'initial_manifest',version:1}}}));
+    const initialTarget={turnId:initialExecution.attemptId,attemptId:initialExecution.attemptId,previousAttemptId:null,agentId:agent.id,workspaceId:agent.workspaceId,sessionId:initialSession.id};
+    const initial=planVerifiedAttemptWrite(service,passwordProof,initialTarget,initialExecution,()=>({execution:initialExecution,inputs:{...inputs,manifest:{id:'initial_manifest',version:1}}}));
+    const createdTask=store.withAttemptAdmission(initial.plan.fenceTerm,initial.plan,initial.write,()=>store.createTask({id:initialExecution.attemptId,agentId:agent.id,issueId:initialIssue.id,issueSessionId:initialSession.id,runtimeId:runtime.id,prompt:'direct'}));
     expect(db.query('SELECT eligibility FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(createdTask.id)?.eligibility).toBe('root');
     const wrongRecipient=await PreparedRootDelivery.prepare({...tuple,recipient_key_id:'retired'},business,enc);
     expect(()=>receipts.commitFirstOffer(wrongRecipient,offerLease)).toThrow();

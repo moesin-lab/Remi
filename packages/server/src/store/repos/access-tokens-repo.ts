@@ -152,6 +152,7 @@ export class AccessTokensRepo {
          AND user_id = ?
          AND type = 'pat'
          AND purpose = 'personal'
+         AND agent_id IS NULL
          AND revoked_at IS NULL
          AND (expires_at IS NULL OR expires_at > ?)
        ORDER BY created_at DESC`,
@@ -233,6 +234,8 @@ export class AccessTokensRepo {
          AND workspace_id = ?
          AND type = 'pat'
          AND purpose = 'cli'
+         AND agent_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM multiremi_credential_version_bindings WHERE credential_id=multiremi_access_tokens.id)
          AND daemon_id IS NULL
          AND expires_at IS NULL
          AND revoked_at IS NULL
@@ -275,7 +278,7 @@ export class AccessTokensRepo {
     const extensionDays = options.extensionDays ?? 90;
     const renewThresholdAt = new Date(nowMs + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
     const newExpiresAt = new Date(nowMs + extensionDays * 24 * 60 * 60 * 1000).toISOString();
-    const observed = this.db.query(`SELECT * FROM multiremi_access_tokens WHERE id=? AND NOT EXISTS (
+    const observed = this.db.query(`SELECT * FROM multiremi_access_tokens WHERE id=? AND (type<>'pat' OR agent_id IS NULL) AND NOT EXISTS (
       SELECT 1 FROM multiremi_credential_version_bindings WHERE credential_id=multiremi_access_tokens.id)`).get(id);
     if (!observed) return null;
     const current = toAccessToken(observed);
@@ -293,14 +296,14 @@ export class AccessTokensRepo {
         `UPDATE multiremi_access_tokens
          SET token_hash = ?, token_prefix = ?, expires_at = ?
          WHERE id = ?
-           AND token_hash = ? AND expires_at = ? AND type = ?
+           AND token_hash = ? AND expires_at = ? AND type = ? AND (type<>'pat' OR agent_id IS NULL)
            AND revoked_at IS NULL
            AND expires_at > ?
          RETURNING *`,
       ).get(hash, rawToken.slice(0, 12), newExpiresAt, id, observed.token_hash, current.expiresAt, current.type, nowIso());
       if (updated) return { token: toAccessToken(updated), renewed: true, rawToken };
       const token = this.getAccessToken(id);
-      return token && accessTokenIsValid(token, Date.now()) ? { token, renewed: false } : null;
+      return token && !(token.type === 'pat' && token.agentId !== null) && accessTokenIsValid(token, Date.now()) ? { token, renewed: false } : null;
     })();
   }
 
@@ -322,7 +325,7 @@ export class AccessTokensRepo {
     // must not disagree because the clock moved between them.
     const nowMs = Date.now();
     if (!accessTokenIsValid(accessToken, nowMs)) return null;
-    if (row.root_attempt && !row.registered) return null;
+    if ((row.root_attempt || (accessToken.type === 'pat' && row.agent_id != null)) && !row.registered) return null;
     if (row.registered) {
       const authority = new RootManagement(this.db);
       const proof = authority.registeredCredentials.verify(token);

@@ -203,8 +203,8 @@ export class RootReceiptStore {
   }
 
   async firstTaskOffer(attemptId: string, runtimeId: string, daemonId: string, credentialId: string, fence: string, current: () => void) {
-    const read = () => {
-      const row = this.db.query(`SELECT e.*,t.id AS turn_id,t.workspace_id,t.legacy_prompt,p.binding_json,p.created_at AS dispatch_time,m.consumer_id,m.recipient_spki,m.recipient_key_id,
+    const read = (lockMessages = false) => {
+      const row = this.db.query(`SELECT e.*,t.id AS turn_id,t.workspace_id,t.session_id,t.trigger_message_id,t.legacy_prompt,p.binding_json,p.created_at AS dispatch_time,m.consumer_id,m.recipient_spki,m.recipient_key_id,
         m.key_expires_at_ms,m.attestation_expires_at_ms FROM multiremi_attempt_eligibility e
         JOIN multiremi_turn_attempts a ON a.id=e.attempt_id AND a.runtime_id=e.runtime_id AND a.status='accepted'
         JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id AND t.agent_id=e.subject_id
@@ -225,18 +225,33 @@ export class RootReceiptStore {
         throw new Error('root_input_unapproved');
       }
       const {inputs} = JSON.parse(approval.row.manifest_snapshot);
-      const authorizedSource=this.db.query(`WITH RECURSIVE sources(id,generation) AS (
-        SELECT node_id,generation FROM multiremi_authority_nodes WHERE node_id IN (${approval.sources.map(()=>'?').join(',')})
-        UNION SELECT edge.parent_id,edge.parent_generation FROM multiremi_authority_edges edge JOIN sources s
-          ON s.id=edge.child_id AND s.generation=edge.child_generation WHERE edge.dependency='continuous')
-        SELECT 1 FROM sources s JOIN multiremi_authority_nodes n ON n.node_id=s.id AND n.generation=s.generation
-        WHERE s.id=? AND s.generation=? AND n.subject_type=? AND n.subject_id=?`);
+      const policyRow=this.db.query(`SELECT x.input_policy_ref FROM multiremi_current_agent_execution_sources x WHERE x.agent_id=? AND x.workspace_id=?
+        AND x.config_epoch=? AND x.runtime_id=? AND x.trust_id=? AND x.trust_generation=? AND x.incarnation=?`)
+        .get(row.subject_id,row.workspace_id,row.config_epoch,runtimeId,row.runtime_trust_id,row.runtime_trust_version,row.incarnation);
+      const sourcePolicy=policyRow && JSON.parse(policyRow.input_policy_ref);
+      if (!sourcePolicy || !isDeepStrictEqual(inputs.sourcePolicy,{id:sourcePolicy.id,version:sourcePolicy.version}) || sourcePolicy.kind!=='input-policy' || sourcePolicy.use!=='accept' ||
+          !this.db.query(`SELECT 1 FROM multiremi_current_agent_source_snapshots p JOIN multiremi_agent_grant_protected_refs f
+            ON f.kind=p.kind AND f.resource_id=p.resource_id AND f.use_kind=p.use_kind AND f.resource_version=p.resource_version AND f.digest=p.digest
+            WHERE p.agent_id=? AND p.workspace_id=? AND p.config_epoch=? AND p.kind='input-policy' AND p.use_kind='accept'
+            AND p.resource_id=? AND p.resource_version=? AND p.digest=? AND f.grant_id=?`)
+            .get(row.subject_id,row.workspace_id,row.config_epoch,sourcePolicy.id,sourcePolicy.version,sourcePolicy.digest,row.grant_id)) throw new Error('root_input_unapproved');
+      const source=this.db.query(`SELECT m.body_md,m.revision,m.message_kind,m.metadata,m.options,w.user_id,a.id AS agent_id FROM multiremi_conversation_log m
+        LEFT JOIN multiremi_workspace_members w ON m.sender_type='member' AND w.id=m.sender_id AND w.workspace_id=? AND w.archived_at IS NULL
+        LEFT JOIN multiremi_agents a ON m.sender_type='agent' AND a.id=m.sender_id AND a.workspace_id=? AND a.archived_at IS NULL
+        WHERE m.id=? AND m.session_id=? AND m.kind='message' AND m.deleted_at IS NULL AND m.visibility='shown'
+        AND NOT EXISTS(SELECT 1 FROM multiremi_attachments att WHERE att.comment_id=m.id OR att.chat_message_id=m.id)
+        ${lockMessages && this.db.dialect==='postgres' ? 'FOR UPDATE OF m' : ''}`);
       for (const entry of inputs.entries) {
-        if (!authorizedSource.get(...approval.sources.map(source=>source.id),entry.source.id,entry.source.version,entry.author.type,entry.author.id)) {
+        const message=source.get(row.workspace_id,row.workspace_id,entry.source.id,row.session_id);
+        if (!message || (!message.agent_id && !message.user_id) || Number(message.revision)!==entry.source.version || message.body_md!==entry.snapshot || message.options ||
+            !['request','reply','report','status','final'].includes(message.message_kind) ||
+            !isDeepStrictEqual(entry.author,message.agent_id ? {type:'agent',id:message.agent_id} : {type:'user',id:message.user_id}) ||
+            Object.keys(JSON.parse(message.metadata)).some(key=>!['execution_scope','delivery_turn_id','pending_completion'].includes(key)) ||
+            entry.purpose!==(message.message_kind==='request'?'instruction':'business_data')) {
           throw new Error('root_input_unapproved');
         }
       }
-      if (row.legacy_prompt && !inputs.entries.some((entry: {purpose:string;snapshot:string})=>entry.purpose==='instruction' && entry.snapshot===row.legacy_prompt)) {
+      if (!inputs.entries.some((entry: {source:{id:string};snapshot:string})=>entry.source.id===row.trigger_message_id && entry.snapshot===row.legacy_prompt)) {
         throw new Error('root_input_unapproved');
       }
       const binding=JSON.parse(row.binding_json);
@@ -277,7 +292,7 @@ export class RootReceiptStore {
       business_payload_digest:rootBusinessPayloadDigest(business)},business,key);
     return this.commitFirstOffer(candidate,{lease_id:randomUUID(),fence_term:fence,start_deadline:new Date(Math.min(expiry,dispatched+90_000)).toISOString()},first=>{
       current();
-      const verified=read();
+      const verified=read(true);
       if (!isDeepStrictEqual({...snapshot,row:{...row,binding_json:verified.row.binding_json}},verified)) throw new Error('authority_revision_conflict');
       if (first) {
         const binding=JSON.parse(verified.row.binding_json);

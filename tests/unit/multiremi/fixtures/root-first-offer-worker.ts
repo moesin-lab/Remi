@@ -2,7 +2,7 @@ import { PostgresSyncDatabase, type SqlDatabase } from '@multiremi/store/db/post
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 import { RootReceiptStore } from '@multiremi/store/root-receipts.js';
 
-self.onmessage = async (event: MessageEvent<{file:string;postgres?:string;barrier:SharedArrayBuffer}>) => {
+self.onmessage = async (event: MessageEvent<{file:string;postgres?:string;barrier:SharedArrayBuffer;attemptId:string;runtimeId:string}>) => {
   const {file,postgres,barrier}=event.data;
   const db:SqlDatabase=postgres ? new PostgresSyncDatabase(postgres) : openSqliteDatabase(file);
   try {
@@ -16,7 +16,7 @@ self.onmessage = async (event: MessageEvent<{file:string;postgres?:string;barrie
         return super.commitFirstOffer(...args);
       }
     }
-    const delivery=await new RacingReceipts(db).firstTaskOffer('tsk_admitted','rt_auth','daemon','machine-token','1',()=>{});
+    const delivery=await new RacingReceipts(db).firstTaskOffer(event.data.attemptId,event.data.runtimeId,'worker','token','1',()=>{});
     self.postMessage({delivery});
   } catch(error) {self.postMessage({error:error instanceof Error ? error.message : String(error)});}
   finally {db.close();}

@@ -136,5 +136,15 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     expect(resolve().digest).toBe(manifest.digest);
     store.upsertSkillFile(skill.id!, {path:file.path,content:'changed'});
     expect(resolve).toThrow('root_required');
+    const write={action:'skill-file.update',use:'write',actualTarget:{type:'skill-file',id:file.id!}};
+    const writePlan=service.plan(registered,write);
+    expect(()=>withSecurityWrite(db,undefined,writePlan,tx=>service.guardProtectedMutation(tx,null,write,0))).toThrow('root_required');
+    expect(()=>withSecurityWrite(db,undefined,writePlan,tx=>service.guardProtectedMutation(tx,service.authorizeWrite(tx,registered,write),write,1))).toThrow('authority_revision_conflict');
+    withSecurityWrite(db,undefined,writePlan,tx=>{
+      service.guardProtectedMutation(tx,service.authorizeWrite(tx,registered,write),write,0);
+      store.upsertSkillFile(skill.id!,{path:file.path,content:'approved change'});
+    });
+    expect(Number(db.query('SELECT config_epoch FROM multiremi_current_agent_config_epochs WHERE agent_id=?').get(agent.id).config_epoch)).toBe(1);
+    expect(db.query('SELECT revoked_at_ms FROM multiremi_authority_nodes WHERE node_id=?').get(result.grant.authority_node_id).revoked_at_ms).toBeTruthy();
   });
 });

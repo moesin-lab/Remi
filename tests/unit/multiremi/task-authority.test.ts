@@ -327,9 +327,12 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const offerLease={lease_id:'one',fence_term:'1',start_deadline:new Date(lease.expiresAtMs).toISOString()};
     const offerPlan=service.planFirstOffer(candidate);
     if (failure==='concurrent first offer') {
+      db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(task.id);
       const offer={action:'offer' as const,tuple,business,publicKey:recipientKeys.publicKey.export({format:'jwk'})};
       await raceIssuers(db,fixture().databaseUrl,[offer,offer],(results,database)=>{
-        expect(results.sort()).toEqual(['committed','receipt_conflict']);
+        expect(results[1]).toBe(results[0]);
+        const receipt=database.query('SELECT envelope_digest,lease_id,material_version,start_deadline FROM multiremi_delivery_receipts WHERE attempt_id=?').get(task.id);
+        expect(JSON.parse(results[0]!)).toEqual([receipt.envelope_digest,receipt.lease_id,Number(receipt.material_version),receipt.start_deadline]);
         for (const table of ['multiremi_current_task_leases','multiremi_delivery_receipts','multiremi_credential_materials','multiremi_credential_version_bindings']) {
           expect(Number(database.query(`SELECT COUNT(*) AS total FROM ${table}`).get().total)).toBe(1);
         }

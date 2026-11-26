@@ -145,6 +145,8 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 签发器从主库读取 attempt 的 Agent、grant 代际、输入批准与连续来源、运行时 trust 和当前 run。`activate` 写入材料版本、lease 和 receipt，并在提交前重新验证。首次 offer 的材料版本为 1。重复的 offer 由调用方通过已提交 receipt 恢复；重新构造候选不能覆盖原材料。
 
+`RootReceiptStore.commitFirstOffer(candidate, lease)` 已封装首次 run/Q CAS、事务内签发以及提交回复丢失后的复查与重放。并发的两个调用会获得相同 envelope、原始版本、期限和 lease。调用者不应再次创建 run 或另行插入 token。
+
 ### 机器登记与退役
 
 部署方离线配置 `multiremi_machine_deployment_roots`，将部署的 `deployment_origin` 节点与部署审批、宿主验证两把 Ed25519 公钥绑定。空表时无法登记。宿主验证方确认执行进程不能访问密钥服务、控制端点或同级进程秘密，并验证 immutable carrier 后，才签署 `machineEnrollmentPayload('attestation', binding, report, expectedGeneration)`。部署方对同一材料的 `deployment` 用途签名。签名使用 base64url。

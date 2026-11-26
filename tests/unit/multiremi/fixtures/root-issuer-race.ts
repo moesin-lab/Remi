@@ -24,13 +24,11 @@ self.onmessage = async (event: MessageEvent<{backend:string;database:string;barr
     if (input.action==='offer') {
       const key=await crypto.subtle.importKey('jwk',input.publicKey,{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
       const candidate=await PreparedRootDelivery.prepare(input.tuple,input.business,key);
-      const plan=root.planFirstOffer(candidate);
       const receipts=new RootReceiptStore(db,root);
       ready();
-      withSecurityWrite(db,'1',plan,tx=>receipts.activate(tx,candidate,{lease_id:'race',fence_term:'1',start_deadline:input.tuple.material_expires_at},(activeTx,material)=>{
-        db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(input.tuple.attempt_id);
-        return root.issue(activeTx,material);
-      }));
+      const result=receipts.commitFirstOffer(candidate,{lease_id:candidate.credentialId,fence_term:'1',start_deadline:input.tuple.material_expires_at});
+      self.postMessage(JSON.stringify([result.envelope_digest,result.lease_id,result.tuple.material_version,result.start_deadline]));
+      return;
     } else {
       const proof=root.registeredCredentials.verify(input.raw);
       const candidate=PreparedAgentPat.prepare();

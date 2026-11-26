@@ -19,7 +19,7 @@ export function expandAgentSourceApprovals(db: SqlDatabase): void {
   )`);
   db.exec(`CREATE TABLE IF NOT EXISTS multiremi_agent_source_snapshots (
     agent_id TEXT NOT NULL,workspace_id TEXT NOT NULL,config_epoch INTEGER NOT NULL,kind TEXT NOT NULL,resource_id TEXT NOT NULL,use_kind TEXT NOT NULL,
-    resource_version INTEGER NOT NULL,digest TEXT NOT NULL,dependencies_json TEXT NOT NULL,content TEXT NOT NULL,
+    resource_version INTEGER NOT NULL,digest TEXT NOT NULL,dependencies_json TEXT NOT NULL,
     PRIMARY KEY(agent_id,config_epoch,kind,resource_id,use_kind)
   )`);
   db.exec(`CREATE TABLE IF NOT EXISTS multiremi_agent_execution_sources (
@@ -36,14 +36,14 @@ export function expandAgentSourceApprovals(db: SqlDatabase): void {
 
 export function storeAgentConfigurationApproval(db: SqlDatabase, agentId: string, workspaceId: string, epoch: number, approval: AgentConfigurationApproval): void {
   if (!approval.sources.length || approval.sources.length>1024 || !approval.executions.length || approval.executions.length>1024) throw new SecurityAbort('root_required');
-  const insert=db.query(`INSERT INTO multiremi_agent_source_snapshots(agent_id,workspace_id,config_epoch,kind,resource_id,use_kind,resource_version,digest,dependencies_json,content)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  const insert=db.query(`INSERT INTO multiremi_agent_source_snapshots(agent_id,workspace_id,config_epoch,kind,resource_id,use_kind,resource_version,digest,dependencies_json)
+    VALUES(?,?,?,?,?,?,?,?,?)`);
   for (const source of approval.sources) {
     const {ref,content,dependencies}=source;
     if (!ref.kind || !ref.id || !ref.use || !Number.isSafeInteger(ref.version) || ref.version<0 || typeof content!=='string' || dependencies.length>1024) throw new SecurityAbort('root_required');
     const digest=ref.kind==='plugin-version' ? `sha256:${createHash('sha256').update(content).digest('hex')}` : agentDependencyDigest(JSON.parse(content));
     if (ref.digest!==digest) throw new SecurityAbort('authority_revision_conflict');
-    insert.run(agentId,workspaceId,epoch,ref.kind,ref.id,ref.use,ref.version,digest,JSON.stringify(dependencies),content);
+    insert.run(agentId,workspaceId,epoch,ref.kind,ref.id,ref.use,ref.version,digest,JSON.stringify(dependencies));
   }
   for (const source of approval.executions) {
     const trusted=db.query(`SELECT t.runtime_id,t.generation,t.incarnation,r.provider FROM multiremi_runtime_trusts t JOIN multiremi_runtimes r ON r.id=t.runtime_id

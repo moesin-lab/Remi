@@ -1,5 +1,5 @@
 import { ExecutionModelPolicyError } from "@multiremi/contracts/execution-endpoint.js";
-import { requiresPromptPolicyCapability } from "@shared/system-prompt-policy-hash.js";
+import { canUseHistoricalChatDefault, requiresPromptPolicyCapability } from "@shared/system-prompt-policy-hash.js";
 import { PlannedRestarts } from "../planned-restarts.js";
 import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
 import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
@@ -1153,6 +1153,24 @@ function fallbackSwitchPlan(parent: MultiremiTask, agent: MultiremiAgent | null,
     || model === taskExecutionTarget(agent, parent).model) return null;
   return { model, thinkingLevel: cleanOptionalString(agent.fallbackThinkingLevel) };
 }
+
+const freshIndependentChatSql = `t.task_kind='direct' AND project_chat.id=t.chat_session_id
+  AND project_chat.workspace_id=t.workspace_id AND project_chat.agent_id=t.agent_id
+  AND project_chat.project_id IS NULL AND project_chat.runtime_workspace_id IS NULL
+  AND project_chat.origin_autopilot_id IS NULL AND project_chat.origin_run_id IS NULL
+  AND EXISTS (SELECT 1 FROM multiremi_turns owner_turn WHERE owner_turn.id=t.turn_id
+    AND owner_turn.session_id=project_chat.id AND owner_turn.execution_scope='' AND owner_turn.continued_from_turn_id IS NULL)
+  AND t.issue_id IS NULL AND t.issue_session_id IS NULL AND t.runtime_workspace_id IS NULL
+  AND (t.execution_fingerprint IS NULL OR t.execution_fingerprint <> '${CHAT_ISSUE_DECOUPLED_FINGERPRINT}')
+  AND t.assignment_event_id IS NULL AND t.assignment_source_event_id IS NULL AND t.delegation_id IS NULL
+  AND t.trigger_comment_id IS NULL AND (t.wake_source IS NULL OR t.wake_source='human_sender') AND t.delegated_from_issue_session_id IS NULL
+  AND t.attempt=1 AND t.offered_at IS NULL AND t.started_at IS NULL AND t.accepted_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings f WHERE f.chat_session_id=t.chat_session_id AND f.issue_id IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM multiremi_issue_sessions s WHERE s.chat_id=t.chat_session_id AND s.issue_id IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM multiremi_autopilot_runs r WHERE r.turn_id=t.turn_id)
+  AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_system_prompts b WHERE b.task_id=t.id)
+  AND NOT EXISTS (SELECT 1 FROM multiremi_task_traces tr WHERE tr.task_id=t.id)
+  AND NOT EXISTS (SELECT 1 FROM multiremi_planned_restarts h WHERE h.attempt_id=t.id)`;
 
 export class TasksRepo {
   private readonly policyScanPositions = new Map<string, { after: TaskListCursor; through: TaskListCursor }>();
@@ -3411,23 +3429,25 @@ export class TasksRepo {
       const policy = this.ctx.systemPrompts().getSystemPrompt(workspaceId);
       const requiresPolicy = requiresPromptPolicyCapability(policy.document.mode, policy.currentDefault.revision);
       const policyBlocked = !options.supportsPromptPolicy && requiresPolicy;
+      const reviewedChat = Boolean(options.policyProtocol) && canUseHistoricalChatDefault(policy.document.mode, policy.currentDefault);
+      const historicalChat = policyBlocked && options.policyProtocol === 'legacy' && options.supportsPromptPolicy === false && reviewedChat;
       const recoveryCutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
       this.recoverExpiredPolicyProposals(runtimeId,recoveryCutoff);
 
       if (policyBlocked) {
-        this.diagnosePolicyWaits(lockedRuntime, options, true);
-        return null;
+        this.diagnosePolicyWaits(lockedRuntime, options, true, false, historicalChat);
+        if (!historicalChat) return null;
       }
-      if (options.policyProtocol && this.ctx.db.query(`SELECT 1 FROM multiremi_turn_execution_records
+      if (!policyBlocked && options.policyProtocol && this.ctx.db.query(`SELECT 1 FROM multiremi_turn_execution_records
         WHERE workspace_id=? AND status='queued' AND wait_reason IN (?,?) LIMIT 1`).get(workspaceId,PROMPT_POLICY_WAIT_REASON,LEGACY_PROMPT_POLICY_WAIT_REASON)) {
-        this.diagnosePolicyWaits(lockedRuntime,options,requiresPolicy,true);
+        this.diagnosePolicyWaits(lockedRuntime,options,requiresPolicy,true,reviewedChat);
       }
 
       this.resetStaleChatWorkspaceTasks(lockedRuntime.workspaceId ?? "local");
       // Recovery must examine stale dispatches even when their Agent can no
       // longer run here. It rechecks eligibility and requeues incompatible
       // work instead of leaving it permanently dispatched on the old member.
-      const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds], Boolean(options.supportsPromptPolicy), Boolean(options.policyProtocol),recoveryCutoff);
+      const stale = historicalChat ? null : this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds], Boolean(options.supportsPromptPolicy), Boolean(options.policyProtocol),recoveryCutoff);
       // Group membership and reported model capabilities can change while work
       // is queued. Skip incompatible Agents before selecting, so they cannot
       // block another runnable task at the head of the queue.
@@ -3506,6 +3526,7 @@ export class TasksRepo {
           [...excludedTargets.values()],
           excludedTaskIds,
           Boolean(options.policyProtocol),
+          historicalChat,
         );
       if (!candidate) return null;
       // One hydration for the selected task. `snapshotTaskExecution` re-reads the Agent row
@@ -3520,6 +3541,7 @@ export class TasksRepo {
         offerGeneration: options.offerGeneration,
         protocol: options.policyProtocol,
         legacyCompatible: !options.supportsPromptPolicy,
+        historicalChat,
       });
       this.ctx.taskTraces().markTaskTraceDaemon(task.id, runtimeId);
       // Check the actual hydrated payload, including both linked and legacy
@@ -4716,7 +4738,7 @@ ${placementAfter.sql}
     return { sql, params, now };
   }
 
-  private diagnosePolicyWaits(runtime: MultiremiRuntime, options: ClaimTaskOptions, requiresPolicy: boolean, existingOnly = false): void {
+  private diagnosePolicyWaits(runtime: MultiremiRuntime, options: ClaimTaskOptions, requiresPolicy: boolean, existingOnly = false, reviewedChat = false): void {
     const workspace = runtime.workspaceId ?? 'local';
     const previous = this.policyScanPositions.get(runtime.id);
     const through = previous?.through ?? this.ctx.db.query(`SELECT created_at AS "createdAt", id
@@ -4739,6 +4761,8 @@ ${placementAfter.sql}
       return [{ peer, params: query.params, test: this.ctx.db.query(executionClaimBaseSql(`${query.sql} AND t.id=?`)) }];
     });
     const capable = peers(options.policyCapableRuntimeIds ?? []);
+    const compatibleChat = reviewedChat && this.ctx.db.query(`SELECT 1 FROM multiremi_turn_execution_records t
+      JOIN multiremi_chat_sessions project_chat ON project_chat.id=t.chat_session_id WHERE t.id=? AND ${freshIndependentChatSql}`);
     const legacy = peers([...(options.supportsPromptPolicy ? [] : [runtime.id]), ...(options.policyLegacyRuntimeIds ?? [])]);
     for (const row of page) {
       if (row.wait_reason != null && row.wait_reason !== reason && row.wait_reason !== LEGACY_PROMPT_POLICY_WAIT_REASON) continue;
@@ -4748,7 +4772,7 @@ ${placementAfter.sql}
       const eligible = ({ peer, params, test }: typeof legacy[number]) => Boolean(test.get(...params, task.id))
         && this.runtimeCanRunTaskAgent(peer, agent, task)
         && (Boolean(task.executionFingerprint) || this.runtimeHasReadyExecutionGroup(peer, agent));
-      const desired = requiresPolicy && this.coveredWakeCursor(task, Number(row.wake_seq)) === null && legacy.some(eligible) && !capable.some(eligible) ? reason : null;
+      const desired = requiresPolicy && !(compatibleChat && compatibleChat.get(task.id)) && this.coveredWakeCursor(task, Number(row.wake_seq)) === null && legacy.some(eligible) && !capable.some(eligible) ? reason : null;
       if (desired === row.wait_reason) continue;
       runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET wait_reason=?,updated_at=?
         WHERE id=? AND status='queued' AND (wait_reason IS NULL OR wait_reason IN (?,?))`, [desired, nowIso(), task.id, reason, LEGACY_PROMPT_POLICY_WAIT_REASON]);
@@ -4770,9 +4794,10 @@ ${placementAfter.sql}
     return covered >= wakeSeq && this.unreadNowMessageSeq(task.issueSessionId, task.agentId, scope, covered) === null ? covered : null;
   }
 
-  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean): MultiremiTask | null {
+  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean, historicalChat: boolean): MultiremiTask | null {
     const { sql, params, now } = this.candidateSelection(runtime, excludedAgentIds, excludedTargets, excludedTaskIds, negotiated);
     const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql}
+         ${historicalChat ? `AND ${freshIndependentChatSql}` : ''}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
       ${this.ctx.db.dialect === 'postgres' ? 'FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED' : ''}`));

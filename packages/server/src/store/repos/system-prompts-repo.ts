@@ -4,16 +4,16 @@ import type { StoreContext } from "../context.js";
 import { runTurnExecutionMutation } from "../turn-execution-records.js";
 import { PROMPT_POLICY_WAIT_REASON } from "../task-wait-reason.js";
 import {
-  MAX_SYSTEM_PROMPT_CODE_POINTS, normalizeSystemPromptContent, serializeSystemPromptContent, samePolicyOffer, type PolicyOfferIdentity,
+  LEGACY_SYSTEM_PROMPT_CONTENT, MAX_SYSTEM_PROMPT_CODE_POINTS, normalizeSystemPromptContent, serializeSystemPromptContent, samePolicyOffer, type PolicyOfferIdentity,
   type SystemPromptActor, type SystemPromptContent, type SystemPromptDefault, type SystemPromptEditInput,
   type SystemPromptMode, type SystemPromptOperation, type SystemPromptPolicyBinding, type SystemPromptRestoreInput,
   type SystemPromptState, type SystemPromptVersion, type SystemPromptVersionList, type SystemPromptVersionSummary,
   type SystemPromptWriteInput, type SystemPromptWriteResult,
 } from "@multiremi/contracts/system-prompt-policy.js";
-import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent, requiresPromptPolicyCapability } from "@shared/system-prompt-policy-hash.js";
+import { canUseHistoricalChatDefault, CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent, LEGACY_BASELINE_DEFAULT_REVISION, requiresPromptPolicyCapability } from "@shared/system-prompt-policy-hash.js";
 
 type DocumentRow = { id: string; workspace_id: string; current_version_id: string | null; revision: number };
-type DispatchPolicy = { protocol: 'adopt' | 'legacy'; state: 'proposed' | 'adopted' | 'revoked'; runtimeId: string; daemonId: string; receiptId?: string; exclusiveDelivery?: boolean };
+type DispatchPolicy = { protocol: 'adopt' | 'legacy'; state: 'proposed' | 'adopted' | 'revoked'; runtimeId: string; daemonId: string; receiptId?: string; exclusiveDelivery?: boolean; historicalChat?: boolean };
 type VersionRow = {
   id: string; document_id: string; workspace_id: string; version_number: number;
   mode: SystemPromptMode; operation: SystemPromptOperation; content_snapshot_json: string; content_hash: string;
@@ -293,7 +293,7 @@ export class SystemPromptsRepo {
   }
 
   /** Caller owns the claim transaction and already holds W; no post-accept mutation is permitted. */
-  bindAttemptSystemPrompt(taskId: string, workspaceId: string, options: { legacyCompatible: boolean; offerGeneration?: string; protocol?: 'adopt' | 'legacy' }): SystemPromptPolicyBinding {
+  bindAttemptSystemPrompt(taskId: string, workspaceId: string, options: { legacyCompatible: boolean; historicalChat?: boolean; offerGeneration?: string; protocol?: 'adopt' | 'legacy' }): SystemPromptPolicyBinding {
     if (!this.ctx.db.inTransaction) throw new Error("System Prompt binding requires the claim transaction");
     const task = this.ctx.tasks().getTask(taskId);
     if (!task || task.workspaceId !== workspaceId) throw new Error("System Prompt binding task/workspace mismatch");
@@ -309,15 +309,20 @@ export class SystemPromptsRepo {
       throw new Error("Accepted attempt System Prompt binding is immutable");
     }
     const state = this.getSystemPrompt(workspaceId);
-    if (options.legacyCompatible && requiresPromptPolicyCapability(state.document.mode, state.currentDefault.revision)) {
+    const historicalChat = options.historicalChat && options.protocol === 'legacy' && options.legacyCompatible && !previous
+      && canUseHistoricalChatDefault(state.document.mode, state.currentDefault);
+    if (options.legacyCompatible && !historicalChat && requiresPromptPolicyCapability(state.document.mode, state.currentDefault.revision)) {
       throw new Error(PROMPT_POLICY_WAIT_REASON);
     }
     const binding: SystemPromptPolicyBinding = { format: 1, workspaceId, documentId: state.document.id,
       versionId: state.document.currentVersionId, versionNumber: state.document.revision, mode: state.document.mode,
-      defaultRevision: state.currentDefault.revision, content: state.content, contentHash: hashSystemPromptContent(state.content),
+      defaultRevision: historicalChat ? LEGACY_BASELINE_DEFAULT_REVISION : state.currentDefault.revision,
+      content: historicalChat ? LEGACY_SYSTEM_PROMPT_CONTENT : state.content,
+      contentHash: historicalChat ? LEGACY_BASELINE_DEFAULT_REVISION : hashSystemPromptContent(state.content),
       legacyCompatible: options.legacyCompatible };
     const daemonId = options.protocol && task.runtimeId ? this.ctx.runtimes().getRuntimeLite(task.runtimeId)?.daemonId : null;
     const dispatch = options.protocol && task.runtimeId ? { protocol: options.protocol, state: 'proposed', runtimeId: task.runtimeId, daemonId,
+      ...(historicalChat ? { historicalChat: true } : {}),
       exclusiveDelivery: previous ? previous.dispatch?.state === 'revoked' && previous.dispatch.exclusiveDelivery === true
         && previous.dispatch.runtimeId === task.runtimeId && previous.dispatch.daemonId === daemonId
         : !task.offeredAt && !task.startedAt && !this.ctx.taskTraces().getTaskTrace(taskId) } : undefined;

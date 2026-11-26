@@ -117,4 +117,4 @@ poll、webhook、baseline 和 bind 都不会依据标题、分支或正文新增
 
 ### 显式绑定协议混版发布
 
-先排空代码交付任务，保留运行中 attempt 身份，确认所有执行这些任务的 daemon 均已排空。升级 daemon、CLI 和 server，再用实际任务验证固定提示、bind 与 list 的同一引用后恢复调度。无法确认排空时保持暂停。`prompt.policy.adopt.v1` 仅确认可接收策略，旧 daemon 的固定段来自其自身二进制。新默认下无该能力的 daemon 无法领取新任务。
+先排空代码交付任务，保留运行中 attempt 身份，确认所有执行这些任务的 daemon 均已排空。升级 daemon、CLI 和 server，再用实际任务验证固定提示、bind 与 list 的同一引用后恢复调度。无法确认排空时保持暂停。`prompt.policy.adopt.v1` 仅确认可接收策略，旧 daemon 的固定段来自其自身二进制。新默认仅为首次投递的独立无代码上下文 Chat 提供经验证的 legacy 执行快照，见[协议 §7.4b](../daemon-protocol-v2.md#74b-n-1-与-contract-发布)。

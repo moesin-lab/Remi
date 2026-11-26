@@ -1,6 +1,8 @@
 import { DEFAULT_SYSTEM_PROMPT_CONTENT, type SystemPromptPolicyBinding, type SystemPromptContent } from "@multiremi/contracts/system-prompt-policy.js";
 import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 import { describe, expect, it } from "bun:test";
+import { LEGACY_SYSTEM_PROMPT_CONTENT } from '@multiremi/contracts/system-prompt-policy.js';
+import { isIndependentChatOffer } from '@multiremi/api/wire/tasks.js';
 import { createHash } from "node:crypto";
 import { buildAgentInstructions, buildTaskPrompt, buildTaskPromptArtifact, fitInstructionPieces } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
@@ -337,6 +339,18 @@ describe("System Prompt policy runtime", () => {
     contentHash: hashSystemPromptContent(content), legacyCompatible: false,
   });
   const empty: SystemPromptContent = { common: "", code_delivery: "", chat_delivery: "", issue_delivery: "", finishing: "" };
+
+  it('renders identical instructions for both snapshots on the independent Chat wire subset', () => {
+    const wire = { kind: 'chat', chat_session_id: 'chat_1', issue_id: '' };
+    expect(isIndependentChatOffer(wire)).toBe(true);
+    const render = (content: SystemPromptContent) => buildAgentInstructions(chatTurn([], [], { systemPromptPolicy: {
+      ...binding(content, 'default'), defaultRevision: hashSystemPromptContent(content),
+    } }));
+    expect(render(LEGACY_SYSTEM_PROMPT_CONTENT)).toBe(render(DEFAULT_SYSTEM_PROMPT_CONTENT));
+    for (const context of [{ kind: 'future' }, { bound_issue: {} }, { issue_session_id: 'ises_1' }, { project: {} },
+      { chat_project_id: 'prj_1' }, { repos: [{}] }, { chat_auto_checkout_repos: [{}] }, { runtime_workspace_id: 'rw_1' },
+      { repository_wiki_contexts: [{}] }, { autopilot_run_id: 'run_1' }]) expect(isIndependentChatOffer({ ...wire, ...context })).toBe(false);
+  });
 
   it("renders empty custom slots without secretly repeating editable defaults, preserving protocols and other layers", () => {
     const instructions = buildAgentInstructions(issueTurn([], [], { systemPromptPolicy: binding(empty),

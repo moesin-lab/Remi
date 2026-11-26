@@ -22,11 +22,11 @@ export function samePolicyOffer(expected: PolicyOfferIdentity, actual: Partial<P
 export type SystemPromptOperation = "initialize" | "edit" | "reset" | "rollback";
 export const MAX_SYSTEM_PROMPT_CODE_POINTS = 8_000;
 
-export const DEFAULT_SYSTEM_PROMPT_CONTENT: Readonly<SystemPromptContent> = Object.freeze({
+export const LEGACY_SYSTEM_PROMPT_CONTENT: Readonly<SystemPromptContent> = Object.freeze({
   common: "",
   code_delivery: `When a task changes code:
 - Push the working branch and create a GitHub pull request or Codebase merge request before reporting completion.
-- Give the PR/MR a title describing the change without an Issue Key prefix.
+- Include the issue key in the PR/MR title or description so Multiremi can associate it automatically.
 - Reuse an existing open PR/MR for the same source branch. Create at most one PR/MR per changed repository.
 - Creating a PR/MR does not require approval.
 - Return every PR/MR URL in the final result.`,
@@ -34,6 +34,16 @@ export const DEFAULT_SYSTEM_PROMPT_CONTENT: Readonly<SystemPromptContent> = Obje
 - Do not attach repository source code or raw logs.`,
   issue_delivery: "Short diagrams may go in the comment body as fenced Mermaid or HTML; use attachments for full pages and shareable reports.",
   finishing: "When finished, summarize what changed, how it was verified, and any remaining risks.",
+});
+
+export const DEFAULT_SYSTEM_PROMPT_CONTENT: Readonly<SystemPromptContent> = Object.freeze({
+  ...LEGACY_SYSTEM_PROMPT_CONTENT,
+  code_delivery: `When a task changes code:
+- Push the working branch and create a GitHub pull request or Codebase merge request before reporting completion.
+- Give the PR/MR a title describing the change without an Issue Key prefix.
+- Reuse an existing open PR/MR for the same source branch. Create at most one PR/MR per changed repository.
+- Creating a PR/MR does not require approval.
+- Return every PR/MR URL in the final result.`,
 });
 
 /** Strict, complete text document. Empty strings are intentional custom content. */

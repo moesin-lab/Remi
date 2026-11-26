@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { LEGACY_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
+import { canUseHistoricalChatDefault } from "@shared/system-prompt-policy-hash.js";
 import { DEFAULT_SYSTEM_PROMPT_CONTENT, MAX_SYSTEM_PROMPT_CODE_POINTS, normalizeSystemPromptContent, serializeSystemPromptContent } from "../../../packages/contracts/src/system-prompt-policy.js";
 import { CURRENT_SYSTEM_PROMPT_DEFAULT, LEGACY_BASELINE_DEFAULT_REVISION, hashSystemPromptContent, requiresPromptPolicyCapability } from "../../../packages/shared/src/system-prompt-policy-hash.js";
 import { CODE_DELIVERY_PROTOCOL } from "../../../packages/contracts/src/remi-rules.js";
@@ -24,6 +26,11 @@ describe("workspace System Prompt contract", () => {
   });
 
   test("hash is canonical and frozen legacy baseline detects later default upgrades", () => {
+    expect(hashSystemPromptContent(LEGACY_SYSTEM_PROMPT_CONTENT)).toBe(LEGACY_BASELINE_DEFAULT_REVISION);
+    expect(canUseHistoricalChatDefault('default', CURRENT_SYSTEM_PROMPT_DEFAULT)).toBe(true);
+    expect(canUseHistoricalChatDefault('custom', CURRENT_SYSTEM_PROMPT_DEFAULT)).toBe(false);
+    expect(canUseHistoricalChatDefault('default', { ...CURRENT_SYSTEM_PROMPT_DEFAULT, revision: 'future' })).toBe(false);
+    expect(canUseHistoricalChatDefault('default', { ...CURRENT_SYSTEM_PROMPT_DEFAULT, content: empty })).toBe(false);
     const reordered = Object.fromEntries(Object.entries(DEFAULT_SYSTEM_PROMPT_CONTENT).reverse()) as typeof empty;
     expect(hashSystemPromptContent(reordered)).toBe(CURRENT_SYSTEM_PROMPT_DEFAULT.contentHash);
     expect(CURRENT_SYSTEM_PROMPT_DEFAULT.revision).toBe(createHash("sha256").update(serializeSystemPromptContent(DEFAULT_SYSTEM_PROMPT_CONTENT)).digest("hex"));

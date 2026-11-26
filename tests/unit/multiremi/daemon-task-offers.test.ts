@@ -1,4 +1,5 @@
 import { useHistoricalCatalog } from "../../helpers/historical-prompt-catalog.js";
+import { bindFeishuTopicFixture } from './feishu-topic-fixture.js';
 import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
 import { CURRENT_SYSTEM_PROMPT_DEFAULT, LEGACY_BASELINE_DEFAULT_REVISION, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
@@ -939,6 +940,65 @@ describe("System Prompt policy claim and offer", () => {
     expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
   });
 
+  it('keeps project, runtime workspace and Feishu Issue Chats queued for a capable runtime', () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const agentId = h.agentIds[0]!;
+    const project = h.store.createProject({ title: 'Bound project' });
+    const projectChat = h.store.createChatSession({ agentId, projectId: project.id });
+    const directory = h.store.runtimeWorkspaces.create(h.runtimeIds[0]!, { name: 'Local', root_path: '/home/user/project' });
+    const local = h.store.createChatSession({ agentId, runtimeWorkspaceId: directory.id });
+    const topic = h.store.createChatSession({ agentId });
+    const issue = createResponsibleTestIssue(h.store, { title: 'Topic destination', assigneeType: 'agent', assigneeId: agentId });
+    bindFeishuTopicFixture(h.store, db!, topic.id, issue.id);
+    const tasks = [projectChat, local, topic].map(chat => h.store.sendChatMessage(chat.id, { body: 'hello' }).task);
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyProtocol: 'legacy', supportsPromptPolicy: false })).toBeNull();
+    for (const task of tasks) {
+      expect(h.store.getTask(task.id)?.status).toBe('queued');
+      expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+    }
+  });
+
+  it('keeps even an exact default copy in custom mode behind the capability gate', () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    edit(h.store, DEFAULT_SYSTEM_PROMPT_CONTENT.common, 'custom-default-copy');
+    const chat = h.store.createChatSession({ agentId: h.agentIds[0]! });
+    const task = h.store.sendChatMessage(chat.id, { body: 'plain' }).task;
+    expect(h.store.getSystemPrompt('local').document.mode).toBe('custom');
+    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: false, policyProtocol: 'legacy' })).toBeNull();
+    expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+  });
+
+  it('withdraws a prepared offer with late Wiki context and does not claim it again on legacy', async () => {
+    let preparations = 0;
+    const h = fixture(async task => {
+      preparations++;
+      return { kind: 'chat', chat_session_id: task.chatSessionId, repository_wiki_contexts: [{ repository: {} }] };
+    });
+    const chat = h.store.createChatSession({ agentId: h.agentIds[0]! });
+    const task = h.store.sendChatMessage(chat.id, { body: 'plain before preparation' }).task;
+    await h.hello(['offer']);
+    h.clock.advance(DAEMON_OFFER_COOLDOWN_MS + 1);
+    await h.layer.drain();
+    expect(preparations).toBe(1);
+    expect(h.offered()).toHaveLength(0);
+    expect(h.store.getTask(task.id)).toMatchObject({ status: 'queued', offeredAt: null, waitReason: 'daemon_capability_required:prompt.policy.adopt.v1' });
+  });
+
+  it('keeps the current snapshot and adopted ownership when an independent Chat reconnects on legacy', async () => {
+    const h = fixture();
+    const chat = h.store.createChatSession({ agentId: h.agentIds[0]! });
+    const task = h.store.sendChatMessage(chat.id, { body: 'modern' }).task;
+    await h.hello();
+    await h.accept();
+    const dispatch = h.store.systemPromptsRepo().dispatchPolicy(task.id);
+    expect(dispatch).toMatchObject({ state: 'adopted', protocol: 'adopt' });
+    h.layer.closeAll();
+    await h.layer.drain();
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyProtocol: 'legacy', supportsPromptPolicy: false })).toBeNull();
+    expect(h.store.systemPromptsRepo().dispatchPolicy(task.id)).toEqual(dispatch);
+    expect(h.store.getAttemptSystemPrompt(task.id)?.contentHash).toBe(CURRENT_SYSTEM_PROMPT_DEFAULT.revision);
+  });
+
   it("keeps reset-to-baseline compatible with old daemons", () => {
     const h = fixture(undefined, 1, undefined, false, false);
     const task = h.task();
@@ -947,6 +1007,30 @@ describe("System Prompt policy claim and offer", () => {
     expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
     expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "default", legacyCompatible: true,
       defaultRevision: LEGACY_BASELINE_DEFAULT_REVISION });
+  });
+
+  for (const reset of [false, true]) it(`freezes the historical snapshot only for a fresh negotiated plain Chat (reset=${reset})`, () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const agentId = h.agentIds[0]!;
+    const runtime = h.runtimeIds[0]!;
+    if (reset) h.store.resetSystemPrompt('local', { expectedRevision: 0, requestId: 'reset-chat' }, actor);
+    const issue = createResponsibleTestIssue(h.store, { title: 'code', assigneeType: 'agent', assigneeId: agentId });
+    const code = h.store.createTask({ agentId, issueId: issue.id, prompt: 'code', priority: 100 });
+    const chat = h.store.createChatSession({ agentId });
+    const plain = h.store.sendChatMessage(chat.id, { body: 'ordinary' }).task;
+    const options = { policyProtocol: 'legacy' as const, supportsPromptPolicy: false };
+    expect(h.store.claimTask(runtime)).toBeNull();
+    expect(h.store.claimTask(runtime, options)?.id).toBe(plain.id);
+    expect(h.store.getSystemPrompt('local').currentDefault.revision).toBe(CURRENT_SYSTEM_PROMPT_DEFAULT.revision);
+    const binding = h.store.getAttemptSystemPrompt(plain.id)!;
+    expect(binding).toMatchObject({ legacyCompatible: true, mode: 'default', defaultRevision: LEGACY_BASELINE_DEFAULT_REVISION,
+      contentHash: LEGACY_BASELINE_DEFAULT_REVISION });
+    expect(hashSystemPromptContent(binding.content)).toBe(binding.contentHash);
+    expect(h.store.getTask(code.id)?.waitReason).toBe('daemon_capability_required:prompt.policy.adopt.v1');
+    expect(h.store.requeueTaskOffer(plain.id, runtime, 'rejected')).toBe(true);
+    expect(h.store.claimTask(runtime, options)).toBeNull();
+    expect(h.store.claimTask(runtime, { supportsPromptPolicy: true, policyProtocol: 'adopt' })?.id).toBe(code.id);
+    expect(h.store.getAttemptSystemPrompt(code.id)?.contentHash).toBe(CURRENT_SYSTEM_PROMPT_DEFAULT.contentHash);
   });
 
   for (const reset of [false, true]) {

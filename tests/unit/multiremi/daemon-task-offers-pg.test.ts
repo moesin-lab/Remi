@@ -1,4 +1,5 @@
 import { useHistoricalCatalog } from "../../helpers/historical-prompt-catalog.js";
+import { LEGACY_BASELINE_DEFAULT_REVISION } from '@shared/system-prompt-policy-hash.js';
 import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -58,6 +59,21 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     return { id, agentId: agent.id, clock, layer, session, offers, frames, send, hello, accept, close,
       task: (prompt = "no-op") => store.createTask({ agentId: agent.id, prompt, maxAttempts: 1 }) };
   }
+  it('skips an earlier project task while locking a fresh legacy Chat on PostgreSQL', async () => {
+    const h = fixture();
+    try {
+      const project = store.createProject({ title: 'Code' });
+      const bound = store.createChatSession({ agentId: h.agentId, projectId: project.id });
+      const queued = store.sendChatMessage(bound.id, { body: 'code' }).task;
+      const chat = store.createChatSession({ agentId: h.agentId });
+      const plain = store.sendChatMessage(chat.id, { body: 'plain' }).task;
+      const claim = store.claimTask(h.id, { policyProtocol: 'legacy', supportsPromptPolicy: false });
+      expect(claim?.id).toBe(plain.id);
+      expect(store.getTask(queued.id)?.waitReason).toBe('daemon_capability_required:prompt.policy.adopt.v1');
+      expect(store.getAttemptSystemPrompt(plain.id)?.contentHash).toBe(LEGACY_BASELINE_DEFAULT_REVISION);
+    } finally { await h.close(); }
+  });
+
   it("keeps recovered retries queued when preparation declines, then offers the same retry after cooldown", async () => {
     let decline = true;
     const h = fixture(async task => decline ? null : { id: task.id });

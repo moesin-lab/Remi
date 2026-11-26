@@ -1,5 +1,11 @@
 # CLI command migration
 
+## Project execution activity
+
+`remi project activity <project-id>` lists active execution attempts in the project's current Issues. Use `--view history --status failed` for failures, `--agent-id` for the executing agent, and `--query` for a literal Issue key or title substring. `--from` includes its UTC creation time and `--to` excludes it. Pages contain 30 attempts by default, up to 100 with `--limit`. With `--output json`, pass `next_cursor` to `--cursor` with the same filters to continue in descending creation time and attempt ID order.
+
+Each row identifies the product Session when available, the Turn and the specific Attempt. Moving an Issue between projects moves its visible history. A task credential sees at most its own Attempt. The public summary uses lifecycle categories, validated step counts and known failure classifications. Detailed output remains in the separately authorized trace.
+
 ## Output and pipe completion
 
 Command namespaces, including implicit nested groups, print their generated help

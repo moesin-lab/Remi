@@ -1354,6 +1354,7 @@ export class IssuesRepo {
     const removed = this.ctx.db.run("DELETE FROM multiremi_issues WHERE id = ?", [id]);
     if (issue.projectId) {
       this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [nowIso(), issue.projectId]);
+      this.ctx.notifyProjectActivity(issue.workspaceId, [issue.projectId]);
     }
     return removed.changes > 0;
   }
@@ -2355,7 +2356,12 @@ export class IssuesRepo {
       }, collector, deferredEvents);
     }
     const next = this.getIssue(id)!;
+    if (!moving && (current.title !== next.title || current.projectId !== next.projectId)) {
+      this.ctx.notifyProjectActivity(next.workspaceId, [current.projectId, next.projectId]);
+    }
     if (moving) {
+      this.ctx.notifyProjectActivity(current.workspaceId, [current.projectId]);
+      this.ctx.notifyProjectActivity(next.workspaceId, [next.projectId]);
       // Store-owned events cover native, batch and direct writers alike. Remove
       // the inaccessible source cache entry and refresh the destination using
       // the existing partial issue-update shape (position invalidates lists).

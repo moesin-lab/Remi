@@ -1052,6 +1052,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "project.activity": {
+      "command": "remi project activity",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "project.activity",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "project.defaults": {
       "command": "remi project defaults",
       "auth": [

@@ -1,3 +1,4 @@
+import { listProjectActivity, type ProjectActivityScope } from "./project-activity.js";
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
@@ -693,6 +694,10 @@ export class MultiremiStore {
     return () => {
       this.ctx.taskEnqueuedListeners.delete(listener);
     };
+  }
+
+  listProjectActivity(scope: ProjectActivityScope, params: Record<string,string>) {
+    return listProjectActivity(this.db, scope, params);
   }
 
   onTaskEvent(listener: TaskEventListener): () => void {
@@ -4615,7 +4620,9 @@ runMigrations(this.db);
   }
 
   updateIssueSession(id: string, input: UpdateIssueSessionInput): MultiremiIssueSession {
-    return this.sessions.updateIssueSession(id, input);
+    const session = this.sessions.updateIssueSession(id, input);
+    if (input.title !== undefined && session.issueId && !session.chatId) this.ctx.notifyIssueProjectActivity(session.workspaceId, session.issueId);
+    return session;
   }
 
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant {

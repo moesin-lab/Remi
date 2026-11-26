@@ -417,6 +417,8 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     expect(misdirected).toContain("GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards");
     expect(misdirected).not.toContain("POST /api/issues/:id/workspace/abandon");
     expect(misdirected).not.toContain("GET /api/sessions/:sessionId/log/entry");
+    expect(statuses.has("GET /api/projects/:id/activity")).toBe(true);
+    expect(statuses.get("GET /api/projects/:id/activity")).not.toBe(421);
     for (const route of [...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES, ...UI_SYSTEM_PROMPT_ROUTES]) {
       expect(statuses.has(route)).toBe(true);
       expect(statuses.get(route), `${route} belongs to the browser/CLI process`).not.toBe(421);
@@ -457,8 +459,9 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
-    expect(refused, routeCountHint("runtime")).toBe(785);
-    expect(refused + 2, routeCountHint("runtime")).toBe(787);
+    expect(statuses.get("GET /api/projects/:id/activity")).toBe(421);
+    expect(refused, routeCountHint("runtime")).toBe(786);
+    expect(refused + 2, routeCountHint("runtime")).toBe(788);
     // ADR 0025: the Chat menu's catalogue is a UI read.
     expect(statuses.get("GET /api/chat/slash-commands")).toBe(421);
   });

@@ -3135,6 +3135,42 @@ export interface MultiremiProject {
   updatedAt: string;
 }
 
+export type ProjectActivityView = "active" | "history";
+export type ProjectActivityStatus = "queued" | "dispatched" | "running" | "waiting_local_directory" | "awaiting_human" | "completed" | "failed" | "cancelled";
+export interface ProjectActivityQuery {
+  view?: ProjectActivityView;
+  status?: ProjectActivityStatus;
+  agent_id?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: string;
+}
+export type ProjectActivitySummary = { code: "step_progress"; step: number; total: number }
+  | { code: "queued" | "dispatched" | "needs_directory" | "needs_human" | "completed" | "cancelled" | "context_overflow" | "offer_too_large" };
+export interface ProjectActivityItem {
+  turn_id: string;
+  attempt_id: string;
+  attempt_no: number;
+  status: ProjectActivityStatus;
+  issue: { id: string; key: string; title: string };
+  agent: { id: string; name: string };
+  issue_session: { id: string; title: string } | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  public_summary: ProjectActivitySummary | null;
+}
+export interface ProjectActivityResponse {
+  items: ProjectActivityItem[];
+  has_more: boolean;
+  next_cursor: string | null;
+  as_of: string;
+}
+export interface ProjectActivityChangedPayload { workspace_id: string; project_ids: string[] }
+
 export interface MultiremiProjectResource {
   id: string;
   projectId: string;

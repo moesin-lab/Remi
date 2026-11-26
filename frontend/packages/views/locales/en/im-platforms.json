@@ -248,6 +248,7 @@
       }
     },
     "concierge": {
+      "wake_words": "Group wake words (one per line)",
       "title": "Feishu concierge bot",
       "description": "Choose the responding Agent, host Runtime and Feishu app credentials for this bot. Each bot has its own configuration, lifecycle and conversation routes.",
       "member_available": "{{name}} is online. Message it in Feishu to reach this workspace.",

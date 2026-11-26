@@ -14,6 +14,7 @@ import { useListPerfMarker } from "../../common/use-list-perf-marker";
 import { Skeleton } from "@multiremi/ui/components/ui/skeleton";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { cn } from "@multiremi/ui/lib/utils";
+import { DeliveryTarget } from "./delivery-target";
 import { AutopilotDialog } from "./autopilot-dialog";
 import type { Autopilot, AutopilotStatus, AutopilotExecutionMode } from "@multiremi/core/types";
 import type { TriggerFrequency } from "../../common/trigger-config";
@@ -143,7 +144,12 @@ function AutopilotRow({ autopilot }: { autopilot: Autopilot }) {
         className="flex min-w-0 items-center gap-2 sm:flex-1"
       >
         <Zap className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-medium">{autopilot.title}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-medium">{autopilot.title}</span>
+          {autopilot.execution_mode === "run_only" && <span className="block truncate text-xs text-muted-foreground">
+            <DeliveryTarget value={autopilot.delivery_chat_session_id} />
+          </span>}
+        </span>
       </AppLink>
 
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-xs sm:contents sm:pl-0">
@@ -186,6 +192,7 @@ export function AutopilotsPage() {
   const wsId = useWorkspaceId();
   const {
     data: autopilots = [],
+    refetch,
     isLoading,
     status: autopilotsStatus,
     isPlaceholderData: autopilotsIsPlaceholderData,
@@ -239,6 +246,11 @@ export function AutopilotsPage() {
               ))}
             </div>
           </>
+        ) : autopilotsStatus === "error" && autopilots.length === 0 ? (
+          <div role="alert" className="flex items-center gap-2 px-5 py-4 text-sm">
+            {t(($) => $.delivery.configuration_error)}
+            <Button size="sm" variant="outline" onClick={() => void refetch()}>{t(($) => $.delivery.retry)}</Button>
+          </div>
         ) : autopilots.length === 0 ? (
           <div className="flex flex-col items-center py-16 px-5">
             <Zap className="h-10 w-10 mb-3 text-muted-foreground opacity-30" />

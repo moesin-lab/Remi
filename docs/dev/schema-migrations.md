@@ -23,12 +23,15 @@ SQLite 历史升级仍须由离线工具调用 `runMigrations(db, { historicalMa
 `multiremi_schema_steps` 记录步骤 ID、phase、level、首次发布版本和完成时间。
 缺少元数据表示历史 level 0；空行、非法值或损坏元数据拒绝启动，不自动重置。
 [声明文件](../../packages/server/src/store/schema-compatibility.json) 同时供运行时代码、打包与 updater 读取。
-MUL-1 整合分支（#174）已将当前版本推进至 `{minLevel: 4, maxLevel: 4}`、expand 4、contract 0（main 基线 `d69bc1d` 为 level 3）。
+当前 `{minLevel: 7, maxLevel: 7}`、expand 7、contract 0。
+level 6 新增 `multiremi_feishu_command_results`。以 workspace、domain、app 和消息 ID 唯一保存 `/new`、`/stop` 的紧凑结果。写入与命令共用事务，结果持续保留，支持长期 pending 恢复。先升级 server 并完成 expand，再升级 daemon。新 daemon 连接旧 server 时，写命令返回 endpoint unsupported，须升级 server 后重试；不会回退到无幂等保证的旧写接口。
+level 5 在飞书机器人配置表新增 `wake_words_json TEXT NOT NULL DEFAULT '[]'`。旧行和省略该列的旧 writer 均使用空数组，旧 writer 更新其他列时保留响应词。
 level 1 是 schema 协议登记；level 2 为 A3 的 `multiremi_live_terms` 加法建表，
 同样在版本化 expand 事务内执行，已登记 level 1 的库启动也会补齐该表。
 level 3 为 planned restart 的表、索引及 daemon drain_id：先补 drain identity，再建 planned restart 表；
 历史两条入口仍保留 ensureDaemonDrains → ensurePlannedRestarts 顺序，已登记 level 2 库只走版本化 expand。
-level 4 为 MUL-1 系统 root 的 `multiremi_security_state` 单例门闩（`singleton = 1`，`security_revision = 0`，`bootstrap_completed = 0`，`feature_activation = 0`），
+level 4 为工作区 System Prompt 的独立文档、不可变版本与 attempt binding 新表；不迁移既有 appendix，不修改冻结 bootstrap。
+level 7 为 MUL-1 系统 root 的 `multiremi_security_state` 单例门闩（`singleton = 1`，`security_revision = 0`，`bootstrap_completed = 0`，`feature_activation = 0`），
 在版本化 expand 事务内加法建表并初始化禁用态，不激活任何 root 权限或创建授权。
 旧代码允许更高 expand，contract floor 仍为 0；历史 DDL allowlist 与 legacy 指纹输入列表不增加。
 
@@ -110,28 +113,111 @@ updater 的隔离演练也保留未登记旧库的启动拒绝，并提示先按
 不会在演练或切换时自动执行历史维护。边界恢复测试的人工迁移步骤显式使用离线维护入口。
 
 [prepare-schema-rollback.ts](../../scripts/prepare-schema-rollback.ts) 从 GitHub 已发布的稳定平台
-Release 解析上一版，建立独立 worktree；[check-schema-rollback.ts](../../scripts/check-schema-rollback.ts)
-绑定 tag、commit、package version、已发布 manifest，在隔离 PostgreSQL 库上执行旧版真实 Store 的
-启动与 create/claim/start/complete/cancel，再执行本版迁移，再次运行旧版同组核心读写。
-旧版模块按旧 worktree 的 tsconfig 解析，不导入本版 Store。
-成功才生成绑定目标 SHA / schema 的 `rollback-evidence.json` 与 `rollbackSafeFrom`；失败先删除旧证据。
-有 contract 的 schema 不生成自动回退声明。核心探针不能替代所有产品行为的兼容验证。
+Release 解析上一版。它校验 manifest 与 source 资产的仓库、版本、URL、GitHub digest、大小及
+`sourceSha256`，使用候选代码中的 [归档校验器](../../scripts/verify-release-source.py) 在解包前核对
+PAX commit，并按全部文件内容、Git 模式和符号链接重建 Git tree，与原发布 commit API 的 tree 精确匹配。
+异常路径、重复条目、特殊文件、硬链接及逃逸链接被拒绝；下载与源码各在新建的独立目录，不能覆盖旧目录。
+
+来源模型显式使用三个相互核对的环节：`gh attestation verify` 验证 API 镜像的签名、证书、固定仓库/
+workflow、发布 tag/source SHA 和 GitHub hosted runner；证书与 provenance 的 invocation 必须对应同一
+成功 push 发布 run/attempt 和成功 publish job；GitHub job 日志必须包含原提交、source archive 生成和
+上传命令。完整 source Git tree 再绑定该已签名的原提交。这是组合来源证明，**不是源码归档的签名证明**：
+`sourceArchiveAttestation: false` 保留这一边界，GitHub Release 资产可被替换，不能称为不可变资产。
+API 不可用、签名失败、来源缺失或源码不符均阻断，不回退为 schema 指纹映射。
+
+正常路径仍要求 tag commit、manifest ref 和旧 worktree HEAD 严格一致。若当前 tag 已漂移，则在
+`published-archive` 模式恢复通过上述全部校验的原发布源码；`observedTagRef` 保留实际观察，
+`actualPreviousRef` 必须等于 `publishedRef`，不以重写后的 tag 代码冒充发布前版。探针前再次核对归档、
+安装后源码、版本、schema 指纹和来源。没有硬编码 SHA 对映射；这也不推断历史 tag 迁移的操作者或原因。
+
+[check-schema-rollback.ts](../../scripts/check-schema-rollback.ts) 在一次性本地 PostgreSQL 库中依次执行
+旧版真实 Store 的启动与 create/claim/start/complete/cancel、本版离线协议准备与 expand/startup、
+同一旧版的启动与核心读写，再验证 schema levels 保留。旧版模块按旧源码目录的 tsconfig 解析，不导入本版 Store。
+成功证据包含候选实际 checkout SHA（PR CI 中为 merge SHA）、manifest/归档 digest、源码 tree、
+发布/实际运行 ref、observed tag、来源验证结果及每阶段 stdout/stderr 路径。
+
+生产入口是 [run-schema-rollback.mjs](../../scripts/run-schema-rollback.mjs)。调用方明确提供完整候选 SHA，
+launcher 在唯一私有目录创建独立 Git clone，并只读显式传输所选 SHA 的对象闭包后核对 SHA/tree；
+即使共享 HEAD 已移离不再 advertised 的 detached 提交，也不依赖当前分支位置获取候选。
+共享 checkout 仅提供该提交的 Git 对象，不读取其可变源码、依赖或 `ci-schema`，不修改共享分支、refs 或 index。launcher 自身也应从该 SHA 的 Git 对象导出到独立
+bootstrap 目录后执行；启动 Node 前清除 `NODE_OPTIONS`、`NODE_PATH` 和 Git root/index/object/config 覆盖。
+私有 clone 的 origin 指向官方 GitHub；候选完整 workspace 与实际发布前版各自
+用 Bun 1.3.14、公共 registry、各自 lockfile 和 `--frozen-lockfile --ignore-scripts` 独立安装，不复用
+共享 `node_modules` 或外链源码。运行 HOME、缓存、前版输入与控制文件属于本轮私有目录。
+
+[候选验证器](../../scripts/schema-rollback-candidate.mjs) 绑定固定 SHA 和 Git tree，逐个重验实际源码
+内容、文件类型、可执行位和符号链接，不依赖 index 或 stat cache。完整 inventory 包含 ignored/untracked
+输入，只排除固定 workspace manifests 推导出的明确安装目录，并检查依赖链接不逃回共享源码。
+安装前后、候选模块加载与执行边界及最终发布前均复核。主 checker 与 expand/read 子入口必须从同一
+真实私有根加载，接收相同 run-context 和原始控制文件摘要，报告同一 runId/ref/tree；没有上下文的直接
+调用拒绝，不回退到共享执行。该模型隔离正常并发开发，依赖私有目录独占及可信工具链/锁定依赖，
+不构成对同 UID/root 恶意瞬时写入的强制安全边界。
+
+持久产物目录必须在共享输入和临时运行目录之外，且是不存在的新目录。路径不得经过 symlink 或与源码、
+前版、控制文件重叠；预检失败仅 stderr，不删除或覆盖任何调用方内容。通过预检后只处理本轮独占创建的
+资源。checker 先写 `rollback-staged-result.json`，保留四阶段 stdout/stderr、失败诊断和旧探针/测试库/
+管理连接/临时 HOME 四项独立清理结果；该 staging 文件不是可发布证据，也不进入上传白名单。
+launcher 最终复核源码和 staged 身份，将必要元数据留存后，依序独立清理 `previous-input`、
+`candidate-checkout`、`staged-result`、`run-root`。必要诊断每次序列化为 UTF-8 bytes，截断后从显式位置 0
+循环写完全部字节；短写继续推进，零进度立即失败，不复用句柄 cursor。全部内外清理及必要诊断的完整写入/
+关闭通过后，才以 `wx` 独占创建 `rollback-evidence.json`，持有文件句柄及 inode/device 所有权；保存或关闭
+失败保留最初错误，关闭重试成功也不恢复发布。final 写入或关闭失败只回收本轮 canonical 文件，路径已被
+其他 writer 替换则保留其内容，不追删未知移名路径或声称所有副本已失效。最终发布后不再执行必需的诊断 I/O。
+任一阶段、复核、清理或文件竞争失败均不产生本轮成功证据；另一 writer 创建的内容保留。`launcher-diagnostics.json`、`preparation-diagnostics.json`、`rollback-diagnostics.json`
+和日志保存本轮失败及清理结果，诊断不产生 `rollbackSafeFrom`。重跑选择全新产物目录，不从失败 CI 或
+旧文件推断成功。应用下述 workflow 补丁后，CI 以 `always()` 上传明确列出的证据/元数据/日志，不上传
+staging、归档、源码、HOME 或依赖。有 contract 的 schema 不生成自动回退声明。核心探针不能替代所有产品行为的兼容验证。
+
+固定 bootstrap 的可运行导出步骤见下述 workflow 补丁；导出后从仓库外调用（候选 SHA 必须是实际 checkout
+SHA，PR CI 为 merge SHA），不能把共享源码中的 checker 当作兼容门禁入口：
 
 ```bash
-bun scripts/prepare-schema-rollback.ts ci-schema
-(cd ci-schema/previous && bun install --frozen-lockfile --ignore-scripts --registry https://registry.npmjs.org)
-MULTIREMI_TEST_POSTGRES_URL=postgres://… bun scripts/check-schema-rollback.ts ci-schema/previous ci-schema/previous-release.json ci-schema/rollback-evidence.json
-PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/package-platform-application.mjs platform-release.json
+MULTIREMI_TEST_POSTGRES_URL=postgres://… node /path/to/exported/run-schema-rollback.mjs \
+  --source-repo "$PWD" --candidate-ref "$candidate_sha" --artifacts "$fresh_artifact_directory"
+PLATFORM_SCHEMA_ROLLBACK_EVIDENCE="$fresh_artifact_directory/rollback-evidence.json" \
+  node scripts/package-platform-application.mjs platform-release.json
 ```
 
-发布负责人只能使用同一目标 SHA 成功可信 main CI 的证据。打包核对 SHA、schema、前版身份、探针完整性
-和版本先后；没有证据时沿用人工审核或空声明。当前 platform-release workflow 不自动下载此 artifact，
-须显式提供 `PLATFORM_SCHEMA_ROLLBACK_EVIDENCE`；发布侧自动取证接线仍需 owner 配合。
+发布负责人只能使用同一目标 SHA 成功可信 main CI 的证据。[打包消费端](../../scripts/platform-rollback-policy.mjs)
+强制验证完整 `format: 2` 契约，旧 format1 或缺字段 artifact 均拒绝，不能靠人工审核挽救错误的自动证据：
 
-[完整 workflow 补丁](../deploy/MUL-173-workflow.patch) 修改现有 release-build-check，加入 PostgreSQL
-守卫、历史回归和上一发布版混跑 job，并加入总 build 的 needs。本 PR 不提交 workflow 本体：
-owner 在本 PR 合入后另开 PR 应用补丁，经 CI 通过再合入；因此该 job 在补丁合入前尚未常态运行。
-补丁可用 `git apply --check docs/deploy/MUL-173-workflow.patch` 检查。
+- `candidateExecution` 必须是 `private-fixed-commit`，携带同一 UUID runId、`expectedRef = actualRef = targetRef`、
+  一致的 expectedTree/finalTree、lockfile SHA256、Node 版本和固定 Bun 1.3.14。`candidatePhases` 中 expand/
+  verify 两报告的 runId/ref/tree 必须逐项相同；外层四项 cleanup 必须完整有序且全部通过，不接受 staging。
+  这与 checker 原四项资源清理分列，两组都不能缺失或失败。
+- `previousManifest` 保留下载 manifest 的原始 UTF-8 文本；重算 SHA256 必须等于
+  `previousIdentity.manifestSha256`，解析内容必须等于 `previousRelease`。发布 URL、镜像和版本必须属于
+  固定仓库；`publishedRef = actualPreviousRef = previousRelease.ref`，归档摘要必须等于其 `sourceSha256`。
+  源码 tree、观察到的 tag、资产 ID、来源摘要及各必填字段均验证格式。
+- `tag` 模式必须严格 tag/ref 相等且 `tagDrift: false`；`published-archive` 模式必须显式记录不同的
+  `observedTagRef` 和 `tagDrift: true`，执行的仍是发布源码。组合来源模型、`sourceArchiveAttestation: false`、
+  镜像身份、run/attempt/job 的 URL 绑定和日志/签名验证摘要必须完整，不能用 digest-only 模型替代。
+- 四阶段必须依序为 `previous-before-expand`、`candidate-expand`、`previous-after-expand`、
+  `verify-schema-levels`，全部 `passed`、exit 0、无 signal/error，并保留对应 stdout/stderr 日志路径；
+  前后两次核心探针必须报告成功及创建/取消的 task ID，四个非空 ID 必须互不相同；producer 与 consumer
+  均拒绝整份报告重放、跨阶段复用及同一任务既完成又取消。跨 expand 保留并读取的旧 task 由环境传入，
+  `after.task` 则是第二次探针新建的任务。`schemaVerification` 必须等于 expand 结果，
+  level 重新计算的指纹必须等于目标 `dataSchema`，contract 仍为 0。
+- 探针、测试库、管理连接和临时 HOME 四项 cleanup 必须完整、依序且全部 `passed`、无 error；
+  缺失、重复、跳过或失败均拒绝自动回退声明。版本先后、候选 SHA、完整 checks 和前版回退指纹也必须匹配。
+
+这些消费端校验约束可信 CI 产物的一致性，不能为任意手写 JSON 建立签名或执行来源；签名验证、归档完整 tree
+和实际源码复核仍由生产证据的门禁实际执行。没有自动证据时沿用人工审核或空声明。当前 platform-release
+workflow 不自动下载此 artifact，须显式提供 `PLATFORM_SCHEMA_ROLLBACK_EVIDENCE`；发布侧自动取证接线仍需 owner 配合。
+
+[release-build-check](../../.github/workflows/release-build-check.yml) 的 `schema-compatibility` job
+执行 PostgreSQL 守卫、历史回归和上一发布版混跑，并作为总 build 的依赖。
+[MUL-4 workflow 补丁](../deploy/MUL-4-release-identity-workflow.patch) 增加身份/私有执行回归，从明确 SHA 的 Git
+对象导出固定 launcher，调用其私有安装/prepare/check 全链，传入 `GH_TOKEN` 并以 `always()` 上传外部产物
+白名单。旧共享 `ci-schema` prepare/安装/cache 接线移除，候选与前版安装由 launcher 管理；upload 路径明确
+使用本轮 runner.temp 产物目录。当前凭据缺少 `workflow` scope，源码 PR 无法提交 workflow 本体；
+须由具备权限的 owner 在独立 PR 应用补丁并核对最终候选的实际 CI，未应用不能宣称门禁已恢复。
+可用 `git apply --check docs/deploy/MUL-4-release-identity-workflow.patch` 检查补丁。
+归档校验回归使用 `python3 -I scripts/verify-release-source.test.py`；身份来源回归使用
+`bun test tests/unit/scripts/schema-rollback-identity.test.ts`，私有 clone/源码 inventory 与失败编排回归使用
+`node --experimental-strip-types --test scripts/run-schema-rollback.test.mjs scripts/schema-rollback-candidate.test.mjs scripts/check-schema-rollback.test.ts`；消费契约回归使用
+`node --test scripts/platform-rollback-policy.test.mjs`，包含合法 tag 漂移和缺失/篡改/失败 artifact 的负向用例。
+这些回归不替代真实发布前版的 PostgreSQL 混跑。
 
 ## SQL 允许清单与检测边界
 

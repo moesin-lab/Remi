@@ -41,12 +41,30 @@ beforeEach(() => {
 
 afterEach(() => vi.useRealTimers());
 /** A `getTurnInput` result: the recorded prompt, or `sent_prompt: null` with the joined messages. */
-function turnInput(prompt: string, extra: { sent_prompt?: string | null; instructions?: string | null } = {}) {
+function turnInput(
+  prompt: string,
+  extra: {
+    sent_prompt?: string | null;
+    instructions?: string | null;
+    system_prompt_policy?: {
+      format: number;
+      workspaceId: string;
+      documentId: string | null;
+      versionId: string | null;
+      versionNumber: number | null;
+      mode: string;
+      defaultRevision: string;
+      contentHash: string;
+      legacyCompatible: boolean;
+    } | null;
+  } = {},
+) {
   return {
     from_seq: 2, to_seq: 5, messages: [], legacy_prompt: null,
     sent_attempt_id: extra.sent_prompt === null ? null : "task-1",
     sent_prompt: extra.sent_prompt === undefined ? prompt : extra.sent_prompt,
     instructions: extra.instructions ?? null,
+    system_prompt_policy: extra.system_prompt_policy ?? null,
     prompt,
   };
 }
@@ -459,5 +477,43 @@ describe("transcript copy feedback", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("adopted system prompt policy metadata", () => {
+  it("shows the adopted system prompt version, mode, and default revision when present", async () => {
+    getTurnInput.mockResolvedValue(
+      turnInput("Fix the bug.", {
+        instructions: "# Remi notes",
+        system_prompt_policy: {
+          format: 1,
+          workspaceId: "ws-1",
+          documentId: "doc-1",
+          versionId: "ver-4",
+          versionNumber: 4,
+          mode: "custom",
+          defaultRevision: "abcdef1234567890",
+          contentHash: "1".repeat(64),
+          legacyCompatible: true,
+        },
+      }),
+    );
+
+    renderTranscript([], { initialView: "prompt" });
+
+    expect(await screen.findByText("System Prompt policy")).toBeInTheDocument();
+    expect(screen.getByText("v4")).toBeInTheDocument();
+    expect(screen.getByText("Custom")).toBeInTheDocument();
+    expect(screen.getByText("default abcdef12")).toBeInTheDocument();
+    expect(screen.getByText("Legacy compatible")).toBeInTheDocument();
+  });
+
+  it("omits the adopted system prompt badge on older servers where the field is null", async () => {
+    getTurnInput.mockResolvedValue(turnInput("Fix the bug.", { system_prompt_policy: null }));
+
+    renderTranscript([], { initialView: "prompt" });
+
+    expect(await screen.findByText("Fix the bug.")).toBeInTheDocument();
+    expect(screen.queryByText("System Prompt policy")).not.toBeInTheDocument();
   });
 });

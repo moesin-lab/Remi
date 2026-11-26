@@ -865,12 +865,14 @@ export interface RuntimesSurface {
   executionBindingStatesRepo(): import("@multiremi/store/repos/execution-binding-states-repo.js").ExecutionBindingStatesRepo;
   getAgentExecutionProfile(runtimeId: string|null, agent: MultiremiAgent): import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile|null;
   executionProfilesRepo(): import("@multiremi/store/repos/execution-profiles-repo.js").ExecutionProfilesRepo;
+  systemPromptsRepo(): import("./repos/system-prompts-repo.js").SystemPromptsRepo;
   isDaemonRetired(workspaceId: string, daemonId: string): boolean;
   getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeExecutionProfile(id: string, provider: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntime(id: string): MultiremiRuntime | null;
   /** Current dispatch capabilities without historical usage aggregation. */
   getRuntimeForDispatch(id: string): MultiremiRuntime | null;
+  heartbeatForClaim(id: string, workspaceId: string): { runtime: MultiremiRuntime; draining: boolean } | null;
   /** The Runtime row without the derived usage / model / execution-group reads. */
   getRuntimeLite(id: string): MultiremiRuntime | null;
   listRuntimes(): MultiremiRuntime[];
@@ -1109,6 +1111,10 @@ export class StoreContext {
     );
   }
 
+  systemPrompts(): import("./repos/system-prompts-repo.js").SystemPromptsRepo {
+    return this.host.systemPromptsRepo();
+  }
+
   // Lazy cross-domain accessors. A carved-out repo reaches a domain it does not own through these,
   // never through a constructor-injected sibling (which would deadlock the carve order). Today they
   // all resolve to the still-monolithic facade.
@@ -1206,6 +1212,24 @@ export class StoreContext {
 
       }
     });
+  }
+
+  notifyProjectActivity(workspaceId: string, ids: (string | null)[]): void {
+    const projectIds = [...new Set(ids.filter((id): id is string => Boolean(id)))];
+    if (projectIds.length) this.emitWorkspaceEvent({ type: "project:activity_changed", workspaceId, actorType:"system", payload: { workspace_id: workspaceId, project_ids: projectIds } });
+  }
+
+  notifyIssueProjectActivity(workspaceId: string, issueId: string): void {
+    if (!this.workspaceEventListeners.size) return;
+    const issue = this.db.query("SELECT project_id FROM multiremi_issues WHERE id=? AND workspace_id=?").get(issueId, workspaceId);
+    if (issue?.project_id) this.notifyProjectActivity(workspaceId, [issue.project_id]);
+  }
+
+  notifyAgentProjectActivity(workspaceId: string, agentId: string): void {
+    if (!this.workspaceEventListeners.size) return;
+    const rows = this.db.query(`SELECT DISTINCT i.project_id FROM multiremi_turns t JOIN multiremi_issues i ON i.id=t.issue_id AND i.workspace_id=t.workspace_id
+      WHERE t.agent_id=? AND t.workspace_id=? AND t.chat_session_id IS NULL AND i.project_id IS NOT NULL`).all(agentId, workspaceId);
+    this.notifyProjectActivity(workspaceId, rows.map(row => row.project_id));
   }
 
   /**

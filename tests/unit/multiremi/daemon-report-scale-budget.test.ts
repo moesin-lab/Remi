@@ -10,12 +10,12 @@ useReportFleetFixtures("file");
 // snapshot ceiling below must not grow with active attempts.
 const SQLITE_BUDGETS = {
   hb: { total: 60, reads: 43, writes: 17 },
-  'task.start': { total: 82, reads: 65, writes: 17 },
+  'task.start': { total: 81, reads: 64, writes: 17 },
   'task.progress': { total: 43, reads: 34, writes: 9 },
-  'task.workspace': { total: 41, reads: 33, writes: 8 },
+  'task.workspace': { total: 39, reads: 31, writes: 8 },
   'turn.input': { total: 90, reads: 75, writes: 15 },
   'turn.complete': { total: 230, reads: 178, writes: 52 },
-  'task.fail': { total: 144, reads: 119, writes: 25 },
+  'task.fail': { total: 143, reads: 118, writes: 25 },
 };
 const fleets: Record<string, Awaited<ReturnType<typeof createReportScaleFixture>>> = {};
 const costs: Record<string, { total: number; reads: number; writes: number; statements: Record<string, number> }> = {};

@@ -1,6 +1,8 @@
 import type { AgentTask } from "@daemon/contracts/types.js";
 import { buildTaskPromptArtifact, type BuildTaskPromptOptions } from "@multiremi/prompt.js";
 import { createHash } from "node:crypto";
+import { normalizeSystemPromptContent, type SystemPromptContent } from "@multiremi/contracts/system-prompt-policy.js";
+import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 
 /**
  * The platform template (ADR 0023): the `AGENTS.md` Remi writes into the
@@ -17,8 +19,9 @@ export interface PlatformPromptTemplatePreview {
 
 const placeholder = (name: string): string => `{{${name}}}`;
 
-export function buildPlatformPromptTemplatePreview(): PlatformPromptTemplatePreview {
-  const artifact = buildPreviewArtifact();
+export function buildPlatformPromptTemplatePreview(content?: SystemPromptContent): PlatformPromptTemplatePreview {
+  const artifact = buildPreviewArtifact(content);
+
   const sha = (text: string) => createHash("sha256").update(text).digest("hex");
   return {
     instructions: artifact.instructions,
@@ -27,11 +30,20 @@ export function buildPlatformPromptTemplatePreview(): PlatformPromptTemplatePrev
   };
 }
 
-function buildPreviewArtifact() {
+export function buildSystemPromptPolicyPreview(value: SystemPromptContent) {
+  const content = normalizeSystemPromptContent(value);
+  return { ...buildPlatformPromptTemplatePreview(content), content,
+    scenario: "feishu-issue-topic-codex-linux", excludesLocalContext: true as const };
+}
+
+function buildPreviewArtifact(content?: SystemPromptContent) {
   const repoUrl = placeholder("repository_url");
   const task: AgentTask = {
     id: placeholder("task_id"),
     workspaceId: placeholder("workspace_id"),
+    ...(content ? { systemPromptPolicy: { format: 1 as const, workspaceId: placeholder("workspace_id"), documentId: null,
+      versionId: null, versionNumber: 0, mode: "custom" as const, defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision,
+      content, contentHash: hashSystemPromptContent(content), legacyCompatible: false } } : {}),
     prompt: placeholder("current_request"),
     issueId: placeholder("issue_id"),
     issueSessionId: placeholder("issue_session_id"),

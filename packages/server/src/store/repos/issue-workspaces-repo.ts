@@ -70,22 +70,25 @@ export class IssueWorkspacesRepo {
          WHERE issue_id = ? AND workspace_id = ? AND runtime_id IS NULL AND status != 'cleaned'`,
         [now, now, issueId, workspaceId],
       ).changes;
+      if (abandoned) this.notifyChanged(workspaceId, issueId);
       return { status: "abandoned", workspace: this.get(issueId)!, issueWorkspacesAbandoned: abandoned };
     })();
   }
 
-  report(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
-    const initialIssue = this.ctx.db.query(
-      "SELECT workspace_id FROM multiremi_issues WHERE id = ?",
-    ).get(input.issueId) as Row | null;
-    if (!initialIssue) throw new Error(`Issue not found: ${input.issueId}`);
-    const workspaceId = String(initialIssue.workspace_id ?? "local");
+  report(input: ReportIssueWorkspaceInput, reportWorkspaceId?: string): MultiremiIssueWorkspace {
+    const workspaceId = reportWorkspaceId ?? this.issueWorkspaceId(input.issueId);
     const tx = this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       this.ctx.lockIssueLifecycle(input.issueId);
       return this.reportWithinLifecycleLock(input, workspaceId);
     });
     return tx();
+  }
+
+  private issueWorkspaceId(issueId: string): string {
+    const issue = this.ctx.db.query("SELECT workspace_id FROM multiremi_issues WHERE id = ?").get(issueId);
+    if (!issue) throw new Error(`Issue not found: ${issueId}`);
+    return String(issue.workspace_id ?? 'local');
   }
 
   /** Caller holds the issue workspace's Runtime lifecycle lock. */
@@ -165,6 +168,7 @@ export class IssueWorkspacesRepo {
         now,
       ],
     );
+    if (current?.status !== input.status || current.branchName !== input.branchName || toJson(current.repos) !== toJson(input.repos ?? [])) this.notifyChanged(workspaceId, input.issueId);
     return this.get(input.issueId)!;
   }
 
@@ -209,7 +213,12 @@ export class IssueWorkspacesRepo {
         input.issueId,
       ],
     );
+    if (current.status !== "cleaned") this.notifyChanged(workspaceId, input.issueId);
     return this.get(input.issueId)!;
+  }
+
+  private notifyChanged(workspaceId: string, issueId: string): void {
+    this.ctx.emitWorkspaceEvent({type:"issue:worktree_changed",workspaceId,payload:{issue_id:issueId}});
   }
 
   private runtimesShareDaemon(firstRuntimeId: string, secondRuntimeId: string): boolean {

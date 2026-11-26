@@ -12,6 +12,32 @@ function result(id: string) { return { persisted: false, inspection: { checked_a
 const wrap = ({ children }: { children: React.ReactNode }) => <I18nProvider locale="en" resources={{ en: { runtimes: en } }}><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{children}</QueryClientProvider></I18nProvider>;
 afterEach(cleanup);
 beforeEach(() => { vi.resetAllMocks(); api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [] }); });
+it.each([
+  { endpointId: "ep", dirty: false, apiKey: "", persists: true },
+  { endpointId: "ep", dirty: true, apiKey: "", persists: false },
+  { endpointId: "ep", dirty: false, apiKey: "temporary", persists: false },
+  { endpointId: undefined, dirty: false, apiKey: "new-key", persists: false },
+])("inspects endpoint $endpointId dirty=$dirty key='$apiKey' and reopens the saved catalog", async ({ endpointId, dirty, apiKey, persists }) => {
+  let saved = "old-model";
+  api.getExecutionEndpointCatalog.mockImplementation(async () => ({ catalogs: [{ protocol: "openai-responses", models_revision: 1, models: [{ id: saved }] }] }));
+  api.inspectExecutionEndpoint.mockImplementation(async (_ws, request) => {
+    const persisted = !!request.endpoint_id && request.connection == null && !request.api_key;
+    if (persisted) saved = "found-model";
+    return { ...result("found-model"), persisted };
+  });
+  const open = (id?: string) => render(<EndpointModels endpointId={id} revision={1} dirty={dirty} connection={connection} apiKey={apiKey} onAddModel={vi.fn()} />, { wrapper: wrap });
+  const editor = open(endpointId);
+  if (endpointId) await screen.findByText("old-model");
+  fireEvent.click(screen.getByRole("button", { name: "Fetch / refresh models" }));
+  await screen.findByText("found-model");
+  const payload = JSON.parse(JSON.stringify(api.inspectExecutionEndpoint.mock.calls[0]![1]));
+  expect(payload).toEqual({ ...(endpointId && { endpoint_id: endpointId }), operation: "models",
+    ...(!persists && { connection }), ...(apiKey && { api_key: apiKey }) });
+  editor.unmount();
+  open("ep");
+  await screen.findByText(persists ? "found-model" : "old-model");
+  expect(screen.queryByText(persists ? "old-model" : "found-model")).not.toBeInTheDocument();
+});
 it("ignores a request that finishes after the draft changes", async () => {
   let resolve!: (value: unknown) => void;
   api.inspectExecutionEndpoint.mockReturnValue(new Promise(done => { resolve = done; }));

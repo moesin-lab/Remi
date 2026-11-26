@@ -45,7 +45,11 @@ CLI 使用 `remi workspace feishu-bot list|create <workspace>`，读写、启停
 
 命令表只有这三项（`apps/remi/cli/feishu-commands.ts` 的 `FEISHU_COMMANDS`）。已下线的名字**不留别名**：`/esc` 曾是 `/stop` 的同义词，现在与 `/clear` 一样落入提示卡。
 
-带参数或含第二个 `/` 的消息（如 `/data00/home/x 看下`、`/help 怎么用`）按普通消息提交，避免误伤。`receive.ts` 的 `isSlashCommand` 群准入豁免保持不变——这是群聊里不 @ 机器人也能收到 `/stop` 的前提。
+命令分发只处理已准入的消息。私聊、群内 @本机器人、以及免 @ 群中没有 mention 的消息沿用原正文。只 @ 他人的群消息静默。其他群只匹配本条 text 或 post 自写正文开头的机器人响应词（默认 `[]`）。引用、转发、姓名和媒体占位符不能唤醒机器人；未唤醒的 `/ai`、`/ai 查下`、`/stop` 等不会触发任务、回执或权限提示。
+
+匹配先去首尾空白，仅折叠 ASCII 英文字母大小写；若词尾和下一字符都属于 `[A-Za-z0-9_]`，该候选无效。选择最长有效前缀，只剥一次及其后的空白。仅词无正文时静默。`小助理：查下` 匹配 `小助理` 后保留 `：查下`；`/ai` 不匹配 `/aide`。清洗后的正文才进入命令分发。已准入的带参未知命令按普通消息提交。
+
+每个连接实例从当前 assignment 加载机器人响应词。保存配置、清空词表或切换机器人后，已升级的 daemon 自动重新应用对应 revision。旧 daemon 仍需升级才能移除裸斜杠豁免。发送者按当前机器人的访问策略授权；历史补收与仅因免 @ 准入的消息被拒时静默，暂时无法鉴权的持久化入站留待重试。
 
 取消定位分三级（[FeishuBotRepo.cancelSessionTask](../packages/server/src/store/repos/feishu-bot-repo.ts)）：① 会话 key 精确命中（私聊 `chatId`、话题内 `chatId:thread:rootId`）；② 群顶层消息按**同 chat + 同发送者**的未结束任务回退，恰好 1 个才取消，≥2 个回候选卡（列出 Issue key / task id / 状态 / 已运行时长，最多 5 条）而不猜；③ 无候选则回「当前没有正在运行的任务」且不做任何写操作。判定候选沿用 Chat 队列的 pending 状态集合（`queued` / `dispatched` / `running` / `waiting_local_directory` / `awaiting_human`），发送者无法匹配时一律不进候选（fail closed）。
 
@@ -98,9 +102,17 @@ daemon 以服务端既有 `multiremi_feishu_bot_chat_bindings.chat_id`（含话�
 `multiremi_feishu_bot_agent_routes.chat_id` 为已知会话种子，不另建会话目录。
 启用此配置的连接器将实时事件先原子写入本地 app/domain 隔离的 pending 日志，
 业务 callback 成功后确认；失败保留 pending，启动及每 30 秒重放并分页读取历史。
-同一 message_id 的实时副本优先于历史副本；旧回调完成时保留其间后到的副本，避免吞掉实时通知。
+确认时原子清除已处理的 pending，并在同一 journal 保留 30 分钟的 message_id 确认记录。确认记录不保存正文。静默消息也会确认，因此重叠回扫或更换响应词不会重新唤醒同一条消息，同文新 ID 仍按当前配置处理。旧版 journal 保留原 pending 与扫描水位；升级前已经删除的 ID 无法追溯。
+首次可识别的解析在鉴权前保存摘要，包含域名、应用、消息、发送者、会话、话题、命令、参数、目标和清洗后的原文。实时事件先到时，历史副本不能替换它。历史先到时，仅历史跳过的命令或显式拒绝保留对应的实时机会。后到的实时副本须通过当前准入并匹配原摘要。临时缺少身份、鉴权失败、服务不可用时保留 pending，不受 30 分钟终态清理影响。
+
+`/status` 保存查询结果后单独发送结果卡。`/new` 和 `/stop` 需要支持 `commands/v1` 的服务端，重试沿用原事件键。执行响应丢失后遇到配置或语义变化，只查原执行结果。旧服务端缺少该入口时记录 `command_endpoint_unsupported`，升级 server 后请发一条新命令。旧 v1 journal 保留扫描水位、pending 和终态。无摘要的历史命令机会静默关闭；旧实时 pending 可能已执行写命令时记录 `upgrade_write_outcome_unknown_resend_new_message`，请先核对业务状态，确有需要时用一条新消息重试。
+
+命令与拒绝卡以版本、域名、应用、消息 ID 和用途生成 UUID，发送前持久化正文、目的地和首次尝试时间。结果卡再次发送前复核当前权限。飞书官方 SDK 的 `CreateMessageReqBodyBuilder.Uuid` 和 `ReplyMessageReqBodyBuilder.Uuid` 均注明相同 UUID 的有效去重窗口为一小时。送达不明时，daemon 在首次尝试后 55 分钟内沿用原 UUID 重试，超过此窗口记录 `command_reply_delivery_unknown`。表情回执失败不会重新执行业务。[飞书官方 SDK 字段说明](https://github.com/larksuite/oapi-sdk-go/blob/v3_main/service/im/v1/model.go)
 历史 sender/mention 转为同一接收事件，沿用发送者授权、群准入及附件链路。
-历史准入拒绝不发送用户卡片，避免重叠回扫重复通知；实时拒绝提示按 message_id 本地去重一次。
+补齐发送者时保留首份消息的 mentions。按顺序核对 mention 数量、占位 key、名称和目标 open_id。历史列表只返回 open_id 时，可省略实时 mention 中的 user_id、union_id 或 tenant_key；双方均提供的这些字段必须相符。
+实时事件缺少发送者身份时，同一 app/domain 内后到的实时或历史副本可补齐原 pending 的身份。仅在尚未绑定摘要且无执行进度时接受补件，要求消息 ID、原文、类型、聊天、话题、回复目标和 mention 上下文一致，已有发送者字段与租户身份无冲突。首次来源保留：真实实时事件经历史补齐后仍须通过当前授权才能执行命令；只有历史副本的命令继续等待实时机会。
+每轮恢复记录暂时不可用的身份或鉴权，保留该项并继续处理其他 pending 和历史页。补扫会回看未分类事件的时间；历史页中尚无法转换并落盘的身份缺口会限制该聊天的扫描水位。下一轮沿用 30 秒轮询和 10 分钟历史窗口；journal 写入、关闭或结构错误仍会使本轮失败。
+历史准入拒绝不发送用户卡片，避免重叠回扫重复通知；实时拒绝提示按域名、应用与 message_id 去重。
 Task 去重仍只由服务端 `multiremi_feishu_bot_deliveries.external_message_id` 负责；
 提交成功而本地未确认的事件可再次提交，解析到原 Task。
 

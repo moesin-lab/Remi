@@ -9,10 +9,98 @@ import { MultiremiTaskReportOutbox } from "@multiremi/worker/outbox.js";
 import { outboxRecordFrame } from "@multiremi/worker/report-frames.js";
 import { migrateLegacyUsage } from "@multiremi/store/usage-accounting.js";
 import { join } from "node:path";
+import { readFileSync } from 'node:fs';
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
 import { useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
 
 useMigratedIntegrationDatabases();
+
+for (const recovery of ['on the original socket','after reconnect','after restart'] as const) for (const loss of ['adopt_request','adopt_response'] as const) test(`uses only the adopted policy ${recovery} with lost ${loss}`, async () => {
+  const connected = recovery === 'on the original socket';
+  let providerRuns = 0;
+  let providerInstructions = '';
+  const h = await DaemonProtocolHarness.create({database:'sqlite',manualOfferClock:true,providerFactory: options => ({
+    async *sendStream() {
+      providerRuns++;
+      providerInstructions = readFileSync(join(options.env!.CLAUDE_CONFIG_DIR!, 'AGENTS.md'), 'utf8');
+      yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:'finished'}]} as any;
+    },
+    getLastResponse: () => ({text:'finished',sessionId:'policy-test',usage:[],toolCalls:[]} as any),close:async()=>{},
+  })});
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const [runtime] = h.store.listRuntimes();
+    const agent = h.store.createAgent({name:'Adoption',provider:'claude',runtimeId:runtime!.id});
+    const edit = (common:string) => {
+      const state = h.store.getSystemPrompt('local');
+      h.store.editSystemPrompt('local',{expectedRevision:state.document.revision,requestId:common,content:{...state.content,common}},
+        {type:'human',operatorId:'local',userId:'local',displayName:'Fixture'});
+    };
+    edit('POLICY A');
+    const adopt = (h.layer as any).rpcHandlers.get('task.offer_adopt');
+    let dropped = false;
+    let lostGeneration: unknown;
+    const releaseReplies: Array<() => void> = [];
+    h.layer.registerRpcHandler('task.offer_adopt', async (frame,session) => {
+      const sameGeneration = lostGeneration === frame.payload.offer_generation;
+      if (dropped && (!connected || !sameGeneration || (loss === 'adopt_response' && releaseReplies.length >= 2))) return adopt(frame,session);
+      lostGeneration = frame.payload.offer_generation;
+      const reply = loss === 'adopt_response' ? await adopt(frame,session) : {ok:false,code:'policy_offer_mismatch'};
+      if (loss === 'adopt_response') expect(reply.state).toBe('adopted');
+      dropped = true;
+      return session.deferReply(frame.id!,new Promise(resolve => releaseReplies.push(() => resolve(reply))));
+    });
+    const chat = h.store.createChatSession({agentId:agent.id});
+    const {task} = h.store.sendChatMessage(chat.id,{body:'Exercise durable policy adoption'});
+    await waitFor(()=>dropped,'first adoption reached the transport',5000);
+    expect(providerRuns).toBe(0);
+    edit('POLICY B');
+    if (connected) {
+      for (let seconds = 0; seconds < 90 && !providerRuns; seconds++) {
+        h.clock.advance(1_000);
+        await Bun.sleep(15);
+      }
+      expect(h.sessions).toHaveLength(1);
+      expect(providerRuns).toBe(1);
+    } else {
+      if (recovery === 'after restart') {
+        h.clock.advance(10_000);
+        await Bun.sleep(20);
+        await h.stopDaemon();
+        expect(h.client.diagnostics()).toMatchObject({timers:0,pending_rpcs:0,background:0});
+        await h.recreateDaemon(); await h.settleHeartbeat();
+      } else { await h.disconnect(); await h.reconnect(); }
+      if (loss === 'adopt_request') h.clock.advance(DAEMON_OFFER_COOLDOWN_MS);
+    }
+    await waitFor(()=>h.store.getTask(task.id)?.status === 'completed','same attempt completed',45_000);
+    for (const release of releaseReplies) release();
+    await h.settleHeartbeat();
+    expect(providerRuns).toBe(1);
+    const expected = loss === 'adopt_response' ? 'POLICY A' : 'POLICY B';
+    const binding = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(binding.content.common).toBe(expected);
+    expect(h.store.getTaskPrompt(task.id)?.systemPromptPolicy).toEqual(binding);
+    expect(providerInstructions).toContain(expected);
+    const reports = h.ledger.filter(entry => entry.partition === task.id);
+    expect(reports.findLast(entry=>entry.type === 'task.prompt')?.frame.p.system_prompt_policy).toEqual(binding);
+    const offers = reports.filter(entry=>entry.type === 'task.offer_adopt').map(entry=>entry.frame.p);
+    const generations = new Set(offers.map(offer=>offer.offer_generation));
+    expect(generations.size).toBe(loss === 'adopt_request' ? 2 : 1);
+    for (const generation of generations) expect(new Set(offers.filter(offer=>offer.offer_generation === generation).map(offer=>offer.receipt_id)).size).toBe(1);
+    if (connected) {
+      expect(reports.filter(entry=>entry.type === 'task.offer_status').length).toBeGreaterThan(0);
+      expect(releaseReplies.length).toBeGreaterThan(1);
+    }
+    const cli = Bun.spawn([process.execPath,'apps/remi/main.ts','workspace','system-prompt','get','local',
+      '--attempt',task.id,'--content-hash',binding.contentHash,'--output','json'],{
+      env:{...process.env,MULTIREMI_SERVER_URL:h.url,MULTIREMI_TOKEN:'fixture-master',MULTIREMI_CONFIG:join(h.root,'cli.json')},
+      stdout:'pipe',stderr:'pipe',
+    });
+    const [exit,output,errors] = await Promise.all([cli.exited,new Response(cli.stdout).text(),new Response(cli.stderr).text()]);
+    expect({exit,errors}).toEqual({exit:0,errors:''});
+    expect(JSON.parse(output)).toMatchObject({contentHash:binding.contentHash,content:{common:expected}});
+  } finally { await h.dispose(); }
+},60_000);
 
 for (const nativeRunId of ["historical-evidence-v2", "current"]) test(`late deprecated aggregates beside ${nativeRunId} park as invalid without blocking independent bound usage over the real socket`, async () => {
   const h = await DaemonProtocolHarness.create();
@@ -191,13 +279,8 @@ for (const confirmed of [false, true]) {
       const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "inert recovery", maxAttempts: 1 });
       await waitFor(() => droppedStart && h.client.connectionState() === "disconnected", "first start disconnected", 5_000);
       expect(runs).toBe(0);
-      if (confirmed) {
-        expect(h.store.getTask(task.id)?.acceptedAt).not.toBeNull();
-        expect(h.store.getTask(task.id)?.status).toBe("dispatched");
-      } else {
-        await waitFor(() => h.store.getTask(task.id)?.status === "queued", "actual offer-close requeue", 5_000);
-        expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
-      }
+      expect(h.store.getTask(task.id)?.acceptedAt).not.toBeNull();
+      expect(h.store.getTask(task.id)?.status).toBe("dispatched");
       // Recovery must not wait for a new offer: drain deliberately gates dispatch.
       h.store.beginPlatformDrain({ operationId: "report-recovery", ttlMs: 120_000 });
       await h.reconnect();
@@ -299,8 +382,8 @@ test("a new Issue message during offer recovery is consumed in the same turn", a
     const initial = send("First immutable input", "initial-input");
     const oldTaskId = initial.task!.id;
     await waitFor(() => droppedStart && h.client.connectionState() === "disconnected"
-      && h.store.getTask(oldTaskId)?.status === "queued" && prompts.length === 0,
-    "real Issue offer disconnect and requeue", 5_000);
+      && h.store.getTask(oldTaskId)?.status === "dispatched" && prompts.length === 0,
+    "adopted Issue offer survives disconnect", 5_000);
     const oldTask = h.store.getTask(oldTaskId)!;
     const oldBound = h.store.getBoundIssueLogToSeq(oldTaskId);
     const oldOffer = h.received.find(frame => frame.t === "task.offer" && frame.p.attempt_id === oldTaskId)!;
@@ -372,9 +455,10 @@ test("duplicate completion does not repeat delegation wakeups, comments or count
     const reports = h.store.listMessages(source.issueSessionId!).filter(message => message.dedupe_key === `delegation_terminal:${task.id}`);
     expect(reports).toHaveLength(1);
     expect(reports[0]!.metadata.message_source).toMatchObject({ taskId: task.id });
+    const actual = h.ledger.find(entry => entry.type === 'turn.complete' && entry.partition === task.id)!.frame.p;
     for (const seq of [100_000, 100_001]) {
       await expect(h.client.event({ t: "turn.complete", seq, rt: runtimeId,
-        p: turnCompletion(h.store, task.id, "fixture", {  }) })).resolves.toMatchObject({ ok: true });
+        p: actual })).resolves.toMatchObject({ ok: true });
     }
     expect(h.store.listIssueComments(child.id)).toEqual(comments);
     expect(h.store.listSessionEvents(source.issueSessionId!)).toEqual(sessionEvents);
@@ -422,7 +506,7 @@ for (const replacement of ["cancelled", "assigned elsewhere"] as const) {
       const agent = h.store.createAgent({ name: "late report guard", provider: "claude", runtimeId, workspaceId: "local" });
       const task = h.store.createTask({ agentId: agent.id, prompt: "inert late report", maxAttempts: 1 });
       await waitFor(() => droppedStart && h.client.connectionState() === "disconnected"
-        && h.store.getTask(task.id)?.status === "queued", "actual requeue before authority changes", 5_000);
+        && h.store.getTask(task.id)?.status === "dispatched", "adopted offer before authority changes", 5_000);
       let reportTaskId = task.id;
       if (replacement === "cancelled") h.store.cancelTask(task.id);
       else {
@@ -443,7 +527,7 @@ for (const replacement of ["cancelled", "assigned elsewhere"] as const) {
         p: { task_id: reportTaskId } })).rejects.toMatchObject({ code: "authority_revoked", retryable: false });
       const completion = h.client.event({ t: "turn.complete", seq: 100_000, rt: runtimeId,
         p: turnCompletion(h.store, reportTaskId, "late result", {  }) });
-      await expect(completion).rejects.toMatchObject({ code: replacement === "assigned elsewhere" ? "stale_attempt" : "invalid_report", retryable: false });
+      await expect(completion).rejects.toMatchObject({ code: replacement === "assigned elsewhere" ? "stale_attempt" : "policy_offer_mismatch", retryable: false });
       expect(h.store.getTask(reportTaskId)).toMatchObject({
         status: authoritative.status, runtimeId: authoritative.runtimeId,
         startedAt: authoritative.startedAt, result: authoritative.result, completedAt: authoritative.completedAt,
@@ -459,7 +543,7 @@ for (const replacement of ["cancelled", "assigned elsewhere"] as const) {
 
 for (const terminalReport of ["complete", "fail"] as const) {
 for (const accepted of [true, false]) {
-test(`a real ${accepted ? "accepted" : "requeued"} offer accepts legacy ${terminalReport} while a modern daemon waits for its lost start`, async () => {
+test(`an adopted offer with ${accepted ? "delivered" : "lost"} final response checks receipt on ${terminalReport} before start`, async () => {
   let finish!: () => void;
   const finishing = new Promise<void>(resolve => { finish = resolve; });
   let droppedStart = false;
@@ -482,7 +566,7 @@ test(`a real ${accepted ? "accepted" : "requeued"} offer accepts legacy ${termin
         droppedAcceptance = true;
         return false;
       }
-      if (frame.t === "task.start" && !terminalSent) {
+      if (frame.t === "task.start" && !terminalSent && frame.p.usage_run_id !== 'wrong-policy') {
         if (!accepted && !droppedStart) socket.close(4001);
         droppedStart = true;
         return false;
@@ -497,27 +581,50 @@ test(`a real ${accepted ? "accepted" : "requeued"} offer accepts legacy ${termin
     const task = h.store.createTask({ agentId: agent.id, prompt: "Inert accepted completion", maxAttempts: 1 });
     await waitFor(() => droppedStart && runs === 0
       && (accepted ? h.store.getTask(task.id)?.acceptedAt != null
-        : h.client.connectionState() === "disconnected" && h.store.getTask(task.id)?.status === "queued"),
+        : h.client.connectionState() === "disconnected" && h.store.getTask(task.id)?.status === "dispatched"),
       "real offer received, provider gated, start absent", 5_000);
-    expect(h.store.getTask(task.id)).toMatchObject({ status: accepted ? "dispatched" : "queued", startedAt: null });
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "dispatched", startedAt: null });
     if (!accepted) {
       h.store.beginPlatformDrain({ operationId: `terminal-${terminalReport}`, ttlMs: 120_000 });
       h.clock.advance(1_000);
       await waitFor(() => h.client.connectionState() === "connected", "welcome while start remains unsent", 5_000);
     }
     expect(h.ledger.filter(entry => entry.partition === task.id && entry.type === "task.start")).toHaveLength(0);
+    const {offer_generation, content_hash, receipt_id} = h.ledger.find(entry => entry.type === 'task.offer_adopt' && entry.partition === task.id)!.frame.p;
+    if (accepted && terminalReport === 'complete') {
+      const offer = h.received.find(frame=>frame.t === 'task.offer' && frame.p.attempt_id === task.id)!.p;
+      const snapshot = () => ({task:h.store.getTask(task.id),actual:h.store.getTaskPrompt(task.id),
+        attempts:h.store.listTurnAttempts(offer.turn_id),runs:h.db.query('SELECT * FROM multiremi_usage_runs WHERE task_id=?').all(task.id)});
+      const before = snapshot();
+      let sequence = 80_000;
+      for (const difference of [{offer_generation:'older'},{receipt_id:'foreign'}]) {
+        const proof = {offer_generation,content_hash,receipt_id,...difference};
+        const input = {turn_id:offer.turn_id,attempt_id:task.id,input_to_seq:offer.input_to_seq,message_ids:offer.input_messages.map((message:{id:string})=>message.id)};
+        await expect(h.client.rpc('turn.input',{...input,...proof},runtimeId)).rejects.toMatchObject({code:'policy_offer_mismatch'});
+        for (const [type,fields] of [
+          ['task.start',{usage_run_id:'wrong-policy'}],['task.prompt',{prompt:'wrong',instructions:'wrong'}],
+          ['task.session_pin',{session_id:'wrong'}],['task.usage',{usage:[]}],['task.fail',{error:'wrong'}],
+          ['turn.complete',turnCompletion(h.store,task.id,'wrong')],
+        ] as const) {
+          await expect(h.client.event({t:type,seq:sequence++,rt:runtimeId,p:{task_id:task.id,...fields,...proof}})).rejects.toMatchObject({code:'policy_offer_mismatch'});
+        }
+        expect(snapshot()).toEqual(before);
+      }
+    }
     if (terminalReport === "complete") {
       const offer = h.received.find(frame => frame.t === "task.offer" && frame.p.attempt_id === task.id)!.p;
-      expect(await h.client.rpc("turn.input", { turn_id: offer.turn_id, attempt_id: task.id,
+      expect(await h.client.rpc("turn.input", { offer_generation,content_hash,receipt_id,turn_id: offer.turn_id, attempt_id: task.id,
         input_to_seq: offer.input_to_seq, message_ids: offer.input_messages.map((message: { id: string }) => message.id) }, runtimeId))
         .toEqual({ ok: true, input_to_seq: offer.input_to_seq });
     }
     const expected = terminalReport === "complete"
       ? { status: "completed", result: "accepted completion" }
       : { status: "failed", error: "synthetic provider failure" };
-    await expect(h.client.event({ t: terminalReport === "complete" ? "turn.complete" : "task.fail", seq: 100_000, rt: runtimeId,
-      p: terminalReport === "complete" ? turnCompletion(h.store, task.id, "accepted completion")
-        : { task_id: task.id, error: "synthetic provider failure" } })).resolves.toMatchObject({ ok: true });
+    const terminal = terminalReport === 'complete' ? 'turn.complete' : 'task.fail';
+    const body = terminalReport === 'complete' ? turnCompletion(h.store,task.id,'accepted completion') : {task_id:task.id,error:'synthetic provider failure'};
+    await expect(h.client.event({t:terminal,seq:99_999,rt:runtimeId,p:body})).rejects.toMatchObject({code:'policy_offer_mismatch'});
+    expect(h.store.getTask(task.id)?.status).toBe('dispatched');
+    await expect(h.client.event({t:terminal,seq:100_000,rt:runtimeId,p:{...body, offer_generation,content_hash,receipt_id}})).resolves.toMatchObject({ok:true});
     expect(h.store.getTask(task.id)).toMatchObject(expected);
     terminalSent = true;
     // Expire the unsent start exchange through the harness's clock; the real

@@ -131,7 +131,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const input = withAgentUpdateRequestContext(c, store, loaded.agent, body);
     if (input instanceof Response) return input;
     const agent = store.updateAgent(loaded.agent.id, input);
-    publishAgentLifecycleEvent(c, store, "agent:status", agent);
+    publishAgentLifecycleEvent(c, store, "agent:status", agent, loaded.agent.workspaceId);
     return c.json({ agent });
   });
   app.delete("/api/multiremi/agents/:id", (c) => {
@@ -272,7 +272,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const input = withAgentUpdateRequestContext(c, store, loaded.agent, body);
     if (input instanceof Response) return input;
     const agent = store.updateAgent(loaded.agent.id, input);
-    publishAgentLifecycleEvent(c, store, "agent:status", agent);
+    publishAgentLifecycleEvent(c, store, "agent:status", agent, loaded.agent.workspaceId);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });
   app.put("/api/agents/:id/supervisor", async (c) => {

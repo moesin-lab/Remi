@@ -1,7 +1,7 @@
 import { expect } from 'bun:test';
 import type { SqlDatabase } from '../../packages/server/src/store/db/postgres.js';
 import { runMigrations, runStartupMigrations } from '../../packages/server/src/store/migrations.js';
-import { assertSchemaCompatible, readSchemaLevels } from '../../packages/server/src/store/schema-levels.js';
+import { assertSchemaCompatible, readSchemaLevels, SCHEMA_EXPAND_LEVEL } from '../../packages/server/src/store/schema-levels.js';
 import { runSchemaExpands } from '../../packages/server/src/store/schema-migration-runner.js';
 import { SCHEMA_MIGRATIONS } from '../../packages/server/src/store/schema-migrations.js';
 
@@ -11,8 +11,24 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
       DROP TABLE multiremi_security_state;
+      DROP TABLE multiremi_jwt_current;
+      DROP TABLE multiremi_jwt_materials;
+      DROP TABLE multiremi_jwt_signing_domains;
+      DROP TABLE multiremi_delivery_receipts;
+      DROP TABLE multiremi_credential_materials;
+      DROP TABLE multiremi_credential_version_bindings;
+      DROP TABLE multiremi_runtime_trusts;
+      DROP TABLE multiremi_machine_challenges;
+      DROP TABLE multiremi_machine_enrollments;
+      DROP TABLE multiremi_root_bootstrap_authorizations;
+      DROP TABLE multiremi_root_management_events;
+      DROP TABLE multiremi_credential_families;
+      DROP TABLE multiremi_password_authority_versions;
+      DROP TABLE multiremi_root_subject_state;
+      DROP TABLE multiremi_root_grants;
       DROP TABLE multiremi_authority_edges;
       DROP TABLE multiremi_authority_nodes;
+      DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json;
       DELETE FROM multiremi_schema_steps WHERE level>=3;
       UPDATE multiremi_schema_meta SET expand_level=2;`);
   };
@@ -34,7 +50,7 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
     if (historicalMaintenance) restoreLevel2();
     if (historicalMaintenance) runMigrations(db, { historicalMaintenance: true });
     else runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 4, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 2, maxLevel: 2 })).not.toThrow();
     expect(db.query('SELECT * FROM multiremi_planned_restarts').all()).toEqual([]);
     const indexes = db.dialect === 'postgres'

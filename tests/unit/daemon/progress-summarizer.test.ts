@@ -640,11 +640,16 @@ describe("TaskProgressSummarizer", () => {
     expect(reported.length).toBe(1);
   });
 
-  it("sends relay bearer auth and the configured model", async () => {
+  it.each([
+    ["", "/v1/messages"],
+    ["/tenant/", "/tenant/v1/messages"],
+    ["/v1", "/v1/messages"],
+    ["/tenant/v1/", "/tenant/v1/messages"],
+  ])("sends Anthropic auth and configured model through base '%s'", async (basePath, expectedPath) => {
     const requests: Array<{ url: string; headers: Record<string, string>; model: string }> = [];
     const summarizer = new TaskProgressSummarizer({
       config: config({ minNewMessages: 1, minIntervalMs: 0, model: "claude-haiku-test" }),
-      credentials: { baseUrl: "https://relay.example", authToken: "tok", apiKey: "key" },
+      credentials: { baseUrl: `https://relay.example${basePath}`, authToken: "tok", apiKey: "key" },
       taskTitle: "t",
       taskPrompt: "p",
       report: async () => {},
@@ -659,13 +664,17 @@ describe("TaskProgressSummarizer", () => {
     summarizer.onEvents([textMessage()]);
     await Bun.sleep(0);
     expect(requests.length).toBe(1);
-    expect(requests[0]!.url).toBe("https://relay.example/v1/messages");
+    expect(requests[0]!.url).toBe(`https://relay.example${expectedPath}`);
     expect(requests[0]!.model).toBe("claude-haiku-test");
     expect(requests[0]!.headers.authorization).toBe("Bearer tok");
     expect(requests[0]!.headers["x-api-key"]).toBe("key");
   });
 
-  it("calls an OpenAI-compatible chat completions endpoint", async () => {
+  it.each([
+    ["/v1", false, "/v1/chat/completions"],
+    ["/tenant/", false, "/tenant/v1/chat/completions"],
+    ["/tenant/", true, "/tenant/chat/completions"],
+  ] as const)("calls OpenAI base '%s' with exactBaseUrl=%s", async (basePath, exactBaseUrl, expectedPath) => {
     const requests: Array<{
       url: string;
       headers: Record<string, string>;
@@ -676,7 +685,8 @@ describe("TaskProgressSummarizer", () => {
       config: config({
         transport: "openai",
         openAi: {
-          baseUrl: "https://openai.example/v1",
+          baseUrl: `https://openai.example${basePath}`,
+          exactBaseUrl,
           model: "gpt-5.6-luna",
           apiKey: "openai-key",
         },
@@ -701,7 +711,7 @@ describe("TaskProgressSummarizer", () => {
 
     expect(reported).toEqual([{ summary: "Luna 摘要成功", step: 2, total: 3 }]);
     expect(requests.length).toBe(1);
-    expect(requests[0]!.url).toBe("https://openai.example/v1/chat/completions");
+    expect(requests[0]!.url).toBe(`https://openai.example${expectedPath}`);
     expect(requests[0]!.headers.authorization).toBe("Bearer openai-key");
     expect(requests[0]!.body.model).toBe("gpt-5.6-luna");
     expect(requests[0]!.body.messages[0]).toEqual({ role: "system", content: expect.any(String) });

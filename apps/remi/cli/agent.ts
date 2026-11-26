@@ -14,7 +14,7 @@ import type {
 import { FeishuConnector } from "@connectors/feishu/index.js";
 import { MenuSyncer } from "@connectors/feishu/menu-sync.js";
 import type { TaskStreamingHandler, TaskStreamEvent, TaskStreamMeta } from "@connectors/base.js";
-import type { GroupPolicy } from "@connectors/feishu/config.js";
+import type { FeishuSenderAuthorizer, GroupPolicy } from "@connectors/feishu/config.js";
 import type { HandleTaskStreamOpts } from "@connectors/feishu/channel.js";
 
 const log = createLogger("agent");
@@ -90,12 +90,13 @@ export async function waitForFeishuConnectorStart(
  * the decrypted identity down for this start; it is never persisted locally.
  */
 export async function bootFeishuChannel(
-  authorizeSender: (senderOpenId: string) => Promise<boolean>,
+  authorizeSender: FeishuSenderAuthorizer,
   options: {
     daemonPort?: number;
     workspacesRoot?: string;
     ensureTopicWorkspace?: (sessionKey: string, topicId: string) => Promise<string | null>;
     credentials: FeishuChannelCredentials;
+    wakeWords?: readonly string[];
     taskHandler: TaskStreamingHandler;
     groupPolicy?: GroupPolicy;
     abortTask?: (sessionKey: string) => Promise<void>;
@@ -105,7 +106,7 @@ export async function bootFeishuChannel(
   if (!config.feishu.appId || !config.feishu.appSecret) {
     throw new Error("Feishu channel cannot start; the configured bot is missing an App ID or App Secret");
   }
-  const connector = new FeishuConnector(config.feishu, options.groupPolicy, authorizeSender);
+  const connector = new FeishuConnector({ ...config.feishu, wakeWords: options.wakeWords }, options.groupPolicy, authorizeSender);
   if (options.abortTask) connector.setAbortHandler(options.abortTask);
   const menuSyncer = new MenuSyncer({
     appId: config.feishu.appId,

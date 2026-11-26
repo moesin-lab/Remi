@@ -11,6 +11,8 @@ import type { MultiremiIssueDecision } from "@multiremi/contracts";
 
 // WebSocket event types (matching Go server protocol/events.go)
 export type WSEventType =
+  | "project:activity_changed"
+  | "issue:worktree_changed"
   | "issue:created"
   | "issue:updated"
   | "issue:deleted"
@@ -54,6 +56,7 @@ export type WSEventType =
   | "inbox:batch-read"
   | "inbox:batch-archived"
   | "workspace:updated"
+  | "autopilot:delivery_targets_changed"
   | "workspace:deleted"
   | "member:added"
   | "member:updated"
@@ -195,9 +198,7 @@ export interface CommentUnresolvedPayload {
   comment: Comment;
 }
 
-export interface WorkspaceUpdatedPayload {
-  workspace: Workspace;
-}
+export type WorkspaceUpdatedPayload = { workspace: Workspace } | { workspace_id: string } | { id: string };
 
 export interface WorkspaceDeletedPayload {
   workspace_id: string;

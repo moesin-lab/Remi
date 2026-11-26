@@ -3,6 +3,15 @@ import type {
   WorkspacePromptSettings,
   PlatformPromptTemplatePreview,
   UpdateWorkspacePromptSettingsRequest,
+  SystemPromptState,
+  SystemPromptMutationResponse,
+  SystemPromptVersionsPage,
+  SystemPromptVersionDetail,
+  SystemPromptPreviewResponse,
+  UpdateSystemPromptRequest,
+  ResetSystemPromptRequest,
+  RestoreSystemPromptRequest,
+  PreviewSystemPromptRequest,
   WorkspaceRepo,
   BotMenuConfig,
   BotMenuResponse,
@@ -17,6 +26,11 @@ import {
   BotMenuPublishResponseSchema,
   BotMenuResponseSchema,
   PlatformPromptTemplatePreviewSchema,
+  SystemPromptStateSchema,
+  SystemPromptMutationResponseSchema,
+  SystemPromptVersionsPageSchema,
+  SystemPromptVersionDetailSchema,
+  SystemPromptPreviewResponseSchema,
   WorkspaceEnvResponseSchema,
   WorkspaceOperatorSchema,
   WorkspacePromptSettingsSchema,
@@ -79,6 +93,107 @@ export class WorkspacesEndpoints {
     });
     return parseStrictResponse(raw, WorkspacePromptSettingsSchema, {
       endpoint: "PUT /api/workspaces/:id/prompts",
+    });
+  }
+
+  async getWorkspaceSystemPrompt(workspaceId: string): Promise<SystemPromptState> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/system-prompt`,
+    );
+    return parseStrictResponse(raw, SystemPromptStateSchema, {
+      endpoint: "GET /api/workspaces/:id/system-prompt",
+    });
+  }
+
+  async updateWorkspaceSystemPrompt(
+    workspaceId: string,
+    data: UpdateSystemPromptRequest,
+  ): Promise<SystemPromptMutationResponse> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/system-prompt`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      },
+    );
+    return parseStrictResponse(raw, SystemPromptMutationResponseSchema, {
+      endpoint: "PUT /api/workspaces/:id/system-prompt",
+    });
+  }
+
+  async resetWorkspaceSystemPrompt(
+    workspaceId: string,
+    data: ResetSystemPromptRequest,
+  ): Promise<SystemPromptMutationResponse> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/system-prompt/reset`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    );
+    return parseStrictResponse(raw, SystemPromptMutationResponseSchema, {
+      endpoint: "POST /api/workspaces/:id/system-prompt/reset",
+    });
+  }
+
+  async listWorkspaceSystemPromptVersions(
+    workspaceId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<SystemPromptVersionsPage> {
+    const params = new URLSearchParams();
+    if (options.cursor) params.set("cursor", options.cursor);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.size ? `?${params}` : "";
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/system-prompt/versions${query}`,
+    );
+    return parseStrictResponse(raw, SystemPromptVersionsPageSchema, {
+      endpoint: "GET /api/workspaces/:id/system-prompt/versions",
+    });
+  }
+
+  async getWorkspaceSystemPromptVersion(
+    workspaceId: string,
+    versionId: string,
+  ): Promise<SystemPromptVersionDetail> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/system-prompt/versions/${encodeURIComponent(versionId)}`,
+    );
+    return parseStrictResponse(raw, SystemPromptVersionDetailSchema, {
+      endpoint: "GET /api/workspaces/:id/system-prompt/versions/:versionId",
+    });
+  }
+
+  async restoreWorkspaceSystemPromptVersion(
+    workspaceId: string,
+    data: RestoreSystemPromptRequest,
+  ): Promise<SystemPromptMutationResponse> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/system-prompt/restore`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    );
+    return parseStrictResponse(raw, SystemPromptMutationResponseSchema, {
+      endpoint: "POST /api/workspaces/:id/system-prompt/restore",
+    });
+  }
+
+  async previewWorkspaceSystemPrompt(
+    workspaceId: string,
+    data: PreviewSystemPromptRequest = {},
+  ): Promise<SystemPromptPreviewResponse> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/system-prompt/preview`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    );
+    return parseStrictResponse(raw, SystemPromptPreviewResponseSchema, {
+      endpoint: "POST /api/workspaces/:id/system-prompt/preview",
     });
   }
 

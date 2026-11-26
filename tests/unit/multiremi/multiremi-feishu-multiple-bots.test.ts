@@ -36,11 +36,13 @@ describe("multiple Feishu bots", () => {
   it("keeps the original config and exposes independent credentials, routes and stop intent", async () => {
     const { store, agents, body, request } = setup();
     expect((await request("feishu-bot", "PUT", body(0))).status).toBe(200);
-    const created = await request("feishu-bots", "POST", body(1));
+    const created = await request("feishu-bots", "POST", { ...body(1), wake_words: ["second"] });
     expect(created.status).toBe(201);
     const second = await created.json();
     expect(second.bot_id).toStartWith("bot_");
     expect(second.name).toBe("Bot 1");
+    expect(store.getFeishuBotDaemonConfig("local", "rt_one")?.wake_words).toEqual([]);
+    expect(store.getFeishuBotDaemonConfig("local", "rt_two")?.wake_words).toEqual(["second"]);
     const bot = store.feishuBotFor(second.bot_id);
     expect(store.getFeishuBotDaemonConfig("local", "rt_two")?.bot_id).toBe(second.bot_id);
     expect(store.getFeishuBotDaemonConfig("local", "rt_one")?.app_secret).toBe("test-secret-0");

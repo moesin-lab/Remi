@@ -58,6 +58,7 @@ export interface DaemonProtocolLane {
   onTerminal(code: number): Promise<void>;
   onStateChange?(): void;
   onConnected?(): void;
+  onRuntimeConfirmed?(): void | Promise<void>;
   readyToConnect?(): boolean;
 }
 
@@ -131,6 +132,7 @@ export class DaemonProtocolClient {
   private readonly clock: DaemonProtocolClock;
   private readonly lanes = new Set<DaemonProtocolLane>();
   private readonly activeLanes = new Set<DaemonProtocolLane>();
+  private readonly confirmedLanes = new Set<DaemonProtocolLane>();
   private readonly background = new Set<Promise<unknown>>();
   private readonly laneWork = new Map<DaemonProtocolLane, Promise<void>>();
   private readonly pending = new Map<string, PendingRpc>();
@@ -138,6 +140,7 @@ export class DaemonProtocolClient {
   private readonly frameListeners = new Set<(frame: DaemonParsedFrame) => void | Promise<void>>();
   private readonly welcomeListeners = new Set<(welcome: DaemonWelcomePayload) => void>();
   private readonly timers = new Set<DaemonProtocolTimer>();
+  private readonly retryWaiters = new Set<(connected: boolean) => void>();
   private socket: DaemonProtocolSocketLike | null = null;
   private listeners: Array<[string, (event: any) => void]> = [];
   private state: DaemonProtocolClientState = "stopped";
@@ -234,6 +237,22 @@ export class DaemonProtocolClient {
 
   allowsClaims(): boolean { return this.state !== "upgrade_wait" && this.state !== "terminal"; }
   connectionState(): DaemonProtocolClientState { return this.state; }
+  connectionGeneration(): number { return this.generation; }
+  waitForConnectedRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (this.state !== 'connected' || signal?.aborted) return Promise.resolve(false);
+    return new Promise(resolve => {
+      const finish = (connected: boolean) => {
+        this.retryWaiters.delete(finish);
+        signal?.removeEventListener('abort',abort);
+        if (!connected) this.cancel(timer);
+        resolve(connected);
+      };
+      const abort = () => finish(false);
+      const timer = this.schedule(() => finish(true),delayMs);
+      this.retryWaiters.add(finish);
+      signal?.addEventListener('abort',abort,{once:true});
+    });
+  }
   uplinkPaused(): boolean { return this.paused; }
 
   health(): { state: string; server_min: number; self: number; next_probe_at: string | null } {
@@ -493,7 +512,13 @@ export class DaemonProtocolClient {
         const ack = value as MultiremiDaemonHeartbeatAck;
         const entry = advertised.find(item => item.runtimeId === ack.runtime_id);
         if (!entry || entry.lane.runtime()?.runtime_id !== entry.runtimeId) continue;
-        this.queueLane(entry.lane, () => entry.lane.onHeartbeatAck(ack));
+        this.queueLane(entry.lane, async () => {
+          if (generation !== this.generation) return;
+          await entry.lane.onHeartbeatAck(ack);
+          if (generation !== this.generation || ack.status !== 'ok' || ack.runtime_gone || this.confirmedLanes.has(entry.lane)) return;
+          await entry.lane.onRuntimeConfirmed?.();
+          if (generation === this.generation) this.confirmedLanes.add(entry.lane);
+        });
       }
     }).catch(error => {
       if (generation === this.generation && this.state === "connected") this.report(error);
@@ -549,6 +574,9 @@ export class DaemonProtocolClient {
 
   private disconnectSocket(): void {
     ++this.generation;
+    this.confirmedLanes.clear();
+    for (const resolve of this.retryWaiters) resolve(false);
+    this.retryWaiters.clear();
     this.welcomeCaps = new Set();
     for (const timer of this.timers) this.clock.clearTimeout(timer);
     this.timers.clear();

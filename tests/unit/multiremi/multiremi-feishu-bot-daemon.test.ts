@@ -1,4 +1,8 @@
+import { describeFeishuCommand, feishuCommandDigest } from '@shared/feishu-command-semantic.js';
+import type { FeishuBotCommandRequest, FeishuBotCommandResponse } from '@multiremi/contracts/types.js';
 import { controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
+import { FeishuConciergeSupervisor } from "@multiremi/worker/feishu-concierge.js";
+import { processFeishuMessageEvent } from "@connectors/feishu/receive.js";
 import { MultiremiDaemon } from "@multiremi/worker/daemon.js";
 import { sendMessageFeishu } from "@connectors/feishu/send.js";
 import { FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS } from "@multiremi/store/repos/feishu-bot-repo.js";
@@ -168,6 +172,47 @@ function queuedClient(test: Scaffold, canSend = () => true, timeoutMs = 30_000) 
 }
 
 describe("Feishu bot control-plane delivery", () => {
+  it("applies saved words before the next inbound event and authorizes through the daemon HTTP route", async () => {
+    const fixture = await scaffold();
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: fixture.app.fetch });
+    const client = new MultiremiDaemonClient(String(server.url).replace(/\/$/, ""), fixture.tokens.rt_a);
+    const sender = { sender_open_id: "ou_external", external_session_key: "oc_group:thread:root" };
+    const save = (change: Record<string, unknown>) => fixture.app.request("/api/workspaces/local/feishu-bot", { method: "PUT", headers: MASTER,
+      body: JSON.stringify({ agent_id: fixture.agentId, runtime_id: "rt_a", app_id: "cli_a1b2c3d4e5f6g7h8", domain: "feishu", enabled: true, ...change }) });
+    let receive: ((word: string) => Promise<string | null>) | null = null;
+    const supervisor = new FeishuConciergeSupervisor({ fetchConfig: () => client.getFeishuBotConfig("rt_a"), report: async () => {}, host: {
+      stop: async () => { receive = null; },
+      start: async ({ config }) => {
+        receive = async word => {
+          const parsed = await processFeishuMessageEvent({ request: async () => ({}) } as any, { sender: { sender_id: { open_id: sender.sender_open_id } },
+            message: { chat_id: "oc_group", root_id: "root", message_id: crypto.randomUUID(), message_type: "text", chat_type: "group",
+              content: JSON.stringify({ text: `${word}正文` }) } }, "ou_bot", { durableIntake: true, wakeWords: config.wake_words,
+            authorizeSender: () => client.authorizeFeishuBotSender("rt_a", { ...sender, revision: config.revision }), onDenied: async () => {} });
+          return parsed?.rawContent ?? null;
+        };
+        return {};
+      },
+    } });
+    try {
+      for (const words of [[], ["甲"], ["乙"], []]) {
+        const saved = await save({ wake_words: words });
+        expect(saved.status).toBe(200);
+        const directive = (await (await heartbeat(fixture, "rt_a")).json()).feishu_bot;
+        expect(directive.wake_words).toEqual(words);
+        await supervisor.apply(directive);
+        for (const word of ["甲", "乙"]) expect(await receive!(word)).toBe(words.includes(word) ? "正文" : null);
+      }
+      const staleRevision = supervisor.snapshot().appliedRevision;
+      const saved = await save({ sender_access_policy: "allowlist" });
+      expect(saved.status).toBe(200);
+      const current = await client.getFeishuBotConfig("rt_a");
+      expect(await client.authorizeFeishuBotSender("rt_a", { ...sender, revision: current!.config.revision })).toBe(false);
+      await expect(client.authorizeFeishuBotSender("rt_a", { ...sender, revision: staleRevision })).rejects.toMatchObject({ status: 409 });
+    } finally {
+      await supervisor.shutdown();
+      server.stop(true);
+    }
+  });
   it("reuses a stable Feishu UUID after the daemon loses its send acknowledgement", async () => {
     const test = await scaffold();
     await report(test, "rt_a", { applied_revision: 1, state: "online" });
@@ -765,7 +810,7 @@ describe("Feishu bot control-plane delivery", () => {
 
     expect(ack.status).toBe(200);
     const body = await ack.json();
-    expect(body.feishu_bot).toEqual({ revision: 1, desired_state: "running", config_available: true, no_mention_chat_ids: [] });
+    expect(body.feishu_bot).toEqual({ revision: 1, desired_state: "running", config_available: true, no_mention_chat_ids: [], wake_words: [] });
     // The whole ack, not just the directive: a credential must not ride along
     // in `workspace_settings` or any other field either.
     expect(JSON.stringify(body)).not.toContain(APP_SECRET);
@@ -847,6 +892,189 @@ describe("Feishu bot control-plane delivery", () => {
     expect(await asAdmin.json()).toMatchObject({ code: "daemon_token_required" });
   });
 
+  it('binds a Feishu command digest to the exact raw text and target', () => {
+    const semantic = describeFeishuCommand({ domain: 'feishu', app_id: 'app', external_message_id: 'om_1', sender_open_id: 'ou_1',
+      chat_id: 'oc_1', external_session_key: 'oc_1', raw_content: '/STOP MUL-1' });
+    expect(feishuCommandDigest(semantic)).toBe('a70fd1d6be90436ba52db6c1a01cdb7ac23b8c78458f0d8ae5406354297d4661');
+  });
+
+  it.skipIf(process.env.MULTIREMI_TEST_FEISHU_BACKEND !== 'postgres')('serializes Feishu command writers on independent PostgreSQL connections', async () => {
+    const { store } = await scaffold();
+    const url = new URL(process.env.MULTIREMI_TEST_POSTGRES_URL!);
+    url.pathname = String(db!.query('SELECT current_database() AS name').get()!.name);
+    const semantic = describeFeishuCommand({ domain: 'feishu', app_id: 'cli_a1b2c3d4e5f6g7h8', external_message_id: 'om_race', sender_open_id: 'ou_race',
+      chat_id: 'oc_race', external_session_key: 'oc_race', raw_content: '/new' });
+    const task = store.submitFeishuBotMessage('local','rt_a',{ revision: 1, externalSessionKey: 'oc_race',
+      senderOpenId: 'ou_race', externalMessageId: 'om_before', text: 'before' });
+    const input: FeishuBotCommandRequest = { revision: 1, bot_id: 'default', mode: 'execute', semantic, digest: feishuCommandDigest(semantic) };
+    const program = `import { MultiremiStore } from '@multiremi/store.js';
+      import { PostgresSyncDatabase } from '@multiremi/store/db/postgres.js';
+      const db = new PostgresSyncDatabase(process.env.COMMAND_TEST_DB);
+      const store = new MultiremiStore(db);
+      process.on('message', input => {
+        try { process.send(store.executeFeishuBotCommand('local','rt_a','daemon-a',input)); }
+        finally { db.close(); process.disconnect(); }
+      });
+      process.send('ready');`;
+    const workers = Array.from({ length: 2 }, () => {
+      const ready = Promise.withResolvers<void>();
+      const result = Promise.withResolvers<FeishuBotCommandResponse>();
+      const child = Bun.spawn([process.execPath, '-e', program], { env: { ...process.env, COMMAND_TEST_DB: url.toString() },
+        ipc(message) { if (message === 'ready') ready.resolve(); else result.resolve(message as FeishuBotCommandResponse); },
+        onExit(_child, code) { if (code) { ready.reject(new Error(`worker exit ${code}`)); result.reject(new Error(`worker exit ${code}`)); } } });
+      return { ready: ready.promise, result: result.promise, child };
+    });
+    try {
+      await Promise.all(workers.map(worker => worker.ready));
+      for (const worker of workers) worker.child.send(input);
+      const results = await Promise.all(workers.map(worker => worker.result));
+      expect(results[0]).toMatchObject({ state: 'committed', result: { name: 'new', reset: true } });
+      expect(results[1]).toEqual(results[0]);
+      expect(store.getTask(task.taskId)?.status).toBe('cancelled');
+      expect(db!.query('SELECT external_message_id FROM multiremi_feishu_command_results').all()).toEqual([{ external_message_id: 'om_race' }]);
+    } finally { for (const worker of workers) worker.child.kill(); }
+  }, 30000);
+
+  it('fails closed against a server without the versioned Feishu endpoint', async () => {
+    const paths: string[] = [];
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+      paths.push(new URL(request.url).pathname);
+      return new Response('Not found', { status: 404 });
+    } });
+    try {
+      const semantic = describeFeishuCommand({ domain: 'feishu', app_id: 'app', external_message_id: 'om', sender_open_id: 'ou',
+        chat_id: 'oc', external_session_key: 'oc', raw_content: '/new' });
+      const client = new MultiremiDaemonClient(server.url.origin);
+      await expect(client.executeFeishuBotCommand('rt_a', { revision: 1, bot_id: 'default', mode: 'execute', semantic,
+        digest: feishuCommandDigest(semantic) })).rejects.toMatchObject({ status: 404, code: 'command_endpoint_unsupported' });
+      expect(paths).toEqual(['/api/daemon/runtimes/rt_a/feishu-bot/commands/v1']);
+    } finally { server.stop(true); }
+  });
+
+  for (const scenario of ['new', 'stop', 'target', 'none'] as const) {
+    it(`commits ${scenario} once and safely recovers its original result over HTTP`, async () => {
+      const { app, store, tokens } = await scaffold();
+      const cancelled: string[] = [];
+      store.onTaskEvent(event => { if (event.type === 'task:cancelled') cancelled.push(event.task.id); });
+      let loseResponse = false;
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
+        const response = await app.fetch(request);
+        if (loseResponse && response.ok) {
+          loseResponse = false;
+          return new Response(null, { status: 503 });
+        }
+        return response;
+      } });
+      const client = new MultiremiDaemonClient(server.url.origin, tokens.rt_a);
+      const base = { domain: 'feishu' as const, app_id: 'cli_a1b2c3d4e5f6g7h8', external_message_id: 'om_cmd', sender_open_id: 'ou_actor',
+        chat_id: 'oc_command', external_session_key: 'oc_command' };
+      const submit = async (id: string) => {
+        const response = await app.request('/api/daemon/runtimes/rt_a/feishu-bot/messages', { method: 'POST', headers: daemonHeaders(tokens.rt_a!),
+          body: JSON.stringify({ ...base, revision: 1, external_message_id: id, text: 'work', chat_type: 'p2p' }) });
+        expect(response.status).toBe(202);
+        return String((await response.json()).taskId);
+      };
+      const request = (raw: string): FeishuBotCommandRequest => {
+        const semantic = describeFeishuCommand({ ...base, raw_content: raw });
+        return { revision: 1, bot_id: 'default', mode: 'execute', semantic, digest: feishuCommandDigest(semantic) };
+      };
+      try {
+        const before = scenario === 'none' ? null : await submit('om_before');
+        const input = request(scenario === 'target' ? `/stop ${before}` : scenario === 'new' ? '/new' : '/stop');
+        const execute = (body: FeishuBotCommandRequest) => client.executeFeishuBotCommand('rt_a', body);
+        expect(await execute({ ...input, mode: 'lookup_only' })).toEqual({ state: 'missing' });
+        if (scenario === 'new') {
+          if (db!.dialect === 'postgres') db!.exec(`ALTER TABLE multiremi_feishu_command_results ADD CONSTRAINT fail_receipt CHECK (digest='fail')`);
+          else db!.exec(`CREATE TRIGGER fail_receipt BEFORE INSERT ON multiremi_feishu_command_results BEGIN SELECT RAISE(ABORT,'fail receipt'); END`);
+          await expect(execute(input)).rejects.toMatchObject({ status: 500 });
+          expect(store.getTask(before!)?.status).toBe('queued');
+          expect(cancelled).toEqual([]);
+          expect(store.inspectFeishuBotSession('local','rt_a',1,base.external_session_key,base.sender_open_id).task?.taskId).toBe(before!);
+          expect(await execute({ ...input, mode: 'lookup_only' })).toEqual({ state: 'missing' });
+          db!.exec(db!.dialect === 'postgres' ? 'ALTER TABLE multiremi_feishu_command_results DROP CONSTRAINT fail_receipt' : 'DROP TRIGGER fail_receipt');
+        }
+        loseResponse = true;
+        const concurrent = await Promise.allSettled([execute(input), execute(input)]);
+        expect(concurrent.filter(reply => reply.status === 'rejected')).toHaveLength(1);
+        const original = concurrent.find(reply => reply.status === 'fulfilled') as PromiseFulfilledResult<FeishuBotCommandResponse>;
+        expect(original.value).toMatchObject({ state: 'committed', result: scenario === 'new' ? { name: 'new', reset: true } :
+          { name: 'stop', cancel: { outcome: scenario === 'none' ? 'none' : 'cancelled', taskId: before } } });
+        if (before) expect(store.getTask(before)?.status).toBe('cancelled');
+        const after = await submit('om_after');
+        for (const mode of ['execute','lookup_only'] as const) expect(await execute({ ...input, mode })).toEqual(original.value);
+        expect(store.getTask(after)?.status).toBe('queued');
+        expect(store.inspectFeishuBotSession('local','rt_a',1,base.external_session_key,base.sender_open_id).task?.taskId).toBe(after);
+        expect(db!.query('SELECT external_message_id FROM multiremi_feishu_command_results').all()).toEqual([{ external_message_id: 'om_cmd' }]);
+        await expect(execute(request('/stop another-target'))).rejects.toMatchObject({ status: 409, code: 'command_conflict' });
+        await expect(execute({ ...input, digest: 'bad' })).rejects.toMatchObject({ status: 400, code: 'invalid_command' });
+        for (const mode of ['execute','lookup_only'] as const) {
+          await expect(execute({ ...input, mode, bot_id: 'other' })).rejects.toMatchObject({ code: 'stale_revision' });
+          await expect(client.executeFeishuBotCommand('rt_b', { ...input, mode })).rejects.toMatchObject({ status: 403 });
+          for (const change of [{ app_id: 'other' }, { domain: 'lark' as const }]) {
+            const semantic = { ...input.semantic, ...change };
+            await expect(execute({ ...input, mode, semantic, digest: feishuCommandDigest(semantic) })).rejects.toMatchObject({ code: 'stale_revision' });
+          }
+        }
+        await expect(client.executeFeishuBotCommand('rt_missing', input)).rejects.toMatchObject({ code: 'stale_revision' });
+        const differentSender = { ...input.semantic, sender_open_id: 'ou_another' };
+        await expect(execute({ ...input, semantic: differentSender, digest: feishuCommandDigest(differentSender) })).rejects.toMatchObject({ code: 'command_conflict' });
+        db!.run("UPDATE multiremi_feishu_bot_configs SET bot_id='replacement' WHERE bot_id='default'");
+        for (const mode of ['execute','lookup_only'] as const) {
+          await expect(execute({ ...input, mode })).rejects.toMatchObject({ code: 'stale_revision' });
+          await expect(execute({ ...input, mode, bot_id: 'replacement' })).rejects.toMatchObject({ code: 'command_conflict' });
+        }
+        db!.run("UPDATE multiremi_feishu_bot_configs SET bot_id='default', runtime_id='rt_b' WHERE bot_id='replacement'");
+        await expect(execute(input)).rejects.toMatchObject({ code: 'stale_revision' });
+        db!.run("UPDATE multiremi_feishu_bot_configs SET runtime_id='rt_a' WHERE bot_id='default'");
+        db!.run("UPDATE multiremi_feishu_bot_configs SET sender_access_policy='allowlist' WHERE bot_id='default'");
+        for (const mode of ['execute','lookup_only'] as const) await expect(execute({ ...input, mode })).rejects.toMatchObject({ code: 'sender_not_allowed' });
+        db!.run("UPDATE multiremi_feishu_bot_configs SET revision=2, sender_access_policy='agent' WHERE bot_id='default'");
+        await expect(execute(input)).rejects.toMatchObject({ code: 'stale_revision' });
+        for (const mode of ['execute','lookup_only'] as const) expect(await execute({ ...input, mode, revision: 2 })).toEqual(original.value);
+        expect(cancelled).toEqual(before ? [before] : []);
+        expect(store.getTask(after)?.status).toBe('queued');
+      } finally { server.stop(true); }
+    }, 30000);
+  }
+
+  it("rechecks a preauthorized sender under the command lock after same-revision revocation", async () => {
+    const { app, store, tokens, agentId } = await scaffold();
+    const config = store.upsertFeishuBotConfig("local", { agentId, runtimeId: "rt_a", domain: "feishu",
+      appId: "cli_a1b2c3d4e5f6g7h8", appSecretOp: "keep", enabled: true, senderAccessPolicy: "allowlist" });
+    const headers = daemonHeaders(tokens.rt_a!);
+    const key = "oc_review:thread:om_root";
+    const scope = { revision: config.revision, external_session_key: key, sender_open_id: "ou_external" };
+    const post = (route: string, body: unknown) => app.request(`/api/daemon/runtimes/rt_a/feishu-bot/${route}`, {
+      method: "POST", headers, body: JSON.stringify(body),
+    });
+    expect(await (await post("authorize-sender", scope)).json()).toEqual({ allowed: false });
+    const sender = store.listFeishuBotSenders("local")[0]!;
+    store.setFeishuBotSenderAllowed("local", sender.id, true);
+    expect(await (await post("authorize-sender", scope)).json()).toEqual({ allowed: true });
+    const submit = await post("messages", { ...scope, external_message_id: "om_work", text: "work", chat_type: "group", chat_id: "oc_review" });
+    expect(submit.status).toBe(202);
+    const task = await submit.json();
+    expect((await (await post("session/inspect", scope)).json()).task.task_id).toBe(task.taskId);
+    store.setFeishuBotSenderAllowed("local", sender.id, false);
+    expect(store.getFeishuBotConfig("local")?.revision).toBe(scope.revision);
+    for (const [route, extra] of [["session/inspect", {}], ["session/cancel", { chat_id: "oc_review" }],
+      ["session/reset", {}], ["session/reset", { cancel_current: true }]] as const) {
+      for (const identity of [scope.sender_open_id, undefined]) {
+        const denied = await post(route, { ...scope, ...extra, sender_open_id: identity });
+        expect(denied.status).toBe(403);
+        expect(await denied.json()).toMatchObject({ code: "sender_not_allowed" });
+      }
+    }
+    expect(store.getTask(task.taskId)?.status).toBe("queued");
+    store.setFeishuBotSenderAllowed("local", sender.id, true);
+    expect((await (await post("session/inspect", scope)).json()).task.task_id).toBe(task.taskId);
+    expect((await post("session/reset", { ...scope, revision: scope.revision - 1, cancel_current: true })).status).toBe(409);
+    const reset = await post("session/reset", { ...scope, cancel_current: true });
+    expect(await reset.json()).toEqual({ reset: true });
+    expect(store.getTask(task.taskId)?.status).toBe("cancelled");
+    expect((await (await post("session/inspect", scope)).json()).chat_session_id).toBeNull();
+  });
+
   it("bridges messages and session inspection only for the selected Runtime", async () => {
     const test = await scaffold();
     const submitted = await test.app.request("/api/daemon/runtimes/rt_a/feishu-bot/messages", {
@@ -867,7 +1095,7 @@ describe("Feishu bot control-plane delivery", () => {
     const inspected = await test.app.request("/api/daemon/runtimes/rt_a/feishu-bot/session/inspect", {
       method: "POST",
       headers: daemonHeaders(test.tokens.rt_a!),
-      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1" }),
+      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1", sender_open_id: "ou_member" }),
     });
     expect(inspected.status).toBe(200);
     expect(await inspected.json()).toMatchObject({
@@ -878,7 +1106,7 @@ describe("Feishu bot control-plane delivery", () => {
     const crossRuntime = await test.app.request("/api/daemon/runtimes/rt_a/feishu-bot/session/inspect", {
       method: "POST",
       headers: daemonHeaders(test.tokens.rt_b!),
-      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1" }),
+      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1", sender_open_id: "ou_member" }),
     });
     expect(crossRuntime.status).toBe(403);
   });

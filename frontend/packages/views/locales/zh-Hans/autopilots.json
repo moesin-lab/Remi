@@ -1,4 +1,26 @@
 {
+  "delivery": {
+    "create_unknown": "无法确认任务是否已创建。请先在任务列表中核对，再决定是否重试。",
+    "committed": "任务已创建，投递配置待核实。可继续配置此任务。",
+    "resume": "核实并继续配置",
+    "inspect": "创建已提交，请先在任务列表核对后再修改。",
+    "configuration_error": "无法读取定时任务配置。",
+    "denied": "没有访问投递目标的权限。",
+    "heading": "汇报投递",
+    "unbound": "仅写入内部会话，不向用户 Chat 投递",
+    "unknown": "投递配置未知",
+    "unavailable": "目标不可用",
+    "read_error": "无法读取投递目标",
+    "loading": "正在读取投递目标",
+    "choose": "选择投递会话",
+    "clear": "清除投递目标",
+    "empty": "没有匹配的会话",
+    "retry": "重试",
+    "clear_first": "请先清除投递目标，再切换执行模式。",
+    "web_chat": "Web Chat",
+    "feishu": "飞书",
+    "unknown_channel": "未知通道"
+  },
   "schedule_targets": {
     "previous": "上一页执行记录",
     "next": "下一页执行记录",

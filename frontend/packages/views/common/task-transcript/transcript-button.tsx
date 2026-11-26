@@ -8,12 +8,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@multiremi/ui/components/ui/tooltip";
-import type { AgentTask } from "@multiremi/core/types/agent";
+import type { TranscriptTask } from "./agent-transcript-dialog";
 import { TaskTraceDialog } from "./task-trace-dialog";
 import { useT } from "../../i18n";
 
 interface TranscriptButtonProps {
-  task: AgentTask;
+  task: TranscriptTask;
   agentName: string;
   isLive?: boolean;
   className?: string;

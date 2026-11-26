@@ -1,5 +1,11 @@
 # CLI command migration
 
+## Project execution activity
+
+`remi project activity <project-id>` lists active execution attempts in the project's current Issues. Use `--view history --status failed` for failures, `--agent-id` for the executing agent, and `--query` for a literal Issue key or title substring. `--from` includes its UTC creation time and `--to` excludes it. Pages contain 30 attempts by default, up to 100 with `--limit`. With `--output json`, pass `next_cursor` to `--cursor` with the same filters to continue in descending creation time and attempt ID order.
+
+Each row identifies the product Session when available, the Turn and the specific Attempt. Moving an Issue between projects moves its visible history. A task credential sees at most its own Attempt. The public summary uses lifecycle categories, validated step counts and known failure classifications. Detailed output remains in the separately authorized trace.
+
 ## Output and pipe completion
 
 Command namespaces, including implicit nested groups, print their generated help
@@ -343,6 +349,73 @@ remain usable. `model_catalog_status: "unknown"` marks missing, obsolete, or
 unrefreshed snapshots; new explicit selections return
 `model_execution_catalog_unknown` until discovery finishes. The saved model and
 thinking level are preserved. Custom Runtime connections keep their own catalogs.
+
+## Workspace System Prompt (MUL-3)
+
+`remi workspace system-prompt` manages workspace default behavior separately from
+`workspace prompt get|update`, which retains its independent appendix semantics.
+The five editable text slots are `common`, `code_delivery`, `chat_delivery`,
+`issue_delivery`, and `finishing`; runtime protocols and dynamic context remain
+read-only. These are new canonical commands; the existing appendix commands are
+not renamed or deprecated.
+
+```text
+remi workspace system-prompt get <workspace> [--attempt <attempt-id> --content-hash <sha256>] [--output json]
+remi workspace system-prompt set <workspace> --file policy.json --expected-revision <n>
+    [--request-id <id>] [--change-note <text>] [--base-default-revision <revision>]
+remi workspace system-prompt reset <workspace> --expected-revision <n> [--request-id <id>] [--change-note <text>]
+remi workspace system-prompt history <workspace> [--limit <n>] [--cursor <nextCursor>]
+remi workspace system-prompt version <workspace> <version-id>
+remi workspace system-prompt restore <workspace> <version-id> --expected-revision <n> [--request-id <id>] [--change-note <text>]
+remi workspace system-prompt diff <workspace> <from-version-id> <to-version-id>
+remi workspace system-prompt diff <workspace> [from-version-id] --against-default
+remi workspace system-prompt preview <workspace> [--file policy.json | --stdin]
+```
+
+`set --file` and `set --stdin` accept a JSON object containing exactly all five
+string slots, not a request envelope. Empty strings intentionally clear custom
+slots; they do not select default mode. `--file -` also reads stdin. For example:
+
+```json
+{"common":"Use concise reports.","code_delivery":"","chat_delivery":"","issue_delivery":"","finishing":"Explain verification."}
+```
+
+Use `get --output json` to load `document.revision`, `currentDefault.revision`,
+`baseDefault`, and `defaultUpdated`. Extract `.content` to a file for editing;
+pass the revision at the start of editing as `--base-default-revision`. For default mode
+use `currentDefault.revision`; for custom mode use `baseDefault.revision`. Saves apply
+to subsequent claims. Runtime omission markers supply `--attempt` and `--content-hash`
+to read the frozen binding, including a virtual default or a default upgraded after reset.
+Task credentials can read their own attempt. Both server and CLI verify the snapshot hash.
+
+All writes require `--expected-revision` (including `0` for a virtual default).
+They accept `--request-id`, generating one UUID per invocation when omitted.
+On an HTTP write failure, the error hint retains that ID: retry the identical
+request with the same ID, revision, content, and note to recover an idempotent
+result. The CLI does not automatically retry writes. A 409 retains the server
+conflict details; reload and compare before submitting a new edit.
+
+Every independent `reset` records a new version and follows the current platform
+default, including future default upgrades. `restore` always creates a new custom
+version with the historical snapshot's exact text, even when restoring an old
+default/reset version. It does not resume following future defaults; use `reset`
+for that. History JSON preserves `{versions,nextCursor}`; version JSON preserves
+the complete camelCase snapshot and actor audit fields. JSONL emits one version
+per line. Text history shows the next cursor when another page exists.
+
+`diff` computes line changes locally from two authorized historical snapshots or
+from current/a historical snapshot to `currentDefault.content`. It does not
+reconstruct historical defaults from today's catalog. Without a historical
+argument, `--against-default` compares current effective content. `preview`
+submits optional five-slot content without saving and shows a synthetic runtime
+structure, not an actual model input or host-local instructions.
+
+`set`, `reset`, and `restore` are human-only workspace administration; they are
+explicitly excluded from task parity and the server also rejects task writes.
+Task credentials may read current content/history/version, compare snapshots,
+and preview within their workspace scope. All commands support generated help
+and `--output table|json|jsonl`. HTTP mapping, stdin, conflicts, and task capability
+boundaries are covered by [the System Prompt CLI tests](../tests/unit/remi/cli-workspace-system-prompt.test.ts).
 
 ## Canonical command tree
 
@@ -786,6 +859,53 @@ API changes:
 - CLI context no longer includes `current.chat.issue_id` or `current.bound_issue`.
 - Internal daemon task wire removes `chat_bootstrap_transcript`; cold conversation
   history continues through the existing session projection.
+
+## Autopilot report delivery (MUL-32)
+
+A `run_only` Autopilot with no `delivery_chat_session_id` saves reports only in
+its internal Chat. Create, update, get and list responses include
+`warnings: [{"code":"autopilot_delivery_unbound","message":"Reports are saved only in the internal Chat. Open the Autopilot details to configure delivery."}]`
+for that state. Text output shows the warning and its Autopilot ID, including
+when several tasks are listed. JSON and JSONL preserve each task's warnings.
+A bound report or an Autopilot that creates Issues has no unbound-delivery warning.
+
+Humans can discover eligible destinations with the registered command
+`remi autopilot delivery-targets --workspace <workspace> --json`. It calls
+`GET /api/autopilot-delivery-targets?workspace_id=<workspace>` and returns
+`{"targets":[{"id":"chat_id","title":"Report Chat","channel":"web_chat"}]}`;
+`channel` is `web_chat` or `feishu`. Text output includes all three fields.
+Target discovery and delivery binding changes are human-only; listing a target does
+not authorize a task credential to bind it. Existing task access to create/update
+without a delivery target is preserved.
+
+Human CLI examples:
+
+```bash
+remi autopilot delivery-targets --workspace <workspace>
+remi autopilot create --data '{"title":"Progress report","assignee_id":"agt_reporter","execution_mode":"run_only","delivery_chat_session_id":"chat_current"}'
+remi autopilot update <autopilot> --data '{"delivery_chat_session_id":"chat_current"}'
+remi autopilot update <autopilot> --data '{"delivery_chat_session_id":null}'
+remi autopilot get <autopilot> --json
+```
+
+The create example shows delivery fields; provide any other required task fields
+through `--data` or `--file`. On update, omitting `delivery_chat_session_id` preserves
+the saved binding, a Chat ID sets/replaces it, and explicit JSON `null` clears it.
+HTTP errors retain a nonzero exit status and their server details. A rejected
+binding must not be retried with the delivery field removed.
+
+When an Agent creates a report through its authorized tool and receives
+`autopilot_delivery_unbound`, it must relay the warning and Autopilot ID in the
+original Chat. Tell the user to open **Autopilots -> task details -> choose current
+Chat and save**. Do not invent a trusted URL or claim that reports will reach the
+user before delivery is configured. The Web details page lets a human select,
+change or clear the destination; clearing it restores internal-Chat-only reporting
+and the warning for `run_only` tasks. The CLI does not silently infer or bind the
+current Chat.
+
+Regression coverage for text/JSON output, discovery scope and channels, binding
+states, and rejected writes is in
+[CLI operations tests](../tests/unit/remi/cli-operations.test.ts).
 
 ## Autopilot run must not read as a query (MUL-468)
 

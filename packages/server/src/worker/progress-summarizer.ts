@@ -18,6 +18,7 @@ import { join } from "node:path";
 import type { WorkspaceProgressSummaryPolicy } from "@daemon/agent-runtime/workspace/progress-summary-policy.js";
 import { extractBaseUrl, type RelayEngine } from "@multiremi/relay/fragment.js";
 import { beginSummaryUsage, type SummaryUsageCallback } from "./progress-summary-usage.js";
+import { chatCompletionsUrl, v1BaseUrl } from "@multiremi/relay/protocol-url.js";
 
 const log = createLogger("multiremi-progress");
 
@@ -430,7 +431,7 @@ async function callSummaryModel(
   if (credentials.apiKey) headers["x-api-key"] = credentials.apiKey;
   if (credentials.authToken) headers.authorization = `Bearer ${credentials.authToken}`;
   const recordUsage = beginSummaryUsage("claude", model, onUsage);
-  const response = await fetchImpl(`${credentials.baseUrl}/v1/messages`, {
+  const response = await fetchImpl(`${v1BaseUrl(credentials.baseUrl)}/messages`, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -462,9 +463,8 @@ async function callOpenAiSummaryModel(
   fetchImpl: FetchLike,
   onUsage?: SummaryUsageCallback,
 ): Promise<ProgressSummaryResult> {
-  const apiRoot = config.exactBaseUrl || config.baseUrl.endsWith("/v1") ? config.baseUrl : `${config.baseUrl}/v1`;
   const recordUsage = beginSummaryUsage("openai", config.model, onUsage);
-  const response = await fetchImpl(`${apiRoot}/chat/completions`, {
+  const response = await fetchImpl(chatCompletionsUrl(config.baseUrl, !!config.exactBaseUrl), {
     method: "POST",
     headers: {
       ...config.headers,

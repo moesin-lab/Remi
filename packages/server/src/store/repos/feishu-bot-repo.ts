@@ -1,3 +1,6 @@
+import type { FeishuBotCommandRequest, FeishuBotCommandResponse, FeishuBotCommandResult } from '@multiremi/contracts/types.js';
+import { describeFeishuCommand, feishuCommandDigest } from '@shared/feishu-command-semantic.js';
+import { normalizeFeishuWakeWords } from "@shared/feishu-wake-words.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 /** Feishu message UUID dedup is one hour; reserve five minutes for transit/clock skew. */
 export const FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS = 55 * 60_000;
@@ -71,6 +74,7 @@ import {
   type FeishuDecisionDegradeReason,
 } from "@multiremi/contracts/types.js";
 import type {
+  FeishuBotAuthorizeSenderResult,
   FeishuBotAuditAction,
   IssueTopicConfig,
   FeishuPresentationCheckpoint,
@@ -254,6 +258,9 @@ export class FeishuBotConfigError extends Error {
     this.name = "FeishuBotConfigError";
   }
 }
+
+type FeishuSenderIdentity = Pick<SubmitFeishuBotMessageInput,
+  "externalSessionKey" | "senderOpenId" | "senderUserId" | "senderUnionId" | "senderTenantKey" | "senderName">;
 
 export class FeishuBotRepo {
   private replayingOutboundOperation = false;
@@ -627,6 +634,11 @@ export class FeishuBotRepo {
       const human=this.ctx.workspaces().getWorkspaceMember(responsibleMemberId);
       if(!human||human.archivedAt||human.workspaceId!==workspaceId)throw new FeishuBotConfigError('responsible_member_id must name an active human in this workspace',400,'invalid_config');
     }
+    let wakeWordsJson = String(existing?.wake_words_json ?? "[]");
+    if (input.wakeWords !== undefined) {
+      try { wakeWordsJson = JSON.stringify(normalizeFeishuWakeWords(input.wakeWords)); }
+      catch (error) { throw new FeishuBotConfigError((error as Error).message, 400, "invalid_wake_words"); }
+    }
     const senderAccessPolicy = input.senderAccessPolicy ?? existing?.sender_access_policy ?? "allowlist";
     if (senderAccessPolicy !== "agent" && senderAccessPolicy !== "allowlist") {
       throw new FeishuBotConfigError("sender_access_policy must be agent or allowlist", 400, "invalid_sender_access_policy");
@@ -657,10 +669,10 @@ export class FeishuBotRepo {
       `INSERT INTO multiremi_feishu_bot_configs (
          workspace_id, bot_id, name, agent_id, runtime_id, app_id,
          app_secret_encrypted, app_secret_hint,
-         domain, enabled, sender_access_policy, responsible_member_id, revision,
+         domain, enabled, wake_words_json, sender_access_policy, responsible_member_id, revision,
          bot_name, bot_open_id, last_tested_at, last_test_error, last_test_error_code,
          created_at, updated_at, updated_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(workspace_id, bot_id) DO UPDATE SET
          name = excluded.name,
          agent_id = excluded.agent_id,
@@ -670,6 +682,7 @@ export class FeishuBotRepo {
          app_secret_hint = excluded.app_secret_hint,
          domain = excluded.domain,
          enabled = excluded.enabled,
+         wake_words_json = excluded.wake_words_json,
          sender_access_policy = excluded.sender_access_policy,
          responsible_member_id = excluded.responsible_member_id,
          revision = excluded.revision,
@@ -690,6 +703,7 @@ export class FeishuBotRepo {
       hint,
       domain,
       input.enabled ? 1 : 0,
+      wakeWordsJson,
       senderAccessPolicy,
       responsibleMemberId,
       revision,
@@ -844,7 +858,7 @@ export class FeishuBotRepo {
     const row = this.rawConfigRow(workspaceId);
     if (!row) return null;
     if (String(row.runtime_id ?? "") !== runtimeId) return null;
-    const directive = this.directiveForRuntime(workspaceId, runtimeId);
+    const directive = this.directiveFromRow(workspaceId, runtimeId, row);
     if (!directive || !directive.config_available) return null;
     return {
       workspace_id: workspaceId,
@@ -859,6 +873,8 @@ export class FeishuBotRepo {
         field: "app_secret",
       }),
       domain: normalizeDomain(row.domain),
+      wake_words: directive.wake_words,
+      no_mention_chat_ids: directive.no_mention_chat_ids,
       recovery_chats: this.ctx.db.query(`SELECT chat_id, MAX(is_group) AS is_group FROM (
         SELECT chat_id, CASE WHEN thread_id IS NOT NULL OR reply_to_message_id IS NOT NULL THEN 1 ELSE 0 END AS is_group
         FROM multiremi_feishu_bot_chat_bindings
@@ -3884,10 +3900,22 @@ export class FeishuBotRepo {
     log.warn(`Feishu receipt delivery ${deliveryId} failed after ${attempts} attempt(s)`);
   }
 
+  authorizeSender(workspaceId: string, runtimeId: string, input: FeishuSenderIdentity & { revision: number }): FeishuBotAuthorizeSenderResult {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const config = this.getConfig(workspaceId);
+      if (!config?.enabled || config.runtimeId !== runtimeId || config.revision !== input.revision) {
+        throw new FeishuBotConfigError("feishu bot assignment is stale", 409, "stale_revision");
+      }
+      requiredBoundedString(input.externalSessionKey, "external_session_key", 1_024);
+      return { allowed: this.resolveSender(workspaceId, config.appId, input, config.senderAccessPolicy).allowed };
+    })();
+  }
+
   private resolveSender(
     workspaceId: string,
     appId: string,
-    input: SubmitFeishuBotMessageInput,
+    input: FeishuSenderIdentity,
     accessPolicy: MultiremiFeishuBotConfig["senderAccessPolicy"],
   ): ResolvedFeishuSender {
     const unionId = optionalBoundedString(input.senderUnionId, "sender_union_id", 512);
@@ -3932,9 +3960,86 @@ export class FeishuBotRepo {
     return { id: account?.id ?? null, allowed: accessPolicy === "agent" || (account?.allowed ?? false), displayName, actorId, profileDescription };
   }
 
-  resetSession(workspaceId: string, runtimeId: string, revision: number, externalSessionKey: string): boolean {
-    const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) return false;
+  private withCommandSender<Result>(workspaceId: string, runtimeId: string, revision: number,
+    senderOpenId: string | null | undefined, execute: (appId: string, domain: FeishuBotDomain) => Result): Result {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const openId = optionalBoundedString(senderOpenId, "sender_open_id", 512);
+      if (!openId) throw new FeishuBotConfigError("Feishu sender identity required", 403, "sender_not_allowed");
+      const row = this.ctx.db.query(`SELECT bot.app_id, bot.domain, bot.sender_access_policy, sender.allowed
+        FROM multiremi_feishu_bot_configs bot LEFT JOIN multiremi_feishu_bot_senders sender
+        ON sender.workspace_id = bot.workspace_id AND sender.bot_id = bot.bot_id AND sender.app_id = bot.app_id AND sender.open_id = ?
+        WHERE bot.workspace_id = ? AND bot.bot_id = ? AND bot.runtime_id = ? AND bot.revision = ? AND bot.enabled = 1`)
+        .get(openId, workspaceId, this.botId, runtimeId, revision);
+      if (!row) throw new FeishuBotConfigError("feishu bot assignment is stale", 409, "stale_revision");
+      if (row.sender_access_policy !== "agent" && Number(row.allowed) !== 1) {
+        throw new FeishuBotConfigError("Feishu sender is not allowed", 403, "sender_not_allowed");
+      }
+      return execute(String(row.app_id), normalizeDomain(row.domain));
+    })();
+  }
+
+  executeCommand(workspaceId: string, runtimeId: string, daemonId: string, input: FeishuBotCommandRequest): FeishuBotCommandResponse {
+    const semantic = input?.semantic;
+    const exactId = (value: unknown, max: number) => typeof value === 'string' && value.length > 0 && value.length <= max && value.trim() === value && !value.includes('\0');
+    if (!semantic || !Number.isSafeInteger(input.revision) || !['execute', 'lookup_only'].includes(input.mode)
+      || !exactId(input.bot_id, 512) || !DOMAINS.has(semantic.domain) || !exactId(semantic.app_id, 512)
+      || !exactId(semantic.sender_open_id, 512) || !exactId(semantic.external_message_id, 512)
+      || !exactId(semantic.chat_id, 512) || !exactId(semantic.external_session_key, 1024)
+      || !(semantic.external_session_key === semantic.chat_id || semantic.external_session_key.startsWith(`${semantic.chat_id}:thread:`))
+      || typeof semantic.raw_content !== 'string' || semantic.raw_content.length > 65536 || semantic.raw_content.includes('\0')) {
+      throw new FeishuBotConfigError('Invalid Feishu command envelope', 400, 'invalid_command');
+    }
+    const parsed = describeFeishuCommand(semantic);
+    if (parsed.kind !== 'command' || (parsed.name !== 'new' && parsed.name !== 'stop')
+      || parsed.kind !== semantic.kind || parsed.name !== semantic.name || parsed.args !== semantic.args
+      || parsed.target !== semantic.target || input.digest !== feishuCommandDigest(parsed)) {
+      throw new FeishuBotConfigError('Invalid Feishu command semantics', 400, 'invalid_command');
+    }
+    return this.withCommandSender(workspaceId, runtimeId, input.revision, semantic.sender_open_id, (appId, domain) => {
+      const runtime = this.ctx.db.query(`SELECT daemon_id FROM multiremi_runtimes WHERE id=? AND COALESCE(workspace_id,'local')=?`).get(runtimeId, workspaceId);
+      if (!runtime || runtime.daemon_id !== daemonId) {
+        throw new FeishuBotConfigError('Feishu runtime assignment changed', 409, 'stale_revision');
+      }
+      if (this.botId !== input.bot_id || appId !== semantic.app_id || domain !== semantic.domain) {
+        throw new FeishuBotConfigError('Feishu bot assignment changed', 409, 'stale_revision');
+      }
+      const key = [workspaceId, domain, appId, semantic.external_message_id];
+      const row = this.ctx.db.query(`SELECT bot_id, sender_open_id, digest, result_json FROM multiremi_feishu_command_results
+        WHERE workspace_id=? AND domain=? AND app_id=? AND external_message_id=?`).get(...key);
+      if (row) {
+        if (row.bot_id !== this.botId || row.sender_open_id !== semantic.sender_open_id || row.digest !== input.digest) {
+          throw new FeishuBotConfigError('Event already bound to different command semantics', 409, 'command_conflict');
+        }
+        return { state: 'committed', result: JSON.parse(String(row.result_json)) as FeishuBotCommandResult };
+      }
+      if (input.mode === 'lookup_only') return { state: 'missing' };
+      const sessionKey = semantic.external_session_key;
+      let result: FeishuBotCommandResult;
+      if (parsed.name === 'new') {
+        const { agentName } = this.inspectAuthorizedSession(workspaceId, appId, sessionKey);
+        this.cancelAuthorizedSession(workspaceId, appId, sessionKey, { senderOpenId: semantic.sender_open_id });
+        result = { name: 'new', reset: this.resetAuthorizedSession(workspaceId, appId, sessionKey), agentName: agentName ?? null };
+      } else {
+        result = { name: 'stop', cancel: this.cancelAuthorizedSession(workspaceId, appId, sessionKey,
+          { chatId: semantic.chat_id, senderOpenId: semantic.sender_open_id, target: parsed.target }) };
+      }
+      this.ctx.db.run(`INSERT INTO multiremi_feishu_command_results
+        (workspace_id,domain,app_id,external_message_id,bot_id,sender_open_id,digest,command_name,result_json,completed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`, ...key, this.botId, semantic.sender_open_id, input.digest, parsed.name, JSON.stringify(result), nowIso());
+      return { state: 'committed', result };
+    });
+  }
+
+  resetSession(workspaceId: string, runtimeId: string, revision: number, externalSessionKey: string,
+    senderOpenId: string | null, cancelCurrent = false): boolean {
+    return this.withCommandSender(workspaceId, runtimeId, revision, senderOpenId, appId => {
+      if (cancelCurrent) this.cancelAuthorizedSession(workspaceId, appId, externalSessionKey, { senderOpenId });
+      return this.resetAuthorizedSession(workspaceId, appId, externalSessionKey);
+    });
+  }
+
+  private resetAuthorizedSession(workspaceId: string, appId: string, externalSessionKey: string): boolean {
     const key = requiredBoundedString(externalSessionKey, "external_session_key", 1_024);
     const result = this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_chat_bindings
@@ -3944,7 +4049,7 @@ export class FeishuBotRepo {
       nowIso(),
       workspaceId,
       this.botId,
-      config.appId,
+      appId,
       key,
     );
     return result.changes > 0;
@@ -3983,10 +4088,12 @@ export class FeishuBotRepo {
     externalSessionKey: string,
     options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
   ): FeishuBotCancelResult {
-    const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) {
-      return rejectedCancel("stale_assignment");
-    }
+    return this.withCommandSender(workspaceId, runtimeId, revision, options.senderOpenId,
+      appId => this.cancelAuthorizedSession(workspaceId, appId, externalSessionKey, options));
+  }
+
+  private cancelAuthorizedSession(workspaceId: string, appId: string, externalSessionKey: string,
+    options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null }): FeishuBotCancelResult {
     const key = requiredBoundedString(externalSessionKey, "external_session_key", 1_024);
     const target = cleanOptionalString(options.target ?? null);
     const senderOpenId = cleanOptionalString(options.senderOpenId ?? null);
@@ -3996,7 +4103,7 @@ export class FeishuBotRepo {
       `SELECT chat_session_id FROM multiremi_feishu_bot_chat_bindings
         WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND external_session_key = ?
         ORDER BY updated_at DESC, id DESC`,
-    ).all(workspaceId, this.botId, config.appId, key) as Row[];
+    ).all(workspaceId, this.botId, appId, key) as Row[];
     const sessionTargets: ResolvedCancelTarget[] = [];
     const seenSessions = new Set<string>();
     for (const binding of bindings) {
@@ -4008,7 +4115,7 @@ export class FeishuBotRepo {
     }
 
     const candidates = chatId && senderOpenId
-      ? this.listCancelCandidates(workspaceId, config.appId, chatId, senderOpenId, seenSessions)
+      ? this.listCancelCandidates(workspaceId, appId, chatId, senderOpenId, seenSessions)
       : [];
 
     if (target) {
@@ -4118,11 +4225,13 @@ export class FeishuBotRepo {
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): FeishuBotSessionSnapshot {
-    const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) {
-      return { chatSessionId: null, agentId: null, agentName: null, task: null };
-    }
+    return this.withCommandSender(workspaceId, runtimeId, revision, senderOpenId,
+      appId => this.inspectAuthorizedSession(workspaceId, appId, externalSessionKey));
+  }
+
+  private inspectAuthorizedSession(workspaceId: string, appId: string, externalSessionKey: string): FeishuBotSessionSnapshot {
     const key = requiredBoundedString(externalSessionKey, "external_session_key", 1_024);
     const binding = this.ctx.db.query(
       `SELECT b.chat_session_id, b.agent_id, a.name AS agent_name
@@ -4130,7 +4239,7 @@ export class FeishuBotRepo {
        LEFT JOIN multiremi_agents a ON a.id = b.agent_id
        WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND b.external_session_key = ?
        ORDER BY b.updated_at DESC, b.id DESC LIMIT 1`,
-    ).get(workspaceId, this.botId, config.appId, key) as Row | null;
+    ).get(workspaceId, this.botId, appId, key) as Row | null;
     if (!binding) return { chatSessionId: null, agentId: null, agentName: null, task: null };
 
     const chatSessionId = String(binding.chat_session_id);
@@ -4162,7 +4271,10 @@ export class FeishuBotRepo {
    * makes a Runtime switch a handover rather than a double-run.
    */
   directiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {
-    const row = this.rawConfigRow(workspaceId);
+    return this.directiveFromRow(workspaceId, runtimeId, this.rawConfigRow(workspaceId));
+  }
+
+  private directiveFromRow(workspaceId: string, runtimeId: string, row: Row | null): MultiremiFeishuBotDirective | null {
     if (!row) {
       // No config: a Runtime that still reports a live connector (because the
       // config was just deleted) must be told to stop. One that already
@@ -4196,6 +4308,7 @@ export class FeishuBotRepo {
     const topics = readWorkspaceIssueTopicsForDelivery(
       this.ctx.workspaces().getWorkspace(workspaceId)?.settings ?? {});
     return { revision, desired_state: "running", config_available: true,
+      wake_words: JSON.parse(String(row.wake_words_json ?? "[]")),
       no_mention_chat_ids: this.botId === "default" && topics.enabled && topics.chatId ? [topics.chatId] : [],
     };
   }
@@ -4658,6 +4771,7 @@ function mapConfig(row: Row): MultiremiFeishuBotConfig {
     appId: String(row.app_id ?? ""),
     domain: normalizeDomain(row.domain),
     enabled: Boolean(Number(row.enabled ?? 0)),
+    wakeWords: JSON.parse(String(row.wake_words_json ?? "[]")),
     senderAccessPolicy: row.sender_access_policy === "agent" ? "agent" : "allowlist",
     responsibleMemberId:nullableString(row.responsible_member_id),
     revision: Number(row.revision ?? 0),

@@ -1,3 +1,4 @@
+import { ensureSystemPrompts } from "./system-prompt-schema.js";
 import { ensureDaemonDrainIdentity, ensurePlannedRestarts } from "./planned-restart-schema.js";
 import { LIVE_TERM_SCHEMA } from './live-term-fence.js';
 import { expandSecurityState } from './security-state-schema.js';
@@ -25,30 +26,46 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { ensureDaemonDrainIdentity(db); ensurePlannedRestarts(db); },
 }, {
-  id: '20261124_security_state', phase: 'expand', level: 4,
+  id: '20261124_system_prompt_policy', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { ensureSystemPrompts(db); },
+}, {
+  id: '20261124_feishu_bot_wake_words', phase: 'expand', level: 5,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { db.exec("ALTER TABLE multiremi_feishu_bot_configs ADD COLUMN wake_words_json TEXT NOT NULL DEFAULT '[]'"); },
+}, {
+  id: '20261125_feishu_command_results', phase: 'expand', level: 6,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { db.exec(`CREATE TABLE multiremi_feishu_command_results (
+    workspace_id TEXT NOT NULL, domain TEXT NOT NULL, app_id TEXT NOT NULL, external_message_id TEXT NOT NULL,
+    bot_id TEXT NOT NULL, sender_open_id TEXT NOT NULL, digest TEXT NOT NULL, command_name TEXT NOT NULL,
+    result_json TEXT NOT NULL, completed_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, domain, app_id, external_message_id))`); },
+}, {
+  id: '20261124_security_state', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandSecurityState,
 }, {
-  id: '20261124_authority_provenance', phase: 'expand', level: 4,
+  id: '20261124_authority_provenance', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandAuthorityProvenance,
 }, {
-  id: '20261124_root_grants', phase: 'expand', level: 4,
+  id: '20261124_root_grants', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandRootGrants,
 }, {
-  id: '20261124_root_management', phase: 'expand', level: 4,
+  id: '20261124_root_management', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandRootManagement,
 }, {
-  id: '20261124_bootstrap_authorizations', phase: 'expand', level: 4,
+  id: '20261124_bootstrap_authorizations', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandBootstrapAuthorizations,
 }, {
-  id: '20261124_runtime_trust', phase: 'expand', level: 4,
+  id: '20261124_runtime_trust', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandRuntimeTrust,
 }, {
-  id: '20261124_root_receipts', phase: 'expand', level: 4,
+  id: '20261124_root_receipts', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandRootReceipts,
 }, {
-  id: '20261124_credential_version_bindings', phase: 'expand', level: 4,
+  id: '20261124_credential_version_bindings', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandCredentialVersionBindings,
 }, {
-  id: '20261124_dashboard_jwt_materials', phase: 'expand', level: 4,
+  id: '20261124_dashboard_jwt_materials', phase: 'expand', level: 7,
   expandRelease: '0.2.95', release: '0.2.95', run: expandJwtMaterials,
 }];

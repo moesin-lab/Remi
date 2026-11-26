@@ -47,7 +47,7 @@ import {
 import { api } from "@multiremi/core/api";
 import { useTranscriptViewStore } from "@multiremi/core/agents/stores";
 import type { AgentTask, Agent, AgentRuntime } from "@multiremi/core/types/agent";
-import type { SessionTask } from "@multiremi/core/types";
+export type TranscriptTask = Omit<Partial<AgentTask>, "status" | "issue_id"> & { id: string; status: string };
 import { redactItem } from "./redact";
 import { useT } from "../../i18n";
 import {
@@ -67,7 +67,7 @@ import type { TurnTraceReadInfo } from "./use-task-trace";
 interface AgentTranscriptDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  task: AgentTask | SessionTask;
+  task: TranscriptTask;
   /** The trace's turn; model and context usage come from it. */
   turn?: TraceTurn | null;
   /** Every item of the trace, at any depth; subagent items nest their own. */
@@ -730,6 +730,9 @@ export function AgentTranscriptDialog({
                   {t(($) => $.transcript.prompt_sent_title)}
                 </div>
                 <div className="min-h-0 flex-1 space-y-4 overflow-auto bg-muted/10 p-4">
+                  {promptInput.system_prompt_policy && (
+                    <AdoptedSystemPromptBadge policy={promptInput.system_prompt_policy} />
+                  )}
                   {promptInput.instructions && <SessionInstructions text={promptInput.instructions} />}
                   {promptInput.sent_prompt === null && (
                     <p className="text-xs text-muted-foreground">{t(($) => $.transcript.prompt_messages_fallback)}</p>
@@ -885,6 +888,60 @@ function PromptSteers({ steers, chat }: { steers: readonly TraceItemOf<"user_mes
 }
 
 /** Remi's part of the session's AGENTS.md for the attempt, collapsed by default. */
+function AdoptedSystemPromptBadge({
+  policy,
+}: {
+  policy: {
+    versionNumber: number | null;
+    versionId: string | null;
+    mode: string;
+    defaultRevision: string;
+    contentHash: string;
+    legacyCompatible: boolean;
+  };
+}) {
+  const { t } = useT("agents");
+  const modeLabel =
+    policy.mode === "custom"
+      ? t(($) => $.transcript.system_prompt_mode_custom)
+      : policy.mode === "default"
+        ? t(($) => $.transcript.system_prompt_mode_default)
+        : policy.mode;
+  const versionText =
+    policy.versionNumber !== null && policy.versionNumber > 0
+      ? `v${policy.versionNumber}`
+      : t(($) => $.transcript.system_prompt_version_default);
+
+  return (
+    <div
+      data-adopted-system-prompt="true"
+      className="flex flex-wrap items-center gap-2 rounded-md border bg-background px-3 py-2 text-xs"
+    >
+      <span className="font-medium text-foreground">
+        {t(($) => $.transcript.system_prompt_adopted_label)}
+      </span>
+      <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] font-medium text-foreground">
+        {versionText}
+      </span>
+      <span className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground">
+        {modeLabel}
+      </span>
+      {policy.defaultRevision && (
+        <span className="font-mono text-[11px] text-muted-foreground" title={policy.defaultRevision}>
+          {t(($) => $.transcript.system_prompt_default_rev, {
+            revision: policy.defaultRevision.slice(0, 8),
+          })}
+        </span>
+      )}
+      {policy.legacyCompatible && (
+        <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-700 dark:text-amber-300">
+          {t(($) => $.transcript.system_prompt_legacy_compatible)}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function SessionInstructions({ text }: { text: string }) {
   const { t } = useT("agents");
   const [open, setOpen] = useState(false);

@@ -1,3 +1,4 @@
+import { listProjectActivity, type ProjectActivityScope } from "./project-activity.js";
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
 import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
@@ -8,6 +9,8 @@ import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
+import { SystemPromptsRepo } from "@multiremi/store/repos/system-prompts-repo.js";
+import type { SystemPromptActor, SystemPromptEditInput, SystemPromptRestoreInput, SystemPromptWriteInput } from "@multiremi/contracts/system-prompt-policy.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
 import { ExecutionEndpointsRepo } from "@multiremi/store/repos/execution-endpoints-repo.js";
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
@@ -590,6 +593,7 @@ export class MultiremiStore {
   private runtimes: RuntimesRepo;
   private executionBindingStates: ExecutionBindingStatesRepo;
   private executionProfiles: ExecutionProfilesRepo;
+  private systemPrompts: SystemPromptsRepo;
   private daemonProfiles: DaemonProfilesRepo;
   private runtimeProvisions: RuntimeProvisionsRepo;
   private daemonRetirement: DaemonRetirementRepo;
@@ -667,6 +671,7 @@ export class MultiremiStore {
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
     this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
     this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
+    this.systemPrompts = new SystemPromptsRepo(this.ctx);
     this.daemonProfiles = new DaemonProfilesRepo(this.ctx);
     this.runtimeProvisions = new RuntimeProvisionsRepo(this.ctx);
     this.daemonRetirement = new DaemonRetirementRepo(this.ctx);
@@ -697,6 +702,10 @@ export class MultiremiStore {
     return () => {
       this.ctx.taskEnqueuedListeners.delete(listener);
     };
+  }
+
+  listProjectActivity(scope: ProjectActivityScope, params: Record<string,string>) {
+    return listProjectActivity(this.db, scope, params);
   }
 
   onTaskEvent(listener: TaskEventListener): () => void {
@@ -972,6 +981,23 @@ runMigrations(this.db);
   executionProfilesRepo() {
     return this.executionProfiles;
   }
+
+  systemPromptsRepo() { return this.systemPrompts; }
+  getSystemPrompt(workspaceId: string) { return this.systemPrompts.getSystemPrompt(workspaceId); }
+  editSystemPrompt(workspaceId: string, input: SystemPromptEditInput, actor: SystemPromptActor) {
+    return this.systemPrompts.editSystemPrompt(workspaceId, input, actor);
+  }
+  resetSystemPrompt(workspaceId: string, input: SystemPromptWriteInput, actor: SystemPromptActor) {
+    return this.systemPrompts.resetSystemPrompt(workspaceId, input, actor);
+  }
+  restoreSystemPrompt(workspaceId: string, input: SystemPromptRestoreInput, actor: SystemPromptActor) {
+    return this.systemPrompts.restoreSystemPrompt(workspaceId, input, actor);
+  }
+  listSystemPromptVersions(workspaceId: string, options: { cursor?: string; limit?: number } = {}) {
+    return this.systemPrompts.listSystemPromptVersions(workspaceId, options);
+  }
+  getSystemPromptVersion(workspaceId: string, versionId: string) { return this.systemPrompts.getSystemPromptVersion(workspaceId, versionId); }
+  getAttemptSystemPrompt(taskId: string) { return this.systemPrompts.getAttemptSystemPrompt(taskId); }
   listExecutionProfiles(workspaceId: string) {
     return this.executionProfiles.list(workspaceId);
   }
@@ -2373,6 +2399,10 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).getDaemonConfig(workspaceId, runtimeId);
   }
 
+  authorizeFeishuBotSender(workspaceId: string, runtimeId: string, input: Parameters<FeishuBotRepo["authorizeSender"]>[2]) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).authorizeSender(workspaceId, runtimeId, input);
+  }
+
   submitFeishuBotMessage(
     workspaceId: string,
     runtimeId: string,
@@ -2607,13 +2637,19 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
   }
 
+  executeFeishuBotCommand(workspaceId: string, runtimeId: string, daemonId: string, input: import('@multiremi/contracts/types.js').FeishuBotCommandRequest) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).executeCommand(workspaceId, runtimeId, daemonId, input);
+  }
+
   resetFeishuBotSession(
     workspaceId: string,
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
+    cancelCurrent = false,
   ): boolean {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId, cancelCurrent);
   }
 
   cancelFeishuBotSessionTask(
@@ -2631,8 +2667,9 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): ReturnType<FeishuBotRepo["inspectSession"]> {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId);
   }
 
   feishuBotDirectiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {
@@ -3315,6 +3352,10 @@ runMigrations(this.db);
     return this.runtimes.getRuntimeForDispatch(id);
   }
 
+  heartbeatForClaim(id: string, workspaceId: string) {
+    return this.runtimes.heartbeatForClaim(id, workspaceId);
+  }
+
   /** The Runtime row without the derived usage/model/group reads. */
   daemonInputRuntimeIds(workspaceId: string) { return this.runtimes.daemonInputRuntimeIds(workspaceId); }
 
@@ -3900,8 +3941,8 @@ runMigrations(this.db);
     return this.issueWorkspaces.abandon(issueId, workspaceId);
   }
 
-  reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
-    const workspace = this.issueWorkspaces.report(input);
+  reportIssueWorkspace(input: ReportIssueWorkspaceInput, workspaceId?: string): MultiremiIssueWorkspace {
+    const workspace = this.issueWorkspaces.report(input, workspaceId);
     // A live Issue workspace is pinned to its daemon. Its readiness changes
     // eligibility for sibling providers on that host, not unrelated machines.
     const runtime = this.runtimes.getRuntimeLite(input.runtimeId)!;
@@ -4619,7 +4660,9 @@ runMigrations(this.db);
   }
 
   updateIssueSession(id: string, input: UpdateIssueSessionInput): MultiremiIssueSession {
-    return this.sessions.updateIssueSession(id, input);
+    const session = this.sessions.updateIssueSession(id, input);
+    if (input.title !== undefined && session.issueId && !session.chatId) this.ctx.notifyIssueProjectActivity(session.workspaceId, session.issueId);
+    return session;
   }
 
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant {
@@ -6045,18 +6088,18 @@ runMigrations(this.db);
     return this.tasks.claimTask(runtimeId, options);
   }
 
-  recordTaskOffered(taskId: string, runtimeId: string, at?: string): boolean {
-    return this.tasks.recordTaskOffered(taskId, runtimeId, at);
+  recordTaskOffered(taskId: string, runtimeId: string, at?: string, generation?: string): boolean {
+    return this.tasks.recordTaskOffered(taskId, runtimeId, at, generation);
   }
 
-  acceptTaskOffer(taskId: string, runtimeId: string, at?: string): boolean {
-    return this.tasks.acceptTaskOffer(taskId, runtimeId, at);
+  acceptTaskOffer(taskId: string, runtimeId: string, at?: string, generation?: string): boolean {
+    return this.tasks.acceptTaskOffer(taskId, runtimeId, at, generation);
   }
 
   releaseTaskOfferLease(taskId: string): void { this.tasks.releaseTaskOfferLease(taskId); }
 
-  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown"): boolean {
-    return this.tasks.requeueTaskOffer(taskId, runtimeId, outcome);
+  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown", generation?: string): boolean {
+    return this.tasks.requeueTaskOffer(taskId, runtimeId, outcome, generation);
   }
 
   startTask(taskId: string, usageRunId?: string, expectedRuntimeId?: string): MultiremiTask {

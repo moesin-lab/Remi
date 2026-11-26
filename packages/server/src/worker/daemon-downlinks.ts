@@ -35,7 +35,8 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   private readonly cancelListeners = new Map<string, (status: Terminal) => void>();
   private readonly connectionWaiters = new Set<(error?: Error) => void>();
 
-  constructor(private readonly client: DaemonProtocolClient, private readonly runtimeId: () => string | undefined) {
+  constructor(private readonly client: DaemonProtocolClient, private readonly runtimeId: () => string | undefined,
+    private readonly reportIdentity: (attemptId: string) => Record<string, unknown> = () => ({})) {
     client.registerFrameHandler("turn.message", frame => {
       if (!frame.rt || frame.rt !== runtimeId()) return;
       const attemptId = frame.payload.attempt_id;
@@ -340,6 +341,7 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   }
 
   async rpc(type: string, payload: Record<string, unknown>, timeoutMs = 10_000): Promise<Record<string, unknown>> {
+    if (type === 'turn.input' && typeof payload.attempt_id === 'string') payload = {...this.reportIdentity(payload.attempt_id), ...payload};
     const deadline = performance.now() + timeoutMs;
     while (true) {
       const remaining = deadline - performance.now();

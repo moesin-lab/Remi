@@ -8,7 +8,9 @@
 
 import { describe, expect, it } from "bun:test";
 import { attachControlPlaneConciergeHosts, controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
-import type { FeishuConciergeHost } from "@multiremi/worker/feishu-concierge.js";
+import { FeishuConciergeSupervisor, type FeishuConciergeHost } from "@multiremi/worker/feishu-concierge.js";
+import { createFeishuInboundDelivery, processFeishuMessageEvent } from "@connectors/feishu/receive.js";
+import { feishuHistoryEvent } from "@connectors/feishu/inbound-recovery.js";
 import type { bootFeishuChannel, FeishuChannelHandle } from "../../../apps/remi/cli/agent.js";
 import type { MultiremiDaemon } from "@multiremi/worker/daemon.js";
 import type {
@@ -155,6 +157,54 @@ function host(input: {
 }
 
 describe("control-plane Feishu concierge host", () => {
+  it("wires the assignment into command intake and retries an unavailable inspect before sending one card", async () => {
+    const { daemon } = fakeDaemon();
+    const inspects: unknown[] = [], cards: unknown[] = [];
+    daemon.authorizeFeishuBotSender = async () => true;
+    daemon.inspectFeishuBotSession = async (...args) => {
+      inspects.push(args);
+      if (inspects.length === 1) throw new Error("503");
+      return { chatSessionId: "current", task: null };
+    };
+    const test = host({ daemon });
+    await test.conciergeHost.start(assignment());
+    const event = feishuHistoryEvent({ message_id: "om_status", msg_type: "text", body: { content: '{"text":"/status"}' },
+      sender: { sender_type: "user", id_type: "open_id", id: "ou_sender" } }, "oc_chat", "p2p")!;
+    delete event.recovery_source;
+    const delivery = createFeishuInboundDelivery({ appId: assignment().config.app_id, recovery: null, authorizeSender: test.calls[0].authorize,
+      botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() }, onMessage: async () => { throw new Error("unexpected task"); },
+      client: { im: { message: { create: async (input: unknown) => { cards.push(input); return { code: 0, data: { message_id: "om_status_card" } }; } } },
+        request: async () => ({ code: 0, data: { items: [] } }) } as any });
+    await expect(delivery(event)).rejects.toThrow("503");
+    await delivery(event); await delivery(event);
+    expect(inspects).toEqual([[4, "oc_chat", "ou_sender"], [4, "oc_chat", "ou_sender"]]);
+    expect(cards).toHaveLength(1);
+    expect(JSON.stringify(cards[0])).toContain("current");
+  });
+
+  it("refetches on reconnect and replaces wake words with the assignment snapshot", async () => {
+    const fake = fakeDaemon();
+    fake.daemon.authorizeFeishuBotSender = async () => true;
+    const test = host({ daemon: fake.daemon });
+    let snapshot = assignment();
+    const supervisor = new FeishuConciergeSupervisor({ host: test.conciergeHost, fetchConfig: async () => snapshot, report: async () => {} });
+    for (const [revision, words] of [[4, ["甲"]], [5, ["乙"]], [6, []]] as const) {
+      snapshot = assignment({ revision, wake_words: [...words] });
+      await supervisor.apply({ desired_state: "running", config_available: true, revision: revision - 1, wake_words: ["错误"] });
+      const boot = test.calls.at(-1)!;
+      for (const word of ["甲", "乙", "错误"]) {
+        const result = await processFeishuMessageEvent({ request: async () => ({ data: { users: [{ name: "Alice" }] } }) } as any,
+          { sender: { sender_id: { open_id: "ou_hot" } }, message: { chat_type: "group", chat_id: "oc_hot", message_id: crypto.randomUUID(),
+            message_type: "text", content: JSON.stringify({ text: `${word}正文` }) } }, "ou_bot", { durableIntake: true,
+            wakeWords: boot.options.wakeWords, groupPolicy: boot.options.groupPolicy, authorizeSender: boot.authorize, onDenied: async () => {} });
+        expect(result?.rawContent ?? null).toBe(words[0] === word ? "正文" : null);
+      }
+      supervisor.connectionRestored();
+    }
+    await supervisor.apply({ desired_state: "stopped", config_available: false, revision: 7 });
+    expect(test.current()).toBeNull();
+    expect(test.calls).toHaveLength(3);
+  });
   it("publishes only for the bot identity and revision hosted by this connector", async () => {
     const fake = fakeDaemon();
     const test = host({ daemon: fake.daemon });
@@ -402,8 +452,7 @@ describe("control-plane Feishu concierge host", () => {
 
   it("applies live no-mention settings to exactly the configured group", async () => {
     const test = host({ daemon: fakeDaemon().daemon });
-    test.conciergeHost.setNoMentionChatIds!(["oc_topics"]);
-    await test.conciergeHost.start(assignment());
+    await test.conciergeHost.start(assignment({ no_mention_chat_ids: ["oc_topics"] }));
     const policy = test.calls[0]!.options.groupPolicy!;
     expect(policy.getByChatId("oc_topics")).toEqual({ monitor: true, replyMode: "thread" });
     expect(policy.getByChatId("oc_other")).toBeNull();
@@ -444,16 +493,23 @@ describe("control-plane Feishu concierge host", () => {
     expect(test.channel.uploads).toEqual([Buffer.from("png")]);
   });
 
-  it("admits senders for server-side union_id classification", async () => {
+  it("checks sender identity against the running assignment before delivery", async () => {
     const fake = fakeDaemon();
+    fake.daemon.authorizeFeishuBotSender = async input => {
+      expect(input).toEqual({ revision: 4, external_session_key: "chat:thread:root", sender_open_id: "ou_stranger",
+        sender_union_id: "union", sender_tenant_key: "tenant", sender_user_id: null });
+      return false;
+    };
     const test = host({ daemon: fake.daemon });
 
     const result = await test.conciergeHost.start(assignment());
 
     expect(result).toEqual({ botName: "Concierge" });
     expect(test.calls).toHaveLength(1);
-    const authorized = await test.calls[0]!.authorize("ou_stranger");
-    expect(authorized).toBe(true);
+    const authorized = await test.calls[0]!.authorize("ou_stranger", { senderId: "ou_stranger", senderOpenId: "ou_stranger",
+      senderUnionId: "union", senderUserId: "", senderTenantKey: "tenant", chatId: "chat", chatType: "group", rootId: "root",
+      messageId: "msg", contentType: "text", content: "/stop", mentionedBot: true });
+    expect(authorized).toBe(false);
   });
 
   it("refuses to boot without the canonical Task bridge", async () => {

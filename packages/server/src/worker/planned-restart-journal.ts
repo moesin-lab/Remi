@@ -1,11 +1,11 @@
 import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { openSqliteDatabase } from "../store/db/sqlite.js";
 import { ROOT_DELIVERY_RECEIVER_STATES, type RootDeliveryTuple, type RootDeliveryReceiverState, type RootExecutionLocator } from '@multiremi/contracts/root-delivery.js';
 import { serializeRootDeliveryTuple } from './root-delivery-envelope.js';
-import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+import { isRestartPolicyReceipt, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { parseTraceTranslatorCheckpoint, TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES, type TraceTranslatorCheckpoint } from "./trace-translator.js";
 
 export interface RestartExecution {
@@ -42,6 +42,7 @@ function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoin
   if (ids.some(id => typeof id !== "string" || !id || id.length > 256)
     || !counter(execution.generation) || execution.generation >= Number.MAX_SAFE_INTEGER
     || !counter(checkpoint.trace_head) || !counter(checkpoint.input_ack_seq)
+    || (checkpoint.policy_receipt !== undefined && !isRestartPolicyReceipt(checkpoint.policy_receipt))
     || [checkpoint.session_id, checkpoint.work_dir].some(value => value !== null && (typeof value !== "string" || value.length > 8192))
     || !Array.isArray(checkpoint.delivered_message_ids) || checkpoint.delivered_message_ids.length > 1024
     || checkpoint.delivered_message_ids.some(id => typeof id !== "string" || !id || id.length > 256)
@@ -50,7 +51,7 @@ function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoin
       || checkpoint.question_ids.some(id => typeof id !== "string" || !id || id.length > 256)
       || new Set(checkpoint.question_ids).size !== checkpoint.question_ids.length))
     || Object.keys(execution).some(key => !["workspace_id", "daemon_id", "runtime_id", "turn_id", "attempt_id", "handoff_id", "generation"].includes(key))
-    || Object.keys(checkpoint).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids"].includes(key))) {
+    || Object.keys(checkpoint).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids", "policy_receipt"].includes(key))) {
     throw new Error("Invalid planned restart journal entry");
   }
   // Canonical field order makes retries insensitive to object construction order.
@@ -59,7 +60,8 @@ function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoin
     handoff_id: execution.handoff_id, generation: execution.generation }, checkpoint: {
     version: 1, session_id: checkpoint.session_id, work_dir: checkpoint.work_dir, trace_head: checkpoint.trace_head,
     input_ack_seq: checkpoint.input_ack_seq, delivered_message_ids: checkpoint.delivered_message_ids,
-    ...(checkpoint.question_ids ? { question_ids: checkpoint.question_ids } : {}) } });
+    ...(checkpoint.question_ids ? { question_ids: checkpoint.question_ids } : {}),
+    ...(checkpoint.policy_receipt ? {policy_receipt:checkpoint.policy_receipt} : {}) } });
 }
 
 /**
@@ -83,6 +85,8 @@ export class PlannedRestartJournal {
         handoff_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
         attempts INTEGER NOT NULL, next_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS planned_restart_holds (handoff_id TEXT PRIMARY KEY, reason TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS planned_restart_launches (handoff_id TEXT PRIMARY KEY, consumer_id TEXT NOT NULL, generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS planned_restart_trace_identities (
         handoff_id TEXT PRIMARY KEY, payload TEXT NOT NULL, sha256 TEXT NOT NULL
       );
@@ -180,7 +184,11 @@ export class PlannedRestartJournal {
   }
 
   get(handoffId: string): RestartJournalEntry | null {
-    const row = this.db.query("SELECT * FROM planned_restart_journal WHERE handoff_id=?").get(handoffId) as {
+    return PlannedRestartJournal.read(this.db, handoffId);
+  }
+
+  private static read(db: Database, handoffId: string): RestartJournalEntry | null {
+    const row = db.query("SELECT * FROM planned_restart_journal WHERE handoff_id=?").get(handoffId) as {
       payload: string; sha256: string; consumer_id: string; state: RestartJournalEntry["state"]; resumed_generation: number | null;
     } | null;
     if (!row) return null;
@@ -195,9 +203,77 @@ export class PlannedRestartJournal {
     return { ...value, consumer_id: row.consumer_id, state: row.state, resumed_generation: row.resumed_generation };
   }
 
+  static discover(scope: {server: string; workspace: string; daemon: string; provider: string; legacyPath: string}) {
+    const directory = dirname(scope.legacyPath);
+    if (scope.legacyPath === ':memory:' || !existsSync(directory)) return [];
+    const sources = readdirSync(directory).flatMap(name => {
+      const match = /^restart-(.+)-([a-f0-9]{16})\.db$/.exec(name);
+      if (!match) return [];
+      const provider = match[1]!;
+      const path = provider === scope.provider ? scope.legacyPath : join(directory, `${provider}-${digest([scope.server, scope.workspace, scope.daemon, provider].join('|')).slice(0,16)}.db`);
+      return digest(path).slice(0,16) === match[2] ? [{journal:join(directory,name),path}] : [];
+    });
+    const incidents: Array<{ source:string; handoff:string; attempt:string|null; legacyPaths:string[]; awaitingGrant?:boolean }> = [];
+    for (const source of sources) {
+      const db = openSqliteDatabase(source.journal,{readonly:true});
+      try {
+        const rows = db.query('SELECT handoff_id FROM planned_restart_journal').all() as Array<{handoff_id:string}>;
+        for (const {handoff_id:handoff} of rows) {
+          let attempt: string | null = null;
+          try {
+            const entry = this.read(db,handoff);
+            if (entry?.execution.workspace_id === scope.workspace && entry.execution.daemon_id === scope.daemon) {
+              if (entry.checkpoint.policy_receipt) {
+                const table = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='planned_restart_launches'").get();
+                incidents.push({source:source.journal,handoff,attempt:entry.execution.attempt_id,legacyPaths:[],awaitingGrant:!table || !this.launched(db,entry)});
+                continue;
+              }
+              attempt = entry.execution.attempt_id;
+            }
+          } catch {
+            const table = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='planned_restart_trace_identities'").get();
+            const trace = table ? db.query('SELECT payload,sha256 FROM planned_restart_trace_identities WHERE handoff_id=?').get(handoff) as {payload:string;sha256:string} | null : null;
+            if (trace && digest(trace.payload) === trace.sha256) {
+              try {
+                const value = JSON.parse(trace.payload);
+                encode(value.execution,identityCheckpoint(value.trace_head));
+                if (value.execution.handoff_id === handoff && value.execution.workspace_id === scope.workspace && value.execution.daemon_id === scope.daemon && parseTraceTranslatorCheckpoint(value.state)) attempt = value.execution.attempt_id;
+              } catch { attempt = null; }
+            }
+          }
+          incidents.push({source:source.journal,handoff,attempt,legacyPaths:[source.path]});
+        }
+      } finally { db.close(); }
+    }
+    return incidents;
+  }
+
   entries(): RestartJournalEntry[] {
     const rows = this.db.query("SELECT handoff_id FROM planned_restart_journal ORDER BY handoff_id").all() as { handoff_id: string }[];
-    return rows.map(row => this.get(row.handoff_id)!);
+    return rows.flatMap(row => {
+      try { return [this.get(row.handoff_id)!]; }
+      catch { this.hold(row.handoff_id); return []; }
+    });
+  }
+
+  private static launched(db: Database, entry: RestartJournalEntry): boolean {
+    return entry.state === 'resumed' && Boolean(db.query('SELECT 1 FROM planned_restart_launches WHERE handoff_id=? AND consumer_id=? AND generation=?')
+      .get(entry.execution.handoff_id,entry.consumer_id,entry.resumed_generation));
+  }
+
+  awaitingRecovery(): RestartJournalEntry[] {
+    return this.entries().filter(entry => !PlannedRestartJournal.launched(this.db,entry));
+  }
+
+  hold(handoffId: string): void {
+    this.db.run("INSERT OR IGNORE INTO planned_restart_holds(handoff_id,reason) VALUES(?,'restart_policy_unverifiable')",[handoffId]);
+  }
+
+  claimLaunch(entry: RestartJournalEntry): boolean {
+    if (!entry.checkpoint.policy_receipt || entry.state !== 'resumed' || entry.resumed_generation !== entry.execution.generation + 1) return false;
+    return this.db.run(`INSERT INTO planned_restart_launches(handoff_id,consumer_id,generation)
+      SELECT handoff_id,consumer_id,resumed_generation FROM planned_restart_journal WHERE handoff_id=? AND consumer_id=? AND state='resumed'
+      AND resumed_generation=? ON CONFLICT(handoff_id) DO NOTHING`, [entry.execution.handoff_id,entry.consumer_id,entry.resumed_generation]).changes === 1;
   }
 
   acknowledge(handoffId: string): void {
@@ -233,6 +309,7 @@ export class PlannedRestartJournal {
 
   remove(handoffId: string): void {
     this.db.transaction(() => {
+      if (this.db.query('SELECT 1 FROM planned_restart_holds WHERE handoff_id=?').get(handoffId)) return;
       this.db.run("DELETE FROM planned_restart_trace_identities WHERE handoff_id=?", [handoffId]);
       this.db.run("DELETE FROM planned_restart_retries WHERE handoff_id=?", [handoffId]);
       this.db.run("DELETE FROM planned_restart_journal WHERE handoff_id=?", [handoffId]);
@@ -243,6 +320,7 @@ export class PlannedRestartJournal {
 }
 
 export interface PlannedRestartRemote {
+  preflight?(entry: RestartJournalEntry): Promise<boolean>;
   /** Must resolve only after the server has committed the matching checkpoint. */
   suspend(entry: RestartJournalEntry): Promise<void>;
   /** Must perform server resume CAS + fresh execution authorization atomically. */
@@ -289,10 +367,12 @@ export class PlannedRestartTransfer {
   async resume(handoffId: string): Promise<RestartJournalEntry> {
     let entry = this.journal.get(handoffId);
     if (!entry) throw new Error("Missing planned restart journal entry");
+    if (this.remote.preflight && !await this.remote.preflight(entry)) throw new Error('restart_policy_unverifiable');
     if (entry.state === "prepared") {
       await this.remote.suspend(entry);
       this.journal.acknowledge(handoffId);
       entry = this.journal.get(handoffId)!;
+      if (this.remote.preflight && !await this.remote.preflight(entry)) throw new Error('restart_policy_unverifiable');
     }
     // Even for a local resumed receipt, recheck remote authority. Cancellation
     // or another execution after a process crash must not be revived locally.

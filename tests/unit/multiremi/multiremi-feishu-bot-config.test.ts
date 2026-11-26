@@ -75,6 +75,45 @@ async function save(
 }
 
 describe("workspace Feishu bot config API", () => {
+  it("publishes normalized wake words and preserves revisions on invalid updates", async () => {
+    const { app, store, agentId } = scaffold();
+    const initial = await (await save(app, agentId)).json();
+    expect(initial.wake_words).toEqual([]);
+    const words = ["/AI", "小助理", "Ä", "ä", "😀".repeat(64)];
+    for (const [patch, expected] of [
+      [{ wake_words: [" /AI ", "/ai", ...words.slice(1)] }, words], [{}, words], [{ wake_words: [] }, []],
+    ] as const) {
+      const view = await (await save(app, agentId, patch)).json();
+      expect(view.wake_words).toEqual(expected);
+      const snapshot = { revision: view.revision, wake_words: expected, no_mention_chat_ids: [] };
+      expect(store.feishuBotDirectiveForRuntime("local", "rt_bot")).toMatchObject(snapshot);
+      expect(store.getFeishuBotDaemonConfig("local", "rt_bot")).toMatchObject(snapshot);
+    }
+    for (const invalid of [null, "one", [1], ["  "], ["x\ny"], ["x\u0000y"], ["x\u2028y"], ["😀".repeat(65)], Array(33).fill("a")]) {
+      expect((await save(app, agentId, { wake_words: invalid })).status).toBe(400);
+    }
+    expect(store.getFeishuBotConfig("local")).toMatchObject({ revision: initial.revision + 3, wakeWords: [] });
+  });
+
+  it("authorizes the assigned daemon sender with the current bot policy", async () => {
+    const { app, store, agentId } = scaffold();
+    const config = await (await save(app, agentId)).json();
+    const token = await store.createAccessToken({ name: "host", type: "daemon", workspaceId: "local", daemonId: "daemon-bot" });
+    const authorize = (revision: number) => app.request("/api/daemon/runtimes/rt_bot/feishu-bot/authorize-sender", {
+      method: "POST", headers: { Authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ revision, external_session_key: "chat", sender_open_id: "ou_guest" }),
+    });
+    expect(await (await authorize(config.revision)).json()).toEqual({ allowed: false });
+    const pending = store.listFeishuBotSenders("local")[0]!;
+    expect(pending.open_id).toBe("ou_guest");
+    store.setFeishuBotSenderAllowed("local", pending.id, true);
+    expect(await (await authorize(config.revision)).json()).toEqual({ allowed: true });
+    store.setFeishuBotSenderAllowed("local", pending.id, false);
+    const changed = await (await save(app, agentId, { sender_access_policy: "agent" })).json();
+    expect((await authorize(config.revision)).status).toBe(409);
+    expect(await (await authorize(changed.revision)).json()).toEqual({ allowed: true });
+  });
+
   it("stores the app secret encrypted and never returns it", async () => {
     const { store, app, agentId } = scaffold();
 

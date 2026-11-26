@@ -36,6 +36,7 @@ export function resolveWake(
   if (ctx.sourceSideSession) return result("next_turn", "source_side_session");
   if (kind === "request" && (ctx.sourceHasIssue === false || ctx.targetHasIssue === false)) return result("next_turn", "no_issue_target");
   if ((ctx.pairHops ?? 0) >= 2 * (ctx.pairLimit ?? 5)) return result("next_turn", "pair_round_trip_limit");
+  if (kind === "request" && ctx.isParentOwner) return result("now", "to_parent_owner");
   if (kind === "request") return result("now", "agent_dispatch");
   if (ctx.isReplyToDelegator && kind === "reply") return result("now", "member_to_delegator");
   if (ctx.isLeader || recipient.type === "role" && recipient.ref === "leader") return result("now", "to_leader");

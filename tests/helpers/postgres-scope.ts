@@ -25,8 +25,6 @@ export const SQLITE_ONLY_SUITES: Readonly<Record<string, string>> = {
     "Chat terminal re-ring order by seq on one committed baseline; no locks, faults or timing.",
   "tests/unit/multiremi/inbox-dispatch-entrypoints.test.ts":
     "Unified dispatch entry points route to the same Store calls; no dialect-specific SQL asserted.",
-  "tests/unit/multiremi/inbox-operations.test.ts":
-    "Message edit/delete/dispatch business rules; sequential, no faults or timing.",
   "tests/unit/multiremi/issue-done-rule.test.ts":
     "Issue done-rule validation; application checks over ordinary rows.",
   "tests/unit/multiremi/issue-responsibility-resolver.test.ts":

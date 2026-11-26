@@ -3,6 +3,98 @@ import { afterCommit } from '../db/postgres.js';
 import { nowIso } from '@multiremi/ids.js';
 import { questionMetadataText } from './question-indexes.js';
 
+const PLAIN_JSON_ASCII_ID = /^[A-Za-z0-9_.:-]+$/;
+
+function pendingTurnsHaveWorkTrigger(ctx: StoreContext, pendingTurns: any[], turns: any[]): boolean {
+  if (pendingTurns.length === 0) return false;
+
+  const coveredSeqFor = (pending: any): number => {
+    let maxCovered = 0;
+    const pendingSeq = Number(pending.seq ?? 0);
+    for (const prev of turns) {
+      if (
+        prev.session_id !== pending.session_id
+        || prev.agent_id !== pending.agent_id
+        || prev.execution_scope !== pending.execution_scope
+        || !['completed', 'failed', 'cancelled'].includes(prev.status)
+        || Number(prev.seq ?? 0) >= pendingSeq
+      ) {
+        continue;
+      }
+      const prevInputTo = Number(prev.input_to_seq ?? 0);
+      const prevCovered = prev.status === 'completed'
+        ? prevInputTo
+        : Math.max(prevInputTo, Number(prev.trigger_seq ?? 0));
+      if (prevCovered > maxCovered) maxCovered = prevCovered;
+    }
+    return maxCovered;
+  };
+
+  const rows = pendingTurns.map((pending) => [
+    String(pending.id),
+    String(pending.session_id),
+    String(pending.agent_id),
+    String(pending.execution_scope ?? ''),
+    coveredSeqFor(pending),
+  ]);
+
+  // Bind serialized JSON as TEXT first on PostgreSQL so Bun.SQL sends the raw
+  // array string rather than encoding a JSONB string scalar.
+  const pendingChecksCte = ctx.db.dialect === 'postgres'
+    ? `SELECT
+        batch.elem->>0 AS turn_id,
+        batch.elem->>1 AS session_id,
+        batch.elem->>2 AS agent_id,
+        batch.elem->>3 AS execution_scope,
+        (batch.elem->>4)::bigint AS covered_seq
+      FROM jsonb_array_elements(CAST(CAST(? AS TEXT) AS JSONB)) AS batch(elem)`
+    : `SELECT
+        CAST(json_extract(value, '$[0]') AS TEXT) AS turn_id,
+        CAST(json_extract(value, '$[1]') AS TEXT) AS session_id,
+        CAST(json_extract(value, '$[2]') AS TEXT) AS agent_id,
+        CAST(json_extract(value, '$[3]') AS TEXT) AS execution_scope,
+        CAST(json_extract(value, '$[4]') AS INTEGER) AS covered_seq
+      FROM json_each(?)`;
+
+  const scopeSql = (alias: string) => ctx.db.dialect === 'postgres'
+    ? `COALESCE(${alias}.metadata::jsonb->>'execution_scope','')`
+    : `COALESCE(json_extract(${alias}.metadata,'$.execution_scope'),'')`;
+  const workTriggerSql = (alias: string) =>
+    `(${alias}.wake_reason IN ('human_sender','agent_dispatch') OR (${alias}.wake_reason='to_parent_owner' AND ${alias}.message_kind='request'))`;
+  const allPlainAsciiTurnIds = pendingTurns.every((t) => PLAIN_JSON_ASCII_ID.test(String(t.id)));
+  const exactDeliverySql = `${questionMetadataText(ctx.db, 'merged.metadata', 'delivery_turn_id')}=p.turn_id`;
+  const deliveryMatchSql = ctx.db.dialect === 'postgres' && allPlainAsciiTurnIds
+    ? `CASE WHEN strpos(merged.metadata,p.turn_id)>0 THEN ${exactDeliverySql} ELSE FALSE END`
+    : exactDeliverySql;
+
+  const hit = ctx.db.query(`WITH pending_checks AS (
+      ${pendingChecksCte}
+    )
+    SELECT 1
+    FROM pending_checks p
+    LEFT JOIN multiremi_session_lanes sl
+      ON sl.session_id=p.session_id AND sl.reader_type='agent' AND sl.reader_id=p.agent_id AND sl.execution_scope=p.execution_scope
+    WHERE EXISTS (
+      SELECT 1 FROM multiremi_conversation_log u
+      WHERE u.session_id=p.session_id
+        AND u.seq>(CASE WHEN p.covered_seq>COALESCE(sl.cursor_seq,0) THEN p.covered_seq ELSE COALESCE(sl.cursor_seq,0) END)
+        AND u.kind='message' AND u.deleted_at IS NULL
+        AND u.to_agent_id=p.agent_id AND u.wake_applied='now'
+        AND ${scopeSql('u')}=p.execution_scope
+        AND ${workTriggerSql('u')}
+    ) OR EXISTS (
+      SELECT 1 FROM multiremi_conversation_log merged
+      WHERE merged.session_id=p.session_id
+        AND merged.seq>p.covered_seq
+        AND merged.kind='message' AND merged.deleted_at IS NULL
+        AND ${workTriggerSql('merged')}
+        AND ${deliveryMatchSql}
+    )
+    LIMIT 1`).get(JSON.stringify(rows));
+
+  return Boolean(hit);
+}
+
 /** Only turns and unanswered owner decisions participate; attempts are deliberately absent. */
 export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:string,events:CommitEventQueue): {changed:boolean;previousStatus:string|null} {
   if(!ctx.db.inTransaction)throw new Error('Issue derivation requires a transaction');
@@ -10,10 +102,7 @@ export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:stri
   const issue=ctx.issues().getIssue(issueId);
   if(!issue||['done','cancelled'].includes(issue.status))return {changed:false,previousStatus:issue?.status??null};
   const owner=ctx.resolveIssueResponsibility(issueId).executionOwner;
-  const turns=ctx.db.query(`SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind,
-      (SELECT COUNT(*) FROM multiremi_conversation_log merged WHERE merged.kind='message' AND merged.deleted_at IS NULL
-        AND ${questionMetadataText(ctx.db, 'merged.metadata', 'delivery_turn_id')}=t.id
-        AND merged.wake_reason IN ('human_sender','agent_dispatch')) AS merged_work_triggers
+  const turns=ctx.db.query(`SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind,m.seq AS trigger_seq
     FROM multiremi_turns t LEFT JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id
     LEFT JOIN multiremi_issue_sessions owned_session ON owned_session.id=t.session_id
     WHERE t.issue_id=? AND COALESCE(owned_session.chat_id,t.chat_session_id) IS NULL
@@ -32,7 +121,9 @@ export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:stri
   // A question still waiting on a Leader is execution, not review.
   else if(active.some(t=>t.status==='awaiting_human')||decision)status='in_progress';
   else if(active.some(t=>t.status==='pending')){
-    if(active.some(t=>Number(t.merged_work_triggers)>0||t.trigger_sender==='member'||t.trigger_reason==='agent_dispatch'||['human_sender','agent_dispatch'].includes(t.wake_source)))status='todo';
+    const pendingTurns=active.filter(t=>t.status==='pending');
+    const hasDirectWorkTrigger=pendingTurns.some(t=>t.trigger_sender==='member'||t.trigger_reason==='agent_dispatch'||(t.trigger_reason==='to_parent_owner'&&t.trigger_kind==='request')||['human_sender','agent_dispatch'].includes(t.wake_source));
+    if(hasDirectWorkTrigger||pendingTurnsHaveWorkTrigger(ctx,pendingTurns,turns))status='todo';
   }else{
     // Intake completion belongs to the business round, including unassigned intake work.
     const latest=issue.issueKind==='intake'

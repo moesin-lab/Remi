@@ -10,6 +10,7 @@ import { clampEnvelopeBody } from '../envelope-body.js';
 import { countDelegationPairHops, pairRoundTripLimit, DelegationRoundTripLimitError, type TaskSessionContinuation } from '../repos/tasks-repo.js';
 import { resolveWake } from './wake-policy.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
+import { questionMetadataText } from './question-indexes.js';
 import { lockLane } from './lane-machine.js';
 import { deliverToRunningTurn, ensurePendingTurn } from './lane-machine.js';
 import { dependencyGateEnabled } from '../repos/issue-dependencies.js';
@@ -53,19 +54,276 @@ export function messageFromRow(row: Record<string, any>): UnifiedMessage {
     card_token_hash:row.card_token_hash,card_token_recipient:row.card_token_recipient,card_token_consumed_at:row.card_token_consumed_at};
 }
 
+const PLAIN_JSON_ASCII_ID = /^[A-Za-z0-9_.:-]+$/;
+
+function deliveryTurnMatchSql(ctx: StoreContext, column: string, turnId: string): { sql: string; params: string[] } {
+  const exact = `${questionMetadataText(ctx.db, column, 'delivery_turn_id')}=?`;
+  if (ctx.db.dialect === 'postgres' && PLAIN_JSON_ASCII_ID.test(turnId)) {
+    return {
+      sql: `CASE WHEN strpos(${column},?)>0 THEN ${exact} ELSE FALSE END`,
+      params: [turnId, turnId],
+    };
+  }
+  return { sql: exact, params: [turnId] };
+}
+
 export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,targetId:string,limit=pairRoundTripLimit()):number {
   const source=readTurnRow(ctx.db, sourceId);
   if(!source)return 0;
-  const hop=(id:string)=>{
-    const turn=readTurnRow(ctx.db, id);
-    if(!turn)return null;
-    const trigger=turn.trigger_message_id?ctx.db.query('SELECT task_id FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id):null;
-    return {id:turn.id,agentId:turn.agent_id,workspaceId:turn.workspace_id,createdAt:turn.created_at,
-      delegationId:turn.delegation_id,delegatedByAgentId:turn.delegated_by_agent_id,parentTaskId:trigger?.task_id??null};
+  const memberCutoffRow = ctx.db.query(`SELECT MAX(seq) AS seq, MAX(created_at) AS created_at
+    FROM multiremi_conversation_log
+    WHERE session_id=? AND sender_type='member'`).get(source.session_id) as { seq: number | null; created_at: string | null } | null;
+  const hasMemberCutoff = memberCutoffRow?.seq != null && memberCutoffRow?.created_at != null;
+  const lastMemberSeq = hasMemberCutoff ? Number(memberCutoffRow!.seq) : null;
+  const lastMemberMaxAt = hasMemberCutoff ? String(memberCutoffRow!.created_at) : null;
+
+  interface HopStep {
+    turnId: string;
+    beforeCreatedAt: string | null;
+    beforeSessionId: string | null;
+    beforeSessionSeq: number | null;
+    excludeTaskId: string | null;
+  }
+  const steps = new Map<string, HopStep>();
+  let stepSeq = 0;
+  const enqueueStep = (
+    turnId: string | null,
+    beforeCreatedAt: string | null,
+    beforeSessionId: string | null,
+    beforeSessionSeq: number | null,
+    excludeTaskId: string | null,
+  ): string | null => {
+    if (!turnId) return null;
+    const key = `step:${++stepSeq}`;
+    steps.set(key, { turnId, beforeCreatedAt, beforeSessionId, beforeSessionSeq, excludeTaskId });
+    return key;
   };
-  const cutoff=source?ctx.db.query("SELECT MAX(created_at) AS at FROM multiremi_conversation_log WHERE session_id=? AND sender_type='member'").get(source.session_id)?.at:null;
-  const node=source?hop(source.id):null;
-  return node?countDelegationPairHops(node,targetId,hop,cutoff??null,2*limit):0;
+  const prevReqSeqByTurn = new Map<string, number>();
+
+  const findParentRequestTrigger = (
+    turn: any,
+    counterpart: string,
+    step: HopStep,
+  ): { id: string; session_id: string; seq: number; created_at: string; deleted_at: string | null; task_id: string; sender_id: string; metadata: string | null } | null => {
+    const clauses: string[] = [
+      'session_id=?',
+      "kind='message'",
+      "sender_type='agent'",
+      'sender_id=?',
+      'to_agent_id=?',
+      "wake_applied='now'",
+      "wake_reason='to_parent_owner'",
+      "message_kind='request'",
+      'task_id IS NOT NULL',
+      'task_id<>?',
+    ];
+    const params: Array<string | number> = [turn.session_id, counterpart, turn.agent_id, turn.id];
+
+    if (step.excludeTaskId) {
+      clauses.push('task_id<>?');
+      params.push(step.excludeTaskId);
+    }
+    const prevReqSeq = prevReqSeqByTurn.get(turn.id);
+    if (prevReqSeq !== undefined) {
+      clauses.push('seq<?');
+      params.push(prevReqSeq);
+    }
+    if (step.beforeSessionId === turn.session_id && step.beforeSessionSeq !== null) {
+      clauses.push('seq<=?');
+      params.push(step.beforeSessionSeq);
+    } else if (step.beforeCreatedAt !== null) {
+      clauses.push('created_at<=?');
+      params.push(step.beforeCreatedAt);
+    }
+
+    const matchBranches: string[] = [];
+    const matchParams: Array<string | number> = [];
+    if (turn.trigger_message_id) {
+      matchBranches.push('id=?');
+      matchParams.push(turn.trigger_message_id);
+    }
+    const delivery = deliveryTurnMatchSql(ctx, 'metadata', turn.id);
+    matchBranches.push(delivery.sql);
+    matchParams.push(...delivery.params);
+
+    const covered = ctx.db.query(`SELECT MAX(
+        CASE
+          WHEN prev.status='completed' THEN COALESCE(prev.input_to_seq,0)
+          WHEN COALESCE(prev.input_to_seq,0)>COALESCE(prev_m.seq,0) THEN COALESCE(prev.input_to_seq,0)
+          ELSE COALESCE(prev_m.seq,0)
+        END
+      ) AS seq
+      FROM multiremi_turns prev
+      LEFT JOIN multiremi_conversation_log prev_m ON prev_m.id=prev.trigger_message_id
+      WHERE prev.session_id=? AND prev.agent_id=? AND prev.execution_scope=?
+        AND prev.status IN ('completed','failed','cancelled') AND prev.seq<?`)
+      .get(turn.session_id, turn.agent_id, turn.execution_scope, turn.seq);
+    const priorCoveredSeq = Number(covered?.seq ?? 0);
+    let floorSeq = Math.max(priorCoveredSeq, turn.input_from_seq != null ? Number(turn.input_from_seq) : 0);
+    if (turn.status === 'pending') {
+      const lane = ctx.db.query(`SELECT cursor_seq FROM multiremi_session_lanes
+        WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`)
+        .get(turn.session_id, turn.agent_id, turn.execution_scope);
+      floorSeq = Math.max(floorSeq, Number(lane?.cursor_seq ?? 0));
+    }
+    const ceilSeq = Math.max(Number(turn.input_to_seq ?? 0), Number(turn.wake_seq ?? 0));
+    if (ceilSeq > floorSeq) {
+      const scopeSql = ctx.db.dialect === 'postgres'
+        ? "COALESCE(metadata::jsonb->>'execution_scope','')"
+        : "COALESCE(json_extract(metadata,'$.execution_scope'),'')";
+      matchBranches.push(`(seq>? AND seq<=? AND ${scopeSql}=? AND (deleted_at IS NULL OR seq<=?))`);
+      matchParams.push(floorSeq, ceilSeq, turn.execution_scope, Number(turn.input_to_seq ?? 0));
+    }
+
+    clauses.push(`(${matchBranches.join(' OR ')})`);
+    params.push(...matchParams);
+
+    type ParentReqRow = {
+      id: string; session_id: string; seq: number; created_at: string; deleted_at: string | null; task_id: string; sender_id: string; metadata: string | null;
+    };
+    const rows = ctx.db.query(`SELECT id, session_id, seq, created_at, deleted_at, task_id, sender_id, metadata
+      FROM multiremi_conversation_log
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY seq DESC`).all(...params) as ParentReqRow[];
+    for (const row of rows) {
+      const reqMeta = parseJson(row.metadata, {}) as Record<string, unknown>;
+      const deliveryTurnId = typeof reqMeta.delivery_turn_id === 'string' ? reqMeta.delivery_turn_id : null;
+      const isDirectDeliveryForTurn = deliveryTurnId === turn.id
+        || (deliveryTurnId === null && turn.trigger_message_id === row.id && turn.wake_source !== 're_ring');
+      if (!isDirectDeliveryForTurn && row.deleted_at != null) {
+        const ackAtDelete = typeof reqMeta.deleted_at_ack_seq === 'number' ? reqMeta.deleted_at_ack_seq : -1;
+        if (Number(row.seq) > Number(turn.input_to_seq ?? 0) || Number(row.seq) > ackAtDelete) {
+          continue;
+        }
+      }
+      if (!hasMemberCutoff) return row;
+      const hasReqWatermark = typeof reqMeta.source_session_id === 'string'
+        && typeof reqMeta.source_session_seq === 'number';
+      if (hasReqWatermark && reqMeta.source_session_id === source.session_id) {
+        if (Number(reqMeta.source_session_seq) >= lastMemberSeq!) return row;
+      } else if (turn.session_id === source.session_id) {
+        if (hasReqWatermark) {
+          const targetDispatchSeq = typeof reqMeta.target_session_seq === 'number'
+            ? Number(reqMeta.target_session_seq)
+            : null;
+          if (targetDispatchSeq !== null ? targetDispatchSeq >= lastMemberSeq! : Number(row.seq) > lastMemberSeq!) {
+            return row;
+          }
+        } else if (row.created_at > lastMemberMaxAt!) {
+          return row;
+        }
+      } else if (row.created_at > lastMemberMaxAt!) {
+        return row;
+      }
+    }
+    return null;
+  };
+
+  const resolveNode = (step: HopStep) => {
+    const turn = readTurnRow(ctx.db, step.turnId);
+    if (!turn) return null;
+    const trigger = turn.trigger_message_id
+      ? ctx.db.query('SELECT id, session_id, seq, created_at, task_id, metadata FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id) as {
+          id: string; session_id: string; seq: number; created_at: string; task_id: string | null; metadata: string | null;
+        } | null
+      : null;
+    const trigMeta = trigger ? parseJson(trigger.metadata, {}) as Record<string, unknown> : {};
+    const hasTriggerWatermark = Boolean(
+      trigger
+      && typeof trigMeta.source_session_id === 'string'
+      && typeof trigMeta.source_session_seq === 'number',
+    );
+    const hasExplicitSourceSeqInSourceSession = Boolean(
+      hasMemberCutoff
+      && hasTriggerWatermark
+      && trigMeta.source_session_id === source.session_id,
+    );
+    const trigSrcSession = hasTriggerWatermark
+      ? (trigMeta.source_session_id as string)
+      : null;
+    const trigSrcSeq = hasTriggerWatermark
+      ? (trigMeta.source_session_seq as number)
+      : null;
+
+    if (turn.delegation_id && turn.delegated_by_agent_id) {
+      if (hasMemberCutoff) {
+        if (hasExplicitSourceSeqInSourceSession) {
+          if (Number(trigMeta.source_session_seq) < lastMemberSeq!) return null;
+        } else if (turn.session_id === source.session_id) {
+          if (trigger && trigger.session_id === source.session_id && hasTriggerWatermark) {
+            const targetDispatchSeq = typeof trigMeta.target_session_seq === 'number'
+              ? Number(trigMeta.target_session_seq)
+              : null;
+            if (targetDispatchSeq !== null ? targetDispatchSeq < lastMemberSeq! : Number(trigger.seq) <= lastMemberSeq!) {
+              return null;
+            }
+          } else if (turn.created_at <= lastMemberMaxAt!) {
+            return null;
+          }
+        } else if (turn.created_at <= lastMemberMaxAt!) {
+          return null;
+        }
+      }
+      return {
+        id: turn.id,
+        agentId: turn.agent_id,
+        workspaceId: turn.workspace_id,
+        createdAt: turn.created_at,
+        delegationId: turn.delegation_id,
+        delegatedByAgentId: turn.delegated_by_agent_id,
+        parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, trigSrcSession, trigSrcSeq, turn.id),
+      };
+    }
+
+    if (!turn.delegation_id && !turn.delegated_by_agent_id) {
+      const counterpart = turn.agent_id === source.agent_id ? targetId : source.agent_id;
+      const parentReq = counterpart ? findParentRequestTrigger(turn, counterpart, step) : null;
+      if (parentReq) {
+        prevReqSeqByTurn.set(turn.id, Number(parentReq.seq));
+        const reqMeta = parseJson(parentReq.metadata, {}) as Record<string, unknown>;
+        const hasReqWatermark = typeof reqMeta.source_session_id === 'string'
+          && typeof reqMeta.source_session_seq === 'number';
+        const reqSrcSession = hasReqWatermark
+          ? (reqMeta.source_session_id as string)
+          : null;
+        const reqSrcSeq = hasReqWatermark
+          ? (reqMeta.source_session_seq as number)
+          : null;
+        return {
+          id: `parent_req:${parentReq.id}`,
+          agentId: turn.agent_id,
+          workspaceId: turn.workspace_id,
+          createdAt: parentReq.created_at,
+          delegationId: `parent_req:${parentReq.id}`,
+          delegatedByAgentId: parentReq.sender_id,
+          parentTaskId: enqueueStep(parentReq.task_id, parentReq.created_at, reqSrcSession, reqSrcSeq, turn.id),
+        };
+      }
+    }
+
+    return {
+      id: turn.id,
+      agentId: turn.agent_id,
+      workspaceId: turn.workspace_id,
+      createdAt: turn.created_at,
+      delegationId: turn.delegation_id ?? null,
+      delegatedByAgentId: turn.delegated_by_agent_id ?? null,
+      parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, trigSrcSession, trigSrcSeq, turn.id),
+    };
+  };
+
+  const initialNode = resolveNode({ turnId: source.id, beforeCreatedAt: null, beforeSessionId: null, beforeSessionSeq: null, excludeTaskId: null });
+  if (!initialNode) return 0;
+  return countDelegationPairHops(
+    initialNode,
+    targetId,
+    (stepKey) => {
+      const step = steps.get(stepKey);
+      return step ? resolveNode(step) : null;
+    },
+    null,
+    2 * limit,
+  );
 }
 
 export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageInput,events:CommitEventQueue,
@@ -191,6 +449,18 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
     WHERE s.leader_id=? AND m.member_id=? AND m.member_type='agent' AND s.workspace_id=? AND s.archived_at IS NULL`).get(recipientId,input.sender.id,workspaceId):false;
   // The direct parent's execution owner, whatever the rest of the chain resolves to.
   const parentAgent=issue?ctx.resolveIssueResponsibility(issue.id).chain[1]?.executionOwner??null:null;
+  // Recognize a descendant Issue agent sending a request to an ancestor Issue's
+  // default coordination session so it stays on the parent's default lane.
+  const ancestorParentAgent=input.sender.type==='agent'&&input.message_kind==='request'&&recipientType==='agent'&&recipientId
+    &&source?.issue_id&&dispatchIssue&&source.issue_id!==dispatchIssue.id
+    &&finalSession&&!finalSession.chatId&&finalSession.isDefault&&finalSession.issueId===dispatchIssue.id
+    &&!input.execution_scope&&!roleScope&&!(input.to.type==='role'&&input.to.ref==='delegator')
+    ?ctx.resolveIssueResponsibility(source.issue_id).chain.slice(1)
+        .find((node)=>node.issueId===dispatchIssue.id)?.executionOwner??null
+    :null;
+  const isParentOwner=input.message_kind==='request'
+    ?Boolean(recipientType==='agent'&&recipientId&&ancestorParentAgent?.id===recipientId)
+    :parentAgent?.id===recipientId;
   const policy=resolveWake(input.sender,input.to,input.wake_requested,input.message_kind,{
     recipientType,recipientId,recipientAvailable:recipientType==='agent'?!!targetAgent&&!targetAgent.archivedAt:recipientType==='member'?!!member&&!member.archivedAt:false,
     // Structural platform reports retain main's dependency exemption. Agent
@@ -198,7 +468,7 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
     dependenciesMet:input.sender.type==='platform'||!!force||unmet.length===0,
     sourceSideSession:!!sourceSession&&sourceSession.inheritMode!=='none',sourceHasIssue:input.sender.type==='agent'?!!source?.issue_id:undefined,
     targetHasIssue:!!dispatchIssue,pairHops:hops,pairLimit:limit,
-    isReplyToDelegator:reply?.sender_type==='agent'&&reply.sender_id===recipientId||source?.delegated_by_agent_id===recipientId,isLeader:!!isLeader,isParentOwner:parentAgent?.id===recipientId,
+    isReplyToDelegator:reply?.sender_type==='agent'&&reply.sender_id===recipientId||source?.delegated_by_agent_id===recipientId,isLeader:!!isLeader,isParentOwner,
   });
   const header:MessageHeader={sender_type:input.sender.type,sender_id:input.sender.id,to_type:input.to.type,
     to_ref:input.to.type==='none'?null:input.to.ref,to_agent_id:recipientType==='agent'?recipientId:null,to_member_id:recipientType==='member'?recipientId:null,
@@ -217,6 +487,16 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   // Freeze the resolved scope in the initial row; an insert followed by a scope patch
   // can let Hub observers see the patch before the new message itself.
   const metadata:Record<string,any>={...input.metadata,execution_scope:scope};
+  if (
+    input.sender.type === 'agent'
+    && input.message_kind === 'request'
+    && source
+    && (policy.reason === 'agent_dispatch' || policy.reason === 'to_parent_owner')
+  ) {
+    metadata.source_session_id = source.session_id;
+    metadata.source_session_seq = Number(ctx.conversationLog().getConversationLogHead(source.session_id)?.headSeq ?? 0);
+    metadata.target_session_seq = Number(ctx.conversationLog().getConversationLogHead(sessionId)?.headSeq ?? 0);
+  }
   if(input.message_kind==='decision'){
     const key=metadata.human_request?'human_request':metadata.question?'question':isHistoricalIssueQuestionRecord(metadata.decision_record)?'decision_record':'message_choice';
     metadata[key]={status:'pending',...(metadata[key] as object)};

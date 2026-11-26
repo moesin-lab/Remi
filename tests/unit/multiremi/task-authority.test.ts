@@ -19,6 +19,7 @@ import { PreparedRootDelivery, RootReceiptStore, rootBusinessPayloadDigest } fro
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
 import { planVerifiedAttemptWrite } from '@multiremi/store/attempt-admission.js';
+import { classifyDaemonTaskOfferPayload } from '@multiremi/contracts/root-delivery.js';
 import { PreparedAgentPat } from '@multiremi/store/durable-delegation.js';
 import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
@@ -250,7 +251,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);
   }, 60_000);
 
-  it.each(['expired lease','preempted fence','revoked source','durable delegation','concurrent first offer','concurrent security termination'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
+  it.each(['expired lease','preempted fence','revoked source','durable delegation','concurrent first offer','concurrent security termination','first WS offer','concurrent dispatch'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
     const {store}=fixture();
     const db=(store as unknown as {db:SqlDatabase}).db;
     const dependency=hash('protected instructions');
@@ -298,7 +299,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     db.query('UPDATE multiremi_machine_challenges SET consumed_at_ms=1 WHERE challenge_id=?').run(challenge.id);
     db.query(`INSERT INTO multiremi_runtime_trusts VALUES('trust','rt_auth',1,'inc',?,'runtime-trust','{}',NULL)`).run(challenge.id);
     const inputs={manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
-      entries:[],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
+      entries:[{source:{id:'password',version:1},purpose:'instruction' as const,snapshot:'previous',author:{type:'user' as const,id:'usr_auth'}}],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
     const retry=()=>{
       const {plan,write}=planVerifiedAttemptWrite(service,passwordProof,{...target,agentId:agent.id},execution,()=>({execution,inputs}));
       return store.withAttemptAdmission(plan.fenceTerm,plan,write,()=>store.retryTurnAsMember(turnId));
@@ -307,6 +308,96 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     db.query("UPDATE multiremi_turn_attempts SET status='lost' WHERE id=?").run(previous.id);
     db.query("UPDATE multiremi_turns SET status='failed' WHERE id=?").run(turnId);
     expect(retry().current_attempt_id).toBe(target.attemptId);
+    if (failure==='concurrent dispatch') {
+      db.run("INSERT INTO multiremi_live_terms(scope,term,holder,updated_at) VALUES('background_jobs',1,'test','now') ON CONFLICT(scope) DO UPDATE SET term=1");
+      expect(store.claimTask(runtime.id,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'race'})?.id).toBe(target.attemptId);
+      const dir=mkdtempSync(join(tmpdir(),'first-offer-'));
+      const file=join(dir,'store.sqlite');
+      const postgres=fixture().databaseUrl;
+      const barrier=new SharedArrayBuffer(4);
+      const workers:Worker[]=[];
+      try {
+        if (!postgres) db.query('VACUUM INTO ?').run(file);
+        const compete=()=>new Promise((resolve,reject)=>{
+          const worker=new Worker(new URL('./fixtures/root-first-offer-worker.ts',import.meta.url));
+          workers.push(worker);
+          worker.onmessage=({data})=>data.error ? reject(new Error(data.error)) : resolve(data.delivery);
+          worker.onerror=event=>reject(new Error(event.message));
+          worker.postMessage({file,postgres,barrier});
+        });
+        const [left,right]=await Promise.all([compete(),compete()]);
+        expect(left).toEqual(right);
+        const sqlite=postgres ? null : openSqliteDatabase(file);
+        const counts:SqlDatabase=sqlite ?? db;
+        try {
+          for (const [table,key] of [['delivery_receipts','attempt_id'],['current_task_leases','attempt_id'],['usage_runs','task_id'],['access_tokens','task_id']]) {
+            expect(Number(counts.query(`SELECT COUNT(*) AS n FROM multiremi_${table} WHERE ${key}=?`).get(target.attemptId).n)).toBe(1);
+          }
+        } finally {sqlite?.close();}
+      } finally {for (const worker of workers) worker.terminate();rmSync(dir,{recursive:true,force:true});}
+      return;
+    }
+    if (failure==='first WS offer') {
+      for (const credential of [null,'different-machine']) {
+        expect(store.claimTask(runtime.id,{supportsPromptPolicy:true,policyProtocol:'adopt',rootMachineCredentialId:credential})).toBeNull();
+      }
+      expect(store.getTask(target.attemptId)?.status).toBe('queued');
+      const server=startMultiremiServer({store,port:0,hostname:'127.0.0.1',authToken:'test-master',backgroundJobs:true,daemonWelcomeCaps:['root.delivery','prompt.policy.adopt.v1']});
+      const receive=async(resume=false)=>{
+        const offered=Promise.withResolvers<Record<string,unknown>>();
+        const client=new DaemonProtocolClient({serverUrl:`http://127.0.0.1:${server.port}`,token:'machine-token',daemonId:'daemon',cliVersion:DAEMON_MIN_CLI_VERSION,
+          caps:['root.delivery','prompt.policy.adopt.v1'],onFrame(frame){if(frame.type==='task.offer') offered.resolve(frame.payload);}});
+        const lane:DaemonProtocolLane={runtime:()=>({runtime_id:runtime.id,provider:'codex',max_concurrency:1,active_task_ids:[],capabilities:{root_delivery_protocol:1,root_carrier_modes:['immutable_run_env']}}),
+          heartbeat:()=>({active_task_count:0}),async onHeartbeatAck(){},onRuntimeConfirmed(){client.send({t:'runtime.ready',rt:runtime.id,p:{active_task_ids:[]}});},async probeUpgrade(){},async onTerminal(){}};
+        const timeout=setTimeout(()=>offered.reject(new Error(`missing task.offer (${store.getTask(target.attemptId)?.status})`)),5000);
+        try {
+          client.addLane(lane);client.startLane(lane);
+          const frame=await offered.promise;
+          const classified=classifyDaemonTaskOfferPayload(frame);
+          if (classified.kind!=='root') throw new Error('expected root offer');
+          const delivery=classified.payload.root_delivery;
+          const tuple=delivery.tuple;
+          const input=delivery.frozen_business_payload.input;
+          if (!input || typeof input!=='object' || !('policy_offer' in input) || !input.policy_offer || typeof input.policy_offer!=='object') throw new Error('missing policy');
+          const identity={...input.policy_offer};
+          for (const key of ['receipt_id','content_hash','offer_generation']) {
+            await expect(client.rpc('task.offer_adopt',{...identity,[key]:'tampered'},runtime.id)).rejects.toMatchObject({code:'policy_offer_mismatch'});
+          }
+          expect(await client.rpc('task.offer_adopt',identity,runtime.id)).toMatchObject({grant:resume?'replay':'first',state:'adopted',...identity});
+          if (resume) {
+            const keys=new RootMachineKeys({runtimeId:runtime.id,daemonId:'daemon',consumerId:tuple.consumer_id,incarnation:'inc',recipientKeyId:'key',deploymentId:'deploy',
+              credentialId:'machine-token',credentialDigest:hash('machine-token'),keyExpiresAtMs:9999999999999},recipientKeys.privateKey,signingKeys.privateKey);
+            const recovery=new RootReceiptClient(client,{async answerChallenge(challenge){return keys.answerChallenge(challenge);}});
+            const locator={runtime_id:runtime.id,daemon_id:'daemon',incarnation:'inc',execution_id:'process',birth_token_id:'birth',launch_identity:'launch',carrier_mode:'immutable_run_env' as const,started_at:null};
+            await recovery.acknowledge(tuple,delivery.envelope_digest,locator);
+            const start=async(seq:number)=>client.event({t:'task.start',seq,rt:runtime.id,p:{...identity,task_id:tuple.attempt_id,usage_run_id:tuple.consumer_id,
+              root_receipt_id:tuple.receipt_id,execution_locator:locator,machine_proof:await recovery.proof(tuple,'start')}});
+            expect(await start(1)).toMatchObject({ok:true,execution_authorized:true});
+            const request={turn_id:turnId,attempt_id:tuple.attempt_id,body_md:'Choose direction',dedupe_key:'root-first-question',options:[{label:'A',value:'A'}],
+              metadata:{kind:'question',questions:[{fieldKey:'direction',question:{question:'Choose direction',options:[{label:'A'}]}}]}};
+            const question=await client.rpc('turn.decision',request,runtime.id).catch(error=>{throw new Error('first question',{cause:error});});
+            const original=store.getQuestion(String(question.message_id));
+            expect(original).toMatchObject({route_revision:1,status:'pending'});
+            expect(await client.rpc('turn.decision',request,runtime.id)).toMatchObject({message_id:question.message_id});
+            expect(store.getQuestion(String(question.message_id))).toEqual(original);
+            const answered=store.answerQuestion(String(question.message_id),{expected_route_revision:1,response:{answer:'A'}},{type:'member',id:'mem_local_local'});
+            expect(answered.question.status).toBe('answered');
+            const saved=store.getQuestion(String(question.message_id));
+            expect(await start(2)).toMatchObject({ok:true,code:'start_replayed'});
+            expect(store.getQuestion(String(question.message_id))).toEqual(saved);
+            expect(Number(db.query('SELECT COUNT(*) AS n FROM multiremi_conversation_log WHERE dedupe_key=?').get(request.dedupe_key).n)).toBe(1);
+          }
+          return frame;
+        } finally {clearTimeout(timeout);client.stopLane(lane);}
+      };
+      try {
+        const first=await receive();
+        expect(first).toMatchObject({attempt_id:target.attemptId,turn_id:turnId});
+        expect(first).not.toHaveProperty('access_token');
+        expect(await receive(true)).toEqual(first);
+      } finally {await server.stop(true);}
+      return;
+    }
     const manifest=JSON.parse(db.query('SELECT manifest_json FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(target.attemptId).manifest_json);
 
     const task=store.getTask(target.attemptId)!;

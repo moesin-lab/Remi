@@ -1,14 +1,19 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { frozenPayload, rootBusinessPayloadDigest } from '@shared/root-business-payload.js';
 export { rootBusinessPayloadDigest } from '@shared/root-business-payload.js';
+import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
+import type { PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
+import { assertUnrevokedAncestry } from './authority-provenance.js';
+import { tableExists } from './unified-model-migration.js';
+
 import type { RootDeliveryEnvelopePayload, RootDeliveryTuple, RootDeliveryExecutionKey, RootDeliveryStatusResponse, RootDeliveryInstallAckResponse,
   RootDeliveryReplayRequest, RootDeliveryInstallAckRequest, RootExecutionLocator } from '@multiremi/contracts/root-delivery.js';
 import { sealRootDelivery, serializeRootDeliveryTuple } from '../worker/root-delivery-envelope.js';
 import type { IssuedCredential, ReceiptService } from './root-authority-contract.js';
 import type { SqlDatabase } from './db/postgres.js';
 import { persistIssuedMaterialBinding } from './credential-version-bindings.js';
-import { readCurrentTaskLease, writeCurrentTaskLease } from './task-authority.js';
+import { approvedAttemptSources, readCurrentTaskLease, writeCurrentTaskLease } from './task-authority.js';
 import { RootManagement } from './root-management.js';
 import { beginMachineChallenge, bindMachineConnection, releaseMachineConnection, requireCurrentMachine, verifyConnectionChallenge, verifyMachineChallenge, type MachineConnection } from './machine-proof.js';
 import { abortSecurityWrite, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
@@ -187,7 +192,120 @@ export class RootReceiptStore {
       start_deadline: row.start_deadline, lease_id: row.lease_id, fence_term: row.fence_term, run_state: row.run_state };
   }
 
-  commitFirstOffer(candidate: PreparedRootDelivery, lease: Lease): RootDeliveryEnvelopePayload {
+  isRootAttempt(attemptId: string): boolean {
+    return !!this.db.query("SELECT 1 FROM multiremi_attempt_eligibility WHERE attempt_id=? AND eligibility='root'").get(attemptId);
+  }
+
+  dispatchedRootAttempts(runtimeId: string): string[] {
+    return this.db.query(`SELECT a.id FROM multiremi_attempt_eligibility e JOIN multiremi_turn_attempts a ON a.id=e.attempt_id
+      JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id WHERE e.eligibility='root' AND e.runtime_id=?
+      AND a.runtime_id=e.runtime_id AND a.status='accepted' ORDER BY a.accepted_at,a.id`).all(runtimeId).map(row=>String(row.id));
+  }
+
+  async firstTaskOffer(attemptId: string, runtimeId: string, daemonId: string, credentialId: string, fence: string, current: () => void) {
+    const read = () => {
+      const row = this.db.query(`SELECT e.*,t.id AS turn_id,t.workspace_id,t.legacy_prompt,p.binding_json,p.created_at AS dispatch_time,m.consumer_id,m.recipient_spki,m.recipient_key_id,
+        m.key_expires_at_ms,m.attestation_expires_at_ms FROM multiremi_attempt_eligibility e
+        JOIN multiremi_turn_attempts a ON a.id=e.attempt_id AND a.runtime_id=e.runtime_id AND a.status='accepted'
+        JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id AND t.agent_id=e.subject_id
+        JOIN multiremi_attempt_system_prompts p ON p.task_id=a.id AND p.workspace_id=t.workspace_id
+        JOIN multiremi_machine_enrollments m ON m.incarnation=e.incarnation AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id
+        JOIN multiremi_access_tokens token ON token.id=m.credential_id AND token.workspace_id=t.workspace_id AND token.token_hash=m.credential_digest
+          AND token.type='daemon' AND token.daemon_id=m.daemon_id AND token.revoked_at IS NULL
+        WHERE e.eligibility='root' AND e.attempt_id=? AND e.runtime_id=? AND e.daemon_id=? AND m.credential_id=? AND m.retired_at_ms IS NULL`)
+        .get(attemptId,runtimeId,daemonId,credentialId);
+      if (!row) throw new Error('root_runtime_untrusted');
+      const manifest = JSON.parse(row.manifest_json);
+      const approval = approvedAttemptSources(this.db,manifest);
+      if (!approval || approval.row.attempt_id!==attemptId || approval.row.grant_id!==row.grant_id ||
+          approval.row.subject_id!==row.subject_id || approval.row.execution_digest!==row.execution_digest ||
+          Number(approval.row.config_epoch)!==Number(row.config_epoch) || approval.row.runtime_trust_id!==row.runtime_trust_id ||
+          Number(approval.row.runtime_trust_version)!==Number(row.runtime_trust_version) || approval.row.invocation_digest!==JSON.parse(row.invocation_json).id ||
+          Number(approval.row.grant_generation)!==Number(row.grant_generation) || `sha256:${createHash('sha256').update(approval.row.manifest_snapshot).digest('hex')}`!==manifest.digest) {
+        throw new Error('root_input_unapproved');
+      }
+      const {inputs} = JSON.parse(approval.row.manifest_snapshot);
+      const authorizedSource=this.db.query(`WITH RECURSIVE sources(id,generation) AS (
+        SELECT node_id,generation FROM multiremi_authority_nodes WHERE node_id IN (${approval.sources.map(()=>'?').join(',')})
+        UNION SELECT edge.parent_id,edge.parent_generation FROM multiremi_authority_edges edge JOIN sources s
+          ON s.id=edge.child_id AND s.generation=edge.child_generation WHERE edge.dependency='continuous')
+        SELECT 1 FROM sources s JOIN multiremi_authority_nodes n ON n.node_id=s.id AND n.generation=s.generation
+        WHERE s.id=? AND s.generation=? AND n.subject_type=? AND n.subject_id=?`);
+      for (const entry of inputs.entries) {
+        if (!authorizedSource.get(...approval.sources.map(source=>source.id),entry.source.id,entry.source.version,entry.author.type,entry.author.id)) {
+          throw new Error('root_input_unapproved');
+        }
+      }
+      if (row.legacy_prompt && !inputs.entries.some((entry: {purpose:string;snapshot:string})=>entry.purpose==='instruction' && entry.snapshot===row.legacy_prompt)) {
+        throw new Error('root_input_unapproved');
+      }
+      const binding=JSON.parse(row.binding_json);
+      const {dispatch,offerGeneration,confirmed,...systemPrompt}=binding;
+      if (dispatch?.protocol!=='adopt' || !['proposed','adopted'].includes(dispatch.state) || dispatch.runtimeId!==runtimeId ||
+          dispatch.daemonId!==daemonId || typeof offerGeneration!=='string' || !offerGeneration || systemPrompt.workspaceId!==row.workspace_id ||
+          hashSystemPromptContent(systemPrompt.content)!==systemPrompt.contentHash) throw new Error('policy_offer_mismatch');
+      const receiptId=createHash('sha256').update(JSON.stringify([attemptId,offerGeneration,systemPrompt.contentHash])).digest('hex');
+      if (dispatch.receiptId!==undefined && dispatch.receiptId!==receiptId) throw new Error('policy_offer_mismatch');
+      const policy_offer={attempt_id:attemptId,workspace_id:row.workspace_id,runtime_id:runtimeId,daemon_id:daemonId,
+        offer_generation:offerGeneration,receipt_id:receiptId,content_hash:systemPrompt.contentHash};
+      const business = {turn_id:row.turn_id,attempt_id:attemptId,input_revision:manifest.version,prompt:row.legacy_prompt??'',input:{entries:inputs.entries,policy_offer,system_prompt:systemPrompt}};
+      const authority=this.db.query(`SELECT g.authority_node_id AS grant_node,t.authority_node_id AS trust_node FROM multiremi_root_grants g
+        JOIN multiremi_runtime_trusts t ON t.trust_id=? AND t.generation=? WHERE g.grant_id=? AND g.generation=?`)
+        .get(row.runtime_trust_id,row.runtime_trust_version,row.grant_id,row.grant_generation);
+      if (!authority) throw new Error('root_authority_revoked');
+      const parents=[...approval.sources,{id:authority.grant_node,version:Number(row.grant_generation)},
+        {id:authority.trust_node,version:Number(row.runtime_trust_version)}];
+      return {row,manifest,business,parents,checkpoint:inputs.providerState.checkpointDigest};
+    };
+    current();
+    const snapshot=read();
+    const {row,manifest,business,checkpoint}=snapshot;
+    const publicKey=createPublicKey(row.recipient_spki);
+    const spki=publicKey.export({type:'spki',format:'der'});
+    const key=await crypto.subtle.importKey('jwk',publicKey.export({format:'jwk'}),{name:'RSA-OAEP',hash:'SHA-256'},false,['encrypt']);
+    const dispatched=Date.parse(row.dispatch_time);
+    const revision=this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get();
+    const ceiling=withSecurityWrite(this.db,fence,{expectedRevision:Number(revision?.security_revision),workspaceIds:[row.workspace_id],numberKeys:[],
+      domainTargets:[...new Set(snapshot.parents.map(source=>`authority:${source.id}`))].sort()},tx=>Math.min(...snapshot.parents.map(source=>
+        assertUnrevokedAncestry(this.db,tx,{nodeId:source.id,generation:source.version}))));
+    const expiry=Math.min(dispatched+3600_000,Number(row.key_expires_at_ms),Number(row.attestation_expires_at_ms),ceiling);
+    const candidate=await PreparedRootDelivery.prepare({receipt_id:randomUUID(),receipt_version:1,delivery_version:1,material_version:1,
+      attempt_id:attemptId,handoff_id:null,handoff_generation:0,run_generation:1,consumer_id:row.consumer_id,runtime_id:runtimeId,daemon_id:daemonId,
+      incarnation:row.incarnation,recipient_key_id:row.recipient_key_id,recipient_key_fingerprint:`sha256:${createHash('sha256').update(spki).digest('hex')}`,
+      execution_config_epoch:Number(row.config_epoch),execution_digest:row.execution_digest,input_revision:manifest.version,input_digest:manifest.digest,
+      checkpoint_digest:checkpoint,grant_id:row.grant_id,grant_generation:Number(row.grant_generation),material_expires_at:new Date(expiry).toISOString(),
+      business_payload_digest:rootBusinessPayloadDigest(business)},business,key);
+    return this.commitFirstOffer(candidate,{lease_id:randomUUID(),fence_term:fence,start_deadline:new Date(Math.min(expiry,dispatched+90_000)).toISOString()},first=>{
+      current();
+      const verified=read();
+      if (!isDeepStrictEqual({...snapshot,row:{...row,binding_json:verified.row.binding_json}},verified)) throw new Error('authority_revision_conflict');
+      if (first) {
+        const binding=JSON.parse(verified.row.binding_json);
+        if (binding.dispatch.state!=='proposed') throw new Error('policy_offer_mismatch');
+        binding.dispatch.receiptId=business.input.policy_offer.receipt_id;
+        this.db.query('UPDATE multiremi_attempt_system_prompts SET binding_json=? WHERE task_id=?').run(JSON.stringify(binding),attemptId);
+        this.db.query('UPDATE multiremi_turn_attempts SET offered_at=COALESCE(offered_at,?) WHERE id=?').run(new Date().toISOString(),attemptId);
+      }
+    });
+  }
+
+  withPolicyOffer<T>(identity: PolicyOfferIdentity, credentialId: string, fence: string, action: () => T): T {
+    const receiptId=this.db.query('SELECT receipt_id FROM multiremi_delivery_receipts WHERE attempt_id=? AND run_generation=1').get(identity.attempt_id)?.receipt_id;
+    if (!receiptId) throw new Error('policy_offer_mismatch');
+    return withSecurityWrite(this.db,fence,this.planRecovery(receiptId),tx=>{
+      this.authority.requireReceiptAuthority(tx,receiptId);
+      const row=this.db.query(`SELECT r.* FROM multiremi_delivery_receipts r JOIN multiremi_attempt_eligibility e ON e.attempt_id=r.attempt_id
+        JOIN multiremi_machine_enrollments m ON m.incarnation=e.incarnation AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id
+        WHERE r.receipt_id=? AND m.credential_id=? AND m.retired_at_ms IS NULL`).get(receiptId,credentialId);
+      if (!row) throw new Error('root_authority_revoked');
+      const business=JSON.parse(row.business_payload_json);
+      if (rootBusinessPayloadDigest(business)!==JSON.parse(row.binding_json).business_payload_digest ||
+          !isDeepStrictEqual(business.input?.policy_offer,identity)) throw new Error('policy_offer_mismatch');
+      return action();
+    });
+  }
+
+  commitFirstOffer(candidate: PreparedRootDelivery, lease: Lease, check?: (first:boolean) => void): RootDeliveryEnvelopePayload {
     const { tuple } = candidate;
     if (!preparedDeliveries.has(candidate) || tuple.handoff_id !== null || tuple.handoff_generation !== 0 || tuple.run_generation !== 1) {
       throw new Error('receipt_conflict');
@@ -199,6 +317,7 @@ export class RootReceiptStore {
       return withSecurityWrite(this.db, lease.fence_term, plan, tx => withSecurityTarget(this.db, tx, `receipt:${receiptId}`, () => {
         this.authority.requireReceiptAuthority(tx, receiptId);
         const row: StoredReceipt = this.db.query('SELECT * FROM multiremi_delivery_receipts WHERE receipt_id=?').get(receiptId);
+        check?.(false);
         const committed: RootDeliveryTuple = JSON.parse(row.binding_json);
         if (committed.receipt_id !== receiptId || serializeRootDeliveryTuple(committed) !== row.binding_json ||
             !isDeepStrictEqual(committed, { ...tuple, receipt_id: receiptId, material_expires_at: committed.material_expires_at })) {
@@ -213,12 +332,16 @@ export class RootReceiptStore {
     try {
       return withSecurityWrite(this.db, lease.fence_term, plan, tx => {
         if (existing()) throw new CommittedRunConflict();
+        check?.(true);
         return this.activate(tx, candidate, lease, (activeTx, prepared) => {
+          const emptyLegacy=tableExists(this.db,'multiremi_usage_legacy_sources') ? `AND (r.run_id<>'legacy' OR NOT EXISTS
+            (SELECT 1 FROM multiremi_usage_legacy_sources s WHERE s.task_id=r.task_id AND (s.source_usage IS NULL OR s.source_usage='[]'))
+            OR EXISTS (SELECT 1 FROM multiremi_usage_units u WHERE u.task_id=r.task_id AND u.run_id=r.run_id))` : '';
           const bound = this.db.query(`INSERT INTO multiremi_usage_task_scopes(task_id,workspace_id,agent_id,runtime_id,active_run_id,runtime_provenance)
             SELECT a.id,t.workspace_id,t.agent_id,a.runtime_id,?,'live_task' FROM multiremi_turn_attempts a
             JOIN multiremi_turns t ON t.current_attempt_id=a.id AND t.id=a.turn_id
             WHERE a.id=? AND a.runtime_id=? AND a.status='accepted'
-            AND NOT EXISTS (SELECT 1 FROM multiremi_usage_runs r WHERE r.task_id=a.id)
+            AND NOT EXISTS (SELECT 1 FROM multiremi_usage_runs r WHERE r.task_id=a.id ${emptyLegacy})
             ON CONFLICT(task_id) DO UPDATE SET active_run_id=excluded.active_run_id,runtime_id=excluded.runtime_id,runtime_provenance='live_task'
             WHERE multiremi_usage_task_scopes.active_run_id IS NULL AND multiremi_usage_task_scopes.agent_id=excluded.agent_id
               AND multiremi_usage_task_scopes.workspace_id=excluded.workspace_id

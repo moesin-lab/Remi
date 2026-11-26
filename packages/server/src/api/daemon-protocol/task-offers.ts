@@ -18,6 +18,9 @@ import type { DaemonParsedFrame } from "./frames.js";
 import { fitTaskOfferToBudget, useTaskSessionInput } from "./offer-budget.js";
 import { authorizeReportRuntime } from './report-handlers.js';
 import type { PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
+import { buildDaemonRootTaskOfferPayload } from '@multiremi/contracts/root-delivery.js';
+import { LiveTermFence } from '@multiremi/store/live-term-fence.js';
+import type { DaemonSessionHello } from './session.js';
 
 export const DAEMON_OFFER_SWEEP_MS = 60_000;
 
@@ -36,9 +39,11 @@ export function daemonTurnOfferPayload(execution: Record<string, unknown>, input
 export async function prepareTaskOffer(store: MultiremiStore, task: MultiremiTaskWithAgent,
   project: ProjectKnowledgeServiceContract, repository: RepositoryWikiServiceContract,
   supportsWikiFetch = false,
-  input: DaemonTurnInput = store.getDaemonTurnBridge().offerInput(task),
+  input?: DaemonTurnInput,
   expectedStatus: "dispatched" | "resumable" = "dispatched"): Promise<Record<string, unknown> | null> {
   // Validate canonical input before preparing the execution context and access token.
+  if (store.rootReceipts.isRootAttempt(task.id)) return null;
+  input ??= store.getDaemonTurnBridge().offerInput(task);
   daemonTurnOfferPayload({}, input);
   const remotes = new Set(task.repos.map(repo => canonicalRepositoryRemote(repo.url)));
   for (const repo of resolveTaskRepositoryWikiRepositories(store, task)) {
@@ -83,6 +88,8 @@ interface RuntimePump {
 export class DaemonTaskOffers {
   private readonly pumps = new Map<string, RuntimePump>();
   private readonly reconciled = new Map<string, DaemonProtocolSession>();
+  private readonly hellos = new WeakMap<DaemonProtocolSession, DaemonSessionHello>();
+  private readonly rootSent = new WeakMap<DaemonProtocolSession, Set<string>>();
   private readonly clock: DaemonProtocolClock;
   private readonly heartbeatCounts = new Map<string, number>();
   private stopped = false;
@@ -124,7 +131,17 @@ export class DaemonTaskOffers {
             const handoff = state === 'adopted' && typeof p.handoff_id === 'string' && session.supportsPlannedRestart ? options.store.plannedRestarts().get(identity.attempt_id) : null;
             return {ok:true,state,...identity,...(handoff?.handoff_id === p.handoff_id && handoff ? {handoff} : {})};
           }
-          const grant = policy.adoptOfferResult(identity);
+          let grant;
+          if (options.store.rootReceipts.isRootAttempt(identity.attempt_id)) {
+            const credential=this.rootCredential(session,identity.runtime_id);
+            const term=this.generation.term;
+            if (!credential || !(term instanceof LiveTermFence)) return {ok:false,code:'authority_revoked',retryable:false};
+            try { grant=options.store.rootReceipts.withPolicyOffer(identity,credential,term.term,()=>policy.adoptOfferResult(identity)); }
+            catch (error) {
+              if (error instanceof StaleLiveTermError || isDatabaseConnectionError(error)) throw error;
+              return {ok:false,code:error instanceof Error && error.message==='policy_offer_mismatch'?'policy_offer_mismatch':'authority_revoked',retryable:false};
+            }
+          } else grant=policy.adoptOfferResult(identity);
           if (!grant) return {ok:false,code:'policy_offer_mismatch',retryable:false};
           const pump = this.pumps.get(identity.runtime_id);
           const pending = pump?.pending;
@@ -143,6 +160,8 @@ export class DaemonTaskOffers {
     options.layer.registerSessionHooks({
       stop: () => { void this.stop(); },
       hello: (session, hello) => this.inGeneration(() => {
+        this.hellos.set(session, hello);
+        this.rootSent.set(session, new Set());
         for (const rt of session.runtimeIds) {
           options.store.reconcileQuestionWaits(rt, hello.runtimes.find(r => r.runtimeId === rt)?.activeQuestionWaits ?? []);
           for (const retry of options.store.taskOfferRetryDeadlines(rt)) {
@@ -372,6 +391,16 @@ export class DaemonTaskOffers {
       return;
     }
     const runtime = store.getRuntimeLite(runtimeId);
+    for (const id of store.rootReceipts.dispatchedRootAttempts(runtimeId)) {
+      if (!this.rootSent.get(session)?.has(id)) {
+        try { await this.sendRoot(session,runtimeId,id,pump); }
+        catch (error) {
+          if (error instanceof StaleLiveTermError || isDatabaseConnectionError(error)) throw error;
+          if (this.session(runtimeId)!==session) return;
+        }
+      }
+      if (pump.waiting || this.session(runtimeId)!==session) return;
+    }
     // Status/input notifications do not create work. Avoid a locked claim and
     // heartbeat write when this workspace has no queued or offered turn.
     if (!runtime || !store.hasPendingTaskOffers(runtime.workspaceId ?? "local")) return;
@@ -379,11 +408,16 @@ export class DaemonTaskOffers {
     const connected = this.options.layer.registry.listSessions()
       .flatMap(peer => peer.runtimeIds).filter(id => this.session(id));
     const task = store.claimTask(runtimeId, { offerGeneration: generation, supportsBinarySkillFiles: true,
+      rootMachineCredentialId:this.rootCredential(session,runtimeId),
       policyProtocol: session.supportsPromptPolicy ? 'adopt' : 'legacy',
       supportsPromptPolicy: session.supportsPromptPolicy, policyCapableRuntimeIds: connected.filter(id => this.session(id)?.supportsPromptPolicy),
       policyLegacyRuntimeIds: connected.filter(id => !this.session(id)?.supportsPromptPolicy),
       continuePolicyScan: () => this.scheduleRetry(`policy-page:${runtimeId}`,runtimeId,this.clock.now()+1) });
     if (!task) return;
+    if (store.rootReceipts.isRootAttempt(task.id)) {
+      await this.sendRoot(session,runtimeId,task.id,pump);
+      return;
+    }
     pump.preparing = { taskId: task.id, generation };
     try {
       const payload = await this.options.prepare(task, session.supportsWikiFetch);
@@ -456,6 +490,31 @@ export class DaemonTaskOffers {
       if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id, generation);
       throw error;
     } finally { pump.preparing = null; }
+  }
+
+  private rootCredential(session: DaemonProtocolSession, runtimeId: string) {
+    const hello=this.hellos.get(session);
+    const capabilities=hello?.runtimes.find(runtime=>runtime.runtimeId===runtimeId)?.capabilities;
+    return session.supportsPromptPolicy && hello?.caps.includes('root.delivery') && hello.welcomeCaps.includes('root.delivery') &&
+      capabilities?.root_delivery_protocol===1 && capabilities.root_carrier_modes?.includes('immutable_run_env') && session.ownerAccessToken?.type==='daemon'
+      ? session.ownerAccessToken.id : null;
+  }
+
+  private async sendRoot(session: DaemonProtocolSession, runtimeId: string, attemptId: string, pump: RuntimePump) {
+    const term=currentBackgroundTerm();
+    const credential=this.rootCredential(session,runtimeId);
+    if (!credential || !(term instanceof LiveTermFence)) return;
+    const current=()=>{
+      term.assertCurrent();
+      if (this.stopped || this.session(runtimeId)!==session || this.generation.term!==term) throw new Error('stale_execution');
+      authorizeReportRuntime(this.options.store,session,runtimeId);
+    };
+    const delivery=await this.options.store.rootReceipts.firstTaskOffer(attemptId,runtimeId,session.daemonId,credential,term.term,current);
+    current();
+    const payload=buildDaemonRootTaskOfferPayload({attempt_id:attemptId,turn_id:String(delivery.frozen_business_payload.turn_id),root_delivery:delivery});
+    const sent=session.sendEvent({t:'task.offer',rt:runtimeId,p:{...payload}},{pausable:true});
+    if (sent.ok) this.rootSent.get(session)?.add(attemptId);
+    else if (sent.reason==='window_full' || sent.reason==='paused') pump.waiting=true;
   }
 
   private reply(session: DaemonProtocolSession, frame: DaemonParsedFrame): void {
@@ -551,6 +610,7 @@ export class DaemonTaskOffers {
         if (!['adopted','proposed'].includes(policy.offerStatus(proof as PolicyOfferIdentity))) continue;
         const task = store.getTaskWithAgent(proof.attempt_id);
         if (!task || task.status !== 'dispatched') continue;
+        if (store.rootReceipts.isRootAttempt(task.id)) continue;
         const payload = await this.options.prepare(task,session.supportsWikiFetch);
         currentBackgroundTerm()?.assertCurrent();
         if (this.session(runtimeId) !== session || !payload || !['adopted','proposed'].includes(policy.offerStatus(proof))) continue;
@@ -575,7 +635,7 @@ export class DaemonTaskOffers {
     }
     const holds = Array.isArray(frame.payload.held_restart_attempts) ? frame.payload.held_restart_attempts : [];
     session.heldRestartAttempts.set(runtimeId,holds.filter(entry => entry && typeof entry.attempt_id === 'string' && typeof entry.handoff_id === 'string'));
-    const protectedIds = [...ids as string[],...this.validatedHolds(session,runtimeId)];
+    const protectedIds = [...ids as string[],...this.validatedHolds(session,runtimeId),...store.rootReceipts.dispatchedRootAttempts(runtimeId)];
     if (session.supportsPromptPolicy && Array.isArray(frame.payload.exited_launches)) {
       const workspace = store.getRuntimeLite(runtimeId)?.workspaceId ?? 'local';
       for (const proof of frame.payload.exited_launches) {

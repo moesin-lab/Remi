@@ -717,6 +717,7 @@ export interface RedispatchTaskResult {
 class AgentPluginReadinessChangedError extends Error {}
 
 export interface ClaimTaskOptions {
+  rootMachineCredentialId?: string | null;
   policyProtocol?: 'legacy' | 'adopt';
   policyCapableRuntimeIds?: readonly string[];
   policyLegacyRuntimeIds?: readonly string[];
@@ -3529,6 +3530,7 @@ export class TasksRepo {
           excludedTaskIds,
           Boolean(options.policyProtocol),
           historicalChat,
+          options.rootMachineCredentialId,
         );
       if (!candidate) return null;
       // One hydration for the selected task. `snapshotTaskExecution` re-reads the Agent row
@@ -4351,6 +4353,7 @@ ${routing.sql}
     const expired = this.ctx.db.query(`SELECT a.id, ${field('offerGeneration')} AS generation FROM multiremi_turn_attempts a
       JOIN multiremi_attempt_system_prompts b ON b.task_id=a.id WHERE a.runtime_id=? AND a.status='accepted'
       AND ${field('dispatch.protocol')}='adopt' AND ${field('dispatch.state')}='proposed'
+      AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e WHERE e.attempt_id=a.id AND e.eligibility='root')
       AND COALESCE(a.offered_at,b.created_at) <= ? ORDER BY b.created_at,a.id LIMIT 32`)
       .all(runtimeId, cutoff);
     for (const row of expired) this.requeueTaskOffer(String(row.id), runtimeId, 'unknown', String(row.generation));
@@ -4796,9 +4799,14 @@ ${placementAfter.sql}
     return covered >= wakeSeq && this.unreadNowMessageSeq(task.issueSessionId, task.agentId, scope, covered) === null ? covered : null;
   }
 
-  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean, historicalChat: boolean): MultiremiTask | null {
+  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean, historicalChat: boolean, rootCredential?: string | null): MultiremiTask | null {
     const { sql, params, now } = this.candidateSelection(runtime, excludedAgentIds, excludedTargets, excludedTaskIds, negotiated);
-    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql}${historicalChat ? `\n         AND ${freshIndependentChatSql}` : ''}
+    const rootFilter = rootCredential === undefined ? '' : `AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e
+      WHERE e.attempt_id=claim_attempt.id AND e.eligibility='root' AND NOT EXISTS (SELECT 1 FROM multiremi_machine_enrollments m
+        WHERE m.runtime_id=? AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id AND m.incarnation=e.incarnation
+          AND m.retired_at_ms IS NULL AND m.credential_id=?))`;
+    if (rootCredential !== undefined) params.push(runtime.id,rootCredential ?? '');
+    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql} ${rootFilter}${historicalChat ? `\n         AND ${freshIndependentChatSql}` : ''}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
       ${this.ctx.db.dialect === 'postgres' ? 'FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED' : ''}`));

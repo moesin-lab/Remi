@@ -10,6 +10,7 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
   const restoreLevel2 = () => {
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
+      DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json;
       DELETE FROM multiremi_schema_steps WHERE level>=3;
       UPDATE multiremi_schema_meta SET expand_level=2;`);
   };

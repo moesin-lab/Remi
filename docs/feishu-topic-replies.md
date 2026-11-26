@@ -3,9 +3,9 @@
 When Issue topic synchronization is enabled, the configured group `chat_id`
 accepts human messages without mentioning the bot, including new top-level
 messages and replies inside topics. Existing topic replies continue their bound
-platform Chat. Other groups still require a bot mention or a slash command.
+platform Chat. Other groups require a bot mention or a configured wake word at the start of the sender's own text.
 Messages authored by bots and messages directed only at other people are ignored.
-Sender identity and workspace permission checks in the Task API are unchanged.
+The daemon checks the running bot's sender access policy before receipts and commands. Task submission checks it again.
 
 Replies to human group messages mention that message's sender in the card footer,
 using the bot-scoped `senderOpenId` already supplied by the incoming event. The

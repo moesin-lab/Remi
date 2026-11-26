@@ -268,12 +268,19 @@ describe("CLI capabilities manifest", () => {
   });
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
+    for (const route of [
+      "POST /api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender",
+      "POST /api/daemon/runtimes/:runtimeId/feishu-bot/commands/v1",
+    ]) {
+      expect(golden.routes).toContain(route);
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
+    }
     expect(manifest.routes["GET /api/projects/:id/activity"]).toEqual({command:"project.activity"});
     expect(cliCoverageReport(manifest)).toEqual({
       mapped: 667,
-      exempt: 184,
+      exempt: 186,
       missing: 0,
-      total: 851,
+      total: 853,
     });
     // PR #97 (MUL-168): these four loopback-only, dedicated-token endpoints are
     // the supervisor's slot lifecycle protocol, not user-facing CLI capabilities.

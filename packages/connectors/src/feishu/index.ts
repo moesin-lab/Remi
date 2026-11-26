@@ -34,6 +34,7 @@ import { formatCardStats } from "./card-metadata.js";
 import { resolveProactiveMention } from "./proactive-mention.js";
 import { setFeishuMessageReceipt, type FeishuMessageReceipt } from "./message-receipt.js";
 import type { FeishuBotOutboundMention } from "@multiremi/contracts/types.js";
+import { feishuSessionKey } from "./types.js";
 
 const log = createLogger("feishu");
 
@@ -68,7 +69,7 @@ export class FeishuConnector implements Connector {
   private _taskStreamHandler: TaskStreamingHandler | null = null;
 
   constructor(
-    config: FeishuConfig & { domain?: string; connectionMode?: string },
+    config: FeishuConfig & { domain?: string; connectionMode?: string; wakeWords?: readonly string[] },
     groupPolicy?: GroupPolicy,
     authorizeSender?: FeishuSenderAuthorizer,
   ) {
@@ -76,13 +77,12 @@ export class FeishuConnector implements Connector {
     this._channel = createLarkChannel({
       appId: config.appId,
       recoveryChats: config.recoveryChats,
+      wakeWords: config.wakeWords,
       appSecret: config.appSecret,
       domain: config.domain as any,
       connectionMode: config.connectionMode as any,
     });
 
-    // Group policy only supplies optional monitor/reply behavior. A missing
-    // entry does not block explicit bot mentions or slash commands.
     this._groupPolicy = groupPolicy ?? { getByChatId: () => null };
     this._channel.setGroupPolicy(this._groupPolicy);
     if (authorizeSender) this._channel.setSenderAuthorizer(authorizeSender);
@@ -245,7 +245,7 @@ export class FeishuConnector implements Connector {
     // mode the daemon's command router owns /esc and /stop, because only it can
     // cancel the durable server-side Task the user is watching (MUL-358).
     if (!this._taskStreamHandler && /^\/esc$/i.test(msg.rawContent.trim())) {
-      const sessionKey = this._resolveSessionKey(msg);
+      const sessionKey = feishuSessionKey(msg);
       await this._channel.abortSession(sessionKey, msg.chatId);
       return;
     }
@@ -270,6 +270,7 @@ export class FeishuConnector implements Connector {
         senderName: msg.senderName,
         mentionedBot: msg.mentionedBot,
         monitored: msg.monitored,
+        fromHistory: msg.fromHistory,
         mediaCount: msg.media.length,
         quotedContent: msg.quotedContent,
         rootId: msg.rootId,
@@ -285,7 +286,7 @@ export class FeishuConnector implements Connector {
       // Legacy Remi streams treated a new message as replacing a pending form.
       // A canonical Task owns its human request server-side, so cancelling only
       // the local form would strand the Task in awaiting_human until timeout.
-      const sessionKey = this._resolveSessionKey(msg);
+      const sessionKey = feishuSessionKey(msg);
       if (!this._taskStreamHandler) {
         const cancelled = this._channel.cancelPendingInteractions(msg.chatId);
         if (cancelled > 0) _log.info(`Cancelled ${cancelled} pending action(s) for session "${sessionKey}"`);
@@ -399,12 +400,6 @@ export class FeishuConnector implements Connector {
     return incoming.metadata?.chatType === "group" && typeof openId === "string" && /^ou_[A-Za-z0-9_-]+$/.test(openId)
       ? openId
       : undefined;
-  }
-
-  private _resolveSessionKey(msg: ParsedFeishuMessage): string {
-    if (msg.rootId) return `${msg.chatId}:thread:${msg.rootId}`;
-    if (msg.chatType === "group") return `${msg.chatId}:thread:${msg.messageId}`;
-    return msg.chatId;
   }
 
   private async _rewriteImages(client: ReturnType<typeof createFeishuClient>, text: string): Promise<string> {

@@ -9,6 +9,13 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { FeishuChannelConfig, FeishuSenderAuthorizer, GroupPolicy } from "./config.js";
 import { hashIdentifier, redactFeishuError } from "./log-redaction.js";
+import { createHash } from "node:crypto";
+import { describeFeishuCommand, feishuCommandDigest } from "@shared/feishu-command-semantic.js";
+import { FeishuDeliveryError } from "@shared/feishu-delivery-error.js";
+import type { FeishuCommandSemantic } from "@multiremi/contracts/types.js";
+import { feishuSessionKey } from "./types.js";
+import { setFeishuMessageReceipt } from "./message-receipt.js";
+import { foldFeishuWakeWord } from "@shared/feishu-wake-words.js";
 import { createLogger } from "@shared/logger.js";
 
 const log = createLogger("feishu");
@@ -21,14 +28,17 @@ import {
   waitForFeishuWSReady,
 } from "./client.js";
 
-/** Group policy injected by the caller (remi's GroupConfigStore). */
-let _groupPolicy: GroupPolicy | undefined;
-function gcStore(): GroupPolicy {
-  return _groupPolicy ?? { getByChatId: () => null };
-}
-/** Set the group policy implementation (called by FeishuChannel on init). */
-export function setGroupPolicy(policy: GroupPolicy): void {
-  _groupPolicy = policy;
+function stripWakeWord(content: string, authoredPrefix: string, words: readonly string[]): string | null {
+  if (!words.length) return null;
+  const text = content.trim();
+  const prefix = foldFeishuWakeWord(authoredPrefix.trimStart());
+  let longest = 0;
+  for (const word of words) {
+    if (word.length <= longest || !prefix.startsWith(foldFeishuWakeWord(word))) continue;
+    if (/[A-Za-z0-9_]$/.test(word) && /^[A-Za-z0-9_]/.test(text.slice(word.length))) continue;
+    longest = word.length;
+  }
+  return longest ? text.slice(longest).trimStart() : null;
 }
 
 type GroupMessageDropReason =
@@ -55,11 +65,11 @@ function logDroppedGroupMessage(
 }
 import { downloadMessageResourceFeishu, FeishuAttachmentTooLargeError } from "./media.js";
 import { extractMentionTargets, extractMessageBody } from "./mention.js";
-import { getMessageFeishu, sendMarkdownCardFeishu } from "./send.js";
+import { buildMarkdownCard, getMessageFeishu, sendCardFeishu } from "./send.js";
 import { handleFormSubmission, handleButtonClick, hasPendingAction } from "./card-actions.js";
 import { handleIssueDecisionInteractionEvent, handleTaskInteractionEvent } from "./task-interaction.js";
-import { resolveFeishuCommand, isUnknownFeishuCommand } from "@shared/feishu-commands.js";
-import { FeishuInboundRecovery, feishuRecoveryPath, recoverFeishuHistory } from "./inbound-recovery.js";
+
+import { FeishuAdmissionUnavailable, FeishuInboundRecovery, feishuRecoveryPath, recoverFeishuHistory, type FeishuInboundDelivery, type CommandReply } from "./inbound-recovery.js";
 
 // ── Dedup (persisted across restarts) ────────────────────────
 const DEDUP_TTL_MS = 30 * 60 * 1000;
@@ -246,7 +256,7 @@ function stripHtmlTags(text: string): string {
   return text.replace(/<[^>]+>/g, "").trim();
 }
 
-export function parsePostContent(content: string): { textContent: string; imageKeys: string[] } {
+export function parsePostContent(content: string, authoredPrefixOnly = false): { textContent: string; imageKeys: string[] } {
   try {
     const parsed = JSON.parse(content);
     // Post messages may be wrapped in a locale key (zh_cn, en_us, ja_jp, etc.)
@@ -260,6 +270,9 @@ export function parsePostContent(content: string): { textContent: string; imageK
     for (const paragraph of contentBlocks) {
       if (Array.isArray(paragraph)) {
         for (const element of paragraph) {
+          if (authoredPrefixOnly && element.tag !== "text" && element.tag !== "img") {
+            return { textContent: stripHtmlTags(textContent), imageKeys };
+          }
           if (element.tag === "text") textContent += element.text || "";
           else if (element.tag === "a") textContent += `[${element.text || ""}](${element.href || ""})`;
           else if (element.tag === "at") textContent += `@${element.user_name || element.user_id || ""}`;
@@ -272,9 +285,9 @@ export function parsePostContent(content: string): { textContent: string; imageK
       }
     }
 
-    return { textContent: stripHtmlTags(textContent.trim()) || "[富文本消息]", imageKeys };
+    return { textContent: stripHtmlTags(textContent.trim()) || (authoredPrefixOnly ? "" : "[富文本消息]"), imageKeys };
   } catch {
-    return { textContent: "[富文本消息]", imageKeys: [] };
+    return { textContent: authoredPrefixOnly ? "" : "[富文本消息]", imageKeys: [] };
   }
 }
 
@@ -403,8 +416,8 @@ function stripBotMention(text: string, mentions?: FeishuMessageEvent["message"][
   if (!mentions || mentions.length === 0) return text;
   let result = text;
   for (const mention of mentions) {
-    result = result.replace(new RegExp(`@${mention.name}\\s*`, "g"), "").trim();
-    result = result.replace(new RegExp(mention.key, "g"), "").trim();
+    if (mention.key) result = result.replaceAll(mention.key, "").trim();
+    if (mention.name) result = result.replaceAll(`@${mention.name}`, "").trim();
   }
   return result;
 }
@@ -419,14 +432,15 @@ export function parseFeishuMessageEvent(
   const rawContent = parseTextContent(event.message.content, event.message.message_type);
   const mentionedBot = checkBotMentioned(event, botOpenId);
   const content = stripBotMention(rawContent, event.message.mentions);
+  const senderIds = event.sender.sender_id ?? {};
 
   return {
     chatId: event.message.chat_id,
     messageId: event.message.message_id,
-    senderId: event.sender.sender_id.user_id || event.sender.sender_id.open_id || "",
-    senderOpenId: event.sender.sender_id.open_id || "",
-    senderUserId: event.sender.sender_id.user_id || "",
-    senderUnionId: event.sender.sender_id.union_id || "",
+    senderId: senderIds.user_id || senderIds.open_id || "",
+    senderOpenId: senderIds.open_id || "",
+    senderUserId: senderIds.user_id || "",
+    senderUnionId: senderIds.union_id || "",
     senderTenantKey: event.sender.tenant_key || "",
     chatType: event.message.chat_type,
     mentionedBot,
@@ -499,6 +513,7 @@ export async function resolveFeishuMedia(
 // ── Parsed message for connector ─────────────────────────────
 
 export type ParsedFeishuMessage = {
+  fromHistory?: boolean;
   text: string;
   /** Raw content without speaker prefix or quote wrapper (for command detection). */
   rawContent: string;
@@ -521,6 +536,12 @@ export type ParsedFeishuMessage = {
 export type FeishuAdmissionDenialReason = "not_member" | "unavailable";
 
 export interface FeishuMessageAdmissionOptions {
+  classify?: (context: FeishuMessageContext, monitored: boolean) => boolean;
+  onAllowed?: (context: FeishuMessageContext) => boolean;
+  onExplicitHistoryDenial?: () => void;
+  denialOnly?: boolean;
+  groupPolicy?: GroupPolicy;
+  wakeWords?: readonly string[];
   /** Durable Task intake uses the server's external_message_id dedup. */
   durableIntake?: boolean;
   authorizeSender: FeishuSenderAuthorizer;
@@ -532,8 +553,8 @@ export interface FeishuMessageAdmissionOptions {
 
 export function feishuAdmissionDenialMessage(reason: FeishuAdmissionDenialReason): string {
   return reason === "not_member"
-    ? "你还不是这个 workspace 的成员，请联系管理员添加后再试。"
-    : "暂时无法验证 workspace 成员身份，请稍后再试。";
+    ? "你还没有使用此机器人的权限。请联系空间管理员在「IM 平台 → 飞书 → 访问控制」中将你加入白名单。"
+    : "暂时无法验证机器人使用权限，请稍后再试。";
 }
 
 async function denyFeishuMessage(
@@ -544,7 +565,7 @@ async function denyFeishuMessage(
   try {
     await options.onDenied(context, reason);
   } catch {
-    log.error("failed to send workspace membership denial");
+    log.error("failed to send Feishu sender access denial");
   }
   return null;
 }
@@ -566,7 +587,7 @@ export async function processFeishuMessageEvent(
   }
   if (admission?.durableIntake && event.message.chat_type === "group"
       && event.message.mentions?.length && !botOpenId) {
-    throw new Error("Feishu bot identity unavailable for durable group admission");
+    throw new FeishuAdmissionUnavailable("Feishu bot identity unavailable for durable group admission");
   }
 
   // Dedup
@@ -577,58 +598,59 @@ export async function processFeishuMessageEvent(
 
   // Parse
   const ctx = parseFeishuMessageEvent(event, botOpenId);
-  const isSlashCommand = /^\/\w+/i.test(ctx.content.trim());
-  const shouldNotifyAdmissionDenial =
-    ctx.chatType === "p2p" || ctx.mentionedBot || isSlashCommand;
 
   if (!admission) {
-    log.error("workspace membership gate is not configured");
+    log.error("Feishu sender authorizer is not configured");
     logDroppedGroupMessage(event, "membership_gate_unconfigured", "error");
     return null;
   }
 
+  let monitored = false;
+  if (ctx.chatType === "group" && !ctx.mentionedBot) {
+    if (event.message.mentions?.length) {
+      logDroppedGroupMessage(event, botOpenId ? "directed_at_others" : "bot_open_id_unresolved");
+      return null;
+    }
+    monitored = admission.groupPolicy?.getByChatId(ctx.chatId)?.monitor === true;
+    if (!monitored) {
+      const words = admission.wakeWords ?? [];
+      const type = event.message.message_type;
+      const prefix = words.length && type === "post" ? parsePostContent(event.message.content, true).textContent : ctx.content;
+      const body = (type === "text" || type === "post") && stripWakeWord(ctx.content, prefix, words);
+      if (!body) {
+        logDroppedGroupMessage(event, "not_mentioned");
+        return null;
+      }
+      ctx.content = body;
+    }
+  }
+  if (admission.classify && !admission.classify(ctx, monitored)) return null;
+  const shouldNotifyAdmissionDenial = !monitored && event.recovery_source !== "history";
+  if (admission.durableIntake && !ctx.senderOpenId && !ctx.senderUserId && !ctx.senderUnionId) {
+    throw new FeishuAdmissionUnavailable("Feishu sender identity temporarily unavailable");
+  }
   let admitted = false;
   try {
-    admitted = Boolean(ctx.senderOpenId) && await admission.authorizeSender(ctx.senderOpenId);
+    admitted = Boolean(ctx.senderOpenId || ctx.senderUnionId || ctx.senderUserId)
+      && await admission.authorizeSender(ctx.senderOpenId, ctx);
   } catch {
-    if (admission.durableIntake) throw new Error("Feishu sender admission temporarily unavailable");
-    log.error("workspace membership lookup failed; message denied");
+    if (admission.durableIntake) throw new FeishuAdmissionUnavailable("Feishu sender admission temporarily unavailable");
+    log.error("Feishu sender authorization unavailable");
     logDroppedGroupMessage(event, "membership_unavailable", "warn");
     return shouldNotifyAdmissionDenial
       ? denyFeishuMessage(admission, ctx, "unavailable")
       : null;
   }
   if (!admitted) {
-    log.warn("workspace membership denied");
+    if (!monitored && event.recovery_source === "history") admission.onExplicitHistoryDenial?.();
+    log.warn("Feishu sender access denied");
     logDroppedGroupMessage(event, "not_member", "warn");
     return shouldNotifyAdmissionDenial
       ? denyFeishuMessage(admission, ctx, "not_member")
       : null;
   }
-  log.info("workspace membership allowed");
-
-  // Explicit bot mentions and slash commands are always admitted. Group policy
-  // only adds monitor mode; a missing policy entry is not a deny rule.
-  let monitored = false;
-  if (ctx.chatType === "group") {
-    const mentions = event.message.mentions ?? [];
-    const directedAtOthers = mentions.length > 0 && !ctx.mentionedBot;
-
-    if (ctx.mentionedBot || isSlashCommand) {
-      // Explicitly addressed messages do not require additional group config.
-    } else if (mentions.length > 0 && !botOpenId) {
-      logDroppedGroupMessage(event, "bot_open_id_unresolved");
-      return null;
-    } else if (directedAtOthers) {
-      logDroppedGroupMessage(event, "directed_at_others");
-      return null;
-    } else if (gcStore().getByChatId(ctx.chatId)?.monitor === true) {
-      monitored = true;
-    } else {
-      logDroppedGroupMessage(event, "not_mentioned");
-      return null;
-    }
-  }
+  log.info("Feishu sender access allowed");
+  if (admission.denialOnly || admission.onAllowed?.(ctx)) return null;
 
   // Resolve sender name (best-effort)
   const senderName = await resolveSenderName(client, ctx.senderOpenId);
@@ -682,6 +704,7 @@ export async function processFeishuMessageEvent(
   return {
     text,
     rawContent: ctx.content,
+    fromHistory: event.recovery_source === "history",
     chatId: ctx.chatId,
     senderOpenId: ctx.senderOpenId,
     senderUserId: ctx.senderUserId,
@@ -787,47 +810,157 @@ export async function processFeishuMessageEventWithBotIdentity(
   return processFeishuMessageEvent(client, event, botIdentity.botOpenId, admission);
 }
 
+function terminalCommandError(error: unknown): error is { code: string } {
+  return !!error && typeof error === "object" && "code" in error && ["command_conflict", "invalid_command", "command_endpoint_unsupported", "sender_not_allowed"].includes(String(error.code));
+}
+
+async function sendJournaledReply(client: Lark.Client, active: FeishuInboundRecovery, id: string, reply: CommandReply): Promise<boolean> {
+  if (reply.uncertain && active.now() - reply.firstSendAt! >= 55 * 60_000) {
+    active.skipped(reply.chatId, "command_reply_delivery_unknown", id);
+    return false;
+  }
+  const attempt = { ...reply, firstSendAt: reply.firstSendAt ?? active.now(), uncertain: true };
+  active.checkpoint(id, { reply: attempt });
+  try {
+    const sent = await sendCardFeishu(client, reply.chatId, reply.card, { replyToMessageId: reply.replyTo, idempotencyKey: reply.uuid });
+    active.checkpoint(id, { reply: { ...attempt, messageId: sent.messageId, uncertain: false } });
+  } catch (error) {
+    if (error instanceof FeishuDeliveryError && !error.ambiguous) {
+      active.checkpoint(id, { reply: { ...attempt, uncertain: !!reply.uncertain } });
+      if (!error.retryable) { active.skipped(reply.chatId, reply.uncertain ? "command_reply_delivery_unknown" : "command_reply_failed", id); return false; }
+    }
+    throw error;
+  }
+  return true;
+}
+
 /** Shared live/history intake; exported for transport-independent recovery verification. */
 export function createFeishuInboundDelivery(options: {
+  wakeWords?: readonly string[];
+  groupPolicy?: GroupPolicy;
   client: Lark.Client;
   botIdentity: FeishuBotIdentityState;
   authorizeSender: FeishuSenderAuthorizer;
   onMessage: FeishuMessageCallback;
   recovery: FeishuInboundRecovery | null;
   appId: string;
+  domain?: FeishuCommandSemantic["domain"];
   isStopped?: () => boolean;
-}): (event: FeishuMessageEvent) => Promise<void> {
-  const { client, botIdentity, authorizeSender, onMessage, recovery, appId } = options;
-  const isStopped = options.isStopped ?? (() => false);
-  return async (event: FeishuMessageEvent) => {
-    if (isStopped()) throw new Error("Feishu connector stopped before input acknowledgement");
+}): FeishuInboundDelivery {
+  const { client, botIdentity, authorizeSender, onMessage, appId } = options;
+  const domain = options.domain ?? "feishu";
+  const runtime = authorizeSender.commands;
+  const journal = options.recovery ?? new FeishuInboundRecovery(null);
+  const handle: FeishuInboundDelivery = async (event, liveOnly, active = journal) => {
+    const checkActive = () => {
+      if (options.isStopped?.()) throw new Error("Feishu connector stopped before acknowledgement");
+    };
+    checkActive();
+    const id = event.message.message_id;
+    const previous = active.progress(id);
+    let classified: { semantic: FeishuCommandSemantic; context: FeishuMessageContext; monitored: boolean } | undefined;
+    let allowed = false, denied = false, historyDenied = false;
     const msg = await processFeishuMessageEventWithBotIdentity(client, event, botIdentity, {
-      authorizeSender,
-      durableIntake: Boolean(recovery),
-      onDenied: async (context, reason) => {
-        // Overlapping history scans may revisit denied messages. They have no
-        // durable outbound delivery identity; notify only on live admission.
-        if (event.recovery_source === "history") return;
-        // Without recovery the pipeline already recorded this message. Durable
-        // intake bypasses that gate, so deduplicate this live side effect here.
-        if (recovery && !tryRecordMessage(context.messageId)) return;
-        await sendMarkdownCardFeishu(client, context.chatId, feishuAdmissionDenialMessage(reason), { replyToMessageId: context.messageId });
+      authorizeSender, denialOnly: liveOnly === "denial", durableIntake: true,
+      groupPolicy: options.groupPolicy, wakeWords: options.wakeWords,
+      classify(context, monitored) {
+        const semantic = describeFeishuCommand({ domain, app_id: appId, external_message_id: id,
+          sender_open_id: context.senderOpenId, external_session_key: feishuSessionKey(context),
+          chat_id: context.chatId, raw_content: context.content });
+        if (!context.senderOpenId) throw new FeishuAdmissionUnavailable("Feishu sender identity temporarily unavailable");
+        const digest = feishuCommandDigest(semantic);
+        if ((previous.digest && digest !== previous.digest) || (previous.botId && previous.botId !== runtime?.botId)) return false;
+        if (previous.legacyPending && event.recovery_source !== "history" && ["stop", "new"].includes(semantic.name)) {
+          active.skipped(context.chatId, "upgrade_write_outcome_unknown_resend_new_message", id);
+          return false;
+        }
+        if (!previous.digest) active.checkpoint(id, { digest, botId: runtime?.botId });
+        classified = { semantic, context, monitored };
+        return true;
       },
+      onAllowed: () => { allowed = true; return classified?.semantic.kind !== "message" && (!!runtime || event.recovery_source === "history"); },
+      onExplicitHistoryDenial: () => { historyDenied = true; },
+      onDenied: async () => { denied = true; },
     });
-    if (!msg) return;
-    const command = resolveFeishuCommand(msg.rawContent);
-    const intercepted = command !== null || isUnknownFeishuCommand(msg.rawContent);
-    if (intercepted && event.recovery_source === "history") {
-      recovery!.skipped(msg.chatId, "history_operational_command", msg.messageId, command?.name ?? msg.rawContent.trim().slice(1));
-      log.warn(JSON.stringify({ event: "feishu_recovery_skipped", app_id: appId, chat_id: msg.chatId,
-        message_id: msg.messageId, command: command?.name ?? msg.rawContent.trim().slice(1), reason: "history_operational_command" }));
-      return;
+    checkActive();
+    const write = previous.write;
+    const lookupOnly = write && (write.lookupOnly || !classified || runtime?.botId !== write.botId || runtime.revision !== write.revision);
+    let rendered: { text: string; displayName: string } | undefined;
+    if (lookupOnly && runtime && !previous.reply) {
+      active.checkpoint(id, { write: { ...write, lookupOnly: true } });
+      try {
+        const result = await runtime.execute({ revision: runtime.revision, bot_id: runtime.botId, mode: "lookup_only", semantic: write.semantic, digest: previous.digest! });
+        if (result) rendered = runtime.render(result, write.semantic);
+      } catch (error) {
+        if (!terminalCommandError(error)) throw error;
+      }
+      if (!classified || !allowed || !rendered || runtime.botId !== write.botId) {
+        active.skipped(event.message.chat_id, "command_assignment_or_semantics_changed", id);
+        return;
+      }
     }
-    // Operational commands predate Task intake and have no server delivery row.
-    // Keep their existing suppression; history never re-executes old operations.
-    if (intercepted && recovery && !tryRecordMessage(event.message.message_id)) return;
-    await onMessage(msg);
+    if (!classified) return;
+    const { semantic, context, monitored } = classified;
+    const history = event.recovery_source === "history";
+    if (historyDenied) return "denial";
+    if (history && semantic.kind !== "message" && allowed) {
+      active.skipped(context.chatId, "history_operational_command", id, semantic.name);
+      return "command";
+    }
+    if (previous.reply && (previous.reply.botId !== runtime?.botId || previous.reply.denied !== denied || previous.reply.messageId)) return;
+    if (liveOnly === "denial" && !denied) return;
+    if (liveOnly === "command" && semantic.kind === "message") return;
+    let reply = previous.reply;
+    if (!reply) {
+      let text = rendered?.text;
+      if (denied) text = feishuAdmissionDenialMessage("not_member");
+      else if (!rendered && runtime && allowed && semantic.kind !== "message") {
+        const request = { revision: runtime.revision, bot_id: runtime.botId, mode: "execute" as const, semantic, digest: active.progress(id).digest! };
+        if (semantic.name === "new" || semantic.name === "stop") active.checkpoint(id, { write: { semantic, revision: runtime.revision, botId: runtime.botId } });
+        try {
+          const result = await runtime.execute(request);
+          if (result) { rendered = runtime.render(result, semantic); text = rendered.text; }
+        }
+        catch (error) {
+          if (!terminalCommandError(error)) throw error;
+          if (error.code !== "sender_not_allowed" || monitored) {
+            active.skipped(context.chatId, error.code, id);
+            return;
+          }
+          denied = true;
+          text = feishuAdmissionDenialMessage("not_member");
+        }
+      } else if (msg) {
+        try { await onMessage(msg); return; }
+        catch (error) {
+          if (!terminalCommandError(error) || error.code !== "sender_not_allowed") throw error;
+          if (history) return monitored ? undefined : "denial";
+          if (monitored) return;
+          denied = true;
+          text = feishuAdmissionDenialMessage("not_member");
+        }
+      }
+      if (text === undefined) return;
+      const uuid = createHash("sha256").update(JSON.stringify([1, domain, appId, id, denied ? "denial" : "command-result"])).digest("hex").slice(0, 32);
+      const mention = !denied && context.chatType === "group" && /^ou_[A-Za-z0-9_-]+$/.test(context.senderOpenId)
+        ? `<at id=${context.senderOpenId}></at> ` : "";
+      const policy = options.groupPolicy?.getByChatId(context.chatId);
+      const inThread = context.chatType === "group" && (!policy || policy.replyMode === "thread");
+      reply = { uuid, botId: runtime?.botId, card: buildMarkdownCard(mention + text.slice(0, 12000), rendered?.displayName),
+        denied, chatId: context.chatId, replyTo: denied || inThread ? id : undefined };
+      active.checkpoint(id, { reply });
+    }
+    if (!reply.denied) {
+      const authorized = await authorizeSender(context.senderOpenId, context).catch(() => {
+        throw new FeishuAdmissionUnavailable("Feishu sender admission temporarily unavailable");
+      });
+      if (!authorized) return;
+    }
+    checkActive();
+    const sent = await sendJournaledReply(client, active, id, reply);
+    if (sent && !reply.denied && runtime) await setFeishuMessageReceipt(client, JSON.stringify([domain, appId]), id, "completed").catch(() => {});
   };
+  return (event, liveOnly, active) => active ? handle(event, liveOnly, active) : journal.accept(event, handle);
 }
 
 /** Start WebSocket listener. Returns a handle to stop it. */
@@ -835,6 +968,7 @@ export function startWebSocketListener(
   config: FeishuChannelConfig,
   onMessage: FeishuMessageCallback,
   authorizeSender: FeishuSenderAuthorizer,
+  groupPolicy?: GroupPolicy,
 ): FeishuWSHandle {
   const creds = {
     appId: config.appId,
@@ -848,7 +982,7 @@ export function startWebSocketListener(
   const recovery = config.recoveryChats ? new FeishuInboundRecovery(feishuRecoveryPath(creds.appId, creds.domain)) : null;
   for (const chat of config.recoveryChats ?? []) recovery!.rememberChat(chat.chat_id, chat.chat_type);
   const deliver = createFeishuInboundDelivery({ client, botIdentity, authorizeSender, onMessage,
-    recovery, appId: creds.appId, isStopped: () => stopped });
+    recovery, groupPolicy, wakeWords: config.wakeWords, appId: creds.appId, domain: config.domain, isStopped: () => stopped });
   let recovering: Promise<void> | null = null;
   let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   const catchUp = (): Promise<void> => {
@@ -856,7 +990,7 @@ export function startWebSocketListener(
     if (recovering) return recovering;
     recovering = recoverFeishuHistory({ journal: recovery, deliver,
       list: params => client.im.message.list({ params }),
-      warn: (id, reason) => log.warn(`skipped Feishu recovery chat_hash=${hashIdentifier(id)} reason=${reason}`),
+      warn: (id, reason) => log.warn(`Feishu recovery chat_hash=${hashIdentifier(id)} reason=${reason}`),
     }).catch(error => {
       log.warn(`Feishu inbound recovery pending: ${redactFeishuError(error, [creds.appId, creds.appSecret])}`);
     }).finally(() => {
@@ -980,6 +1114,7 @@ export function startWebSocketListener(
     botOpenIdReady: botIdentity.botOpenIdReady,
     stop() {
       stopped = true;
+      recovery?.close();
       clearTimeout(recoveryTimer);
       wsClient.close({ force: true });
     },

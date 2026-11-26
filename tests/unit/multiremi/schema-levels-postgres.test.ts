@@ -1,3 +1,4 @@
+import { verifyFeishuWakeWordUpgrade } from "../../fixtures/feishu-wake-word-schema-upgrade.js";
 import { fileURLToPath } from "node:url";
 import { MultiremiStore } from "@multiremi/store.js";
 import { SCHEMA_MIGRATIONS } from "@multiremi/store/schema-migrations.js";
@@ -36,28 +37,31 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
   it('enrolls and reopens the production migration chain on PostgreSQL', () => {
     expect(readSchemaLevels(db)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(db); runMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 4, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 6, contractLevel: 0 });
   }, 30_000);
   it('adds A3 live terms to an enrolled level 1 database and preserves old reader compatibility', () => {
-    db.exec('DROP TABLE multiremi_live_terms');
+    db.exec('DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json; DROP TABLE multiremi_live_terms');
     db.exec('DELETE FROM multiremi_schema_steps WHERE level>=2');
     db.exec('UPDATE multiremi_schema_meta SET expand_level=1');
     runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 4, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 6, contractLevel: 0 });
     expect(db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='multiremi_live_terms'").get()).not.toBeNull();
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 1, maxLevel: 1 })).not.toThrow();
     console.info('A3 startup expand: level 1 -> 2, live terms table exists; previous B1 reader interval [1,1] remains compatible');
   });
   it('refuses contracted schemas before historical migrations execute', () => {
-    db.exec('UPDATE multiremi_schema_meta SET expand_level=5, contract_level=5');
+    db.exec('UPDATE multiremi_schema_meta SET expand_level=7, contract_level=7');
     try {
       let refusal: Error | undefined;
       try { runStartupMigrations(db); } catch (error) { refusal = error as Error; }
-      expect(refusal?.message).toContain('contract_level=5 exceeds code maxLevel=4');
+      expect(refusal?.message).toContain('contract_level=7 exceeds code maxLevel=6');
       console.info(`startup guard: ${refusal?.message}`);
     }
-    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=4'); }
+    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=6'); }
   });
+  it('upgrades existing bot rows and accepts old writers after level 5', () => {
+    verifyFeishuWakeWordUpgrade(db);
+  }, 30_000);
   it('upgrades level 2 planned restart schema atomically and preserves old drains on PostgreSQL', () => {
     verifyPlannedRestartSchemaUpgrade(db);
   }, 30_000);
@@ -150,7 +154,7 @@ describe.skipIf(!adminUrl)("System Prompt atomicity on real PostgreSQL (requires
     store = new MultiremiStore(db);
     store.ensureLocalWorkspace();
     db.exec("CREATE TABLE system_prompt_test_barrier (batch TEXT NOT NULL, participant TEXT NOT NULL, PRIMARY KEY(batch,participant))");
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 4, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 6, contractLevel: 0 });
   }, 60_000);
 
   afterAll(async () => {

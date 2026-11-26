@@ -2370,6 +2370,10 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).getDaemonConfig(workspaceId, runtimeId);
   }
 
+  authorizeFeishuBotSender(workspaceId: string, runtimeId: string, input: Parameters<FeishuBotRepo["authorizeSender"]>[2]) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).authorizeSender(workspaceId, runtimeId, input);
+  }
+
   submitFeishuBotMessage(
     workspaceId: string,
     runtimeId: string,
@@ -2604,13 +2608,19 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
   }
 
+  executeFeishuBotCommand(workspaceId: string, runtimeId: string, daemonId: string, input: import('@multiremi/contracts/types.js').FeishuBotCommandRequest) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).executeCommand(workspaceId, runtimeId, daemonId, input);
+  }
+
   resetFeishuBotSession(
     workspaceId: string,
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
+    cancelCurrent = false,
   ): boolean {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId, cancelCurrent);
   }
 
   cancelFeishuBotSessionTask(
@@ -2628,8 +2638,9 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): ReturnType<FeishuBotRepo["inspectSession"]> {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId);
   }
 
   feishuBotDirectiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {

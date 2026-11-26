@@ -48,6 +48,7 @@ export type FeishuMessageEvent = {
     message_id: string;
     create_time?: string;
     root_id?: string;
+    thread_id?: string;
     parent_id?: string;
     chat_id: string;
     chat_type: "p2p" | "group";
@@ -83,3 +84,8 @@ export type FeishuMessageContext = {
   content: string;
   contentType: string;
 };
+
+export function feishuSessionKey(message: Pick<FeishuMessageContext, "chatId" | "chatType" | "messageId" | "rootId">): string {
+  if (message.rootId) return `${message.chatId}:thread:${message.rootId}`;
+  return message.chatType === "group" ? `${message.chatId}:thread:${message.messageId}` : message.chatId;
+}

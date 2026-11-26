@@ -67,6 +67,10 @@ const UI_SYSTEM_PROMPT_ROUTES = [
   'POST /api/workspaces/:id/system-prompt/preview', 'POST /api/workspaces/:id/system-prompt/reset', 'POST /api/workspaces/:id/system-prompt/restore',
 ];
 const UI_BOT_ROUTES = ["GET /api/workspaces/:id/feishu-bots", "POST /api/workspaces/:id/feishu-bots"];
+const FEISHU_DAEMON_COMMAND_ROUTES = [
+  "POST /api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender",
+  "POST /api/daemon/runtimes/:runtimeId/feishu-bot/commands/v1",
+];
 const UI_RESPONSIBILITY_ROUTES = [
   "GET /api/issues/:id/deliveries",
   "GET /api/issues/:id/questions",
@@ -428,9 +432,10 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     // Endpoint credentials are daemon-only; endpoint configuration, system model
     // references and platform updater operations are browser/CLI routes.
     expect(misdirected).toContain("GET /api/daemon/runtimes/:id/endpoint-key");
-    expect(misdirected, routeCountHint("ui")).toHaveLength(49);
+    for (const route of FEISHU_DAEMON_COMMAND_ROUTES) expect(misdirected).toContain(route);
+    expect(misdirected, routeCountHint("ui")).toHaveLength(51);
     // daemon/ws and trace/ws are tested as real upgrades below.
-    expect(misdirected.length + 2, routeCountHint("ui")).toBe(51);
+    expect(misdirected.length + 2, routeCountHint("ui")).toBe(53);
   }, 60_000);
 
   it("refuses paths outside runtime's daemon, health, peer and trace routes", async () => {
@@ -441,6 +446,7 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(status === 421, `${pattern} -> ${status}`).toBe(expectedRefusal("runtime", path));
       if (status === 421) refused += 1;
     }
+    for (const route of FEISHU_DAEMON_COMMAND_ROUTES) expect(statuses.get(route), `${route} requires daemon credentials`).toBe(403);
     // Responsibility, delivery, Question,
     // Chat follow-up queue (ADR 0020), background-task (PR 6) and slash-command
     // (ADR 0025) user operations belong to UI; runtime owns daemon/health/peer/trace

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { FeishuInboundRecovery, feishuHistoryEvent, recoverFeishuHistory } from "@connectors/feishu/inbound-recovery.js";
 import { createFeishuInboundDelivery, flushDedupCacheSync, setDedupCachePathForTesting } from "@connectors/feishu/receive.js";
 import { resolveFeishuCommand } from "@shared/feishu-commands.js";
+import { FeishuConnector } from "@connectors/feishu/index.js";
+import { createFeishuTaskHandler } from "../../../apps/remi/cli/multiremi.js";
 
 const dedupTestRoot = mkdtempSync(join(tmpdir(), "feishu-recovery-dedup-"));
 beforeAll(() => setDedupCachePathForTesting(join(dedupTestRoot, "dedup-cache.json")));
@@ -51,7 +53,7 @@ for (const overlap of ["queued", "delivering", "acknowledged"] as const) it(`kee
 
 it("denies overlapping history without repeated cards while retaining live denial notifications", async () => {
   const root = mkdtempSync(join(tmpdir(), "feishu-history-denied-"));
-  let now = Date.now(), deniedCards = 0, callbacks = 0, admissions = 0;
+  let now = Date.now(), deniedCards = 0, callbacks = 0, admissions = 0, allowed = false;
   const client = { im: { message: { reply: async () => {
     deniedCards++;
     return { code: 0, data: { message_id: "om_denial_card" } };
@@ -60,7 +62,7 @@ it("denies overlapping history without repeated cards while retaining live denia
     const journal = new FeishuInboundRecovery(join(root, "journal.json"), () => now);
     journal.rememberChat("oc_private", "p2p");
     const deliver = createFeishuInboundDelivery({ client, recovery: journal, appId: "cli_test",
-      authorizeSender: async () => { admissions++; return false; },
+      authorizeSender: async () => { admissions++; return allowed; },
       botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
       onMessage: async () => { callbacks++; } });
     const items = ["ordinary input", "/stop"].map((text, i) => ({ message_id: `om_denied_${i}`,
@@ -71,13 +73,18 @@ it("denies overlapping history without repeated cards while retaining live denia
         list: async () => ({ code: 0, data: { items } }) });
       now += 30_000;
     }
-    expect(admissions).toBe(4);
+    expect(admissions).toBe(2);
     expect(callbacks).toBe(0);
     expect(deniedCards).toBe(0);
     const live = feishuHistoryEvent(items[0]!, "oc_private", "p2p")!;
     await journal.accept({ ...live, recovery_source: undefined }, deliver);
     await journal.accept({ ...live, recovery_source: undefined }, deliver);
-    expect(admissions).toBe(6);
+    expect(admissions).toBe(3);
+    expect(callbacks).toBe(0);
+    expect(deniedCards).toBe(1);
+    allowed = true;
+    const laterAllowed = feishuHistoryEvent(items[1]!, "oc_private", "p2p")!;
+    await journal.accept({ ...laterAllowed, recovery_source: undefined }, deliver);
     expect(callbacks).toBe(0);
     expect(deniedCards).toBe(1);
     expect(JSON.parse(readFileSync(join(root, "journal.json"), "utf8")).pending).toEqual({});
@@ -94,6 +101,102 @@ it("denies overlapping history without repeated cards while retaining live denia
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+it("keeps an acknowledged silent message silent across wake-word revisions and submits the same text under a new ID", async () => {
+  const path = join(dedupTestRoot, "wake-word-revision.json");
+  let now = Date.now();
+  const appId = "cli_revision";
+  const oldId = "om_consumed", newId = "om_new";
+  const item = (id: string) => ({ message_id: id, create_time: String(now - 1000), msg_type: "text",
+    sender: { id_type: "open_id", id: "ou_reader", sender_type: "user" }, body: { content: JSON.stringify({ text: "/ai 查下" }) } });
+  const oldItem = item(oldId);
+  const live = { ...feishuHistoryEvent(oldItem, "oc_group", "group")!, recovery_source: undefined };
+  const submitted: unknown[] = [], receipts: string[] = [], replies: string[] = [];
+  const client = { request: async () => ({ data: { users: [{ name: "Reader" }] } }), im: { message: { reply: async () => { replies.push("denial"); } } } } as any;
+  let journal = new FeishuInboundRecovery(path, () => now);
+  const connector = Object.create(FeishuConnector.prototype);
+  Object.assign(connector, { _groupPolicy: { getByChatId: () => null },
+    _channel: { setMessageReceipt: async (id: string) => { receipts.push(id); }, handleTaskStream: async () => { replies.push("command"); } },
+    _taskStreamHandler: createFeishuTaskHandler({ submitFeishuBotMessage: async (input: { externalMessageId: string; text: string }) => {
+      submitted.push([input.externalMessageId, input.text]); return { deliveryQueued: true };
+    } } as any, 2, "Remi") });
+  const delivery = (wakeWords: string[]) => createFeishuInboundDelivery({ appId, client, recovery: journal, wakeWords,
+    botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() }, authorizeSender: async () => true,
+    onMessage: message => connector._handleFeishuMessage(message) });
+  await journal.accept(live, delivery([]));
+  expect([submitted, receipts, replies]).toEqual([[], [], []]);
+  expect(readFileSync(path, "utf8")).not.toContain("查下");
+  now += 30_000;
+  journal = new FeishuInboundRecovery(path, () => now);
+  const deliver = delivery(["/ai"]);
+  const scan = (items: ReturnType<typeof item>[]) => recoverFeishuHistory({ journal, now, deliver, warn: () => {},
+    list: async () => ({ code: 0, data: { items } }) });
+  await scan([oldItem]);
+  expect([submitted, receipts, replies]).toEqual([[], [], []]);
+  await journal.accept(live, deliver);
+  expect([submitted, receipts, replies]).toEqual([[], [], []]);
+  const newItem = item(newId);
+  await scan([oldItem, newItem]);
+  await scan([oldItem, newItem]);
+  expect(submitted).toEqual([[newId, "Reader: 查下"]]);
+  expect(receipts).toEqual([newId]);
+  expect(replies).toEqual([]);
+  now += 31 * 60_000;
+  await scan([]);
+  expect(JSON.parse(readFileSync(path, "utf8")).acknowledged).toEqual({});
+});
+
+it("keeps a live wake-word command durable through a temporary authorization failure", async () => {
+  const path = join(dedupTestRoot, "retry-auth.json");
+  const journal = new FeishuInboundRecovery(path);
+  const event = feishuHistoryEvent({ message_id: crypto.randomUUID(), msg_type: "text", sender: { id_type: "open_id", id: "ou_retry", sender_type: "user" },
+    body: { content: JSON.stringify({ text: "助手 /stop" }) } }, "oc_group", "group")!;
+  delete event.recovery_source;
+  let available = false;
+  const commands: string[] = [];
+  const deliver = createFeishuInboundDelivery({ client: { request: async () => ({}) } as any, recovery: journal, appId: "cli_test",
+    wakeWords: ["助手"], botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
+    authorizeSender: async () => { if (!available) throw new Error("offline"); return true; }, onMessage: async message => { commands.push(message.rawContent); } });
+  await expect(journal.accept(event, deliver)).rejects.toThrow("temporarily unavailable");
+  expect(commands).toEqual([]);
+  expect(Object.keys(JSON.parse(readFileSync(path, "utf8")).pending)).toEqual([event.message.message_id]);
+  available = true;
+  const reopened = new FeishuInboundRecovery(path);
+  await reopened.replay(deliver);
+  await reopened.accept(event, deliver);
+  expect(commands).toEqual(["/stop"]);
+  expect(JSON.parse(readFileSync(path, "utf8")).pending).toEqual({});
+});
+
+it("retains pending input and scan cursors when opening a journal without acknowledgement records", async () => {
+  const path = join(dedupTestRoot, "legacy.json"), now = Date.now();
+  const event = feishuHistoryEvent({ message_id: "om_legacy", msg_type: "text", sender: { id_type: "open_id", id: "ou_reader", sender_type: "user" },
+    body: { content: '{"text":"legacy input"}' } }, "oc_old", "p2p")!;
+  const chats = { oc_old: { type: "p2p", through: now - 2000, scannedThrough: now - 3000 } };
+  writeFileSync(path, JSON.stringify({ version: 1, initializedAt: now - 600_000, chats, pending: { om_legacy: event }, skipped: [] }));
+  const journal = new FeishuInboundRecovery(path, () => now);
+  const ids: string[] = [];
+  await journal.replay(async input => { ids.push(input.message.message_id); });
+  expect(ids).toEqual(["om_legacy"]);
+  expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ chats, pending: {}, acknowledged: { om_legacy: { at: now } } });
+});
+
+it("prevents an old connector's unfinished callback from overwriting the reopened journal", async () => {
+  const path = join(dedupTestRoot, "handover.json");
+  const first = new FeishuInboundRecovery(path);
+  const event = feishuHistoryEvent({ message_id: "om_handover", msg_type: "text", sender: { id_type: "open_id", id: "ou_reader", sender_type: "user" },
+    body: { content: '{"text":"input"}' } }, "oc_group", "group")!;
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const prior = first.accept(event, async () => { entered.resolve(); await release.promise; });
+  await entered.promise;
+  first.close();
+  const second = new FeishuInboundRecovery(path);
+  await second.replay(async () => {});
+  await second.accept({ ...event, message: { ...event.message, message_id: "om_next" } }, async () => {});
+  release.resolve();
+  await expect(prior).rejects.toThrow("journal closed");
+  expect(Object.keys(JSON.parse(readFileSync(path, "utf8")).acknowledged).sort()).toEqual(["om_handover", "om_next"]);
+});
+
 it("skips replayed commands, advances past an offline stop, and preserves ordinary slash requests", async () => {
   const root = mkdtempSync(join(tmpdir(), "feishu-commands-")), path = join(root, "journal.json"), now = Date.now();
   const client = { request: async () => ({ data: { users: [{ name: "Member" }] } }) } as any;
@@ -103,7 +206,7 @@ it("skips replayed commands, advances past an offline stop, and preserves ordina
     msg_type: "text", sender: { id_type: "open_id", id: "ou_member", sender_type: "user" }, body: { content: JSON.stringify({ text }) } }, "oc_private", "p2p")!;
   try {
     const journal = new FeishuInboundRecovery(path, () => now);
-    const deliver = createFeishuInboundDelivery({ client, recovery: journal, appId: "cli_test", authorizeSender: async () => true,
+    const deliver = createFeishuInboundDelivery({ client, recovery: journal, appId: "cli_test", wakeWords: ["助手"], authorizeSender: async () => true,
       botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
       onMessage: async message => {
         const command = resolveFeishuCommand(message.rawContent);
@@ -115,17 +218,23 @@ it("skips replayed commands, advances past an offline stop, and preserves ordina
     await journal.accept({ ...previousNew, recovery_source: undefined }, deliver);
     expect(newCount).toBe(1);
     const offlineStop = item("om_offline_stop", "/stop", now - 3000);
+    const groupStop = item("om_group_stop", "助手 /stop", now - 3000);
+    Object.assign(groupStop.message, { chat_type: "group", chat_id: "oc_group" });
     const ordinary = item("om_ordinary", "/data00/home/x 看下", now - 2000);
     const help = item("om_help_request", "/help 怎么用", now - 1000);
     for (let overlap = 0; overlap < 2; overlap++) {
-      for (const event of [previousNew, offlineStop, ordinary, help]) await journal.accept(event, deliver);
+      for (const event of [previousNew, offlineStop, groupStop, ordinary, help]) await journal.accept(event, deliver);
     }
     expect(newCount).toBe(1);
     expect(stopCount).toBe(0);
+    await journal.accept({ ...groupStop, recovery_source: undefined }, deliver);
+    await journal.accept({ ...groupStop, recovery_source: undefined }, deliver);
+    expect(stopCount).toBe(1);
     expect([...submitted]).toEqual(["om_ordinary", "om_help_request"]);
     const state = JSON.parse(readFileSync(path, "utf8"));
     expect(state.pending).toEqual({});
     expect(state.skipped).toContainEqual(expect.objectContaining({ status: "skipped", messageId: "om_offline_stop", command: "stop" }));
+    expect(state.skipped).toContainEqual(expect.objectContaining({ messageId: "om_group_stop", command: "stop" }));
     expect(state.chats.oc_private.through).toBe(now - 1000);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

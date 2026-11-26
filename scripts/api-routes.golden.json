@@ -1,10 +1,10 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 851,
+    "routeCount": 853,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 605,
+      "compat": 607,
       "root": 20
     },
     "getRoutes": 371,
@@ -15,7 +15,7 @@
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 480,
+    "mutationRoutes": 482,
     "mutationRoutesCovered": 299,
     "flows": [
       "agents-compat",
@@ -602,6 +602,8 @@
     "POST /api/daemon/runtimes/:runtimeId/commands/claim",
     "POST /api/daemon/runtimes/:runtimeId/directory-scans/claim",
     "POST /api/daemon/runtimes/:runtimeId/feishu-bot/attachments",
+    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender",
+    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/commands/v1",
     "POST /api/daemon/runtimes/:runtimeId/feishu-bot/messages",
     "POST /api/daemon/runtimes/:runtimeId/feishu-bot/session/cancel",
     "POST /api/daemon/runtimes/:runtimeId/feishu-bot/session/inspect",
@@ -4398,6 +4400,7 @@
         "app_id": "cli_snapshot_bot",
         "domain": "feishu",
         "enabled": false,
+        "wake_words": [],
         "sender_access_policy": "allowlist",
         "responsible_member_id": null,
         "revision": 1,
@@ -4433,6 +4436,7 @@
         "app_id": "cli_snapshot_bot",
         "domain": "lark",
         "enabled": true,
+        "wake_words": [],
         "sender_access_policy": "allowlist",
         "responsible_member_id": null,
         "revision": 2,
@@ -4544,6 +4548,7 @@
         "app_id": "",
         "domain": "feishu",
         "enabled": false,
+        "wake_words": [],
         "sender_access_policy": "allowlist",
         "revision": 0,
         "app_secret_configured": false,
@@ -23654,6 +23659,7 @@
         "app_id": "",
         "domain": "feishu",
         "enabled": false,
+        "wake_words": [],
         "sender_access_policy": "allowlist",
         "revision": 0,
         "app_secret_configured": false,
@@ -25303,6 +25309,7 @@
         "app_id": "cli_responsibility_snapshot",
         "domain": "feishu",
         "enabled": false,
+        "wake_words": [],
         "sender_access_policy": "allowlist",
         "responsible_member_id": null,
         "revision": 1,

@@ -4740,6 +4740,7 @@ export interface MultiremiFeishuBotConfig {
   appId: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  wakeWords: string[];
   senderAccessPolicy: "agent" | "allowlist";
   /** Member who answers questions from Feishu transport Chats without an Issue; never an Issue creation requirement. */
   responsibleMemberId?: string | null;
@@ -4779,6 +4780,7 @@ export interface FeishuBotConfigView {
   app_id: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  wake_words: string[];
   sender_access_policy: "agent" | "allowlist";
   revision: number;
   app_secret_configured: boolean;
@@ -4835,6 +4837,7 @@ export interface UpsertFeishuBotConfigInput {
   appId: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  wakeWords?: string[];
   senderAccessPolicy?: "agent" | "allowlist";
   /** Member who answers questions from Feishu transport Chats without an Issue. */
   responsibleMemberId?: string | null;
@@ -4876,12 +4879,15 @@ export interface MultiremiFeishuBotDirective {
   desired_state: FeishuBotDesiredState;
   /** False while another Runtime still holds the connector (two-phase handover). */
   config_available: boolean;
+  wake_words?: string[];
   /** Authoritative group admission policy, refreshed even without a bot revision change. */
   no_mention_chat_ids?: string[];
 }
 
 /** Runtime-scoped payload returned to the daemon. Contains decrypted secrets. */
 export interface MultiremiFeishuBotDaemonConfig {
+  wake_words?: string[];
+  no_mention_chat_ids?: string[];
   /** Existing bot-scoped bindings/routes only; unseen chats are not discovered. */
   recovery_chats?: Array<{ chat_id: string; chat_type: "p2p" | "group" }>;
   /** Older control planes omit this for the original bot. */
@@ -4908,6 +4914,20 @@ export interface MultiremiFeishuBotDaemonConfig {
 export interface MultiremiFeishuBotDaemonPayload extends MultiremiFeishuBotDaemonConfig {
   /** Wire-shaped Agent row (snake_case), or null when the Agent has vanished. */
   bot_agent: Record<string, unknown> | null;
+}
+
+export interface FeishuBotAuthorizeSenderRequest {
+  revision: number;
+  external_session_key: string;
+  sender_open_id?: string | null;
+  sender_user_id?: string | null;
+  sender_union_id?: string | null;
+  sender_tenant_key?: string | null;
+  sender_name?: string | null;
+}
+
+export interface FeishuBotAuthorizeSenderResult {
+  allowed: boolean;
 }
 
 /** One inbound Feishu event submitted by the Runtime hosting the connector. */
@@ -4982,6 +5002,33 @@ export interface FeishuBotSessionSnapshot {
 
 /** One Task that a Feishu `/stop` could target, with the context a human
  *  needs to tell several concurrent runs apart. */
+export interface FeishuCommandSemantic {
+  domain: FeishuBotDomain;
+  app_id: string;
+  external_message_id: string;
+  sender_open_id: string;
+  chat_id: string;
+  external_session_key: string;
+  kind: 'command' | 'unknown' | 'message';
+  name: string;
+  args: string;
+  target: string | null;
+  raw_content: string;
+}
+
+export interface FeishuBotCommandRequest {
+  revision: number;
+  bot_id: string;
+  mode: 'execute' | 'lookup_only';
+  semantic: FeishuCommandSemantic;
+  digest: string;
+}
+
+export type FeishuBotCommandResult = { name: 'new'; reset: boolean; agentName: string | null }
+  | { name: 'stop'; cancel: FeishuBotCancelResult };
+
+export type FeishuBotCommandResponse = { state: 'missing' } | { state: 'committed'; result: FeishuBotCommandResult };
+
 export interface FeishuBotCancelCandidate {
   taskId: string;
   status: MultiremiTaskStatus;

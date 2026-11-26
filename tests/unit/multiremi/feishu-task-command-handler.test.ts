@@ -8,13 +8,21 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { MultiremiDaemon } from "@multiremi/worker/daemon.js";
+import { MultiremiDaemonClient, MultiremiDaemonHttpError } from "@multiremi/worker/client.js";
+import { FeishuInboundRecovery, feishuHistoryEvent } from "@connectors/feishu/inbound-recovery.js";
+import type { FeishuSenderAuthorizer } from "@connectors/feishu/config.js";
+import { createFeishuInboundDelivery } from "@connectors/feishu/receive.js";
 import type { IncomingMessage, TaskStreamEvent, TaskStreamMeta } from "@connectors/base.js";
-import { createFeishuTaskHandler } from "../../../apps/remi/cli/multiremi.js";
+import { createFeishuCommandRuntime, createFeishuTaskHandler } from "../../../apps/remi/cli/multiremi.js";
 import type { MultiremiStore } from "@multiremi/store.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 const APP_SECRET = "wJ4tQ7xR2nB8vC5mZ1kL0pS6dF3gH9jA";
+const scope = { appId: "cli_handler", domain: "feishu" as const, botId: "default" };
 const CHAT = "oc_command_group";
 let previousEncryptionKey: string | undefined;
 
@@ -56,21 +64,19 @@ function handler(store: MultiremiStore, revision: number) {
   const daemon = {
     submitFeishuBotMessage: async (input: Parameters<MultiremiDaemon["submitFeishuBotMessage"]>[0]) =>
       store.submitFeishuBotMessage("local", "rt_bot", input),
-    cancelFeishuBotSessionTask: async (
-      rev: number, key: string,
-      options?: { chatId?: string | null; senderOpenId?: string | null; target?: string | null },
-    ) => store.cancelFeishuBotSessionTask("local", "rt_bot", rev, key, options),
-    inspectFeishuBotSession: async (rev: number, key: string) =>
-      store.inspectFeishuBotSession("local", "rt_bot", rev, key),
-    resetFeishuBotSession: async (rev: number, key: string) =>
-      store.resetFeishuBotSession("local", "rt_bot", rev, key),
+    executeFeishuBotCommand: async (request: Parameters<MultiremiDaemon["executeFeishuBotCommand"]>[0]) =>
+      store.executeFeishuBotCommand("local", "rt_bot", "bot-host", request),
+    inspectFeishuBotSession: async (rev: number, key: string, sender: string) =>
+      store.inspectFeishuBotSession("local", "rt_bot", rev, key, sender),
+    resetFeishuBotSession: async (rev: number, key: string, sender: string) =>
+      store.resetFeishuBotSession("local", "rt_bot", rev, key, sender, true),
     getFeishuBotHumanRequest: async () => null,
     respondFeishuBotHumanRequest: async () => { throw new Error("not expected"); },
     uploadFeishuBotAttachment: async () => { throw new Error("not expected"); },
     getFeishuBotTaskSnapshot: async () => ({ taskId: "unused", status: "running", result: null,
       error: null, sessionId: null, workDir: null, usage: [] }),
   } as unknown as MultiremiDaemon;
-  return createFeishuTaskHandler(daemon, revision, "Concierge");
+  return createFeishuTaskHandler(daemon, revision, "Concierge", scope);
 }
 
 /** Capture the reply card text the consumer renders, if any. */
@@ -94,6 +100,68 @@ async function run(
 }
 
 describe("Feishu Task command handler", () => {
+  it("recovers a committed stop and an uncertain card without cancelling a later task", async () => {
+    const { store, revision } = scaffold();
+    const paths: string[] = [], cards: Array<{ content: string; uuid: string }> = [];
+    const directory = mkdtempSync(join(tmpdir(), "feishu-http-journal-"));
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+      paths.push(new URL(request.url).pathname);
+      const result = store.executeFeishuBotCommand("local", "rt_bot", "bot-host", await request.json());
+      return paths.length === 1 ? new Response(null, { status: 503 }) : Response.json(result);
+    } });
+    try {
+      const client = new MultiremiDaemonClient(server.url.origin);
+      const authorize: FeishuSenderAuthorizer = async () => true;
+      authorize.commands = createFeishuCommandRuntime({ executeFeishuBotCommand: request => client.executeFeishuBotCommand("rt_bot", request) } as MultiremiDaemon,
+        revision, scope.botId, "Concierge");
+      const open = () => {
+        const journal = new FeishuInboundRecovery(join(directory, "journal.json"));
+        const delivery = createFeishuInboundDelivery({ recovery: journal, appId: scope.appId, authorizeSender: authorize, wakeWords: ["助手"],
+          botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() }, onMessage: async () => { throw new Error("unexpected task"); },
+          client: { request: async () => ({ code: 0, data: { items: [] } }), im: { message: { reply: async ({ data }: { data: typeof cards[number] }) => {
+            cards.push(data);
+            if (cards.length === 1) throw new Error("lost card response");
+            return { code: 0, data: { message_id: "om_card" } };
+          } } } } as any });
+        return { journal, delivery };
+      };
+      const input = feishuHistoryEvent({ message_id: "om_stop", msg_type: "text", root_id: "om_thread", body: { content: '{"text":"助手 /stop"}' },
+        sender: { sender_type: "user", id_type: "open_id", id: "ou_owner" } }, CHAT, "group")!;
+      delete input.recovery_source;
+      const first = open(); await expect(first.journal.accept(input, first.delivery)).rejects.toThrow("503"); first.journal.close();
+      const later = store.submitFeishuBotMessage("local", "rt_bot", { revision, externalSessionKey: `${CHAT}:thread:om_thread`, externalMessageId: "om_later",
+        chatType: "group", chatId: CHAT, threadId: "om_thread", senderOpenId: "ou_owner", text: "start later", deliveryMode: "native_cot_v1" });
+      const second = open(); await expect(second.journal.replay(second.delivery)).rejects.toThrow(); second.journal.close();
+      const last = open(); await last.journal.replay(last.delivery); await last.journal.accept(input, last.delivery); last.journal.close();
+      expect(paths).toEqual(Array(2).fill("/api/daemon/runtimes/rt_bot/feishu-bot/commands/v1"));
+      expect(cards).toHaveLength(2); expect(cards[0]).toEqual(cards[1]); expect(cards[0].content).toContain("当前没有正在运行的任务");
+      expect(store.getTask(later.taskId)?.status).toBe("queued");
+      expect(db!.query("SELECT count(*) AS n FROM multiremi_feishu_command_results").get()).toEqual({ n: 1 });
+    } finally { server.stop(true); rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  it("suppresses monitor and history denial cards if access changes before submit", async () => {
+    const denied = createFeishuTaskHandler({ submitFeishuBotMessage: async () => {
+      throw new MultiremiDaemonHttpError(409, "POST", "messages", "denied", "sender_not_allowed");
+    } } as unknown as MultiremiDaemon, 1, "Concierge");
+    for (const [monitored, fromHistory] of [[false, false], [true, false], [false, true]]) {
+      const response = await run(denied, { chatId: CHAT, sender: "human", connectorName: "feishu", text: "ordinary",
+        metadata: { chatType: "group", messageId: "om_test", monitored, fromHistory } }, CHAT);
+      expect(response.text.length).toBe(monitored || fromHistory ? 0 : 1);
+    }
+  });
+  it("preserves denial notification intent when a command loses access after admission", async () => {
+    const revoked = async () => { throw new MultiremiDaemonHttpError(403, "POST", "session", "denied", "sender_not_allowed"); };
+    const handle = createFeishuTaskHandler({ inspectFeishuBotSession: revoked, executeFeishuBotCommand: revoked } as unknown as MultiremiDaemon, 1, "Concierge", scope);
+    for (const command of ["/stop", "/new", "/status"]) {
+      for (const monitored of [false, true]) {
+        const response = await run(handle, { chatId: CHAT, text: command, metadata: { messageId: "om_revoked", rawContent: command, senderOpenId: "ou_revoked", monitored } }, CHAT);
+        expect(response.text).toHaveLength(monitored ? 0 : 1);
+        if (!monitored) expect(response.text[0]).not.toContain("停止请求失败");
+      }
+    }
+  });
+
   it("answers /stop without filing new work", async () => {
     const { store, revision } = scaffold();
     const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
@@ -238,7 +306,7 @@ describe("Feishu Task command handler", () => {
     expect(store.listTasks()).toHaveLength(before + 1);
   });
 
-  it("reports a failure card when the cancel request cannot be made", async () => {
+  it("leaves a failed write pending without a terminal failure card", async () => {
     const { store, revision } = scaffold();
     const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
       revision, externalSessionKey: `${CHAT}:thread:omt_fail`, externalMessageId: "om_fail",
@@ -250,11 +318,11 @@ describe("Feishu Task command handler", () => {
 
     // The transport itself fails (an internal route answered 500).
     const daemon = {
-      cancelFeishuBotSessionTask: async () => {
+      executeFeishuBotCommand: async () => {
         throw new Error("GET /api/feishu-bot/session/cancel returned 500: internal error");
       },
     } as unknown as MultiremiDaemon;
-    const handle = createFeishuTaskHandler(daemon, revision, "Concierge");
+    const handle = createFeishuTaskHandler(daemon, revision, "Concierge", scope);
     const text: string[] = [];
     const census = () => ({
       tasks: store.listTasks().length,
@@ -265,36 +333,9 @@ describe("Feishu Task command handler", () => {
         .get() as { n: number }).n),
     });
     const before = census();
-    // The handler must absorb the failure: if the error escaped, the connector
-    // would mark the inbound message `failed` and send its own `**Error:**`
-    // card on top of ours. Resolving is what keeps that from happening.
-    await handle(
-      {
-        chatId: CHAT,
-        text: "贺华杰: /stop",
-        metadata: {
-          messageId: "om_fail_click", chatType: "group", senderOpenId: "ou_owner", rawContent: "/stop",
-        },
-      },
-      `${CHAT}:thread:omt_fail_click`,
-      async (stream) => {
-        for await (const event of stream as AsyncIterable<TaskStreamEvent>) {
-          // A command reply is one final agent message.
-        if (event.kind === "message" && event.message.type === "item.completed" && event.message.item.type === "agent_message") {
-          text.push(event.message.item.text);
-        }
-        }
-      },
-    );
-
-    const card = text.join("\n");
-    // The user is told the request failed and that the Task may still be alive —
-    // never that it stopped, and never a raw HTTP dump.
-    expect(card).toContain("停止请求失败");
-    expect(card).toContain("任务可能仍在运行");
-    expect(card).toContain("服务端返回 500");
-    expect(card).not.toContain("**Error:**");
-    expect(card).not.toContain("returned 500: internal error");
+    await expect(handle({ chatId: CHAT, text: "/stop", metadata: { messageId: "om_fail_click", senderOpenId: "ou_owner" } },
+      `${CHAT}:thread:omt_fail_click`, async () => { text.push("unexpected card"); })).rejects.toThrow("500");
+    expect(text).toEqual([]);
     expect(store.getTask(submitted.taskId)?.status).toBe("running");
     // A failed stop writes nothing at all: the running Task is left alone and
     // no Task, Issue, chat message, or delivery is added.

@@ -13433,6 +13433,16 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
+    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/commands/v1": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
     "POST /api/daemon/runtimes/:runtimeId/feishu-bot/messages": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",

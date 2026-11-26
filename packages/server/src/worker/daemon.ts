@@ -1,4 +1,5 @@
 import { foldStoredTrace } from "./trace-pages.js";
+import type { FeishuBotCommandRequest, FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution, type RestartJournalEntry } from "./planned-restart-journal.js";
 import { samePolicyOffer } from '@multiremi/contracts/system-prompt-policy.js';
 import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
@@ -1735,6 +1736,7 @@ export class MultiremiDaemon {
       onStateChange: () => { this.taskDownlinks.connectionChanged(); this.wakeClaim(); },
       readyToConnect: () => this.supervisorReady(),
       onConnected: async () => {
+        this.feishuConcierge?.connectionRestored();
         // welcome follows the server's authenticated target-version hello transition.
         this.updateConfirmation ??= this.confirmRuntimeUpdate().catch(error => {
           log.warn(`Update confirmation deferred: ${error instanceof Error ? error.message : String(error)}`);
@@ -1963,8 +1965,8 @@ export class MultiremiDaemon {
     return this.client.respondTaskHumanRequest(requestId, response, credential);
   }
 
-  resetFeishuBotSession(revision: number, externalSessionKey: string): Promise<boolean> {
-    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  resetFeishuBotSession(revision: number, externalSessionKey: string, senderOpenId: string | null): Promise<boolean> {
+    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, senderOpenId);
   }
 
   cancelFeishuBotSessionTask(
@@ -1977,8 +1979,16 @@ export class MultiremiDaemon {
     );
   }
 
-  inspectFeishuBotSession(revision: number, externalSessionKey: string) {
-    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  executeFeishuBotCommand(input: FeishuBotCommandRequest) {
+    return this.client.executeFeishuBotCommand(this.options.runtimeId!, input);
+  }
+
+  authorizeFeishuBotSender(input: FeishuBotAuthorizeSenderRequest) {
+    return this.client.authorizeFeishuBotSender(this.options.runtimeId!, input);
+  }
+
+  inspectFeishuBotSession(revision: number, externalSessionKey: string, senderOpenId: string | null) {
+    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, senderOpenId);
   }
 
   async ensureTopicWorkspace(sessionKey: string, topicId: string): Promise<string | null> {

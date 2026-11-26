@@ -1277,7 +1277,7 @@ describe("Feishu bot standard Task bridge", () => {
       workDir: "/workspaces/chats/chat_1",
     });
 
-    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, "oc_chat_1"))
+    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, "oc_chat_1", "ou_owner"))
       .toEqual({
         chatSessionId: submitted.chatSessionId,
         agentId: agent.id,
@@ -1301,8 +1301,8 @@ describe("Feishu bot standard Task bridge", () => {
         },
       });
 
-    expect(store.resetFeishuBotSession("local", "rt_bot", config.revision, "oc_chat_1")).toBe(true);
-    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, "oc_chat_1"))
+    expect(store.resetFeishuBotSession("local", "rt_bot", config.revision, "oc_chat_1", "ou_owner")).toBe(true);
+    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, "oc_chat_1", "ou_owner"))
       .toEqual({ chatSessionId: null, agentId: null, agentName: null, task: null });
   });
 
@@ -1339,15 +1339,15 @@ describe("Feishu bot standard Task bridge", () => {
       "UPDATE multiremi_feishu_bot_chat_bindings SET updated_at = ? WHERE chat_session_id = ?",
       ["2026-09-09T00:00:01.000Z", second.chatSessionId],
     );
-    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, externalSessionKey))
+    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, externalSessionKey, "ou_owner"))
       .toMatchObject({ chatSessionId: second.chatSessionId, agentId: routedAgent.id });
 
-    expect(store.cancelFeishuBotSessionTask("local", "rt_bot", config.revision, externalSessionKey))
+    expect(store.cancelFeishuBotSessionTask("local", "rt_bot", config.revision, externalSessionKey, { senderOpenId: "ou_owner" }))
       .toMatchObject({ outcome: "cancelled", taskId: second.taskId });
     expect(store.getTask(first.taskId)?.status).toBe("cancelled");
     expect(store.getTask(second.taskId)?.status).toBe("cancelled");
-    expect(store.resetFeishuBotSession("local", "rt_bot", config.revision, externalSessionKey)).toBe(true);
-    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, externalSessionKey))
+    expect(store.resetFeishuBotSession("local", "rt_bot", config.revision, externalSessionKey, "ou_owner")).toBe(true);
+    expect(store.inspectFeishuBotSession("local", "rt_bot", config.revision, externalSessionKey, "ou_owner"))
       .toEqual({ chatSessionId: null, agentId: null, agentName: null, task: null });
     const archivedBindings = db!.query(
       `SELECT id, external_session_key FROM multiremi_feishu_bot_chat_bindings

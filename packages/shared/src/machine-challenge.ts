@@ -1,3 +1,17 @@
+export interface MachinePublicBinding {
+  deploymentId: string;
+  runtimeId: string;
+  daemonId: string;
+  incarnation: string;
+  consumerId: string;
+  credentialId: string;
+  credentialDigest: string;
+  recipientKeyId: string;
+  recipientSpki: string;
+  signingSpki: string;
+  keyExpiresAtMs: number;
+}
+
 export interface MachineChallenge {
   id: string;
   encryptedNonce: string;

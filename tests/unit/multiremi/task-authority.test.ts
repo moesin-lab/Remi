@@ -324,8 +324,10 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       const challenge=store.withSecurityWrite('1',recoveryPlan,tx=>repo.challenge(tx,connection,tuple.runtime_id,action,tuple.receipt_id));
       return signChallenge(challenge);
     }
-    const machineKeys = new RootMachineKeys(local, recipientKeys.privateKey, signingKeys.privateKey);
-    expect(tuple.recipient_key_fingerprint).toBe(machineKeys.publicBinding().recipient_key_fingerprint);
+    const machineKeys = new RootMachineKeys({runtimeId:local.runtime_id, daemonId:local.daemon_id, consumerId:local.consumer_id,
+      incarnation:local.incarnation, recipientKeyId:local.recipient_key_id, deploymentId:'test', credentialId:'daemon-token',
+      credentialDigest:createHash('sha256').update('machine-token').digest('hex'), keyExpiresAtMs:Date.parse(expiresAt)}, recipientKeys.privateKey, signingKeys.privateKey);
+    expect(machineKeys.publicBinding().recipientSpki).toBe(recipient);
     function signChallenge(challenge: ReturnType<typeof repo.challenge>) {
       expect(()=>machineKeys.answerChallenge({...challenge,targetId:'wrong-target'})).toThrow();
       return {id:challenge.id,proof:machineKeys.answerChallenge(challenge)};

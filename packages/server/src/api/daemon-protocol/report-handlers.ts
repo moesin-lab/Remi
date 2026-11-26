@@ -1,6 +1,8 @@
 import { PlannedRestartError } from "@multiremi/store/planned-restarts.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import { UsageValidationError, validateUsageSnapshot } from "@multiremi/store/usage-accounting.js";
+import { SecurityAbort } from "@multiremi/store/security-write.js";
+import { assertRootWirePayloadHasNoPlaintextSecrets, type RootDeliveryMachineProof, type RootExecutionLocator } from "@multiremi/contracts/root-delivery.js";
 import { isDeepStrictEqual } from "node:util";
 import { TaskDaemonReportError } from "@multiremi/store/repos/tasks-repo.js";
 import type { MultiremiIssueWorkspaceRepo, MultiremiIssueWorkspaceStatus, ReportAgentPluginRuntimeStateInput,
@@ -48,6 +50,44 @@ function reject(code = "invalid_report"): never { throw new ReportRejection(code
 const string = (value: unknown): string => typeof value === "string" ? value : "";
 const nullable = (value: unknown): string | null => string(value).trim() || null;
 const terminal = (status: string): boolean => ["completed", "failed", "cancelled"].includes(status);
+const ROOT_RUNNING_LEASE_MS = 60_000;
+
+function handleRootStart(store: MultiremiStore, session: DaemonProtocolSession, frame: DaemonParsedFrame, taskId: string) {
+  const payload = frame.payload;
+  const receiptId = payload.root_receipt_id;
+  const handoffId = payload.handoff_id;
+  const proof = payload.machine_proof as RootDeliveryMachineProof | undefined;
+  const locator = payload.execution_locator as RootExecutionLocator | undefined;
+  const runtimeId = frame.rt;
+  if (!runtimeId || session.ownerAccessToken?.type !== 'daemon' || !proof || proof.runtime_id !== runtimeId ||
+      proof.daemon_id !== session.daemonId || !locator || typeof receiptId !== 'string' || !receiptId || receiptId.length > 512 ||
+      (payload.usage_run_id !== undefined && payload.usage_run_id !== proof.consumer_id) ||
+      (handoffId != null && typeof handoffId !== 'string')) reject('authority_revoked');
+  const receipts = store.rootReceipts;
+  try {
+    assertRootWirePayloadHasNoPlaintextSecrets(payload);
+    const plan = receipts.planRecovery(receiptId);
+    return store.withSecurityWrite(plan.fenceTerm, plan, tx => {
+      const task = authorizeReportTask(store, session, taskId, runtimeId);
+      const scope = { workspaceId: task.workspaceId, runtimeId, daemonId: session.daemonId };
+      const executionKey = { attempt_id: taskId, receipt_id: receiptId, handoff_id: handoffId };
+      if (receipts.findReceipt(executionKey, runtimeId, proof.consumer_id) !== receiptId) reject('authority_revoked');
+      if (!store.systemPromptsRepo().acceptsReport(taskId, scope, payload)) reject('policy_offer_mismatch');
+      const machine = receipts.authenticateConnection(tx, session, 'start', receiptId, proof);
+      return store.plannedRestarts().withExecution(taskId, payload.generation, scope, () => {
+        const outcome = store.startRootTaskFromDaemon(tx, machine, receiptId, locator, Date.now() + ROOT_RUNNING_LEASE_MS);
+        return { ok: true, execution_authorized: true, ...(outcome === 'replayed' && { code: 'start_replayed' }) };
+      }, proof.consumer_id);
+    });
+  } catch (error) {
+    if (error instanceof ReportRejection || error instanceof PlannedRestartError) throw error;
+    if (error instanceof SecurityAbort && error.code === 'security_state_unavailable') {
+      return { ok: false, code: error.code, retryable: true };
+    }
+    if (error instanceof Error && error.message === 'stale_execution') reject('stale_execution');
+    reject('authority_revoked');
+  }
+}
 
 function completionFields(p: Record<string, unknown>, taskId: string): DaemonTaskCompletionFields | null {
   const count = (value: unknown): boolean => Number.isSafeInteger(value) && (value as number) >= 0;
@@ -231,6 +271,9 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       if (frame.type.startsWith("task.")) {
         const taskId = string(p.task_id);
         if (!taskId) reject();
+        if (frame.type === 'task.start' && (p.root_receipt_id !== undefined || p.machine_proof !== undefined || p.execution_locator !== undefined)) {
+          return handleRootStart(store, session, frame, taskId);
+        }
         let task;
         let reportingRuntimeId: string | null = null;
         if ((frame.type === "task.usage" && p.usageSnapshot !== undefined) || (frame.type === "task.start" && p.usage_run_id !== undefined)) {
@@ -262,7 +305,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
               const runId = typeof p.usage_run_id === "string" ? p.usage_run_id : undefined;
               let outcome: "started" | "replayed";
               try { outcome = store.startTaskFromDaemon(taskId, authority, runId); }
-              catch (error) { if (error instanceof UsageValidationError) reject("authority_revoked"); throw error; }
+              catch (error) { if (error instanceof UsageValidationError || error instanceof SecurityAbort) reject("authority_revoked"); throw error; }
               const permission = runId ? { execution_authorized: store.isTaskUsageExecutionAuthorized(taskId, runId, authority.runtimeId) } : {};
               if (outcome === "replayed") return { ok: true, code: "start_replayed", ...permission };
               if (runId) return { ok: true, ...permission };

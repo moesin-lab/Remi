@@ -384,7 +384,6 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       launch_identity:'launch',carrier_mode:'immutable_run_env' as const,started_at:null};
     const acknowledge=()=>store.withSecurityWrite('1',recoveryPlan,tx=>repo.acknowledge(tx,ackProof,{tuple,envelope_digest:delivery.envelope_digest,
       execution_locator:locator,installed_at:new Date().toISOString()}));
-    expect(acknowledge().idempotent_replay).toBe(false);
     repo.releaseConnection(originalSocket);
     expect(status).toThrow('root_authority_revoked');
     expect(acknowledge).toThrow('root_authority_revoked');
@@ -411,25 +410,53 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       await connect();
       await expect(rpc('status',{execution_key:{attempt_id:task.id},machine_proof:staleProof})).rejects.toMatchObject({code:'authority_revoked'});
       const query={execution_key:{attempt_id:task.id},machine_proof:await wireProof('status')};
-      expect(await rpc('status',query)).toMatchObject({ok:true,ack_state:'confirmed',allowed_recovery_action:'start_execution'});
+      expect(await rpc('status',query)).toMatchObject({ok:true,ack_state:'pending',allowed_recovery_action:'replay_envelope'});
       await expect(rpc('status',query)).rejects.toMatchObject({code:'authority_revoked'});
       const recovery = new RootReceiptClient(client, {async answerChallenge(challenge) { return machineKeys.answerChallenge(challenge); }});
-      const confirmed = await recovery.status(tuple,delivery.envelope_digest);
-      expect(await recovery.replay(tuple,confirmed)).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
-      expect(await recovery.acknowledge(tuple,delivery.envelope_digest,locator)).toMatchObject({ok:true,idempotent_replay:true});
+      const pending = await recovery.status(tuple,delivery.envelope_digest);
+      expect(await recovery.replay(tuple,pending)).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
+      let seq = 0;
+      const startEvent = (payload: Record<string, unknown>, runtimeId = local.runtime_id, sequence = ++seq) => client.event({
+        t: 'task.start', seq: sequence, rt: runtimeId, p: {task_id: task.id, usage_run_id: tuple.consumer_id, ...payload},
+      });
+      const rootStart = {root_receipt_id: tuple.receipt_id, execution_locator: locator};
+      await expect(startEvent({...rootStart, machine_proof: await wireProof('start')})).rejects.toMatchObject({code:'stale_execution'});
+      const installAck = () => recovery.acknowledge(tuple,delivery.envelope_digest,locator);
+      expect(await installAck()).toMatchObject({ok:true,idempotent_replay:false});
+      expect(await installAck()).toMatchObject({ok:true,idempotent_replay:true});
+      await expect(startEvent({})).rejects.toMatchObject({code:'authority_revoked'});
+      await expect(startEvent({...rootStart, machine_proof: await wireProof('status')})).rejects.toMatchObject({code:'authority_revoked'});
+      const signedStart = {...rootStart, machine_proof: await wireProof('start')};
+      await expect(startEvent({...signedStart, root_receipt_id:'different-receipt'})).rejects.toMatchObject({code:'authority_revoked'});
+      await expect(startEvent({...signedStart, usage_run_id:'different-consumer'})).rejects.toMatchObject({code:'authority_revoked'});
+      await expect(startEvent({...signedStart, task_id:previous.id})).rejects.toThrow();
+      await expect(startEvent(signedStart, 'other-runtime')).rejects.toThrow();
+      await expect(startEvent({...signedStart, execution_locator:{...locator,birth_token_id:'different'}})).rejects.toMatchObject({code:'stale_execution'});
+      const currentLease = () => db.query('SELECT lease_version,expires_at_ms FROM multiremi_current_task_leases WHERE attempt_id=?').get(task.id);
+      const beforeStart = Date.now();
+      expect(await startEvent({...signedStart, lease_expires_at_ms:1})).toMatchObject({ok:true,execution_authorized:true});
+      const running = currentLease();
+      expect(Number(running.expires_at_ms)).toBeGreaterThan(beforeStart);
+      expect(Number(running.expires_at_ms)).toBeLessThanOrEqual(Date.now()+60_000);
+      await expect(startEvent(signedStart, local.runtime_id, seq)).rejects.toMatchObject({code:'authority_revoked'});
+      expect(await startEvent({...rootStart, machine_proof:await wireProof('start')}, local.runtime_id, seq)).toMatchObject({ok:true,code:'start_replayed'});
+      expect(currentLease()).toEqual(running);
+      const pendingReplay = {...rootStart, machine_proof:await wireProof('start')};
+      db.query('UPDATE multiremi_current_task_leases SET expires_at_ms=1 WHERE attempt_id=?').run(task.id);
+      await expect(startEvent(pendingReplay)).rejects.toMatchObject({code:'authority_revoked'});
+      db.query('UPDATE multiremi_current_task_leases SET expires_at_ms=? WHERE attempt_id=?').run(running.expires_at_ms,task.id);
     } finally {client.stopLane(lane); await server.stop(true);}
     connection=repo.bindConnection({},'machine-token')!;
     statusProof=authenticate('status');
     replayProof=authenticate('replay');
     ackProof=authenticate('install_ack');
-    expect(status().allowed_recovery_action).toBe('start_execution');
+    expect(status().allowed_recovery_action).toBe('reattach_running');
     expect(acknowledge().idempotent_replay).toBe(true);
     const startProof=authenticate('start');
     expect(()=>store.startTaskFromDaemon(task.id,{runtimeId:tuple.runtime_id,daemonId:tuple.daemon_id,workspaceId:'local'},tuple.consumer_id)).toThrow('root_authority_revoked');
     const start=(birthToken:string)=>store.withSecurityWrite('1',recoveryPlan,tx=>store.startRootTaskFromDaemon(tx,startProof,tuple.receipt_id,
       {...locator,birth_token_id:birthToken},lease.expiresAtMs));
     expect(()=>start('different')).toThrow('stale_execution');
-    expect(start('birth')).toBe('started');
     expect(start('birth')).toBe('replayed');
     expect(Number(db.query('SELECT COUNT(*) AS total FROM multiremi_usage_runs WHERE task_id=?').get(task.id).total)).toBe(1);
     expect(()=>withSecurityWrite(db,'1',plan,tx=>writeCurrentTaskLease(db,tx,1,lease))).toThrow('authority_revision_conflict');

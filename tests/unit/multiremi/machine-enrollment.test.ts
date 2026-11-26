@@ -1,5 +1,8 @@
 import { expect, it } from 'bun:test';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
 import { RootManagement } from '@multiremi/store/root-management.js';
 import { machineEnrollmentPayload, machineRetirementPayload } from '@multiremi/store/machine-enrollment.js';
@@ -8,7 +11,7 @@ import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 pendingTurnBackendTests('machine enrollment', fixture => {
   it('requires deployment and isolation signatures, rotates by generation and retires the active node', () => {
-    const { db } = fixture();
+    const { db, databaseUrl } = fixture();
     const kernel = new RootManagement(db);
     const deployment = generateKeyPairSync('ed25519');
     const attestor = generateKeyPairSync('ed25519');
@@ -46,5 +49,24 @@ pendingTurnBackendTests('machine enrollment', fixture => {
     transact(2,second.nodeId,tx=>kernel.retireMachine(tx,proof,'test','rt','second',2));
     expect(db.query('SELECT incarnation FROM multiremi_machine_enrollments WHERE retired_at_ms IS NULL').all()).toEqual([]);
     expect(()=>transact(3,second.nodeId,tx=>kernel.retireMachine(tx,proof,'test','rt','second',2))).toThrow('authority_revision_conflict');
-  });
+    const directory = mkdtempSync(join(tmpdir(),'machine-enroll-'));
+    try {
+      binding = bindingFor('third');
+      const bundle = join(directory,'enrollment.json');
+      const sqlite = join(directory,'server.sqlite');
+      if (!databaseUrl) db.query('VACUUM INTO ?').run(sqlite);
+      const invoke = (signer:typeof deployment) => {
+        writeFileSync(bundle, JSON.stringify({binding, expectedGeneration:2,
+          deploymentProof:sign(null,machineEnrollmentPayload('deployment',binding,attestation,2),signer.privateKey).toString('base64url'),
+          attestation:{...attestation,signature:sign(null,machineEnrollmentPayload('attestation',binding,attestation,2),attestor.privateKey).toString('base64url')}}));
+        return Bun.spawnSync([process.execPath,'apps/remi/main.ts','db','enroll-machine','--bundle',bundle,...(databaseUrl?[]:['--sqlite-file',sqlite])],
+          {env:{...process.env,MULTIREMI_DATABASE_URL:databaseUrl??''},stdout:'pipe',stderr:'pipe'});
+      };
+      expect(invoke(machine).exitCode).not.toBe(0);
+      const registered = invoke(deployment);
+      expect(registered.exitCode).toBe(0);
+      expect(JSON.parse(registered.stdout.toString())).toMatchObject({generation:3});
+      expect(invoke(deployment).exitCode).not.toBe(0);
+    } finally { rmSync(directory,{recursive:true,force:true}); }
+  }, 30_000);
 });

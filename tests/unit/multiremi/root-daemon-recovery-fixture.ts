@@ -103,8 +103,6 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
     const {grant} = withSecurityWrite(db,undefined,grantPlan,tx=>service.grant(tx,service.authorizeWrite(tx,dashboard,grantUse),{
       subject:{type:'agent',id:agent.id},runtime_trust_ids:[trust.id],accepted_dependency_digest:approved.digest,
       expected_revision:grantPlan.expectedRevision,idempotency_key:'recovery-grant',reason:'approved recovery fixture'}));
-    const trustNode=db.query('SELECT authority_node_id FROM multiremi_runtime_trusts WHERE trust_id=?').get(trust.id).authority_node_id;
-    nodes('provider','provider_trust','agent',agent.id,[trustNode,grant.authority_node_id]);
     const directProof = await store.rootManagement.verifyIndependentPassword('usr_auth', 'test-dashboard-password');
     const task = store.createAdmittedTask({agentId:agent.id,issueId:issue.id,prompt:'Recover the original execution'},directProof,{messages:[],includeSubmittedPrompt:true});
     const target = {attemptId:task.id};
@@ -141,5 +139,5 @@ export async function prepareEnrolledRecoveryFixture(fixture: PendingTurnTestFix
     const offerLease={lease_id:'one',fence_term:'1',start_deadline:new Date(lease.expiresAtMs).toISOString()};
 
     const delivery = new RootReceiptStore(db, service).commitFirstOffer(candidate, offerLease);
-    return { delivery, human, signing, reportPolicy };
+    return { delivery, human, signing, reportPolicy, providerTrustId: execution.providerTrust.id };
 }

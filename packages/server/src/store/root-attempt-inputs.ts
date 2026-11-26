@@ -4,6 +4,7 @@ import type { CreateTaskInput } from '@multiremi/contracts/types.js';
 import { createId } from '@multiremi/ids.js';
 import { agentDependencyDigest, planFrozenAgentDependencies, type AgentDependencyRef } from './agent-dependencies.js';
 import { planVerifiedAttemptWrite } from './attempt-admission.js';
+import { executionTrustNodeId } from './agent-source-approvals.js';
 import type { SqlDatabase } from './db/postgres.js';
 import type { CredentialProof, FinalExecution, VersionedRef } from './root-authority-contract.js';
 import type { ApprovedExecutionInputs } from './root-management.js';
@@ -51,11 +52,12 @@ function sources(db: SqlDatabase, store: MultiremiStore, agentId: string, runtim
   const provider = readRef(row.provider_ref, 'provider-trust', 'execute');
   const checkpoint = readRef(row.checkpoint_policy_ref, 'checkpoint-policy', 'restore');
   const policy = readRef(row.input_policy_ref, 'input-policy', 'accept');
+  const providerTrust = { id: executionTrustNodeId(row.grant_id,row.trust_id,provider), version: Number(row.grant_generation) };
   if (policy.version < 1 || !db.query(`SELECT 1 FROM multiremi_authority_nodes WHERE node_id=? AND generation=? AND kind='provider_trust'
     AND subject_type='agent' AND subject_id=? AND scope='system' AND revoked_at_ms IS NULL AND expires_at_ms>?`)
-    .get(provider.id, provider.version, agentId, Date.now())) reject();
+    .get(providerTrust.id, providerTrust.version, agentId, Date.now())) reject();
   const execution: FinalExecution = { attemptId, runtimeId: row.runtime_id, daemonId: row.daemon_id, incarnation: row.incarnation,
-    configEpoch: Number(row.config_epoch), providerTrust: { id: provider.id, version: provider.version }, checkpointTrust: null,
+    configEpoch: Number(row.config_epoch), providerTrust, checkpointTrust: null,
     executionDigest: agentDependencyDigest({ agentId, grant: row.grant_id, frozen: row.dependency_digest, epochNode: row.approval_node_id,
       runtime: row.runtime_id, trust: row.trust_id, profile: row.profile_digest, provider, checkpoint, policy }) };
   const scope = planFrozenAgentDependencies(db, row.grant_id, Number(row.grant_generation), agentId);

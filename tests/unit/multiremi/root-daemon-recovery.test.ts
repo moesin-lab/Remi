@@ -14,7 +14,7 @@ import { prepareRecoveryFixture } from './root-daemon-recovery-fixture.js';
 pendingTurnBackendTests('root receipt recovery over WS and protected HTTP', fixture => {
   it('replays an interrupted installation and rejects both task copies after provider revocation', async () => {
     const { db, store } = fixture();
-    const { delivery, machine, decryptionKey, human, signing, reportPolicy } = await prepareRecoveryFixture(fixture());
+    const { delivery, machine, decryptionKey, human, signing, reportPolicy, providerTrustId } = await prepareRecoveryFixture(fixture());
     const { tuple, envelope_digest: digest } = delivery;
     const { runtime_id, daemon_id, consumer_id, incarnation, recipient_key_id, recipient_key_fingerprint } = tuple;
     const target = { runtime_id, daemon_id, consumer_id, incarnation, recipient_key_id, recipient_key_fingerprint };
@@ -106,7 +106,7 @@ pendingTurnBackendTests('root receipt recovery over WS and protected HTTP', fixt
       expect(Number(db.query('SELECT COUNT(*) AS count FROM multiremi_usage_runs WHERE task_id=?').get(tuple.attempt_id).count)).toBe(1);
       await write(recovered.env.MULTIREMI_TOKEN, 'After reconnect', 200);
       await peerWrite('Original process resumed', 200);
-      db.query('UPDATE multiremi_authority_nodes SET revoked_at_ms=? WHERE node_id=?').run(Date.now(), 'provider');
+      db.query('UPDATE multiremi_authority_nodes SET revoked_at_ms=? WHERE node_id=?').run(Date.now(), providerTrustId);
       await peerWrite('Denied original', 401);
       await write(recovered.env.MULTIREMI_TOKEN, 'Denied replay', 401);
       expect(store.getWorkspace(workspace.id)?.name).toBe('Original process resumed');

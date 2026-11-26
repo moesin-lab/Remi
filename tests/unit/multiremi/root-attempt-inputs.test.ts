@@ -13,7 +13,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connection.js';
 import { readWorkspacePromptSettings } from '@multiremi/prompts/workspace-settings.js';
 import { agentDependencyDigest } from '@multiremi/store/agent-dependencies.js';
-import type { AgentConfigurationApproval } from '@multiremi/store/agent-source-approvals.js';
+import { executionTrustNodeId, type AgentConfigurationApproval } from '@multiremi/store/agent-source-approvals.js';
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
@@ -74,16 +74,13 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     const configPlan = service.planAgentGrant(proof, agent.id, ['trust']);
     const approved = withSecurityWrite(db, undefined, configPlan, tx => service.approveAgentConfiguration(tx,service.authorizeWrite(tx,proof,action),agent.id,null,{sources,executions:[execution]}));
     const plan = service.planAgentGrant(proof, agent.id, ['trust']);
-    const grant = withSecurityWrite(db, undefined, plan, tx => service.grant(tx,service.authorizeWrite(tx,proof,{action:'root.grant.create',use:'management',actualTarget:scope}),
-      {subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,expected_revision:plan.expectedRevision,idempotency_key:'grant',reason:'reviewed'}));
     const taskInput = { agentId: agent.id, issueId: issue.id, prompt: 'original instruction' };
     const submit = () => store.createAdmittedTask(taskInput, proof, {messages: [], includeSubmittedPrompt: true});
     expect(submit).toThrow();
-    expect(db.query("SELECT 1 FROM multiremi_authority_nodes WHERE node_id='provider'").get()).toBeNull();
-    const sequence = Number(db.query('SELECT MAX(issued_seq) AS seq FROM multiremi_authority_nodes').get().seq) + 1;
-    db.query("INSERT INTO multiremi_authority_nodes VALUES('provider',?,1,'provider_trust','agent',?,'system',1,?,NULL,2)").run(sequence, agent.id, expiry);
-    for (const parent of [grant.grant.authority_node_id,'trust-node']) db.query(`INSERT INTO multiremi_authority_edges SELECT 'provider',1,?,node_id,generation,issued_seq,'continuous'
-      FROM multiremi_authority_nodes WHERE node_id=?`).run(sequence,parent);
+    expect(db.query("SELECT 1 FROM multiremi_authority_nodes WHERE kind='provider_trust' AND subject_id=?").get(agent.id)).toBeNull();
+    const grant = withSecurityWrite(db, undefined, plan, tx => service.grant(tx,service.authorizeWrite(tx,proof,{action:'root.grant.create',use:'management',actualTarget:scope}),
+      {subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,expected_revision:plan.expectedRevision,idempotency_key:'grant',reason:'reviewed'}));
+    const providerId = executionTrustNodeId(grant.grant.id,'trust',execution.provider);
     const task = submit();
     expect(task.issueSessionId).toBe(session.id);
     const message = db.query(`SELECT m.* FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id WHERE t.id=?`).get(task.id);
@@ -93,7 +90,7 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     const manifest = approvedInputs(task.id);
     expect(manifest.inputs.entries).toEqual([{source,snapshot:taskInput.prompt,purpose:'instruction',author:{type:'user',id:author.user_id}}]);
     expect(manifest.inputs.sourcePolicy).toEqual({id:'inputs',version:1});
-    expect(manifest.execution.providerTrust).toEqual({id:'provider',version:1});
+    expect(manifest.execution.providerTrust).toEqual({id:providerId,version:grant.grant.generation});
     const turnId=task.id;
     let attemptId=task.id;
     if (scenario==='retry WS offer') {
@@ -119,7 +116,7 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
       const original=db.query('SELECT manifest_json FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(attemptId).manifest_json;
       const snapshot=db.query('SELECT manifest_snapshot FROM multiremi_attempt_input_approvals WHERE attempt_id=?').get(attemptId).manifest_snapshot;
       const altered=JSON.parse(snapshot);
-      altered.inputs.entries.push({...altered.inputs.entries[0],source:{id:'provider',version:1},author:{type:'agent',id:agent.id}});
+      altered.inputs.entries.push({...altered.inputs.entries[0],source:{id:providerId,version:grant.grant.generation},author:{type:'agent',id:agent.id}});
       const forged=JSON.stringify(altered);
       const digest=`sha256:${createHash('sha256').update(forged).digest('hex')}`;
       const approvalUpdate=db.query('UPDATE multiremi_attempt_input_approvals SET manifest_digest=?,manifest_snapshot=? WHERE attempt_id=?');
@@ -242,9 +239,9 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     };
     expect(() => store.retryAdmittedTurn(task.id, task.id, proof, {messages:[{...source,version:source.version+1}]})).toThrow();
     expect(() => store.retryAdmittedTurn(task.id, task.id, proof, {messages:[]})).toThrow();
-    db.query("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='provider'").run();
+    db.query('UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id=?').run(providerId);
     rejectRetry();
-    db.query("UPDATE multiremi_authority_nodes SET revoked_at_ms=NULL WHERE node_id='provider'").run();
+    db.query('UPDATE multiremi_authority_nodes SET revoked_at_ms=NULL WHERE node_id=?').run(providerId);
     db.query("UPDATE multiremi_agent_source_snapshots SET resource_version=2 WHERE agent_id=? AND kind='input-policy'").run(agent.id);
     rejectRetry();
     db.query("UPDATE multiremi_agent_source_snapshots SET resource_version=1 WHERE agent_id=? AND kind='input-policy'").run(agent.id);

@@ -155,6 +155,10 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 `RootManagement.enrollMachine(tx, deploymentProof, report, binding, expectedGeneration)` 在同一安全事务中校验双签、运行时、daemon 凭据与有效期，返回 `{ nodeId, generation }`。首次登记传 0。事务预规划工作区、`machine:<runtimeId>`、部署 authority 节点和轮换前的 authority 节点。`retireMachine(tx, deploymentProof, deploymentId, runtimeId, incarnation, expectedGeneration)` 使用 `machineRetirementPayload` 的独立签名。同一代的重复轮换或退役返回冲突。旧代节点撤销后，现有凭证、trust 与 receipt 在下次核验时失效。
 
+运维使用 `remi db enroll-machine --bundle enrollment.json`，通过 `MULTIREMI_DATABASE_URL` 选择 PostgreSQL。SQLite 使用 `--sqlite-file /absolute/path/to/server.sqlite`。JSON 包含 `deploymentProof`、`attestation`（含宿主签名）、`binding`（仅含公开绑定）和 `expectedGeneration`。命令从主库规划工作区和 authority 锁，在一个事务内复验签名及代际，成功输出节点 ID 和新代际。
+
+对 Agent 签发 grant 时，内核从当前已批准配置读取所选 runtime trust 的 `provider-trust/execute` 与 `checkpoint-policy/restore` 引用，逐项匹配冻结摘要，并在 grant 事务内签发 `provider_trust` 与 `checkpoint_trust`。节点 ID 由 grant ID、trust ID 和完整版本化引用派生，代际等于 grant generation，连续父节点为当前 grant 和 runtime trust。B 的 admission facade 在新 attempt 上解析该 provider 节点；全新运行的 `checkpointTrust` 为 `null`。撤销任一持续来源后，两类节点的下次祖先核验失败。
+
 ## 验证入口
 
 | 变更 | 已有测试 |

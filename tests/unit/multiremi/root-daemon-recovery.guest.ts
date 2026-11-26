@@ -126,7 +126,7 @@ pendingTurnBackendTests('multi-UID root consumer with one authority database', (
       expect(store.listIssueQuestions(task.issueId!).map(entry=>entry.id)).toEqual([questionId]);
       expect(Number(db.query('SELECT COUNT(*) AS count FROM multiremi_usage_runs WHERE task_id=?').get(task.id).count)).toBe(1);
       expect(state()).toMatchObject({run_state:'running',material_version:tuple.material_version});
-      db.query('UPDATE multiremi_authority_nodes SET revoked_at_ms=? WHERE node_id=?').run(Date.now(),'provider');
+      db.query('UPDATE multiremi_authority_nodes SET revoked_at_ms=? WHERE node_id=?').run(Date.now(),execution.providerTrust.id);
       expect(await ask({name:'Revoked original'})).toEqual({pid:model.pid,status:401});
       expect(await ask({copy:true,name:'Revoked replica'})).toEqual({pid:copy.pid,status:401});
       expect(store.getWorkspace(workspace.id)?.name).toBe('After daemon recovery');

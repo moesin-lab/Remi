@@ -10,7 +10,7 @@ import { machineRetirementPayload, requireEnrollmentBinding, requireMachineDeplo
 import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-provenance.js';
 import type { AdmissionTicket, AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority, FinalExecution, InputManifest, VersionedRef } from './root-authority-contract.js';
 import { requireAgentDependencySnapshot, type ResolveAgentDependencies } from './agent-grant-dependencies.js';
-import { storeAgentConfigurationApproval, type AgentConfigurationApproval } from './agent-source-approvals.js';
+import { executionTrustNodeId, storeAgentConfigurationApproval, type AgentConfigurationApproval } from './agent-source-approvals.js';
 import { releasePatAfterCommit, type DelegatedPatInput, type DelegationUse } from './durable-delegation.js';
 import { persistIssuedMaterialBinding } from './credential-version-bindings.js';
 import type { AuthorityNodeRef } from './authority-provenance.js';
@@ -1021,6 +1021,20 @@ export class RootManagement {
     });
   }
 
+  enrollDeploymentMachine(deploymentProof: string, attestation: HostAttestation, binding: MachinePublicBinding, expectedGeneration: number): AuthorityNodeRef {
+    return onPrimary(() => {
+      const state = this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get();
+      const root = this.db.query('SELECT authority_node_id FROM multiremi_machine_deployment_roots WHERE deployment_id=?').get(binding.deploymentId);
+      const runtime = this.db.query('SELECT workspace_id FROM multiremi_runtimes WHERE id=? AND daemon_id=?').get(binding.runtimeId,binding.daemonId);
+      if (!state || !root || !runtime) throw new SecurityAbort('root_authority_revoked');
+      const previous = this.db.query('SELECT authority_node_id FROM multiremi_machine_enrollments WHERE runtime_id=? AND retired_at_ms IS NULL').get(binding.runtimeId);
+      const targets = [`authority:${root.authority_node_id}`,`machine:${binding.runtimeId}`];
+      if (previous) targets.push(`authority:${previous.authority_node_id}`);
+      return withSecurityWrite(this.db,undefined,{expectedRevision:Number(state.security_revision),workspaceIds:[runtime.workspace_id],numberKeys:[],domainTargets:targets.sort()},
+        tx=>this.enrollMachine(tx,deploymentProof,attestation,binding,expectedGeneration));
+    });
+  }
+
   enrollMachine(tx: SecurityTx, deploymentProof: string, verifiedAttestation: HostAttestation, publicBinding: MachinePublicBinding,
     expectedGeneration: number): { nodeId: string; generation: number } {
     const binding = publicBinding;
@@ -1247,6 +1261,23 @@ export class RootManagement {
           VALUES(?,?,?,?,?,?)`).run(result.grant.id,result.grant.generation,target.id,snapshot.configEpoch,snapshot.digest,JSON.stringify(snapshot.trustVersions));
         const insert = this.db.query(`INSERT INTO multiremi_agent_grant_protected_refs(grant_id,kind,resource_id,resource_version,digest,use_kind) VALUES(?,?,?,?,?,?)`);
         for (const ref of snapshot.refs) insert.run(result.grant.id,ref.kind,ref.id,ref.version,ref.digest,ref.use);
+        for (const trust of snapshot.trustVersions) {
+          const execution = this.db.query(`SELECT x.provider_ref,x.checkpoint_policy_ref,t.authority_node_id FROM multiremi_current_agent_execution_sources x
+            JOIN multiremi_runtime_trusts t ON t.trust_id=x.trust_id AND t.generation=x.trust_generation AND t.runtime_id=x.runtime_id
+              AND t.incarnation=x.incarnation AND t.revoked_at_ms IS NULL
+            WHERE x.agent_id=? AND x.config_epoch=? AND x.trust_id=? AND x.trust_generation=?`).get(target.id,snapshot.configEpoch,trust.id,trust.version);
+          if (!execution) {
+            if (snapshot.refs.some(ref=>ref.kind==='provider-trust' || ref.kind==='checkpoint-policy')) throw new SecurityAbort('authority_revision_conflict');
+            continue;
+          }
+          for (const [kind, use, serialized, nodeKind] of [['provider-trust','execute',execution.provider_ref,'provider_trust'],
+            ['checkpoint-policy','restore',execution.checkpoint_policy_ref,'checkpoint_trust']] as const) {
+            const reference = JSON.parse(serialized);
+            if (reference.kind!==kind || reference.use!==use || !snapshot.refs.some(ref=>isDeepStrictEqual(ref,reference))) throw new SecurityAbort('authority_revision_conflict');
+            this.newNode(nodeKind,'agent',target.id,result.grant.generation,result.security_revision,expiry,
+              [result.grant.authority_node_id,execution.authority_node_id],executionTrustNodeId(result.grant.id,trust.id,reference));
+          }
+        }
       }
       this.db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,action,target_id,idempotency_key,payload_digest,proof_node_id,actor_grant_id,
         actor_generation,reason,revision_before,revision_after,created_at_ms,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)

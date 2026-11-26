@@ -97,6 +97,8 @@ pendingTurnBackendTests('registered supervisor task management',fixture=>{
       VALUES(?,?,?,1,?,1,1,1,?,?,'fixture','fixture','{}',?,'test-lease','test-fence','pending','pending_start')`)
       .run(tuple.receipt_id,task.id,tuple.handoff_id,tuple.consumer_id,token.id,serializeRootDeliveryTuple(tuple),token.expiresAt);
     const proof = service.registeredCredentials.verify(token.token);
+    const accessTokens = new AccessTokensRepo(db);
+    expect((await accessTokens.verifyAccessToken(token.token, ['task']))?.taskId).toBe(task.id);
     const request = {action:'root.grant.revoke',use:'management',actualTarget:{type:'grant',id:'nominal'}};
     expect(service.resolveCurrent(proof,request)).toMatchObject({transport:'task',subject:{type:'agent',id:agent.id},attemptId:task.id,
       recordedGrant:{grantId:'nominal'},effectiveRoot:false,reason:'attempt_not_eligible'});
@@ -112,6 +114,7 @@ pendingTurnBackendTests('registered supervisor task management',fixture=>{
     expect(current).toThrow('root_authority_revoked');
     db.run("UPDATE multiremi_delivery_receipts SET run_generation=1,start_deadline='2000-01-01T00:00:00Z'");
     expect(current).toThrow('root_authority_revoked');
+    expect(await accessTokens.verifyAccessToken(token.token, ['task'])).toBeNull();
     db.query('UPDATE multiremi_delivery_receipts SET start_deadline=?').run(token.expiresAt);
     db.run('UPDATE multiremi_usage_runs SET complete=1');
     expect(current).toThrow('root_authority_revoked');
@@ -119,6 +122,8 @@ pendingTurnBackendTests('registered supervisor task management',fixture=>{
     db.query("UPDATE multiremi_turn_attempts SET status='running' WHERE id=?").run(task.id);
     expect(current).toThrow('root_authority_revoked');
     db.run("UPDATE multiremi_delivery_receipts SET run_state='running',ack_state='confirmed',execution_locator_json='{}'");
+    db.run("UPDATE multiremi_delivery_receipts SET start_deadline='2000-01-01T00:00:00Z'");
+    expect((await accessTokens.verifyAccessToken(token.token, ['task']))?.taskId).toBe(task.id);
     expect(service.resolveCurrent(proof,request).effectiveRoot).toBe(false);
     for (const phase of ['offered','waiting_local_directory','completed','failed','cancelled','lost']) {
       db.query('UPDATE multiremi_turn_attempts SET status=? WHERE id=?').run(phase,task.id);

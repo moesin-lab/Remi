@@ -100,6 +100,11 @@ export class PlannedRestartJournal {
     const binding = serializeRootDeliveryTuple(tuple);
     if (!/^sha256:[0-9a-f]{64}$/.test(envelopeDigest)) throw new Error('Invalid envelope digest');
     return this.db.transaction(() => {
+      const latest = this.db.query<{ generation: number; binding: string }, [string]>(
+        'SELECT generation,binding FROM root_execution_receivers WHERE attempt_id=? ORDER BY generation DESC LIMIT 1',
+      ).get(tuple.attempt_id);
+      if (latest && (latest.generation > tuple.run_generation ||
+          JSON.parse(latest.binding).material_version > tuple.material_version)) throw new Error('stale_execution');
       this.db.run(`INSERT INTO root_execution_receivers(receipt_id,attempt_id,generation,binding,envelope_digest,launch_identity,state)
         VALUES(?,?,?,?,?,?,'received') ON CONFLICT DO NOTHING`,
         [tuple.receipt_id, tuple.attempt_id, tuple.run_generation, binding, envelopeDigest, randomUUID()]);
@@ -112,7 +117,7 @@ export class PlannedRestartJournal {
         execution_id: identity[0], birth_token_id: identity[1], launch_identity: stored.launchIdentity, carrier_mode: 'immutable_run_env',
         runtime_id: tuple.runtime_id, daemon_id: tuple.daemon_id, incarnation: tuple.incarnation, started_at: stored.startedAt,
       } };
-    })();
+    }).immediate();
   }
 
   advanceRootExecution(tuple: RootDeliveryTuple, envelopeDigest: string, locator: RootExecutionLocator,
@@ -128,6 +133,8 @@ export class PlannedRestartJournal {
     if (!previous || (next === 'started' ? !Number.isFinite(Date.parse(locator.started_at ?? '')) : locator.started_at !== null)) throw new Error('Invalid receiver transition');
     const result = this.db.run(`UPDATE root_execution_receivers SET locator=?,state=?,started_at=?
       WHERE receipt_id=? AND binding=? AND envelope_digest=? AND launch_identity=? AND state IN (?,?)
+        AND NOT EXISTS (SELECT 1 FROM root_execution_receivers newer WHERE newer.attempt_id=root_execution_receivers.attempt_id
+          AND newer.generation>root_execution_receivers.generation)
         AND (locator IS NULL OR locator=?) AND (started_at IS NULL OR started_at=?)`,
       [identity, next, locator.started_at, tuple.receipt_id, binding, envelopeDigest, locator.launch_identity, previous, next, identity, locator.started_at]);
     if (result.changes !== 1) throw new Error('receipt_conflict');

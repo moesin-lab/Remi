@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { serializeRootDeliveryTuple } from '../worker/root-delivery-envelope.js';
 import { assertUnrevokedAncestry } from './authority-provenance.js';
+import { questionMetadataText } from './inbox/question-indexes.js';
 import { JwtMaterials, type JwtSigningDomain } from './jwt-materials.js';
 import { approvedAttemptSources, matchesDeliveryLease, readAttemptEligibility, readCurrentTaskLease } from './task-authority.js';
 import { readCurrentMaterialBinding, type MaterialIdentity } from './credential-version-bindings.js';
@@ -148,6 +149,7 @@ export class RegisteredCredentialProofs {
       if (binding.node.nodeId!==evidence.nodeId) throw new SecurityAbort('credential_version_conflict');
       assertUnrevokedAncestry(this.db,tx,binding.node);
       if (identity.credentialType==='task' && identity.subject.type==='agent' && identity.purpose==='task') {
+        const questionField = (path: string) => questionMetadataText(this.db, 'q.metadata', path);
         const active = this.db.query(`SELECT receipt.binding_json,receipt.lease_id,receipt.fence_term,receipt.receipt_id,receipt.receipt_version,
           receipt.handoff_id,receipt.consumer_id,receipt.delivery_version,receipt.run_generation,receipt.run_state,receipt.start_deadline,a.runtime_id
           FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id
@@ -163,7 +165,17 @@ export class RegisteredCredentialProofs {
           JOIN multiremi_usage_runs run ON run.task_id=a.id AND run.run_id=scope.active_run_id AND run.complete=0
           WHERE a.id=? AND c.id=? AND t.agent_id=? AND receipt.lease_id<>'' AND receipt.fence_term<>''
             AND ((a.status='accepted' AND execution.status='dispatched' AND receipt.run_state='pending_start')
-              OR (a.status='running' AND execution.status='running' AND receipt.run_state='running' AND receipt.ack_state='confirmed'))
+              OR (a.status='running' AND receipt.run_state='running' AND receipt.ack_state='confirmed'
+                AND (execution.status='running' OR (execution.status='awaiting_human' AND EXISTS (
+                  SELECT 1 FROM multiremi_conversation_log q WHERE q.id=t.waiting_on_message_id
+                    AND q.kind='message' AND q.message_kind='decision' AND q.deleted_at IS NULL
+                    AND q.task_id=t.id AND q.session_id=t.session_id AND q.sender_type='agent' AND q.sender_id=t.agent_id
+                    AND COALESCE(${questionField('execution_scope')},'')=COALESCE(t.execution_scope,'')
+                    AND ${questionField('human_request.kind')} IN ('question','permission')
+                    AND CAST(${questionField('question.version')} AS TEXT)='1' AND ${questionField('question.status')}='pending'
+                    AND ${questionField('question.workspace_id')}=t.workspace_id AND ${questionField('question.source_attempt_id')}=a.id
+                    AND ${questionField('question.wait.runtime_id')}=a.runtime_id AND ${questionField('question.wait.status')}='waiting'
+                    AND ${questionField('question.wait.restart_handoff_id')} IS NULL AND NULLIF(${questionField('question.wait.wait_id')},'') IS NOT NULL)))))
             AND NOT EXISTS(SELECT 1 FROM multiremi_delivery_receipts newer WHERE newer.attempt_id=a.id AND newer.run_generation>receipt.run_generation)`)
           .get(identity.materialVersion,evidence.attemptId,identity.credentialId,identity.subject.id);
         if (!active) throw new SecurityAbort('root_authority_revoked');

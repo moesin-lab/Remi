@@ -22,6 +22,8 @@ Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后
 
 `readAttemptEligibility(db, tx, attemptId)` 和 `readCurrentTaskLease(db, tx, attemptId)` 使用同一个 `attempt:<id>` 域目标。`writeCurrentTaskLease(db, tx, expectedVersion, lease)` 需要最外层以当前 background term 取得 F，再取得 S；首次 dispatched 使用版本 0，后续 CAS 返回新版本。`multiremi_current_task_leases` 按 attempt 唯一绑定 consumer、run generation、runtime/daemon/incarnation、lease、fence 与过期时间。pending-start 只使用首次 receipt 的固定 deadline，running 复核实时 lease。收据留存的历史 lease/fence 不充当当前授权。
 
+已确认的 running receipt 在 Turn 进入 `awaiting_human` 后继续核验当前 attempt、run、机器、lease、fence 和授权来源。Turn 的 `waiting_on_message_id` 必须指向同一会话、执行范围、Agent 和 attempt 的待答原生问题或权限请求，且原 runtime 仍持有该等待。解除绑定或转入 restart handoff 后，此等待不能再作为恢复依据。
+
 ## 登录与请求身份
 
 - [登录路由](../../packages/server/src/api/routers/auth.ts)把飞书 `open_id`、`union_id` 交给 [WorkspacesRepo.getOrCreateUser](../../packages/server/src/store/repos/workspaces-repo.ts)。身份按 `union_id`、`open_id` 解析；兼容邮箱匹配时不会复用已绑定其他外部身份的用户；否则创建独立用户记录。

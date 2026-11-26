@@ -558,6 +558,17 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const recoveredProof=reconnected.registeredCredentials.verify(installed.env.MULTIREMI_TOKEN);
     expect(reconnected.resolveCurrent(recoveredProof,use).effectiveRoot).toBe(true);
     expect(updateTitle(installed.env.MULTIREMI_TOKEN,'after recovery')).toBe('after recovery');
+    const decision=store.getDaemonTurnBridge().rpc('turn.decision',{
+      turn_id:turnId,attempt_id:task.id,wait_id:'native-wait',dedupe_key:'original-question',body_md:'Proceed?',
+      options:[{label:'Yes',value:'yes'}],metadata:{kind:'question',questions:[{question:'Proceed?'}]},
+    },{runtimeId:execution.runtimeId,daemonId:execution.daemonId,workspaceId:'local'});
+    expect(decision.ok).toBe(true);
+    expect(store.getTask(task.id)?.status).toBe('awaiting_human');
+    expect(status().allowed_recovery_action).toBe('reattach_running');
+    db.query('UPDATE multiremi_turns SET waiting_on_message_id=NULL WHERE id=?').run(turnId);
+    expect(()=>service.resolveCurrent(taskProof,use)).toThrow('root_authority_revoked');
+    db.query('UPDATE multiremi_turns SET waiting_on_message_id=? WHERE id=?').run(decision.message_id,turnId);
+    expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(true);
     if (failure==='expired lease') db.run("UPDATE multiremi_current_task_leases SET expires_at_ms=1 WHERE attempt_id='tsk_admitted'");
     if (failure==='preempted fence') db.run("UPDATE multiremi_live_terms SET term=2 WHERE scope='background_jobs'");
     if (failure==='revoked source') db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='provider'");

@@ -9,8 +9,12 @@ import type { DaemonTurnBridge, DaemonTurnRpc } from "./turn-bridge.js";
 import { fitRestartResumeToBudget } from "./offer-budget.js";
 import { samePolicyOffer, type SystemPromptPolicyBinding } from '@multiremi/contracts/system-prompt-policy.js';
 import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
+import { assertRootWirePayloadHasNoPlaintextSecrets, type RootDeliveryInstallAckRequest, type RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
 
 const denied = (code = "invalid_report") => ({ ok: false, code, retryable: false });
+
+const record = (value: unknown): value is Record<string,unknown> => !!value && typeof value==='object' && !Array.isArray(value);
+const text = (value: unknown): value is string => typeof value==='string' && value.length>0 && value.length<=512;
 
 export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: MultiremiStore, kick: (runtimeId: string) => void,
   turns: DaemonTurnBridge = store.getDaemonTurnBridge(),
@@ -21,6 +25,48 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
       masterToken: session.ownerAccessToken === null }, session.daemonId, frame.rt);
     return runtime.ok;
   };
+  for (const action of ['status','replay','install_ack'] as const) {
+    layer.registerRpcHandler(`delivery.receipt.${action}`,async(frame,session)=>{
+      const payload=frame.payload;
+      const proof=payload.machine_proof as RootDeliveryMachineProof | undefined;
+      if (session.ownerAccessToken?.type!=='daemon' || !frame.rt || !proof || proof.runtime_id!==frame.rt || proof.daemon_id!==session.daemonId ||
+          !await authorized(frame,session)) return denied('authority_revoked');
+      try {
+        assertRootWirePayloadHasNoPlaintextSecrets(payload);
+        if (![proof.consumer_id,proof.incarnation,proof.recipient_key_id,proof.recipient_key_fingerprint,proof.nonce,proof.signature,proof.signed_at]
+          .every(value=>typeof value==='string' && value.length>0 && value.length<=4096)) return denied();
+        const receipts=store.rootReceipts;
+        let receiptId: unknown=payload.receipt_id;
+        if (action==='status') {
+          const key=payload.execution_key;
+          if (!record(key) || !text(key.attempt_id) || (key.handoff_id!=null && !text(key.handoff_id)) ||
+              (key.receipt_id!=null && !text(key.receipt_id))) return denied();
+          receiptId=receipts.findReceipt({attempt_id:key.attempt_id,handoff_id:key.handoff_id,receipt_id:key.receipt_id},frame.rt,proof.consumer_id);
+        } else if (action==='install_ack') {
+          if (!record(payload.tuple) || !record(payload.execution_locator) || !text(payload.envelope_digest) ||
+              !text(payload.installed_at) || !Number.isFinite(Date.parse(payload.installed_at))) return denied();
+          receiptId=payload.tuple.receipt_id;
+        }
+        if (!text(receiptId)) return denied('authority_revoked');
+        const id=receiptId;
+        const plan=receipts.planRecovery(id);
+        return store.withSecurityWrite(plan.fenceTerm,plan,tx=>{
+          const machine=receipts.authenticateConnection(tx,session,action,id,proof);
+          if (action==='status') return receipts.status(tx,machine,id);
+          if (action==='replay') {
+            const {expected_receipt_version,expected_delivery_version,run_lease_id,fence_term}=payload;
+            if (typeof expected_receipt_version!=='number' || typeof expected_delivery_version!=='number' || !text(run_lease_id) || !text(fence_term)) return denied();
+            return {ok:true,replay:true,...receipts.replay(tx,machine,{receipt_id:id,expected_receipt_version,expected_delivery_version,run_lease_id,fence_term})};
+          }
+          return receipts.acknowledge(tx,machine,payload as unknown as RootDeliveryInstallAckRequest);
+        });
+      } catch (error) {
+        if (error instanceof Error && (error.message==='receipt_conflict' || error.message==='stale_execution')) return denied(error.message);
+        if (error instanceof Error && error.message==='security_state_unavailable') return {ok:false,code:'security_state_unavailable',retryable:true};
+        return denied('authority_revoked');
+      }
+    });
+  }
   for (const type of ["turn.input", "turn.decision", "turn.decision.get", "turn.decision.expire", "turn.decision.consume"] as const) {
     layer.registerRpcHandler(type, async (frame, session) => {
       if (!await authorized(frame, session)) return denied("authority_revoked");

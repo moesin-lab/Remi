@@ -40,14 +40,21 @@ it("shows the internal Issue ID in both delivery commands", () => {
 
 for (const journal of ["wal", "delete"]) {
   it(`classifies an empty SQLite Server through the CLI after exclusive access (${journal})`, () => {
-    const initialized = Bun.spawnSync([process.execPath, "-e", `
-      import { MultiremiStore } from '@multiremi/store.js';
-      import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
-      const db = openSqliteDatabase(process.argv[1], { create: true });
+    const initScript = join(directory, `init-${journal}.ts`);
+    writeFileSync(initScript, `
+      import { MultiremiStore } from ${JSON.stringify(import.meta.resolve("../../../packages/server/src/store/store.ts"))};
+      import { openSqliteDatabase } from ${JSON.stringify(import.meta.resolve("../../../packages/server/src/store/db/sqlite.ts"))};
+      const db = openSqliteDatabase(process.argv[2], { create: true });
       if (new MultiremiStore(db).scmOwnershipReady()) throw new Error('Unexpected completed cutover');
       db.exec('PRAGMA journal_mode=${journal}');
-      db.close();`, filename]);
-    expect(initialized.exitCode).toBe(0);
+      db.close();
+    `);
+    const initialized = Bun.spawnSync([process.execPath, initScript, filename], {
+      env: { ...process.env, HOME: directory, MULTIREMI_DATABASE_URL: "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(initialized.exitCode, `${initialized.stdout}${initialized.stderr}`).toBe(0);
     const db = openSqliteDatabase(filename);
     try {
       db.exec("BEGIN");

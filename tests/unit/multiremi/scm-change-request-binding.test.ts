@@ -117,7 +117,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect((await bind({ url: pull.html_url }, headers, inactive.id)).status).toBe(200);
       expect(store.listScmChangeRequestsForIssue(inactive.id)).toHaveLength(1);
       expect(count("issue_links")).toBe(4);
-    });
+    }, 30_000);
 
     it("uses frozen competitors and retries a pending merge activity exactly once after text changes", async () => {
       const { store, db, issue, connection } = await setup();

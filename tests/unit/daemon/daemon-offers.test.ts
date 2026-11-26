@@ -1,7 +1,7 @@
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { DaemonProtocolClient, type DaemonProtocolSocketLike } from "@multiremi/worker/daemon-protocol-client.js";
-import { normalizeDaemonTurnOffer, registerDaemonOfferHandler, type OfferRejection } from "@multiremi/worker/daemon-offers.js";
+import { normalizeDaemonTurnOffer, normalizeStandardResumeTask, registerDaemonOfferHandler, type OfferRejection } from "@multiremi/worker/daemon-offers.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 
 class OfferSocket implements DaemonProtocolSocketLike {
@@ -52,6 +52,9 @@ describe("daemon task offers", () => {
     const payload = { turn_id: "turn_distinct", attempt_id: "tsk_attempt", input_from_seq: 2, input_to_seq: 5,
       input_messages: [{ id: "m3", kind: "message", seq: 3, body_md: "first" }, { id: "m5", kind: "message", seq: 5, body_md: "second" }] };
     expect(normalizeDaemonTurnOffer(payload)).toMatchObject({ id: "tsk_attempt", turn_id: "turn_distinct", prompt: "first\n\nsecond" });
+    expect(() => normalizeDaemonTurnOffer({ ...payload, root_delivery: {} })).toThrow('root_delivery_invalid');
+    expect(() => normalizeStandardResumeTask({ ok:true, task:payload, root_delivery:{} })).toThrow('root_delivery_invalid');
+    expect(() => normalizeStandardResumeTask({ ok:true, task:{...payload,carrier_mode:'immutable_run_env'} })).toThrow('root_delivery_invalid');
     expect(() => normalizeDaemonTurnOffer({ ...payload, prompt: "legacy" })).toThrow("invalid turn offer");
     expect(() => normalizeDaemonTurnOffer({ ...payload, turn_id: undefined })).toThrow("invalid turn offer");
     expect(() => normalizeDaemonTurnOffer({ ...payload, input_to_seq: 4 })).toThrow("invalid turn offer input range");

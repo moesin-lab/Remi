@@ -9,7 +9,7 @@ import type { DaemonTurnBridge, DaemonTurnRpc } from "./turn-bridge.js";
 import { fitRestartResumeToBudget } from "./offer-budget.js";
 import { samePolicyOffer, type SystemPromptPolicyBinding } from '@multiremi/contracts/system-prompt-policy.js';
 import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
-import { assertRootWirePayloadHasNoPlaintextSecrets, type RootDeliveryInstallAckRequest, type RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
+import { assertRootWirePayloadHasNoPlaintextSecrets, classifyDaemonRestartResumeRequest, type RootDeliveryInstallAckRequest, type RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
 
 const denied = (code = "invalid_report") => ({ ok: false, code, retryable: false });
 
@@ -131,6 +131,8 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
   for (const method of ['turn.restart.resume','turn.restart.resume_bound']) layer.registerRpcHandler(method, async (frame, session) => {
     if (!await authorized(frame, session)) return denied("authority_revoked");
     const p = frame.payload;
+    const delivery = classifyDaemonRestartResumeRequest(p);
+    if (delivery.kind !== 'standard') return denied(delivery.kind === 'root' ? 'root_delivery_unsupported' : delivery.code);
     if (typeof p.attempt_id !== "string" || typeof p.handoff_id !== "string"
       || typeof p.consumer_id !== "string" || p.consumer_id.length < 16 || p.consumer_id.length > 256 || !prepareResume) return denied();
     const task = store.getTaskWithAgent(p.attempt_id);

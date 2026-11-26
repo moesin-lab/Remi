@@ -98,7 +98,7 @@ import {
   type DaemonProtocolClientOptions,
   type DaemonProtocolLane,
 } from "./daemon-protocol-client.js";
-import { normalizeDaemonTurnOffer, registerDaemonOfferHandler } from "./daemon-offers.js";
+import { normalizeDaemonTurnOffer, normalizeStandardResumeTask, registerDaemonOfferHandler } from "./daemon-offers.js";
 import { DaemonTaskDownlinks, type DaemonSteerMessage } from "./daemon-downlinks.js";
 import { registerDaemonRuntimeDownlinks } from "./daemon-runtime-downlinks.js";
 import {
@@ -4625,7 +4625,7 @@ export class MultiremiDaemon {
         const identities = this.restartJournal!.traceIdentities(entry, reason => log.warn(`Task ${entry.execution.attempt_id}: ${reason}; using trace fold only`));
         const proof = entry.checkpoint.policy_receipt!;
         const result = await this.taskDownlinks.rpc("turn.restart.resume_bound", { ...entry.execution, ...proof, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
-        const task = normalizeDaemonTurnOffer(result.task as Record<string, unknown>);
+        const task = normalizeStandardResumeTask(result);
         const echoed = result.policy_receipt as typeof proof | undefined;
         if (!echoed || !samePolicyOffer(proof,echoed) || echoed.handoff_id !== proof.handoff_id || echoed.turn_id !== proof.turn_id
           || echoed.prior_restart_generation !== proof.prior_restart_generation || task.id !== proof.attempt_id || task.turn_id !== proof.turn_id

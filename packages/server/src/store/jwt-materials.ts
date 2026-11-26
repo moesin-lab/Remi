@@ -119,10 +119,16 @@ export class JwtMaterials {
     // on the primary after taking the security revision lock.
     const locator = this.db.query('SELECT credential_id,authority_node_id FROM multiremi_jwt_materials WHERE compact_digest = ?').get(digest);
     if (!locator) return null;
-    return withSecurityWrite(this.db, undefined, {
+    const current = withSecurityWrite(this.db, undefined, {
       expectedRevision: Number(state.security_revision), workspaceIds: [], numberKeys: [],
       domainTargets: [`authority:${locator.authority_node_id}`, `jwt:${locator.credential_id}`].sort(),
-    }, tx => {
+    }, tx => this.currentInTransaction(tx, digest, signing, {credential_id: locator.credential_id, authority_node_id: locator.authority_node_id}, described));
+    return current ? {userId: current.userId, digest} : null;
+  }
+
+  currentInTransaction(tx: SecurityTx, digest: string, signing: JwtSigningDomain,
+    locator: { credential_id: string; authority_node_id: string }, described?: ReturnType<typeof describeJwt>) {
+    return withSecurityTarget(this.db, tx, `jwt:${locator.credential_id}`, () => {
       this.assertDomain(signing);
       const row = this.db.query(`SELECT m.* FROM multiremi_jwt_materials m JOIN multiremi_jwt_current c
         ON c.credential_id = m.credential_id AND c.current_material_version = m.material_version
@@ -145,7 +151,8 @@ export class JwtMaterials {
         nodeId: row.authority_node_id, generation: Number(row.authority_generation), familyId: row.family_id,
         subjectType: row.subject_type, subjectId: row.subject_id, expiresAtMs: Number(row.expires_at_ms),
       });
-      return { userId: row.subject_id, digest };
+      return { userId: row.subject_id, digest, credential: {id: String(row.credential_id), version: Number(row.material_version)},
+        familyId: String(row.family_id), expiresAtMs:Number(row.expires_at_ms), node: {nodeId: String(row.authority_node_id), generation: Number(row.authority_generation)} };
     });
   }
 

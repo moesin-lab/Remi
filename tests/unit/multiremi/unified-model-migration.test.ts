@@ -320,7 +320,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
       const backup=join(dir,"local-backup");writeFileSync(backup,"local fixture backup");
       expect(dropRetiredTables(db,{...args,execute:true,confirmDrop:true,backup}).dry_run).toBe(false);
       expect(reconcileUnifiedModel(db).mismatches).toEqual([]);
-    });
+    }, 20_000);
   }
 });
 

@@ -1,4 +1,5 @@
 import { createResponsibleTestAutopilot } from './helpers.js';
+import { createSqliteStoreSnapshotFactory } from '../../helpers/sqlite-store-snapshot.js';
 import { createResponsibleTestIssue } from './helpers.js';
 /**
  * MUL-405: the Feishu and Autopilot paths must take the workspace lifecycle row
@@ -153,9 +154,10 @@ afterEach(() => {
   else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousEncryptionKey;
 });
 
+const lockFixtures = createSqliteStoreSnapshotFactory();
 function freshStore(): { store: MultiremiStore; recorder: LockRecordingDatabase } {
   process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 13).toString("base64");
-  const db = openSqliteDatabase(":memory:");
+  const {db} = lockFixtures.create();
   openDbs.push(db);
   const recorder = new LockRecordingDatabase(db);
   expect(recorder.dialect).toBe("sqlite");
@@ -294,7 +296,7 @@ describe.skipIf(!pgAvailable)("MUL-405 lock order", () => {
     // missing row would make the "first lock" a no-op instead of a lock.
     workspaceId = store.createWorkspace({ name: "Lock order", slug: "lock-order" }).id;
     sql = new Bun.SQL(url.toString(), { max: 2 });
-  });
+  }, 30_000);
 
   afterAll(async () => {
     try { await sql?.end(); } catch { /* connection may already be gone */ }

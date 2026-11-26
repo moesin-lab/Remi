@@ -1,5 +1,5 @@
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
   DAEMON_HEARTBEAT_INTERVAL_MS,
 } from "@multiremi/contracts/daemon-protocol.js";
@@ -14,13 +14,12 @@ import { runtimeCapabilitiesInFrame } from "../../fixtures/daemon-protocol.js";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
 import { useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
 
-useMigratedIntegrationDatabases();
 
 const fixtures: DaemonProtocolHarness[] = [];
 const releaseProviders: Array<() => void> = [];
 const savedEnvironment = new Map<string, string | undefined>();
 
-beforeEach(() => {
+beforeAll(() => {
   for (const [key, value] of Object.entries({
     MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY: Buffer.alloc(32, 11).toString("base64"),
     MULTIREMI_PUBLIC_URL: "https://remi.example.com",
@@ -32,9 +31,13 @@ beforeEach(() => {
   }
 });
 
+useMigratedIntegrationDatabases();
+
 afterEach(async () => {
   for (const release of releaseProviders.splice(0)) release();
   for (const h of fixtures.splice(0)) await h.dispose();
+});
+afterAll(() => {
   for (const [key, value] of savedEnvironment) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;

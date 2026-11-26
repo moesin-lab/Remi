@@ -153,12 +153,18 @@ export function readVerifiedTrustChallenge(db: SqlDatabase, tx: SecurityTx, runt
   });
 }
 
-export function recordedMachineBindingIsCurrent(db: SqlDatabase, tx: SecurityTx, runtimeId: string, challengeId: string): boolean {
+export function recordedMachineBindingIsCurrent(db: SqlDatabase, tx: SecurityTx, runtimeId: string, challengeId: string,
+  recipient?: Pick<RootDeliveryMachineProof,'consumer_id'|'daemon_id'|'incarnation'|'recipient_key_id'|'recipient_key_fingerprint'>): boolean {
   return withSecurityTarget(db,tx,`management:runtime:${runtimeId}`,() => {
     const receipt = db.query(`SELECT c.binding_digest,e.credential_digest FROM multiremi_machine_challenges c JOIN multiremi_machine_enrollments e
       ON e.incarnation=c.incarnation WHERE c.challenge_id=? AND c.target_id=? AND e.runtime_id=? AND c.consumed_at_ms IS NOT NULL`).get(challengeId,runtimeId,runtimeId);
     if (!receipt) return false;
-    try { return enrollment(db,runtimeId,receipt.credential_digest).binding===receipt.binding_digest; } catch(error) {
+    try {
+      const current=enrollment(db,runtimeId,receipt.credential_digest);
+      return current.binding===receipt.binding_digest && (!recipient || (current.row.consumer_id===recipient.consumer_id
+        && current.row.daemon_id===recipient.daemon_id && current.row.incarnation===recipient.incarnation
+        && current.row.recipient_key_id===recipient.recipient_key_id && current.fingerprint===recipient.recipient_key_fingerprint));
+    } catch(error) {
       if (error instanceof SecurityAbort && error.code==='root_authority_revoked') return false;
       throw error;
     }

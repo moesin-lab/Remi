@@ -1218,12 +1218,14 @@ describe("Bun Multiremi daemon smoke", () => {
     });
   });
 
-  it("stores nothing when the agent advertised nothing or the provider cannot tell, and an empty list when it is empty", async () => {
-    for (const [id, availableCommands] of [["catalogue-unknown", null], ["catalogue-unsupported", undefined]] as const) {
+  for (const [id, availableCommands] of [["catalogue-unknown", null], ["catalogue-unsupported", undefined]] as const) {
+    it(`stores no command catalogue for ${id}`, async () => {
       const { store, sessionId, agentId } = await runChatCommandCase({ id, body: "hello", availableCommands,
         updates: [{ sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Hi." }] }] });
       expect(laneCommands(store, sessionId, agentId)).toBeNull();
-    }
+    });
+  }
+  it("stores an empty list when the command catalogue is empty", async () => {
     const { store, sessionId, agentId } = await runChatCommandCase({ id: "catalogue-empty", body: "hello", availableCommands: [],
       updates: [{ sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Hi." }] }] });
     expect(laneCommands(store, sessionId, agentId)).toMatchObject({ provider: "claude", commands: [] });

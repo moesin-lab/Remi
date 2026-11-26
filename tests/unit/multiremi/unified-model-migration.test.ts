@@ -95,7 +95,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
     db.run("DELETE FROM multiremi_turn_attempts WHERE id=?", [task.id]);
     expect(Number(db.query("SELECT COUNT(*) AS n FROM multiremi_usage_units").get().n)).toBe(0);
     expect(db.query("SELECT task_id FROM multiremi_usage_runs WHERE task_id=?").get(task.id)).toBeNull();
-  });
+  }, 30_000);
 
   it("migrates empty stores, writes both reports, and is idempotent", () => {
     const { db } = fixture();

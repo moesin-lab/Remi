@@ -33,7 +33,7 @@ export function recoveryIdentity() {
     deploymentId:'deploy', credentialId:'machine-token', credentialDigest:hash('machine-token'), keyExpiresAtMs:Date.now()+300000 };
 }
 
-export async function prepareEnrolledRecoveryFixture(fixture: PendingTurnTestFixture, signer: string, recipient: string,
+export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, signer: string, recipient: string,
   sign: (challenge: MachineChallenge) => Promise<ReturnType<RootMachineKeys['answerChallenge']>>) {
     const {store} = fixture;
     const db = (store as unknown as {ctx:StoreContext}).ctx.db;
@@ -100,11 +100,17 @@ export async function prepareEnrolledRecoveryFixture(fixture: PendingTurnTestFix
       expected_revision:grantPlan.expectedRevision,idempotency_key:'recovery-grant',reason:'approved recovery fixture'}));
     nodes('provider','provider_trust','agent',agent.id,['runtime-trust',grant.authority_node_id]);
     const inputs={manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
-      entries:[],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
+      entries:[{source:{id:'password',version:1},purpose:'instruction' as const,snapshot:'previous',author:{type:'user' as const,id:'usr_auth'}}],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
     const directProof = await store.rootManagement.verifyIndependentPassword('usr_auth', 'test-dashboard-password');
     db.query("UPDATE multiremi_turn_attempts SET status='lost' WHERE id=?").run(previous.id);
     db.query("UPDATE multiremi_turns SET status='failed' WHERE id=?").run(turnId);
     expect(retryAdmittedTurn(store,turnId,previous.id,directProof,execution,()=>({execution,inputs})).current_attempt_id).toBe(target.attemptId);
+    return {db,store,target,execution,runtime,human,signing,grant,approved,turnId,service};
+}
+
+export async function prepareEnrolledRecoveryFixture(fixture: PendingTurnTestFixture, signer: string, recipient: string,
+  sign: (challenge: MachineChallenge) => Promise<ReturnType<RootMachineKeys['answerChallenge']>>) {
+    const {db,store,target,execution,runtime,human,signing,grant,approved,turnId,service} = await prepareRecoveryAdmission(fixture,signer,recipient,sign);
     const manifest=JSON.parse(db.query('SELECT manifest_json FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(target.attemptId).manifest_json);
 
     const task=store.getTask(target.attemptId)!;

@@ -9,7 +9,7 @@ import type { SqlDatabase } from './db/postgres.js';
 import { persistIssuedMaterialBinding } from './credential-version-bindings.js';
 import { readCurrentTaskLease, writeCurrentTaskLease } from './task-authority.js';
 import { RootManagement } from './root-management.js';
-import { beginMachineChallenge, bindMachineConnection, releaseMachineConnection, requireCurrentMachine, verifyMachineChallenge, type MachineConnection } from './machine-proof.js';
+import { beginMachineChallenge, bindMachineConnection, releaseMachineConnection, requireCurrentMachine, verifyConnectionChallenge, verifyMachineChallenge, type MachineConnection } from './machine-proof.js';
 import { withSecurityTarget, type SecurityTx } from './security-write.js';
 
 type Lease = { start_deadline: string; lease_id: string; fence_term: string };
@@ -92,6 +92,11 @@ export class RootReceiptStore {
   bindConnection(owner: object, bearer: string) { return bindMachineConnection(this.db,owner,bearer); }
 
   releaseConnection(owner: object) { releaseMachineConnection(owner); }
+
+  authenticateConnection(tx: SecurityTx, owner: object, action: Parameters<CheckReceipt>[3], receiptId: string,
+    proof: Parameters<typeof verifyConnectionChallenge>[5]) {
+    return verifyConnectionChallenge(this.db,tx,owner,receiptPurpose(action),receiptId,proof);
+  }
 
   challenge(tx: SecurityTx, connection: MachineConnection, runtimeId: string, action: Parameters<CheckReceipt>[3], receiptId: string) {
     return beginMachineChallenge(this.db,tx,connection,runtimeId,receiptPurpose(action),receiptId);

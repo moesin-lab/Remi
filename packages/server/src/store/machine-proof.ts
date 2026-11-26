@@ -50,6 +50,18 @@ function nonceDigest(connection: string | MachineConnection, nonce: string): str
   return typeof connection==='string' ? hash(nonce) : hash(JSON.stringify([connectionProofs.get(connection)!.id,nonce]));
 }
 
+export function verifyConnectionChallenge(db: SqlDatabase, tx: SecurityTx, owner: object, purpose: string,
+  targetId: string, proof: RootDeliveryMachineProof): VerifiedMachine {
+  const connection=connections.get(owner);
+  if (!connection || connectionProofs.get(connection)?.db!==db) return reject();
+  return withSecurityTarget(db,tx,`machine:${proof.runtime_id}`,()=>{
+    const row=db.query(`SELECT challenge_id FROM multiremi_machine_challenges WHERE nonce_digest=? AND purpose=?
+      AND target_id=? AND consumed_at_ms IS NULL AND expires_at_ms>?`).get(nonceDigest(connection,proof.nonce),purpose,targetId,Date.now());
+    if (!row) return reject();
+    return verifyMachineChallenge(db,tx,connection,row.challenge_id,purpose,targetId,proof);
+  });
+}
+
 function enrollment(db: SqlDatabase, runtimeId: string, credentialDigest: string) {
   const row = db.query(`SELECT e.*,r.workspace_id,t.expires_at FROM multiremi_machine_enrollments e
     JOIN multiremi_runtimes r ON r.id=e.runtime_id AND r.daemon_id=e.daemon_id

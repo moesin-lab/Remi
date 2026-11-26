@@ -3,6 +3,9 @@ import { createHash, createPublicKey, generateKeyPairSync, privateDecrypt, sign 
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { beginMachineChallenge, machineSignaturePayload } from '@multiremi/store/machine-proof.js';
 import { rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
+import { DaemonProtocolLayer } from '@multiremi/api/daemon-protocol/index.js';
+import { registerTaskInputRpcs } from '@multiremi/api/daemon-protocol/task-input-rpcs.js';
+import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
 import { createReplacementAttemptWithinTransaction } from '@multiremi/store/turn-attempts.js';
 import { withAttemptAdmission } from '@multiremi/store/attempt-admission.js';
 import type { InputManifest } from '@multiremi/store/root-authority-contract.js';
@@ -185,12 +188,16 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(found).toBe(tuple.receipt_id);
     expect(repo.findReceipt({attempt_id:task.id},local.runtime_id,'unrelated')).toBeNull();
     const recoveryPlan=repo.planRecovery(found!);
-    function authenticate(action:Parameters<typeof repo.challenge>[3]) {
+    function signedChallenge(action:Parameters<typeof repo.challenge>[3]) {
       const challenge=store.withSecurityWrite('1',recoveryPlan,tx=>repo.challenge(tx,connection,tuple.runtime_id,action,tuple.receipt_id));
       const nonce=privateDecrypt({key:recipientKeys.privateKey,oaepHash:'sha256'},Buffer.from(challenge.encryptedNonce,'base64url')).toString('base64url');
       const signed_at=new Date().toISOString();
       const signature=sign(null,machineSignaturePayload(challenge,nonce,signed_at),signingKeys.privateKey).toString('base64url');
-      return store.withSecurityWrite('1',recoveryPlan,tx=>repo.authenticate(tx,connection,challenge.id,action,tuple.receipt_id,{...local,nonce,signed_at,signature}));
+      return {id:challenge.id,proof:{...local,nonce,signed_at,signature}};
+    }
+    function authenticate(action:Parameters<typeof repo.challenge>[3]) {
+      const signed=signedChallenge(action);
+      return store.withSecurityWrite('1',recoveryPlan,tx=>repo.authenticate(tx,connection,signed.id,action,tuple.receipt_id,signed.proof));
     }
     let statusProof=authenticate('status'), replayProof=authenticate('replay'), ackProof=authenticate('install_ack');
     const status=()=>store.withSecurityWrite('1',recoveryPlan,tx=>repo.status(tx,statusProof,tuple.receipt_id));
@@ -209,6 +216,27 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(status).toThrow('root_authority_revoked');
     expect(acknowledge).toThrow('root_authority_revoked');
     expect(repo.bindConnection({},token.token)).toBeNull();
+    const layer=new DaemonProtocolLayer({store});
+    registerTaskInputRpcs(layer,store,()=>{});
+    const frames=new Map<string,Record<string,unknown>>();
+    const session=layer.openSession({bufferedAmount:0,send(wire){const frame=JSON.parse(wire); if (frame.t==='res') frames.set(frame.re,frame.p); return wire.length;},
+      close(){}},{accessToken:store.getAccessToken('machine-token'),masterToken:false});
+    try {
+      await session.handleMessage(JSON.stringify({v:2,t:'hello',p:{protocol:2,cli_version:DAEMON_MIN_CLI_VERSION,daemon_id:local.daemon_id,caps:['root.delivery'],
+        runtimes:[{runtime_id:local.runtime_id,provider:'codex',max_concurrency:1,active_task_ids:[task.id],capabilities:{root_delivery_protocol:1,root_carrier_modes:['immutable_run_env']}}]}}));
+      connection=repo.bindConnection(session,'machine-token')!;
+      const rpc=async(id:string,action:string,payload:Record<string,unknown>)=>{
+        await session.handleMessage(JSON.stringify({v:2,t:`delivery.receipt.${action}`,id,rt:local.runtime_id,p:payload}));
+        return frames.get(id);
+      };
+      const query={execution_key:{attempt_id:task.id},machine_proof:signedChallenge('status').proof};
+      expect(await rpc('first','status',query)).toMatchObject({ok:true,ack_state:'confirmed',allowed_recovery_action:'start_execution'});
+      expect(await rpc('duplicate','status',query)).toMatchObject({ok:false});
+      expect(await rpc('envelope','replay',{receipt_id:tuple.receipt_id,expected_receipt_version:1,expected_delivery_version:1,
+        run_lease_id:'one',fence_term:'1',machine_proof:signedChallenge('replay').proof})).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
+      expect(await rpc('ack','install_ack',{tuple,envelope_digest:delivery.envelope_digest,installed_at:new Date().toISOString(),execution_locator:locator,
+        machine_proof:signedChallenge('install_ack').proof})).toMatchObject({ok:true,idempotent_replay:true});
+    } finally {repo.releaseConnection(session); session.handleSocketClose(); layer.stop();}
     connection=repo.bindConnection({},'machine-token')!;
     statusProof=authenticate('status');
     replayProof=authenticate('replay');

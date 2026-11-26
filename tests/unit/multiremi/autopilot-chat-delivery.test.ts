@@ -1,5 +1,5 @@
 import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
 import { migratedStoreBackend, type MigratedStore } from "../../helpers/migrated-store-backends.js";
@@ -9,19 +9,22 @@ for (const backend of ["sqlite", "postgres"] as const) {
   const suite = backend === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL ? describe.skip : describe;
   suite(`Autopilot authorized Chat delivery (${backend})`, () => {
     const factory = migratedStoreBackend(backend, { prefix: "mul11_delivery", fixture: "autopilot-chat-delivery" });
-    factory.install();
     let f: MigratedStore;
     let previousJobs: string | undefined;
     let previousKey: string | undefined;
-    beforeEach(async () => {
+    beforeAll(() => {
       previousJobs = process.env.MULTIREMI_BACKGROUND_JOBS;
       previousKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
       process.env.MULTIREMI_BACKGROUND_JOBS = "1";
       process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString("base64");
+    });
+    factory.install();
+    beforeEach(async () => {
+      process.env.MULTIREMI_BACKGROUND_JOBS = "1";
       f = await factory.open();
     });
-    afterEach(async () => {
-      await f?.close();
+    afterEach(async () => { await f?.close(); });
+    afterAll(() => {
       if (previousJobs === undefined) delete process.env.MULTIREMI_BACKGROUND_JOBS; else process.env.MULTIREMI_BACKGROUND_JOBS = previousJobs;
       if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY; else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
     });

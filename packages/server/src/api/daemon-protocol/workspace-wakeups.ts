@@ -36,6 +36,7 @@ export function wakeDaemonWorkspaceEvent(event: PeerWorkspaceEvent, options: {
 
   switch (event.type) {
     case "daemon:task_input":
+      if (runtimeId && event.payload.runtime_only === true) { downlink("pending"); return; }
       // Human-request settlement is consumed by both the task runtime and its bot host.
       // They can be different machines; retain the workspace scope for this multi-recipient input.
       options.downlinks.kickWorkspace(event.workspaceId, rt => options.runtimeWorkspace(rt) ?? "local", "pending");

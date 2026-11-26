@@ -1,3 +1,4 @@
+import { MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
@@ -1010,6 +1011,8 @@ describe("Multiremi API — agent plugins", () => {
     const store = createSnapshotStore();
     const runtime = store.registerRuntime({
       id: "rt_api_plugin_claim",
+      daemonId: "dm_api_plugin_claim",
+      metadata: { agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION, parallel_agent_execution: 1 },
       name: "Plugin claim runtime",
       provider: "claude",
       workspaceId: "local",

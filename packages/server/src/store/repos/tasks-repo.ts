@@ -4796,8 +4796,7 @@ ${placementAfter.sql}
 
   private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean, historicalChat: boolean): MultiremiTask | null {
     const { sql, params, now } = this.candidateSelection(runtime, excludedAgentIds, excludedTargets, excludedTaskIds, negotiated);
-    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql}
-         ${historicalChat ? `AND ${freshIndependentChatSql}` : ''}
+    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql}${historicalChat ? `\n         AND ${freshIndependentChatSql}` : ''}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
       ${this.ctx.db.dialect === 'postgres' ? 'FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED' : ''}`));

@@ -315,7 +315,11 @@ describe("MUL-405 nested transaction rollback", () => {
     await admin.unsafe(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
     await admin.unsafe(`CREATE DATABASE ${TEST_DB}`);
     await admin.end();
-  });
+    const url = new URL(PG_ADMIN_URL);
+    url.pathname = `/${TEST_DB}`;
+    const setup = new PostgresSyncDatabase(url.toString());
+    try { new MultiremiStore(setup); } finally { setup.close(); }
+  }, 30_000);
 
   afterAll(async () => {
     if (!pgAvailable) return;

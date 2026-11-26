@@ -1650,6 +1650,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const prompt = "# Bootstrap Prompt\n\n## Current Request\nUse the main context";
     const recordedPrompt = store.recordTaskPrompt(task.id, {
+      systemPromptPolicy: store.getAttemptSystemPrompt(task.id) ?? undefined,
       mode: "bootstrap",
       prompt,
       sha256: createHash("sha256").update(prompt).digest("hex"),

@@ -1,3 +1,4 @@
+import { wireOfferAdopt } from "../../fixtures/wire-offer-adopt.js";
 import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
@@ -13,11 +14,11 @@ import { authenticateBrowserWebSocket, createLocalStore as createStore, db, expe
 afterEach(resetMultiremiTestEnv);
 
 function v2Hello(daemonId: string, runtimeIds: string[],
-  capabilitiesByRuntime: Record<string, { agent_plugin_protocol: number }> = {}): string {
+  capabilitiesByRuntime: Record<string, { agent_plugin_protocol: number }> = {}, caps: string[] = []): string {
   return JSON.stringify({ v: 2, t: "hello", ts: Date.now(), p: {
     protocol: 2, daemon_id: daemonId, cli_version: DAEMON_MIN_CLI_VERSION, launched_by: null,
     runtimes: runtimeIds.map(runtime_id => ({ runtime_id, provider: "codex", max_concurrency: 1,
-      active_task_ids: [], ...(capabilitiesByRuntime[runtime_id] ? { capabilities: capabilitiesByRuntime[runtime_id] } : {}) })), caps: [],
+      active_task_ids: [], ...(capabilitiesByRuntime[runtime_id] ? { capabilities: capabilitiesByRuntime[runtime_id] } : {}) })), caps,
   } });
 }
 
@@ -208,8 +209,8 @@ describe("Multiremi API — realtime websockets", () => {
 
   it("serves process-wide v2 heartbeat, realtime health and task offers without v1 wake-up", async () => {
     const store = createStore();
-    const runtime = store.registerRuntime({ id: "rt_ws", name: "WS runtime", provider: "codex" });
-    const second = store.registerRuntime({ id: "rt_ws_second", name: "Second WS runtime", provider: "claude" });
+    const runtime = store.registerRuntime({ id: "rt_ws", name: "WS runtime", provider: "codex", daemonId: "daemon-ws" });
+    const second = store.registerRuntime({ id: "rt_ws_second", name: "Second WS runtime", provider: "claude", daemonId: "daemon-ws" });
     const agent = store.createAgent({ name: "WS Codex", provider: "codex" });
     const model = store.createRuntimeModelListRequest(runtime.id);
     const server = startMultiremiServer({ store, scheduler: null, port: 0, hostname: "127.0.0.1" });
@@ -217,8 +218,9 @@ describe("Multiremi API — realtime websockets", () => {
     const inbox = watchRuntimeFrames(ws);
     try {
       await waitWebSocketOpen(ws);
-      ws.send(v2Hello("daemon-ws", [runtime.id, second.id]));
+      ws.send(v2Hello("daemon-ws", [runtime.id, second.id], {}, ["offer", "prompt.policy.adopt.v1"]));
       expect(await inbox.next("welcome")).toMatchObject({ v: 2, t: "welcome" });
+      ws.send(JSON.stringify({ v: 2, t: "runtime.ready", rt: runtime.id, p: { active_task_ids: [] } }));
       expect((await inbox.next("runtime.model_list")).p).toEqual({ id: model.id });
       expect(await (await fetch(`http://127.0.0.1:${server.port}/health/realtime`)).json()).toMatchObject({ enabled: true, connections: 1, transport: "websocket" });
       ws.send(JSON.stringify({ v: 2, t: "hb", id: "hb-1", p: { active_task_count: 0 } }));
@@ -233,6 +235,9 @@ describe("Multiremi API — realtime websockets", () => {
       const queued = store.createTask({ agentId: agent.id, prompt: "push dispatch" });
       const offer = await nextOffer;
       expect(offer).toMatchObject({ t: "task.offer", rt: runtime.id, p: { attempt_id: queued.id } });
+      const adopt = wireOfferAdopt(offer, "daemon-ws");
+      ws.send(JSON.stringify(adopt));
+      expect((await inbox.next("res", adopt.id)).p).toMatchObject({ ok: true, state: "adopted" });
       ws.send(JSON.stringify({ v: 2, t: "res", re: String(offer.seq), ack: offer.seq, p: { ok: true } }));
       expect(store.getTask(queued.id)?.status).toBe("dispatched");
       store.cancelTask(queued.id);

@@ -271,7 +271,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
       await admin.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
       rmSync(reportDirectory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   /** A fresh workspace per case, so issue numbering and locks stay isolated. */
   function freshWorkspace(): { workspaceId: string; agent: string; runtime: string; daemonId: string } {

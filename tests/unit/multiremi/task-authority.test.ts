@@ -67,9 +67,68 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       .run(hash('fixture-pat'),registered.family_id,next,patExpires);
     const patProof=service.registeredCredentials.verify('fixture-pat');
     expect(service.resolveCurrent(patProof,use)).toMatchObject({effectiveRoot:true,credentialOrigin:{credential:{id:'pat',version:1}}});
-    db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='password'");
+    const subject = {type:'user',id:'usr_second'} as const;
+    db.run("INSERT INTO multiremi_users(id,name,email,created_at,updated_at) VALUES('usr_second','test','second@example.invalid','now','now')");
+    db.run("INSERT INTO multiremi_password_credentials SELECT 'usr_second','second@example.invalid',password_hash,updated_at FROM multiremi_password_credentials WHERE user_id='usr_auth'");
+    db.run("INSERT INTO multiremi_authority_nodes VALUES('identity2',100,1,'independent_identity','user','usr_second','system',0,9999999999999,NULL,0)");
+    db.run("INSERT INTO multiremi_authority_nodes VALUES('password2',101,1,'password','user','usr_second','system',0,9999999999999,NULL,1)");
+    db.run("INSERT INTO multiremi_authority_edges VALUES('password2',1,101,'identity2',1,100,'continuous')");
+    db.run("INSERT INTO multiremi_password_authority_versions SELECT 'usr_second',1,verifier_digest,'password2','identity2' FROM multiremi_password_authority_versions WHERE user_id='usr_auth'");
+    const recipient=await service.verifyIndependentPassword(subject.id,'test-dashboard-password');
+    const createUse={action:'root.grant.create',use:'management',actualTarget:subject};
+    for (const credential of [proof,patProof]) {
+      const origin=service.resolveCurrent(credential,createUse).credentialOrigin!;
+      const createPlan=service.plan(credential,createUse);
+      const request={subject,expected_revision:createPlan.expectedRevision,idempotency_key:origin.credential.id,reason:'delegate'};
+      const result=withSecurityWrite(db,undefined,createPlan,tx=>service.grant(tx,service.authorizeWrite(tx,credential,createUse),request));
+      expect(result.grant).toMatchObject({origin_family_id:registered.family_id,issuer:{type:'user',id:'usr_auth'}});
+      expect(db.query('SELECT proof_node_id FROM multiremi_root_management_events WHERE revision_after=?').get(result.security_revision)?.proof_node_id).toBe(origin.node.nodeId);
+      expect(service.resolveCurrent(recipient,use).effectiveRoot).toBe(true);
+      const revokeUse={action:'root.grant.revoke',use:'management',actualTarget:{type:'grant',id:result.grant.id}};
+      withSecurityWrite(db,undefined,service.plan(credential,revokeUse),tx=>service.revokeGrant(tx,service.authorizeWrite(tx,credential,revokeUse),result.grant.id,
+        {expected_revision:result.security_revision,idempotency_key:'revoke',reason:'withdraw'}));
+      expect(service.resolveCurrent(recipient,use).effectiveRoot).toBe(false);
+    }
+    const familyUse={action:'root.credential-family.revoke',use:'management',actualTarget:{type:'credential_family',id:registered.family_id}};
+    const familyPlan=service.plan(proof,familyUse);
+    withSecurityWrite(db,undefined,familyPlan,tx=>service.revokeFamily(tx,service.authorizeWrite(tx,proof,familyUse),registered.family_id,
+      {expected_revision:familyPlan.expectedRevision,idempotency_key:'family',reason:'withdraw',reason_code:'operator_security_revoke'}));
     expect(()=>service.resolveCurrent(proof,use)).toThrow('root_authority_revoked');
-    expect(()=>service.resolveCurrent(patProof,use)).toThrow('root_authority_revoked');
+    expect(()=>service.resolveCurrent(patProof,use)).toThrow('credential_version_conflict');
+  });
+
+  it('binds registered management trust changes to the dashboard proof and current machine', async()=>{
+    const {db,store}=fixture();
+    const {service,passwordProof,signing}=await bootstrap(db);
+    const compact=service.issueIndependentDashboardSession(passwordProof,(Math.floor(Date.now()/1000)+300)*1000,
+      (tx,source,claims)=>new JwtMaterials(db).issue(tx,source,claims,signing));
+    const proof=service.registeredCredentials.verifyJwt(compact,signing);
+    store.registerRuntime({id:'rt_management',name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
+    const signature=generateKeyPairSync('ed25519').publicKey.export({type:'spki',format:'pem'});
+    const recipient=generateKeyPairSync('rsa',{modulusLength:3072}).publicKey;
+    db.run("INSERT INTO multiremi_authority_nodes VALUES('machine',100,1,'machine_registration','daemon','daemon','system',1,9999999999999,NULL,0)");
+    db.query("INSERT INTO multiremi_access_tokens(id,name,type,workspace_id,daemon_id,token_hash,token_prefix,created_at) VALUES('machine-token','test','daemon','local','daemon',?,'test','now')").run(hash('machine-token'));
+    db.query(`INSERT INTO multiremi_machine_enrollments VALUES('inc','deploy','consumer','rt_management','daemon','machine-token',?,'machine',1,?,?,'key',9999999999999,1,NULL,1,9999999999999,'test')`)
+      .run(hash('machine-token'),signature,recipient.export({type:'spki',format:'pem'}));
+    const grantUse={action:'root.runtime-trust.grant',use:'management',actualTarget:{type:'runtime',id:'rt_management'}};
+    const plan=service.plan(proof,grantUse);
+    const challenge=withSecurityWrite(db,undefined,{...plan,domainTargets:[...plan.domainTargets,'machine:rt_management'].sort()},
+      tx=>beginMachineChallenge(db,tx,'machine-token','rt_management',grantUse.action,'rt_management'));
+    db.query('UPDATE multiremi_machine_challenges SET consumed_at_ms=1,proof_digest=? WHERE challenge_id=?').run('verified',challenge.id);
+    const grant=(response:string)=>withSecurityWrite(db,undefined,plan,tx=>service.grantRuntimeTrust(tx,service.authorizeWrite(tx,proof,grantUse),{
+      runtime_id:'rt_management',daemon_id:'daemon',incarnation:'inc',recipient_key_id:'key',
+      recipient_key_fingerprint:`sha256:${createHash('sha256').update(recipient.export({type:'spki',format:'der'})).digest('hex')}`,
+      reason:'trust',expected_revision:plan.expectedRevision,idempotency_key:'grant',challenge_id:challenge.id,challenge_response:response}));
+    expect(()=>grant('wrong')).toThrow('root_authority_revoked');
+    const result=grant('verified');
+    expect(result.trust.issuer).toEqual({type:'user',id:'usr_auth'});
+    const revokeUse={action:'root.runtime-trust.revoke',use:'management',actualTarget:{type:'runtime_trust',id:result.trust.id}};
+    const revoked=withSecurityWrite(db,undefined,service.plan(proof,revokeUse),tx=>service.revokeRuntimeTrust(tx,service.authorizeWrite(tx,proof,revokeUse),
+      result.trust.id,{reason:'retire',expected_revision:result.security_revision,idempotency_key:'revoke',reason_code:'operator_security_revoke'}));
+    expect(revoked.trust.status).toBe('revoked');
+    const origin=service.resolveCurrent(proof,revokeUse).credentialOrigin!;
+    expect(db.query('SELECT proof_node_id FROM multiremi_root_management_events WHERE action IN (?,?)').all(grantUse.action,revokeUse.action))
+      .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);
   });
 
   it('consumes one admission on the real replacement insert and fences delayed lease updates', async()=>{
@@ -161,6 +220,18 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(true);
     db.run("UPDATE multiremi_current_task_leases SET expires_at_ms=1 WHERE attempt_id='tsk_admitted'");
     expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(false);
+    const revokeUse={action:'root.grant.revoke',use:'management',actualTarget:{type:'grant',id:'grant-agent'}};
+    const revoke=()=>{
+      const revokePlan=service.plan(taskProof,revokeUse);
+      return withSecurityWrite(db,revokePlan.fenceTerm,revokePlan,tx=>service.revokeGrant(tx,service.authorizeWrite(tx,taskProof,revokeUse),'grant-agent',
+        {expected_revision:revokePlan.expectedRevision,idempotency_key:'task-revoke',reason:'retire'}));
+    };
+    expect(revoke).toThrow('root_required');
+    expect(db.query("SELECT revoked_at_ms FROM multiremi_root_grants WHERE grant_id='grant-agent'").get().revoked_at_ms).toBeNull();
+    db.query('UPDATE multiremi_current_task_leases SET expires_at_ms=? WHERE attempt_id=?').run(lease.expiresAtMs,task.id);
+    const revoked=revoke();
+    expect(db.query('SELECT proof_node_id,actor_grant_id FROM multiremi_root_management_events WHERE revision_after=? AND action=?').get(revoked.security_revision,revokeUse.action))
+      .toMatchObject({proof_node_id:'task-material',actor_grant_id:'grant-agent'});
   });
 
   it('keeps ordinary attempts ineligible and refuses lease writes without the active fence',()=>{

@@ -14,6 +14,8 @@ Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后
 
 路由可直接调用 `store.withAuthorizedMutation(proof, use, plan, (tx, actor) => ..., fence?)`，传入资源的 workspace、编号键和域目标计划。Store 合并凭据检查的域目标，并在自己的连接上完成授权和回调。投递方使用 `store.withSecurityWrite(fence, plan, callback)` 及同一 Store 的 `readAttemptEligibility(tx, id)`、`readCurrentTaskLease(tx, id)`、`writeCurrentTaskLease(tx, expectedVersion, lease)`。
 
+管理调用传 `use: 'management'` 和实际目标。`grant` 创建人类 grant 时保存签发凭据 ID、family 及证明节点，`revokeGrant`、`grantRuntimeTrust`、`revokeRuntimeTrust`、`revokeFamily` 把锁内复核的证明节点写入 `multiremi_root_management_events.proof_node_id`。事件的 `actor_grant_id` 与 `actor_generation` 标识真实签发主体及其授权代次。登记凭据通过 `credentialOrigin.node` 关联证明，独立密码通过已验证的密码版本节点关联证明。Runtime trust 还需当前机器登记与已验证的 challenge。
+
 `planAttemptAdmission` 规划首次创建或直接重试的锁。`verifyAttemptInvocation` 核验真实调用者与目标 turn；`approveAttemptInputs` 在同一事务中冻结目标、新执行及获准输入。`withAttemptAdmission` 在真实 INSERT 前后分别调用 `admitAttempt` 与 `consumeAdmission`。后者核对已存行和当前来源，消费限当前事务的一次性 ticket。level 10 的 `multiremi_attempt_input_approvals` 保存获准快照与持续来源，`multiremi_attempt_eligibility` 按 attempt 唯一记录初始资格。历史缺行、普通 attempt 和 resume 均不能据此取得新资格。
 
 `readAttemptEligibility(db, tx, attemptId)` 和 `readCurrentTaskLease(db, tx, attemptId)` 使用同一个 `attempt:<id>` 域目标。`writeCurrentTaskLease(db, tx, expectedVersion, lease)` 需要最外层以当前 background term 取得 F，再取得 S；首次 dispatched 使用版本 0，后续 CAS 返回新版本。`multiremi_current_task_leases` 按 attempt 唯一绑定 consumer、run generation、runtime/daemon/incarnation、lease、fence 与过期时间。pending-start 只使用首次 receipt 的固定 deadline，running 复核实时 lease。收据留存的历史 lease/fence 不充当当前授权。

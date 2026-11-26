@@ -107,11 +107,9 @@ export function withSecurityWrite<T>(db: SqlDatabase, fenceTerm: string | undefi
       }
     }
     markRequestReadCacheLockTaken();
-    if (db.dialect === 'postgres') {
-      for (const key of numbers) {
-        if (!db.advisoryXactLock) throw new SecurityAbort('security_state_unavailable');
-        db.advisoryXactLock(key);
-      }
+    for (const key of numbers) {
+      if (db.dialect === 'postgres' && !db.advisoryXactLock) throw new SecurityAbort('security_state_unavailable');
+      db.advisoryXactLock?.(key);
     }
     active.set(db, frame);
     try { return synchronous(frame, () => callback(frame.tx)); }

@@ -1,3 +1,4 @@
+import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import type { Context, Hono } from "hono";
 import { guardRootResourceWrite } from "../helpers/root-access.js";
@@ -54,8 +55,8 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
-  function writeAgent<T>(c: Context, agent: MultiremiAgent, operation: () => T): T {
-    return guardRootResourceWrite(c, store, agent.workspaceId, 'agent', agent.id, operation);
+  function writeAgent<T>(c: Context, agent: MultiremiAgent, operation: () => T, numberKeys?: readonly string[]): T {
+    return guardRootResourceWrite(c, store, agent.workspaceId, 'agent', agent.id, operation, { numberKeys });
   }
 
   app.get("/api/multiremi/agents", (c) => {
@@ -143,7 +144,8 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
   app.delete("/api/multiremi/agents/:id", (c) => {
     const loaded = loadAgentForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    const agent = writeAgent(c, loaded.agent, () => store.archiveAgent(loaded.agent.id));
+    const agent = writeAgent(c, loaded.agent, () => store.archiveAgent(loaded.agent.id),
+      [numberAllocationLockKey(`feishu-bot-audit:${loaded.agent.workspaceId}`)]);
     publishAgentLifecycleEvent(c, store, "agent:archived", agent);
     return c.json({ agent });
   });
@@ -312,7 +314,8 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/agents/:id/archive", (c) => {
     const loaded = loadAgentForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    const agent = writeAgent(c, loaded.agent, () => store.archiveAgent(loaded.agent.id));
+    const agent = writeAgent(c, loaded.agent, () => store.archiveAgent(loaded.agent.id),
+      [numberAllocationLockKey(`feishu-bot-audit:${loaded.agent.workspaceId}`)]);
     publishAgentLifecycleEvent(c, store, "agent:archived", agent);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });

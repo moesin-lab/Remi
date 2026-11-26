@@ -1,4 +1,4 @@
-import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
+import { bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { expect, it } from 'bun:test';
 import { createHash, generateKeyPairSync } from 'node:crypto';
@@ -14,7 +14,7 @@ import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connecti
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 pendingTurnBackendTests('agent dependency resolution', fixture => {
-  it('resolves the execution configuration and rejects stale, incomplete or cyclic protected sources', async () => {
+  it.each(['dependency resolution','POST','PUT'])('checks protected execution configuration for %s', async scenario => {
     const {store} = fixture();
     const ctx = (store as unknown as {ctx: StoreContext}).ctx;
     const db = ctx.db;
@@ -112,6 +112,26 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     const result=withSecurityWrite(db,undefined,grantPlan,tx=>service.grant(tx,service.authorizeWrite(tx,registered,grantUse),{
       subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,expected_revision:grantPlan.expectedRevision,idempotency_key:'grant',reason:'reviewed'}));
     expect(result.grant.subject.id).toBe(agent.id);
+    if (scenario!=='dependency resolution') {
+      store.createWorkspaceMember({ workspaceId:'local', userId:'usr_auth', name:'Root reviewer', role:'admin' });
+      const api = rootClient(store,signing);
+      const path = scenario==='POST' ? '/api/execution-groups' : `/api/execution-groups/${group.id}`;
+      const body = {name:'replacement', provider:'claude', profile_id:profile.id, runtime_ids:[runtime.id],
+        connection:{name:'updated profile',profile:{...profile.profile,model:'updated'}}};
+      const before = store.getExecutionProfile(profile.id,'local');
+      const groups = store.listExecutionGroups('local');
+      const denied = await api(path,undefined,body,scenario);
+      expect(denied.status,await denied.clone().text()).toBe(403);
+      expect(await denied.json()).toMatchObject({error:{code:'root_required'}});
+      if (scenario==='PUT') expect((await api(path,compact,body,scenario,{'If-Match':'"9"'})).status).toBe(409);
+      expect(store.getExecutionProfile(profile.id,'local')).toEqual(before);
+      expect(store.listExecutionGroups('local')).toEqual(groups);
+      const accepted = await api(path,compact,body,scenario,{'If-Match':'"0"'});
+      expect(accepted.status,await accepted.text()).toBe(scenario==='PUT'?200:201);
+      expect(store.getExecutionProfile(profile.id,'local')?.revision).toBe(profile.revision+1);
+      expect(Number(db.query('SELECT config_epoch FROM multiremi_agent_config_epochs WHERE agent_id=?').get(agent.id).config_epoch)).toBe(1);
+      return;
+    }
     const trustSources = [provider,checkpointPolicy].map(ref=>executionTrustNodeId(result.grant.id,'trust',ref));
     const checkSource = (id:string) => withSecurityWrite(db,undefined,{expectedRevision:result.security_revision,workspaceIds:[],numberKeys:[],domainTargets:[`authority:${id}`]},
       tx=>assertUnrevokedAncestry(db,tx,{nodeId:id,generation:result.grant.generation}));

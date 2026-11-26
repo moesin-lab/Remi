@@ -505,6 +505,12 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
           return issued;
         });
       };
+      if (failure==='durable delegation') {
+        db.query("UPDATE multiremi_authority_nodes SET expires_at_ms=? WHERE node_id='runtime-trust'").run(use.expiresAtMs-1);
+        expect(()=>issuePat(PreparedAgentPat.prepare(),false)).toThrow('root_authority_revoked');
+        expect(db.query('SELECT node_id FROM multiremi_durable_delegations').all()).toEqual([]);
+        db.query("UPDATE multiremi_authority_nodes SET expires_at_ms=? WHERE node_id='runtime-trust'").run(use.expiresAtMs);
+      }
       const candidate=PreparedAgentPat.prepare();
       expect(()=>issuePat(candidate,true)).toThrow('rollback PAT');
       expect(candidate.takeCommittedToken()).toBeNull();

@@ -15,14 +15,19 @@ import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
 import { agentApproval, bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
+import { agentDependencyDigest, runtimeExecutionFields } from '@multiremi/store/agent-dependencies.js';
+import { daemonRuntimeId } from '@multiremi/store/helpers.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 pendingTurnBackendTests('production root attempt inputs', fixture => {
-  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch','protected writes','runtime reports','shared skill files'])('admits frozen inputs for %s', async scenario => {
+  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch','protected writes','runtime reports','shared skill files','archive agent','delete agent','cascade runtime','delete runtime','daemon register','runtime upsert'])('admits frozen inputs for %s', async scenario => {
     const { store, createIssue } = fixture();
     const { db } = store as unknown as { db: SqlDatabase };
-    const runtime = store.registerRuntime({ name: 'worker', provider: 'codex', workspaceId: 'local', daemonId: 'worker' });
+    const runtime = store.registerRuntime({ id: daemonRuntimeId('worker','codex'), name: 'worker', provider: 'codex', workspaceId: 'local', daemonId: 'worker' });
+    const removable = scenario==='delete runtime' || scenario==='cascade runtime'
+      ? store.registerRuntime({name:'referenced worker',provider:'claude',workspaceId:'local',daemonId:'worker'}) : null;
+    const active = removable && scenario==='cascade runtime' ? store.createAgent({name:'cascade',provider:'claude',runtimeId:removable.id}) : null;
     const agent = store.createAgent({ name: 'reviewer', provider: 'codex', runtimeId: runtime.id });
     const models = [{id:'first',label:'First',provider:'codex',default:true}];
     if (scenario==='runtime reports') store.updateRuntimeModels(runtime.id,models);
@@ -38,7 +43,7 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     const bearer = service.issueIndependentDashboardSession(proof, (Math.floor(Date.now() / 1000) + 300) * 1000,
       (tx, source, claims) => new JwtMaterials(db).issue(tx, source, claims, jwtSigning));
     const api = rootClient(store, jwtSigning);
-    const http = ['retry WS offer','protected writes','runtime reports','shared skill files'].includes(scenario);
+    const http = ['retry WS offer','protected writes','runtime reports','shared skill files','archive agent','delete agent','cascade runtime','delete runtime','daemon register','runtime upsert'].includes(scenario);
     if (http) store.createWorkspaceMember({ workspaceId: 'local', userId: login.userId, name: 'Root reviewer', role: 'admin' });
     const expiry = Date.now() + 3_600_000;
     const hash = createHash('sha256').update('test-daemon').digest('hex');
@@ -46,6 +51,9 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     db.query("INSERT INTO multiremi_authority_nodes VALUES('trust-node',101,1,'runtime_trust','runtime',?,'system',1,?,NULL,1)").run(runtime.id, expiry);
     db.run("INSERT INTO multiremi_authority_edges VALUES('trust-node',1,101,'machine',1,100,'continuous')");
     db.query("INSERT INTO multiremi_access_tokens(id,name,type,workspace_id,daemon_id,token_hash,token_prefix,created_at) VALUES('token','test','daemon','local','worker',?,'test','now')").run(hash);
+    if (scenario==='daemon register' || scenario==='runtime upsert') {
+      db.query("UPDATE multiremi_access_tokens SET user_id=? WHERE id='token'").run(login.userId);
+    }
     const signerKeys=generateKeyPairSync('ed25519');
     const recipientKeys=generateKeyPairSync('rsa',{modulusLength:3072});
     const signing=signerKeys.publicKey.export({format:'pem',type:'spki'});
@@ -60,6 +68,13 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     db.query("INSERT INTO multiremi_runtime_trusts VALUES('trust',?,1,'inc',?,'trust-node','{}',NULL)").run(runtime.id, challenge.id);
 
     const {sources, executions: [execution]} = agentApproval(store, agent, sourceFile);
+    if (removable) {
+      const fields = runtimeExecutionFields(removable);
+      const ref = { kind:'runtime',id:removable.id,use:'execute',version:1,digest:agentDependencyDigest(fields) };
+      sources.push({ref,content:JSON.stringify(fields),dependencies:[]});
+      const index = sources.findIndex(source=>source.ref.use==='instructions');
+      sources[index] = {...sources[index]!,dependencies:[ref]};
+    }
     const workspace = store.getWorkspace('local')!;
     const scope = {type:'agent', id:agent.id};
     const action = { action:'root.agent-configuration.approve', use:'write', actualTarget:scope };
@@ -84,7 +99,39 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
       withSecurityWrite(db, undefined, plan, tx => service.grant(tx,service.authorizeWrite(tx,proof,{action:'root.grant.create',use:'management',actualTarget:scope}),grantInput));
     const effective = async (id: string) => (await (await api(`/api/root/grants?subject_id=${id}`,bearer)).json()).grants[0].effective;
     const epoch = (id: string) => Number(db.query('SELECT config_epoch FROM multiremi_agent_config_epochs WHERE agent_id=?').get(id).config_epoch);
+    if (['archive agent','delete agent','cascade runtime','delete runtime'].includes(scenario)) {
+      const match = {'If-Match':'"1"'};
+      const response = scenario==='archive agent' ? await api(`/api/agents/${agent.id}/archive`,bearer,{},'POST',match)
+        : scenario==='delete agent' ? await api(`/api/multiremi/agents/${agent.id}`,bearer,undefined,'DELETE',match)
+        : scenario==='cascade runtime' ? await api(`/api/runtimes/${removable!.id}/archive-agents-and-delete`,bearer,{expected_active_agent_ids:[active!.id]},'POST',match)
+        : await api(`/api/runtimes/${removable!.id}`,bearer,undefined,'DELETE',match);
+      expect(response.status,await response.text()).toBe(200);
+      expect(await effective(agent.id)).toBe(false);
+      expect(epoch(agent.id)).toBe(1);
+      return;
+    }
+    if (scenario==='daemon register' || scenario==='runtime upsert') {
+      const batch = scenario==='daemon register';
+      const path = batch ? '/api/daemon/register' : '/api/multiremi/runtimes';
+      const body = batch ? {daemon_id:'worker',runtimes:[{type:'codex',name:'worker',version:'test',maxConcurrency:3}]}
+        : {id:runtime.id,name:'worker',provider:'codex',daemonId:'worker',maxConcurrency:3};
+      const denied = await api(path,'test-daemon',body);
+      expect(denied.status,await denied.clone().text()).toBe(403);
+      expect(await denied.json()).toMatchObject({error:{code:'root_required'}});
+      expect(store.getRuntime(runtime.id)?.maxConcurrency).toBe(runtime.maxConcurrency);
+      expect(await effective(agent.id)).toBe(true);
+      const accepted = await api(path,bearer,body,'POST',{'If-Match':'"1"'});
+      expect(accepted.status,await accepted.text()).toBe(batch ? 200 : 201);
+      expect(store.getRuntime(runtime.id)?.maxConcurrency).toBe(3);
+      expect(epoch(agent.id)).toBe(1);
+      expect(await effective(agent.id)).toBe(false);
+      return;
+    }
     if (scenario==='runtime reports') {
+      store.heartbeatRuntime(runtime.id,{health:{state:'ok',reasons:[]},claimPending:false});
+      expect(store.getRuntimeLite(runtime.id)?.metadata.health).toEqual({state:'ok',reasons:[]});
+      expect(()=>store.heartbeatRuntime(runtime.id,{supportsBatchImport:true,claimPending:false})).toThrow('root_required');
+      expect(store.getRuntimeLite(runtime.id)?.metadata.supports_batch_import).toBeUndefined();
       const request = store.createRuntimeModelListRequest(runtime.id);
       const changed = [{...models[0]!,id:'second'}];
       store.updateRuntimeModels(runtime.id,models);

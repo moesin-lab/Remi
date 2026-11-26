@@ -78,8 +78,17 @@ export function agentDependencyDigest(value: unknown): string {
   return `sha256:${createHash('sha256').update(json).digest('hex')}`;
 }
 
+const disabledHeartbeatCapabilities: Readonly<Record<string, false | 0>> = {
+  planned_restart_negotiated: false, planned_restart: 0, supports_batch_import: false, supports_directory_scan: false,
+  supports_skill_directory: false, feishu_bot_menu: false, feishu_bot_menu_protocol: 0, feishu_concierge_config_v1: false,
+  feishu_decision_card: 0, feishu_issue_decision_card: 0, agent_plugin_protocol: 0,
+};
+
 export function runtimeExecutionFields(runtime: MultiremiRuntime) {
-  const { external_chats, external_chat_models, ...metadata } = runtime.metadata;
+  const { external_chats, external_chat_models, health, ...metadata } = runtime.metadata;
+  for (const [key, disabled] of Object.entries(disabledHeartbeatCapabilities)) {
+    if (metadata[key] === disabled) delete metadata[key];
+  }
   const models = runtime.models.map(({ createdAt, updatedAt, ...model }) => model)
     .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
   return { daemonId: runtime.daemonId, legacyDaemonId: runtime.legacyDaemonId, provider: runtime.provider, runtimeMode: runtime.runtimeMode,

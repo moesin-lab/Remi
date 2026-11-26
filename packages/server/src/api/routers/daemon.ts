@@ -1,4 +1,5 @@
 import type { FeishuBotCommandRequest, FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
+import { effectiveRootProof, protectedWriteVersion } from "../helpers/root-access.js";
 import type { Context, Hono } from "hono";
 import { assertCredentialIssuerAvailable } from '../helpers/login.js';
 import { ensureDaemonProtocolUpgrade } from "../helpers/daemon-protocol-upgrade.js";
@@ -352,6 +353,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     const usesMasterToken = Boolean(authToken)
       && c.req.header("Authorization") === `Bearer ${authToken}`;
     const result = registerDaemonRuntimes(store, { ...body, workspace_id: registerWorkspace }, owner, includeRelay, {
+      authorization: id => ({ proof: effectiveRootProof(c, store, { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'runtime', id } }),
+        version: protectedWriteVersion(c) }),
       allowLegacyDaemonMigration:
         currentAccessToken(c)?.type !== "daemon" && (!authToken || usesMasterToken),
     });

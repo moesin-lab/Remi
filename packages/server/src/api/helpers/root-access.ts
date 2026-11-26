@@ -82,23 +82,27 @@ export function effectiveRootProof(c: Context, store: MultiremiStore, use: Autho
 
 export function runRootMutation<T>(store: MultiremiStore, proof: RegisteredProof, use: AuthorityUse,
   operation: (tx: SecurityTx, actor: ReturnType<AuthorityKernel['authorizeWrite']>, current: CurrentAuthority) => T,
-  workspaceIds: readonly string[] = []): T {
+  workspaceIds: readonly string[] = [], numberKeys: readonly string[] = []): T {
   const plan = store.rootManagement.plan(proof, use);
-  return store.withAuthorizedMutation(proof, use, { ...plan, workspaceIds: [...new Set([...plan.workspaceIds, ...workspaceIds])].sort() }, (tx, actor) => {
+  return store.withAuthorizedMutation(proof, use, { ...plan, numberKeys: [...new Set([...plan.numberKeys, ...numberKeys])].sort(), workspaceIds: [...new Set([...plan.workspaceIds, ...workspaceIds])].sort() }, (tx, actor) => {
     const current = store.rootManagement.requireMutationActor(tx, actor, use);
     return operation(tx, actor, current);
   });
 }
 
+export function protectedWriteVersion(c: Context): number {
+  const match = c.req.header('If-Match')?.match(/^"(0|[1-9]\d*)"$/);
+  return match ? Number(match[1]) : NaN;
+}
+
 export function guardRootResourceWrite<T>(c: Context, store: MultiremiStore, workspaceId: string,
   type: string, id: string, operation: () => T,
-  options?: { version?: number; proof?: RegisteredProof | null; didWrite?: (result: T) => boolean; forceGuard?: boolean }): T {
+  options?: { numberKeys?: readonly string[]; version?: number; proof?: RegisteredProof | null; didWrite?: (result: T) => boolean; forceGuard?: boolean }): T {
   if (!options?.proof && !store.jwtMaterials.isActive()) return operation();
   const root = store.rootManagement;
   const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type, id } };
   const proof = c.req.method === 'GET' ? null : options?.proof ?? effectiveRootProof(c, store, use);
-  const match = c.req.header('If-Match')?.match(/^"(0|[1-9]\d*)"$/);
-  const expectedVersion = options?.version ?? (match ? Number(match[1]) : Number.NaN);
+  const expectedVersion = options?.version ?? protectedWriteVersion(c);
   let fileVersions: Map<string,number> | undefined;
   const header = type==='skill' && c.req.header('X-Skill-File-Versions');
   if (header) {
@@ -121,9 +125,9 @@ export function guardRootResourceWrite<T>(c: Context, store: MultiremiStore, wor
     return result;
   };
   try {
-    if (proof) return runRootMutation(store, proof, use, mutate, [workspaceId]);
+    if (proof) return runRootMutation(store, proof, use, mutate, [workspaceId], options?.numberKeys);
     const expectedRevision = root.readContext(null, 'open_local').security_revision;
-    return store.withSecurityWrite(undefined, { expectedRevision, workspaceIds: [workspaceId], numberKeys: [],
+    return store.withSecurityWrite(undefined, { expectedRevision, workspaceIds: [workspaceId], numberKeys: options?.numberKeys ?? [],
       domainTargets: [`management:${type}:${id}`] }, tx => mutate(tx, null));
   } catch (error) {
     if (error === skipped) return skipped.result as T;

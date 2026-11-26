@@ -1113,8 +1113,9 @@ runMigrations(this.db);
     workspaceId: string,
     input: import("@multiremi/contracts/execution-profile.js").ExecutionGroupInput,
     id = createId("eg"),
+    authorization?: { proof: CredentialProof | null; version: number },
   ) {
-    return this.db.transaction(() => {
+    const save = this.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       let profileId = input.profile_id;
       if (input.connection !== undefined) {
@@ -1133,7 +1134,17 @@ runMigrations(this.db);
       const result = saveExecutionGroup(this.db, workspaceId, id, { ...input, profile_id: profileId });
       this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
       return result;
-    })();
+    });
+    if (!this.jwtMaterials.isActive()) return save();
+    const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'execution-group', id } };
+    const profileId = input.connection !== undefined && typeof input.profile_id === 'string' ? input.profile_id : null;
+    const targets = [`management:execution-group:${id}`, ...(profileId ? [`management:profile:${profileId}`] : [])];
+    return this.withResourceWrite(workspaceId, targets, authorization?.proof, use, tx => {
+      const profile = profileId ? withSecurityTarget(this.db, tx, `management:profile:${profileId}`, () => this.getExecutionProfile(profileId, workspaceId)) : null;
+      const actor = authorization?.proof ? this.rootManagement.authorizeWrite(tx, authorization.proof, use) : null;
+      this.rootManagement.guardProtectedMutation(tx, actor, use, authorization?.version ?? NaN, profile ?? undefined);
+      return save();
+    });
   }
   deleteExecutionGroup(id: string, workspaceId: string) {
     return this.db.transaction(() => {
@@ -3123,7 +3134,7 @@ runMigrations(this.db);
 
   registerDaemonRuntimeBatch(
     inputs: RegisterRuntimeInput[],
-    options: { displayName?: string | null } = {},
+    options: { displayName?: string | null; proof?: CredentialProof | null; version?: number } = {},
   ): MultiremiRuntime[] {
     if (inputs.length === 0) return [];
     const first = inputs[0];
@@ -3165,15 +3176,16 @@ runMigrations(this.db);
       return runtimes;
     });
     const ids = [...new Set(inputs.map(input=>input.id).filter((id): id is string=>!!id))].sort();
-    const runtimes = ids.length && this.jwtMaterials.isActive() ? this.withSecurityWrite(undefined,{
-      expectedRevision:this.rootManagement.readContext(null,'open_local').security_revision,workspaceIds:[workspaceId],numberKeys:[],
-      domainTargets:ids.map(id=>`management:runtime:${id}`),
-    },tx=>{
+    const useFor = (id: string): AuthorityUse => ({action:'protected-resource.write',use:'write',actualTarget:{type:'runtime',id}});
+    const runtimes = ids.length && this.jwtMaterials.isActive() ? this.withResourceWrite(workspaceId,
+      ids.map(id=>`management:runtime:${id}`), options.proof, useFor(ids[0]!), tx=>{
       const before = ids.map(id=>this.runtimeDependencyDigest(id));
       const result = register();
       ids.forEach((id,index)=>{
-        if (before[index]!==this.runtimeDependencyDigest(id)) this.rootManagement.guardProtectedMutation(tx,null,
-          {action:'protected-resource.write',use:'write',actualTarget:{type:'runtime',id}},NaN);
+        if (before[index]===this.runtimeDependencyDigest(id)) return;
+        const use = useFor(id);
+        const actor = options.proof ? this.rootManagement.authorizeWrite(tx, options.proof, use) : null;
+        this.rootManagement.guardProtectedMutation(tx,actor,use,options.version ?? NaN);
       });
       return result;
     }) : register();
@@ -3898,7 +3910,8 @@ runMigrations(this.db);
     supportsDecisionCard?: boolean;
     supportsIssueDecisionCard?: boolean;
   } = {}): MultiremiDaemonHeartbeatAck {
-    return this.runtimes.heartbeatRuntime(runtimeId, options);
+    const heartbeat = () => this.runtimes.heartbeatRuntime(runtimeId, options);
+    return Object.keys(options).some(key => key !== 'claimPending') ? this.guardOrdinaryResource('runtime',runtimeId,heartbeat) : heartbeat();
   }
 
   pendingRuntimeRequests(runtimeId: string) { return this.runtimes.pendingRuntimeRequests(runtimeId); }
@@ -5860,6 +5873,15 @@ runMigrations(this.db);
 
   withSecurityWrite<T>(fence:string|undefined, plan:SecurityLockPlan, operation:(tx:SecurityTx)=>T):T {
     return withSecurityWrite(this.db,fence,plan,operation);
+  }
+
+  private withResourceWrite<T>(workspaceId: string, targets: string[], proof: CredentialProof | null | undefined, use: AuthorityUse,
+    operation: (tx: SecurityTx) => T): T {
+    const plan = proof ? this.rootManagement.plan(proof, use) : {
+      fenceTerm: undefined, expectedRevision: this.rootManagement.readContext(null, 'open_local').security_revision, workspaceIds: [], numberKeys: [], domainTargets: [],
+    };
+    return this.withSecurityWrite(plan.fenceTerm, { ...plan, workspaceIds: [...new Set([...plan.workspaceIds, workspaceId])].sort(),
+      domainTargets: [...new Set([...plan.domainTargets, ...targets])].sort() }, operation);
   }
 
   private readonly observedResources = new Set<string>();

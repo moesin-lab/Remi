@@ -1,3 +1,5 @@
+import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
+import { SecurityAbort } from "@multiremi/store/security-write.js";
 import type { Context, Hono } from "hono";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import { guardRootResourceWrite } from "../helpers/root-access.js";
@@ -32,8 +34,8 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
-  function writeRuntime<T>(c: Context, runtime: NonNullable<ReturnType<typeof store.getRuntime>>, operation: () => T, didWrite?: (result: T) => boolean): T {
-    return guardRootResourceWrite(c, store, runtimeWorkspaceId(runtime), 'runtime', runtime.id, operation, { didWrite });
+  function writeRuntime<T>(c: Context, runtime: NonNullable<ReturnType<typeof store.getRuntime>>, operation: () => T, didWrite?: (result: T) => boolean, numberKeys?: readonly string[]): T {
+    return guardRootResourceWrite(c, store, runtimeWorkspaceId(runtime), 'runtime', runtime.id, operation, { didWrite, numberKeys });
   }
   app.get("/api/daemon/runtimes/:id/endpoint-key", (c) => {
     if (currentAccessToken(c)?.type !== "daemon") return c.json({ error: "daemon token required" }, 403);
@@ -61,6 +63,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       return c.json({ profile: guardRootResourceWrite(c, store, runtimeWorkspaceId(loaded.runtime), 'runtime', loaded.runtime.id,
         () => store.setRuntimeCodexProfile(loaded.runtime.id, body.profile, body.api_key), { forceGuard: true }) });
     } catch (error) {
+      if (error instanceof SecurityAbort) throw error;
       return c.json({ error: error instanceof Error ? error.message : "Invalid Codex profile" }, 400);
     }
   });
@@ -94,6 +97,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       return c.json({ profile: guardRootResourceWrite(c, store, runtimeWorkspaceId(loaded.runtime), 'runtime', loaded.runtime.id,
         () => store.setRuntimeClaudeProfile(loaded.runtime.id, body.profile, body.api_key), { forceGuard: true }) });
     } catch (error) {
+      if (error instanceof SecurityAbort) throw error;
       return c.json({ error: error instanceof Error ? error.message : "Invalid Claude profile" }, 400);
     }
   });
@@ -192,7 +196,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       : scopedBody;
     const invalidGroup = validateRuntimeExecutionGroupInput(c, store, workspaceId, registration.provider, registration);
     if (invalidGroup) return invalidGroup;
-    return c.json({ runtime: store.registerRuntime(registration) }, 201);
+    return c.json({ runtime: existingRuntime ? writeRuntime(c, existingRuntime, () => store.registerRuntime(registration)) : store.registerRuntime(registration) }, 201);
   });
   app.get("/api/multiremi/runtimes/:id", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
@@ -640,7 +644,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     }
     const result = writeRuntime(c, loaded.runtime, () => store.deleteRuntimeWithArchivedAgentCleanup(loaded.runtime.id, {
       abandonIssueWorkspaces: abandon === "true",
-    }), result => result.status === 'deleted');
+    }), result => result.status === 'deleted', [numberAllocationLockKey(`feishu-bot-audit:${runtimeWorkspaceId(loaded.runtime)}`)]);
     if (result.status === "active_issue_workspaces") {
       return c.json({
         error: "cannot delete runtime while it has active issue workspaces; review and explicitly abandon them",
@@ -677,7 +681,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     }
     const result = writeRuntime(c, loaded.runtime, () => store.archiveAgentsAndDeleteRuntime(loaded.runtime.id, expectedIds, {
       abandonIssueWorkspaces: body.abandon_issue_workspaces === true,
-    }), result => result.status === 'ok');
+    }), result => result.status === 'ok', [numberAllocationLockKey(`feishu-bot-audit:${runtimeWorkspaceId(loaded.runtime)}`)]);
     if (result.status === "active_issue_workspaces") {
       return c.json({
         error: "cannot delete runtime while it has active issue workspaces; review and explicitly abandon them",

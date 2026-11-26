@@ -147,7 +147,7 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 受保护资源写入保留路由原有权限检查，并在写事务中检查已登记 root proof 与依赖版本。系统提示词使用请求的 `expectedRevision`，执行端点和 Profile 使用资源自身 revision，其余已接线的配置写入口使用 `If-Match: "<version>"` 与审批或预览的引用版本对应。成功的受保护写推进配置 epoch，让旧审批和 grant 失效。普通仓库列表遇到受保护的分支信息时直接读取现有数据。
 
-Runtime 的 `execute` 审批使用 `runtimeExecutionFields` 加登记的 `incarnation`。摘要包括 daemon 绑定、provider、运行模式、工作区、owner、可见性、执行组、并发数、设备信息、模型目录和 metadata。模型按 ID 排序，忽略目录采集时间。`external_chats` 和 `external_chat_models` 仅用于外部聊天界面，可以随观测更新。其余 metadata（包括未知键）参与摘要。普通 daemon 可以重报相同目录，修改已受保护的执行字段需经 root 授权写。摘要格式变更后需重新审批才能用新摘要签发。
+Runtime 的 `execute` 审批使用 `runtimeExecutionFields` 加登记的 `incarnation`。摘要包括 daemon 绑定、provider、运行模式、工作区、owner、可见性、执行组、并发数、设备信息、模型目录和 metadata。模型按 ID 排序，忽略目录采集时间。`external_chats` 和 `external_chat_models` 仅用于外部聊天界面，可以随观测更新。心跳上报的 `health`（磁盘健康状态、原因和容量）也不计入摘要。心跳能力的明确关闭值与缺省关闭等价；启用能力、修改协议版本以及未知 metadata 仍参与摘要。普通 daemon 可以重报相同目录，修改已受保护的执行字段需经 root 授权写。摘要格式变更后需重新审批才能用新摘要签发。
 
 替换 Skill 文件按路径保留未变文件的 ID、内容与时间戳。事务同时核验父 Skill 及受影响的 `skill-file` 引用，归档也核验变得不可用的文件。`If-Match` 可指定共同版本；版本不同时，请用 `X-Skill-File-Versions` 提交按文件 ID 索引的 JSON 版本对象。任一受保护引用版本不匹配会回滚整个请求。一次写入对每个受影响 Agent 只推进一次 epoch。
 

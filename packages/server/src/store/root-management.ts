@@ -586,8 +586,11 @@ export class RootManagement {
     });
   }
 
-  guardProtectedMutation(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number): void {
-    this.guardMutationSet(tx,actor,request,expectedVersion,[]);
+  guardProtectedMutation(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number, profile?: { id: string; revision: number }): void {
+    if (profile && request.actualTarget.type !== 'execution-group') throw new SecurityAbort('security_target_unplanned');
+    this.guardMutationSet(tx, actor, request, expectedVersion, profile && {
+      kind: 'profile', versions: new Map([[profile.id, profile.revision]]),
+    });
   }
 
   mutateSkill<T>(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, version: number, operation: () => T, fileVersions?: ReadonlyMap<string,number>): T {
@@ -601,17 +604,24 @@ export class RootManagement {
       const result = operation();
       const after = files();
       const changed = [...new Set([...before.keys(),...after.keys()])].filter(key => before.get(key)!==after.get(key));
-      this.guardMutationSet(tx,actor,request,version,changed,fileVersions);
+      this.guardMutationSet(tx, actor, request, version, { kind: 'skill-file',
+        versions: new Map(changed.map(id => [id, fileVersions?.get(id) ?? version])),
+      });
       return result;
     });
   }
 
-  private guardMutationSet(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number, fileIds: string[], fileVersions?: ReadonlyMap<string,number>): void {
+  private guardMutationSet(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number,
+    related?: {kind: 'skill-file' | 'profile'; versions: ReadonlyMap<string, number>}): void {
     const {type,id} = request.actualTarget;
     withSecurityTarget(this.db,tx,`management:${type}:${id}`,()=>{
       const ids = this.db.dialect === 'postgres' ? 'SELECT jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB))' : 'SELECT value FROM json_each(?)';
-      const matches = fileIds.length ? `(r.kind=? AND r.resource_id=?) OR (r.kind='skill-file' AND r.resource_id IN (${ids}))` : 'r.kind=? AND r.resource_id=?';
-      const params = fileIds.length ? [type,id,JSON.stringify(fileIds)] : [type,id];
+      let matches = 'r.kind=? AND r.resource_id=?';
+      const params = [type,id];
+      if (related?.versions.size) {
+        matches = `(${matches}) OR (r.kind=? AND r.resource_id IN (${ids}))`;
+        params.push(related.kind, JSON.stringify([...related.versions.keys()]));
+      }
       const affected = this.db.query(`SELECT DISTINCT g.grant_id,g.subject_id,g.authority_node_id,g.generation,r.kind,r.resource_id,r.resource_version FROM multiremi_agent_grant_protected_refs r
         JOIN multiremi_agent_grant_dependencies d ON d.grant_id=r.grant_id AND d.invalidated_revision IS NULL
         JOIN multiremi_root_grants g ON g.grant_id=d.grant_id AND g.generation=d.grant_generation AND g.revoked_at_ms IS NULL
@@ -621,7 +631,7 @@ export class RootManagement {
       if (!affected.length && !snapshots.length) return;
       if (!actor || request.use!=='write') throw new SecurityAbort('root_required');
       this.requireMutationActor(tx,actor,request);
-      if ([...affected,...snapshots].some(row=>Number(row.resource_version)!==(row.kind==='skill-file' ? fileVersions?.get(row.resource_id) ?? expectedVersion : expectedVersion))) {
+      if ([...affected,...snapshots].some(row=>Number(row.resource_version)!==(related && row.kind===related.kind ? related.versions.get(row.resource_id) : expectedVersion))) {
         throw new SecurityAbort('authority_revision_conflict');
       }
       const revision = this.advanceSecurityRevision();
@@ -654,9 +664,11 @@ export class RootManagement {
       if (!lease || lease.state!=='running' || entry?.eligibility!=='root' || entry.subject_id!==current.subject.id || entry.grant_id!==grant.grantId
         || Number(entry.grant_generation)!==grant.generation) throw new SecurityAbort('root_authority_revoked');
       const approval = approvedAttemptSources(this.db,JSON.parse(entry.manifest_json));
-      const trust = this.db.query(`SELECT authority_node_id FROM multiremi_runtime_trusts WHERE trust_id=? AND generation=? AND incarnation=? AND revoked_at_ms IS NULL`)
+      const trust = this.db.query(`SELECT t.authority_node_id,n.expires_at_ms FROM multiremi_runtime_trusts t
+        JOIN multiremi_authority_nodes n ON n.node_id=t.authority_node_id AND n.generation=t.generation
+        WHERE t.trust_id=? AND t.generation=? AND t.incarnation=? AND t.revoked_at_ms IS NULL`)
         .get(entry.runtime_trust_id,entry.runtime_trust_version,entry.incarnation);
-      if (!approval || !trust) throw new SecurityAbort('root_authority_revoked');
+      if (!approval || !trust || !(use.expiresAtMs <= Number(trust.expires_at_ms))) throw new SecurityAbort('root_authority_revoked');
       const binding = digest(JSON.stringify([use.requestDigest,use.expiresAtMs,current.attemptId,origin.credential.id,origin.credential.version,
         origin.familyId,lease.consumer_id,Number(lease.run_generation),lease.lease_id,lease.fence_term]));
       const key = [grant.grantId,grant.generation,use.action,beneficiary.type,beneficiary.id,use.idempotencyKey];

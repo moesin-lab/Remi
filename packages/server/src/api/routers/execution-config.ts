@@ -1,3 +1,4 @@
+import { createId } from "@multiremi/ids.js";
 import { ExecutionModelPolicyError } from "@multiremi/contracts/execution-endpoint.js";
 import type { Context, Hono } from "hono";
 import type { RouterDeps } from "./deps.js";
@@ -5,7 +6,7 @@ import { parseEndpointConnection, type EndpointProtocol } from "@multiremi/contr
 import { inspectEndpoint } from "@multiremi/relay/endpoint-inspection.js";
 import { SecurityAbort } from "@multiremi/store/security-write.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
-import { guardRootResourceWrite } from "../helpers/root-access.js";
+import { effectiveRootProof, guardRootResourceWrite, protectedWriteVersion } from "../helpers/root-access.js";
 import {
   denyCurrentUserWorkspaceAccess,
   requireHumanWorkspaceAdmin,
@@ -266,9 +267,12 @@ export function registerExecutionConfigRoutes(
           if (loaded instanceof Response) return loaded;
         }
         try {
+          const groupId = id ?? createId("eg");
+          const proof = effectiveRootProof(c, store, { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'execution-group', id: groupId } });
           return c.json(
-            { group: wire(id ? guardRootResourceWrite(c, store, ws, 'execution-group', id, () => store.saveExecutionGroup(ws, body, id))
-              : store.saveExecutionGroup(ws, body, id)) },
+            { group: wire(store.saveExecutionGroup(ws, body, groupId, {
+              proof, version: protectedWriteVersion(c),
+            })) },
             method === "post" ? 201 : 200,
           );
         } catch (error) {

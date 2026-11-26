@@ -363,6 +363,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, { workspace: updated });
       return c.json(issueTopicConfigResponse(workspaceId, issueTopics));
     } catch (error) {
+      if (error instanceof SecurityAbort) throw error;
       return issueTopicConfigErrorResponse(c, error);
     }
   });
@@ -505,6 +506,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       }
       return c.json(workspacePromptsResponse(merged.prompts));
     } catch (error) {
+      if (error instanceof SecurityAbort) throw error;
       if (error instanceof WorkspacePromptRevisionConflictError) {
         return c.json({
           error: error.message,
@@ -520,8 +522,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.on(["PUT", "PATCH"], "/api/workspaces/:id", async (c) => {
     const workspaceId = c.req.param("id");
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId) ?? requireWorkspaceAdmin(c, store, workspaceId);
-    const proof = denied && store.hasWorkspace(workspaceId) ? c.get('multiremiRootProof')?.() : null;
-    if (denied && !proof) return denied;
+    const proof = denied ? effectiveRootProof(c, store, { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'workspace', id: workspaceId } }) : null;
+    if (denied && !proof) return c.get('multiremiRootProof') ? c.json({ error: 'insufficient permissions' }, 403) : denied;
+    if (proof && !store.hasWorkspace(workspaceId)) return c.json({ error: 'workspace not found' }, 404);
     const body = sanitizeWorkspaceSettingsInput(await readJson<Partial<CreateWorkspaceInput>>(c));
     if (hasOwn(body, "settings")) {
       if (denied) return denied;

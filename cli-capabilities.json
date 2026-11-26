@@ -977,6 +977,139 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.system-prompt.get": {
+      "command": "remi workspace system-prompt get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.set": {
+      "command": "remi workspace system-prompt set",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.reset": {
+      "command": "remi workspace system-prompt reset",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.reset",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.history": {
+      "command": "remi workspace system-prompt history",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.history",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.version": {
+      "command": "remi workspace system-prompt version",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.version",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.restore": {
+      "command": "remi workspace system-prompt restore",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.restore",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.diff": {
+      "command": "remi workspace system-prompt diff",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.diff",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.preview": {
+      "command": "remi workspace system-prompt preview",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.preview",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.prompt.get": {
       "command": "remi workspace prompt get",
       "aliases": [],
@@ -12891,6 +13024,15 @@
     "GET /api/workspaces/:id/storage/daemons": {
       "command": "runtime.storage"
     },
+    "GET /api/workspaces/:id/system-prompt": {
+      "command": "workspace.system-prompt.get"
+    },
+    "GET /api/workspaces/:id/system-prompt/versions": {
+      "command": "workspace.system-prompt.history"
+    },
+    "GET /api/workspaces/:id/system-prompt/versions/:versionId": {
+      "command": "workspace.system-prompt.version"
+    },
     "GET /api/workspaces/:workspaceId/feishu/chats": {
       "command": "feishu.chats.list"
     },
@@ -14131,6 +14273,15 @@
     "POST /api/workspaces/:id/ssh-mesh/test": {
       "command": "workspace.ssh-mesh.test"
     },
+    "POST /api/workspaces/:id/system-prompt/preview": {
+      "command": "workspace.system-prompt.preview"
+    },
+    "POST /api/workspaces/:id/system-prompt/reset": {
+      "command": "workspace.system-prompt.reset"
+    },
+    "POST /api/workspaces/:id/system-prompt/restore": {
+      "command": "workspace.system-prompt.restore"
+    },
     "POST /api/workspaces/:workspaceId/feishu/endpoints/:name/check": {
       "command": "feishu.endpoint.check"
     },
@@ -14404,6 +14555,9 @@
     },
     "PUT /api/workspaces/:id/storage": {
       "command": "workspace.storage.set"
+    },
+    "PUT /api/workspaces/:id/system-prompt": {
+      "command": "workspace.system-prompt.set"
     },
     "PUT /api/workspaces/:workspaceId/scm/connections/:connectionId/repositories/:repositoryId": {
       "command": "scm.repository.bind"

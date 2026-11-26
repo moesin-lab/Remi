@@ -270,10 +270,10 @@ describe("CLI capabilities manifest", () => {
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(manifest.routes["GET /api/projects/:id/activity"]).toEqual({command:"project.activity"});
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 660,
+      mapped: 667,
       exempt: 184,
       missing: 0,
-      total: 844,
+      total: 851,
     });
     // PR #97 (MUL-168): these four loopback-only, dedicated-token endpoints are
     // the supervisor's slot lifecycle protocol, not user-facing CLI capabilities.

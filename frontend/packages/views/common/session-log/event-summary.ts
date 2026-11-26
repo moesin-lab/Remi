@@ -7,7 +7,7 @@ export const INTERNAL_ID_PREFIXES = [
   "hrq", "inb", "inv", "ises", "iss", "kout", "krun", "ksrc", "ksub", "lbl", "mconn", "mem", "mlease", "mout", "msg", "msrc",
   "nch", "ndl", "orga", "paud", "pdoc", "pdrev", "pin", "pop", "price", "prj", "prov", "qcl", "qmsg", "rck", "rct", "repo", "res", "rt", "run", "rwbatch", "rwdoc",
   "rwjob", "rwlease", "rwrev", "rws", "rxn", "sar", "sce", "scm", "scr", "scv", "sdl", "sev", "sevt", "sfx", "sil", "skf", "skl",
-  "spart", "sqd", "sqm", "srb", "sres", "sshinvalidate", "sshprobe", "sshrekey", "steer", "sub", "trg", "tsk", "usr", "whd", "ws",
+  "spart", "spd", "spv", "sqd", "sqm", "srb", "sres", "sshinvalidate", "sshprobe", "sshrekey", "steer", "sub", "trg", "tsk", "usr", "whd", "ws",
 ] as const;
 const INTERNAL_ID = new RegExp(`\\b(?:${INTERNAL_ID_PREFIXES.join("|")})_[a-zA-Z0-9][a-zA-Z0-9_-]*\\b`, "g");
 

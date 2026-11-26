@@ -1,7 +1,7 @@
 import { expect } from 'bun:test';
 import type { SqlDatabase } from '../../packages/server/src/store/db/postgres.js';
 import { runMigrations, runStartupMigrations } from '../../packages/server/src/store/migrations.js';
-import { assertSchemaCompatible, readSchemaLevels } from '../../packages/server/src/store/schema-levels.js';
+import { assertSchemaCompatible, readSchemaLevels, SCHEMA_EXPAND_LEVEL } from '../../packages/server/src/store/schema-levels.js';
 import { runSchemaExpands } from '../../packages/server/src/store/schema-migration-runner.js';
 import { SCHEMA_MIGRATIONS } from '../../packages/server/src/store/schema-migrations.js';
 
@@ -10,7 +10,7 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
   const restoreLevel2 = () => {
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
-      DELETE FROM multiremi_schema_steps WHERE level=3;
+      DELETE FROM multiremi_schema_steps WHERE level>=3;
       UPDATE multiremi_schema_meta SET expand_level=2;`);
   };
   runMigrations(db);
@@ -31,7 +31,7 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
     if (historicalMaintenance) restoreLevel2();
     if (historicalMaintenance) runMigrations(db, { historicalMaintenance: true });
     else runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 3, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 2, maxLevel: 2 })).not.toThrow();
     expect(db.query('SELECT * FROM multiremi_planned_restarts').all()).toEqual([]);
     const indexes = db.dialect === 'postgres'

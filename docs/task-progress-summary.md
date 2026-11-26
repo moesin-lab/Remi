@@ -16,11 +16,11 @@
 - **生成**：`packages/server/src/worker/progress-summarizer.ts` 对小模型做单次无状态调用。
   输入 = 任务标题 + 原始需求截断 + 自上次摘要以来消息的压缩视图（工具名 + 关键参数 + 文本片段，字符预算内保留最新）+ 上一条摘要；
   输出 = 一句中文进度 + 可选 step/total 估计（JSON，宽松解析）。
-- **传输**：默认 `auto` 在 OpenAI 兼容配置可解析时优先调用 `/v1/chat/completions`（默认 Luna）；
+- **传输**：默认 `auto` 优先使用可用的 OpenAI Chat Completions（默认 Luna）。系统绑定的 Chat 端点在协议基址后直接追加 `/chat/completions`；旧 relay 基址缺少 `/v1` 时先补齐。Anthropic 请求保留基址的自定义路径前缀，并确保 `/v1/messages` 中的版本段不会重复。
   OpenAI HTTP 错误或超时后，本任务切换并记住使用 Anthropic Messages API。部分 workspace Relay 只放行
   真实 Claude Code 客户端，Anthropic API 返回 HTTP 4xx/5xx 后会继续切到 `claude -p`，避免重复撞网关。
   CLI 使用任务 provider env、独立临时 cwd 和同一超时预算。
-- **凭证**：Anthropic API/CLI 复用任务自身的 provider 配置（workspace Relay 下发的
+- **凭证**：工作区绑定系统 AI 端点时，摘要从对应协议端点取得基址、认证和额外 HTTP 头。没有系统端点绑定时，Anthropic API/CLI 复用任务自身的 provider 配置（workspace Relay 下发的
   `ANTHROPIC_BASE_URL/AUTH_TOKEN`，或本机 `~/.claude/settings.json` 的 env），否则回退 daemon 进程环境变量；
   OpenAI 兼容通道除专用环境变量覆盖外，从 workspace Relay fragment 读取任务网关地址，
   key 依次读取专用覆盖、`OPENAI_API_KEY` 环境变量、`$HOME/.codex/auth.json`。
@@ -30,7 +30,7 @@
 
 ## 配置
 
-工作区所有者和管理员可在 **Settings → Model Gateway → 任务进度摘要** 配置传输通道、
+工作区所有者和管理员可在 **设置 → 系统 AI → 任务进度摘要** 配置传输通道、
 OpenAI 兼容模型和 Claude 兜底模型。设置保存在 workspace `settings.progress_summary`，
 随 daemon 心跳下发，下一次任务启动时生效；模型输入留空即使用内置默认值。
 
@@ -41,8 +41,7 @@ OpenAI 兼容模型和 Claude 兜底模型。设置保存在 workspace `settings
 | OpenAI 兼容模型 | `progress_summary.openai_model` | `MULTIREMI_PROGRESS_SUMMARY_OPENAI_MODEL` | `gpt-5.6-luna` |
 
 优先级为 **daemon 环境变量 > workspace settings > 内置默认**。workspace settings 只接受上表三个
-非敏感字段；API key 不得写入 settings，因为该对象会下发给 workspace 成员和 daemon。网关地址、
-凭证及触发阈值仍仅在 daemon 环境配置：
+非敏感字段；API key 不得写入 settings，因为该对象会下发给 workspace 成员和 daemon。系统端点的地址与凭证由网关管理；下表列出 daemon 参数及旧配置的回退来源。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |

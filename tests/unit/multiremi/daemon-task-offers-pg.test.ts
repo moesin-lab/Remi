@@ -68,7 +68,7 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     } finally { await h.close(); }
   });
 
-  it("migrates both timestamp columns and holds accepted dispatches until disconnect", async () => {
+  it("preserves both timestamps and legacy execution ownership across disconnect", async () => {
     const h = fixture();
     try {
       const columns = db.query("PRAGMA table_info(multiremi_turn_attempts)").all().map(row => row.name);
@@ -80,7 +80,8 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
       db.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
       expect(store.claimTask(h.id)).toBeNull();
       h.session.handleSocketClose();
-      expect(store.claimTask(h.id)?.id).toBe(task.id);
+      expect(store.getTask(task.id)).toMatchObject({status:'dispatched',runtimeId:h.id,acceptedAt:'2000-01-01T00:00:00.000Z'});
+      expect(store.claimTask(h.id)).toBeNull();
     } finally { await h.close(); }
   });
   it("requeues a rejected entity and dispatches it only after the 30s cooldown", async () => {

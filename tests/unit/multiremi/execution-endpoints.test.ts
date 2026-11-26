@@ -151,6 +151,94 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(store.getExecutionEndpointCatalog(endpoint.id, "other")).toEqual([]);
   });
 
+  it("caches ID-only catalog reads for a migrated relay and isolates previews and stale revisions", async () => {
+    const { store, db } = fixture();
+    let model = "saved-model";
+    let beforeResponse: (() => void) | undefined;
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+      if (new URL(request.url).pathname !== "/proxy/v1/models") return new Response(null, { status: 404 });
+      beforeResponse?.();
+      return Response.json({ data: [{ id: model }] });
+    } });
+    try {
+      const baseUrl = `${upstream.url.origin}/proxy/v1/`;
+      db.run(`INSERT INTO multiremi_relay_config(workspace_id,engine,fragment,auth_token,revision,updated_at)
+        VALUES('local','claude',?,?,1,?)`, [JSON.stringify({ env: { ANTHROPIC_BASE_URL: baseUrl } }), key, new Date().toISOString()]);
+      db.run("DELETE FROM multiremi_schema_migrations WHERE id='execution_endpoints_v1'");
+      runMigrations(db, { historicalMaintenance: true });
+      const endpoint = store.getExecutionEndpoint(store.getSystemModelEndpoints("local")["anthropic-messages"]!, "local")!;
+      expect(endpoint.connection.base_url).toBe(baseUrl);
+      const app = createMultiremiApp({ store });
+      const inspect = async (overrides: Record<string, unknown> = {}) => {
+        const response = await app.request("/api/execution-endpoints/inspect", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace_id: "local", endpoint_id: endpoint.id, operation: "models", protocol: "anthropic-messages", ...overrides }) });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.inspection.results).toMatchObject([{ state: "ok", models: [{ id: model }] }]);
+        return body.persisted;
+      };
+      const catalogs = async () => {
+        const response = await app.request(`/api/execution-endpoints/${endpoint.id}/catalog?workspace_id=local`);
+        expect(response.status).toBe(200);
+        return (await response.json()).catalogs;
+      };
+      expect(await inspect()).toBe(true);
+      expect(await catalogs()).toMatchObject([{ revision: endpoint.revision, models: [{ id: model }] }]);
+      model = "editor-refresh";
+      expect(await inspect({ protocol: undefined })).toBe(true);
+      expect(await catalogs()).toMatchObject([{ protocol: "anthropic-messages", models: [{ id: model }] }]);
+      model = "saved-null";
+      expect(await inspect({ connection: null })).toBe(true);
+      const saved = await catalogs();
+      expect(saved).toMatchObject([{ models: [{ id: model }] }]);
+      model = "preview";
+      expect(await inspect({ connection: endpoint.connection })).toBe(false);
+      expect(await inspect({ api_key: "preview-key" })).toBe(false);
+      expect(await catalogs()).toEqual(saved);
+      beforeResponse = () => { store.saveExecutionEndpoint("local", { name: "Updated", connection: endpoint.connection }, endpoint.id); };
+      await inspect();
+      const updated = store.getExecutionEndpoint(endpoint.id, "local")!;
+      expect(updated.revision).toBeGreaterThan(endpoint.revision);
+      expect(await catalogs()).toEqual(saved);
+      beforeResponse = undefined;
+      expect(await inspect({ connection: updated.connection })).toBe(false);
+      expect(await catalogs()).toEqual(saved);
+    } finally {
+      upstream.stop(true);
+    }
+  });
+
+  it("refreshes and reads one saved protocol catalog with workspace-scoped human credentials", async () => {
+    const { store } = fixture();
+    const endpoint = store.saveExecutionEndpoint("local", { name: "System catalog", connection: { ...connection,
+      options: { fetch_models: false, manual_models: [{ id: "summary" }] } }, api_key: key });
+    const app = createMultiremiApp({ store, authToken: "master" });
+    const owner = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "Owner", userId: "local" });
+    const daemon = await store.createAccessToken({ workspaceId: "local", type: "daemon", name: "Daemon" });
+    const inspect = (token: string, protocol: string) => app.request("/api/execution-endpoints/inspect", {
+      method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: "local", endpoint_id: endpoint.id, operation: "models", protocol }),
+    });
+    const catalog = (token: string, workspace: string) => app.request(`/api/execution-endpoints/${endpoint.id}/catalog?workspace_id=${workspace}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect((await inspect(daemon.token, "anthropic-messages")).status).toBe(403);
+    expect((await catalog(daemon.token, "local")).status).toBe(403);
+    expect((await inspect(owner.token, "openai-chat-completions")).status).toBe(400);
+    const refresh = await inspect(owner.token, "anthropic-messages");
+    expect(refresh.status).toBe(200);
+    const inspection = await refresh.json();
+    expect(inspection.persisted).toBe(true);
+    expect(inspection.inspection.results).toMatchObject([{ protocol: "anthropic-messages", state: "manual" }]);
+    expect(JSON.stringify(inspection)).not.toContain(key);
+    const snapshot = await catalog(owner.token, "local");
+    expect(snapshot.status).toBe(200);
+    expect((await snapshot.json()).catalogs).toMatchObject([{ protocol: "anthropic-messages", models: [{ id: "summary" }] }]);
+    const other = store.createWorkspace({ name: "Other" });
+    const otherOwner = await store.createAccessToken({ workspaceId: other.id, type: "pat", name: "Other owner", userId: "local" });
+    expect((await catalog(otherOwner.token, other.id)).status).toBe(404);
+  });
+
   it("requires endpoint options support before reporting a binding ready", () => {
     const { store } = fixture();
     const endpoint = store.saveExecutionEndpoint("local", { name: "Manual catalog", connection: { ...connection,

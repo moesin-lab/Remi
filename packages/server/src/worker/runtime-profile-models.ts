@@ -3,6 +3,7 @@ import type { RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import type { MultiremiRuntimeModel } from "@multiremi/contracts/types.js";
 import { proxyFetch } from "@shared/proxy-fetch.js";
 import { readCapped } from "@multiremi/relay/http.js";
+import { v1BaseUrl } from "@multiremi/relay/protocol-url.js";
 import { validCodexNativeCatalog } from "@multiremi/contracts/codex-model-catalog.js";
 import { validateCodexModelCatalog } from "@acp/model-catalog-validation.js";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -37,7 +38,8 @@ async function discoverListedRuntimeModels(
   validate: typeof validateCodexModelCatalog = validateCodexModelCatalog,
 ): Promise<MultiremiRuntimeModel[]> {
   const base = profile.base_url.replace(/\/+$/, "");
-  const url = new URL(profile.endpoint_options?.models_url ?? base + (provider === "antigravity" ? "/v1beta/models" : provider === "claude" && !base.endsWith("/v1") ? "/v1/models" : "/models"));
+  const protocolBase = provider === "claude" ? v1BaseUrl(base) : base;
+  const url = new URL(profile.endpoint_options?.models_url ?? `${protocolBase}${provider === "antigravity" ? "/v1beta/models" : "/models"}`);
   const headers: Record<string, string> = { Accept: "application/json", ...profile.endpoint_options?.headers };
   if (provider === "claude" && (profile as RuntimeClaudeProfile).auth_header === "x-api-key") headers["x-api-key"] = token;
   else headers.Authorization = `Bearer ${token}`;

@@ -79,8 +79,10 @@ pendingTurnBackendTests("pending turn offer rescind", (fixture) => {
           const socket = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return text.length; }, close() {} },
             { accessToken: null, masterToken: true });
           await socket.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2,
-            cli_version: DAEMON_MIN_CLI_VERSION, daemon_id: "dmn_requeue", caps: ["offer"],
+            cli_version: DAEMON_MIN_CLI_VERSION, daemon_id: "dmn_requeue", caps: ["offer", "prompt.policy.adopt.v1"],
             runtimes: [{ runtime_id: runtime.id, provider: "codex", max_concurrency: 1, active_task_ids: [] }] } }));
+          await layer.drain();
+          await socket.handleMessage(JSON.stringify({v:2,t:'runtime.ready',rt:runtime.id,p:{active_task_ids:[],prepared_offers:[]}}));
           await layer.drain();
           return { layer, frames };
         };

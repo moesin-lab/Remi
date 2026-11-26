@@ -1,6 +1,8 @@
+import { DEFAULT_SYSTEM_PROMPT_CONTENT, type SystemPromptPolicyBinding, type SystemPromptContent } from "@multiremi/contracts/system-prompt-policy.js";
+import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { buildAgentInstructions, buildTaskPrompt, buildTaskPromptArtifact } from "@daemon/agent-runtime/prompts/ephemeral.js";
+import { buildAgentInstructions, buildTaskPrompt, buildTaskPromptArtifact, fitInstructionPieces } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import { buildSteerInjectionPrompt, steerMessageText } from "@multiremi/worker/steer.js";
 import { replayInputHint, unreadRangeHint } from "@multiremi/contracts/session-input.js";
@@ -324,5 +326,60 @@ describe("slash commands in the turn input (ADR 0025)", () => {
     expect(prompt).toStartWith("[Alice] /logout");
     expect(bridgeReadsCommand(prompt)).toBe(false);
     expect(buildSteerInjectionPrompt([steer("/logout")], { provider: "codex", alwaysLabel: true })).toBe("[Member mem_alice] /logout");
+  });
+});
+
+
+describe("System Prompt policy runtime", () => {
+  const binding = (content: SystemPromptContent, mode: "custom" | "default" = "custom"): SystemPromptPolicyBinding => ({
+    format: 1, workspaceId: "local", documentId: "spd_1", versionId: "spv_2", versionNumber: 2,
+    mode, defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision, content,
+    contentHash: hashSystemPromptContent(content), legacyCompatible: false,
+  });
+  const empty: SystemPromptContent = { common: "", code_delivery: "", chat_delivery: "", issue_delivery: "", finishing: "" };
+
+  it("renders empty custom slots without secretly repeating editable defaults, preserving protocols and other layers", () => {
+    const instructions = buildAgentInstructions(issueTurn([], [], { systemPromptPolicy: binding(empty),
+      workspacePrompt: "Workspace appendix remains", project: null }));
+    for (const text of Object.values(DEFAULT_SYSTEM_PROMPT_CONTENT).filter(Boolean)) expect(instructions).not.toContain(text);
+    expect(instructions).not.toContain("## Finishing");
+    expect(instructions).toContain("always requires explicit user authorization");
+    expect(instructions).toContain("Never deliver by workspace path alone");
+    expect(instructions).toContain("## Issue Execution and Escalation");
+    expect(instructions).toContain("Workspace appendix remains");
+    expect(instructions).toContain("Answer briefly.");
+  });
+
+  it("uses the server's default-mode content and only falls back to the local catalog for absent old-server wire", () => {
+    const content = { ...empty, common: "SERVER DEFAULT FROM ANOTHER RELEASE", finishing: "Server finishing" };
+    const bound = binding(content, "default");
+    const instructions = buildAgentInstructions(issueTurn([], [], { system_prompt_policy: bound }));
+    expect(instructions).toContain(content.common);
+    expect(instructions).toContain(content.finishing);
+    expect(instructions).not.toContain(DEFAULT_SYSTEM_PROMPT_CONTENT.code_delivery);
+    expect(buildAgentInstructions(issueTurn([], []))).toContain(DEFAULT_SYSTEM_PROMPT_CONTENT.code_delivery);
+    const artifact = buildTaskPromptArtifact(chatTurn([], [], { systemPromptPolicy: binding({ ...empty, common: "POLICY ONLY" }) }));
+    expect(artifact.instructions).toContain("POLICY ONLY");
+    expect(artifact.prompt).not.toContain("POLICY ONLY");
+  });
+
+  it("rejects a malformed, corrupt or cross-workspace snapshot rather than silently using local defaults", () => {
+    const policy = binding(empty);
+    expect(() => buildAgentInstructions(chatTurn([], [], { systemPromptPolicy: { ...policy, format: 2 } as any }))).toThrow("Invalid system prompt");
+    expect(() => buildAgentInstructions(chatTurn([], [], { systemPromptPolicy: { ...policy, workspaceId: "foreign" } }))).toThrow("Invalid system prompt");
+    expect(() => buildAgentInstructions(chatTurn([], [], { systemPromptPolicy: { ...policy, contentHash: "corrupt" } }))).toThrow("hash mismatch");
+  });
+
+  it("shrinks variable pieces all the way to read pointers, preserves UTF-8 and refuses an oversized protected protocol", () => {
+    const fixed = "PROTECTED START\nPROTECTED END";
+    const pointer = "read the rest with `remi workspace system-prompt get local`";
+    const text = fitInstructionPieces([fixed, { body: "😀".repeat(500), rest: pointer }], 160);
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(160);
+    expect(text).toContain(fixed);
+    expect(text).toContain(pointer);
+    expect(text).not.toContain("�");
+    expect(text).toContain("1000 characters omitted");
+    expect(() => fitInstructionPieces([fixed], 10)).toThrow("Protected instruction budget exceeded");
+    expect(() => fitInstructionPieces([fixed, { body: "text", rest: pointer }], 10)).toThrow("Protected instruction budget exceeded");
   });
 });

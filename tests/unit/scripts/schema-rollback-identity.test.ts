@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { sha256, validateAsset, validateManifest, validatePublishRun, verifiedImageInvocation } from '../../../scripts/schema-rollback-identity.ts';
+import { sha256, validateAsset, validateManifest, validatePublishRun, verifiedImageInvocation } from '../../../scripts/schema-rollback-identity.js';
 
 const ref = 'a'.repeat(40), digest = 'b'.repeat(64);
 const base = 'https://github.com/moesin-lab/Remi';

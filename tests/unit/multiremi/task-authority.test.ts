@@ -1,9 +1,8 @@
-import { createMultiremiApp, startMultiremiServer } from '@multiremi/api.js';
+import { startMultiremiServer } from '@multiremi/api.js';
 import { createHub } from '@multiremi/api/hub/hub-core.js';
 import { createLocalHubTransport } from '@multiremi/api/hub/hub-transport.js';
 import { authenticateBrowserWebSocket, nextWebSocketMessage } from './helpers.js';
 import { deltaTraceEvent } from '../../helpers/turn-trace.js';
-import type { MultiremiStore } from '@multiremi/store/store.js';
 import { expect, it } from 'bun:test';
 import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
@@ -21,7 +20,7 @@ import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js'
 import { planVerifiedAttemptWrite } from '@multiremi/store/attempt-admission.js';
 
 import { PreparedAgentPat } from '@multiremi/store/durable-delegation.js';
-import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
+import { bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
 import { prepareRunInstallation, acknowledgeRunEnvironment } from '@multiremi/worker/root-run-installation.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
@@ -49,26 +48,6 @@ async function raceIssuers(db:SqlDatabase,databaseUrl:string|undefined,inputs:[R
     const copy=databaseUrl?null:openSqliteDatabase(database);
     try { verify(results,copy ? copy as unknown as SqlDatabase : db); } finally { copy?.close(); }
   } finally { await Promise.all(workers.map(worker=>worker.terminate())); rmSync(directory,{recursive:true,force:true}); }
-}
-
-function rootClient(store: MultiremiStore, signing: { domainId: string; keyEpoch: string; secret: string }) {
-  const master = 'isolated-master-token';
-  const { request } = createMultiremiApp({ store, authToken: master });
-  return async (path: string, token = master, body?: object, method = body ? 'POST' : 'GET') => {
-    const env = { JWT_SECRET: signing.secret, MULTIREMI_JWT_SIGNING_DOMAIN: signing.domainId, MULTIREMI_JWT_KEY_EPOCH: signing.keyEpoch };
-    const prior = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
-    Object.assign(process.env, env);
-    try {
-      return await request(path, { method, headers: {
-        authorization: 'Bearer ' + token, ...(body && { 'content-type': 'application/json' }),
-      }, ...(body && { body: JSON.stringify(body) }) });
-    } finally {
-      for (const [key, value] of Object.entries(prior)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-  };
 }
 
 pendingTurnBackendTests('task and mutation authority', fixture=>{
@@ -547,6 +526,20 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
         transport_identity: 'agent_pat', authenticated_subject: beneficiary, effective_root: true,
       });
       expect((await api('/api/tokens', issuedPat.token)).status).toBe(401);
+      const humanBearer = service.issueIndependentDashboardSession(passwordProof, (Math.floor(Date.now() / 1000) + 300) * 1000,
+        (tx, source, claims) => new JwtMaterials(db).issue(tx, source, claims, signing));
+      db.run("INSERT INTO multiremi_users(id,name,email,created_at,updated_at) VALUES('usr_delegated','recipient','delegate@example.invalid','now','now')");
+      db.run("INSERT INTO multiremi_password_credentials SELECT 'usr_delegated','delegate@example.invalid',password_hash,updated_at FROM multiremi_password_credentials WHERE user_id='usr_auth'");
+      nodes('delegate-identity', 'independent_identity', 'user', 'usr_delegated', []);
+      nodes('delegate-password', 'password', 'user', 'usr_delegated', ['delegate-identity']);
+      db.run("INSERT INTO multiremi_password_authority_versions SELECT 'usr_delegated',1,verifier_digest,'delegate-password','delegate-identity' FROM multiremi_password_authority_versions WHERE user_id='usr_auth'");
+      const delegated = await api('/api/root/grants', issuedPat.token, {
+        subject: { type: 'user', id: 'usr_delegated' }, expires_at: patRequest.expires_at, idempotency_key: 'pat-subgrant',
+        expected_revision: (await (await api('/api/root/context', issuedPat.token)).json()).security_revision, reason: 'delegated review',
+      });
+      const delegatedGrant = await delegated.json();
+      expect(delegated.status, JSON.stringify(delegatedGrant)).toBe(200);
+      expect(delegatedGrant.grant).toMatchObject({ issuer: beneficiary, origin_attempt_id: task.id, origin_family_id: issuedPat.family_id, effective: true });
       const peer=store.createAgent({name:'delegation target',provider:'codex',runtimeId:execution.runtimeId});
       const childDigest=hash('shared fixture for child grant');
       const childKernel=new RootManagement(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:childDigest,trustVersions:[{id:'trust',version:1}],
@@ -564,6 +557,14 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       expect(service.registeredCredentials.verify(token.token).kind).toBe('invalid');
       expect(service.resolveCurrent(patProof,use).effectiveRoot).toBe(true);
       expect((await api('/api/root/grants', issuedPat.token)).status).toBe(200);
+      const revokePatOrigin = await api(`/api/root/delegations/${issuedPat.origin_id}/revoke`, humanBearer, {
+        expected_revision: (await (await api('/api/root/context', humanBearer)).json()).security_revision,
+        idempotency_key: 'revoke-http-pat-origin', reason: 'retire source', reason_code: 'operator_security_revoke',
+      });
+      expect(revokePatOrigin.status).toBe(200);
+      expect((await api('/api/root/context', issuedPat.token)).status).toBe(401);
+      expect(await (await api('/api/root/grants?subject_id=usr_delegated', humanBearer)).json()).toMatchObject({ grants: [{ effective: false }] });
+      expect((await api('/api/root/context', raw)).status).toBe(200);
       const childStatus=()=>service.listRootGrants(patProof,{limit:100,cursor:'',subjectType:'agent',subjectId:peer.id,status:''}).grants.find(grant=>grant.id===child.id);
       expect(childStatus()?.effective).toBe(true);
       const childOrigin=db.query(`SELECT node_id FROM multiremi_durable_delegations WHERE beneficiary_id=? AND action='root.grant.create'`).get(peer.id).node_id;

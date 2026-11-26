@@ -7,7 +7,7 @@ import { compatibilityInboxScope, denyAttachmentAccess, denyCurrentUserWorkspace
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import { loadConversation, messageActor, messageResponse, canAccessConversationTask, conversationEntryVisibility, canReadDelegationResult } from "../helpers/conversations.js";
 import { persistUploadedAttachments, detectContentTypeFromFilename, safeFilename, uploadedAttachmentPath } from "../helpers/uploads.js";
-import { currentAccessToken, currentTaskAccessToken, currentRequestUserId } from "../wire/context.js";
+import { authenticatedRequestUserId, currentAccessToken, currentTaskAccessToken, currentRequestUserId } from "../wire/context.js";
 import { parseTraceWindow } from "../trace/request.js";
 import type { RouterDeps } from "./deps.js";
 import { IssueDecisionError } from "@multiremi/store/repos/issues-repo.js";
@@ -20,6 +20,8 @@ import { OrganizerActionError } from "../../organizer/settings.js";
 import { ActiveIssueRunError, ChatIssueTaskConflictError, TaskSessionArchivedError } from "@multiremi/store/repos/tasks-repo.js";
 import { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
 import { issueDependencyErrorResponse } from "../wire/issues.js";
+import { readRootAttemptApproval, requireRootProof } from "../helpers/root-access.js";
+import { SecurityAbort } from "@multiremi/store/security-write.js";
 
 class InputError extends Error {}
 function number(value: unknown, fallback?: number): number | undefined {
@@ -61,6 +63,7 @@ function boolean(value: unknown, fallback: boolean): boolean {
 async function action(c: Context, run: () => unknown | Promise<unknown>): Promise<Response> {
   try { const result = await run(); return result instanceof Response ? result : c.json(result); }
   catch (error) {
+    if (error instanceof SecurityAbort) throw error;
     if (error instanceof ChatIssueTaskConflictError) return c.json({ error: "forbidden" }, 403);
     if (error instanceof ActiveIssueRunError) return c.json({ error: error.message, code: "active_run_exists" }, 409);
     if (error instanceof TaskSessionArchivedError) return c.json({ error: error.message, code: "session_archived" }, 409);
@@ -172,6 +175,17 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
         if (!target || target.workspaceId !== conversation.workspaceId) throw new InputError("recipient not found");
       }
       const dispatch = kind === "request" && (to.type === "agent" || to.type === "role");
+      const requiresAdmission = dispatch && wake === 'now' && to.type === 'agent' && store.rootManagement.hasActiveAgentGrant(to.ref);
+      if (!requiresAdmission && input.approved_input_messages !== undefined) throw new SecurityAbort('root_required');
+      let admission: Parameters<typeof store.sendMessage>[4];
+      if (requiresAdmission) {
+        const proof = requireRootProof(c);
+        const member = store.findWorkspaceMemberForUser(authenticatedRequestUserId(c), conversation.workspaceId);
+        if (!member || currentTaskAccessToken(c) || files.length || input.attachment_ids?.length || input.reply_to_id
+          || input.checkpoint !== undefined || input.provider_state !== undefined) throw new SecurityAbort('root_required');
+        sender = { type: 'member', id: member.id };
+        admission = { proof, approval: readRootAttemptApproval(input.approved_input_messages, true) };
+      }
       const coordinating = "coordinating" in conversation && conversation.coordinating;
       if (coordinating && (!dispatch || input.reply_to_id || input.options || input.attachment_ids?.length || files.length)) {
         return c.json({ error: "Topic coordination does not grant Session content access" }, 403);
@@ -282,9 +296,9 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
             || !canTaskCoordinateSession(c, store, target.workSession))) {
             throw new IssueDecisionError(403, "Topic coordination is limited to its bound Issue and Chat");
           }
-        }); }
+        }, admission); }
         catch(error){
-          if(error instanceof IssueDependencyError || error instanceof IssueDecisionError) throw error;
+          if(error instanceof IssueDependencyError || error instanceof IssueDecisionError || error instanceof SecurityAbort) throw error;
           throw new InputError(error instanceof Error ? error.message : 'Message write failed');
         }
       };
@@ -653,17 +667,25 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
       if (operation === "retry") {
         const cold = boolean(input.cold, false);
         if (!turn.current_attempt_id) throw new InputError("attempt not found");
+        const requiresAdmission = store.rootManagement.hasActiveAgentGrant(turn.agent_id);
         if (!token) {
-          if (Object.keys(input).some(key => !["cold", "reason"].includes(key))) throw new InputError("retry accepts only cold and reason");
+          if (Object.keys(input).some(key => !["cold", "reason", "approved_input_messages"].includes(key))) {
+            throw new InputError("retry accepts only cold, reason and approved_input_messages");
+          }
           if (input.reason != null && (typeof input.reason !== "string" || input.reason.length > 2_000)) throw new InputError("invalid retry reason");
-          return { turn: store.retryTurnAsMember(turn.id, cold, sessionId => {
+          const authorizeConversation = (sessionId: string) => {
             const conversation = loadConversation(c, store, sessionId, { scope: "owner" });
             if (conversation instanceof Response) throw new IssueDecisionError(conversation.status === 404 ? 404 : 403, "conversation not available");
             const current = store.getTurn(turn.id);
             const source = current?.current_attempt_id ? store.getTask(current.current_attempt_id) : null;
             if (!source || !canAccessConversationTask(c, store, source)) throw new IssueDecisionError(403, "forbidden");
-          }) };
+          };
+          if (requiresAdmission) return { turn: store.retryAdmittedTurn(turn.id, turn.current_attempt_id, requireRootProof(c),
+            readRootAttemptApproval(input.approved_input_messages), cold, authorizeConversation) };
+          if (input.approved_input_messages !== undefined) throw new SecurityAbort('root_required');
+          return { turn: store.retryTurnAsMember(turn.id, cold, authorizeConversation) };
         }
+        if (requiresAdmission || input.approved_input_messages !== undefined) throw new SecurityAbort('root_required');
         const result = store.performOrganizerAction({ supervisorTaskId: supervisor?.task.id ?? token!.taskId!, supervisorAgentId: supervisor?.agentId ?? token!.agentId!,
           targetTaskId: turn.current_attempt_id, action: "redispatch", reason: input.reason ?? "Retry requested through turn API", cold });
         return { turn: store.getTurn(turn.id), organizer_action: result.audit, comment_id: result.comment.id };

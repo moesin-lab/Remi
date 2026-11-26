@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { guardRootResourceWrite } from "../helpers/root-access.js";
 import {
   resolveStorageSettings,
   STORAGE_SETTINGS_DEFAULTS,
@@ -70,9 +71,9 @@ export function registerStorageRoutes(app: Hono, deps: RouterDeps): void {
     const thresholdErrors = storageThresholdErrors({ ...STORAGE_SETTINGS_DEFAULTS, ...storage });
     if (thresholdErrors.length) return c.json({ error: "invalid storage settings", details: thresholdErrors }, 400);
     const { storage: _previous, ...settings } = workspace.settings;
-    const updated = store.updateWorkspace(workspaceId, {
+    const updated = guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () => store.updateWorkspace(workspaceId, {
       settings: Object.keys(storage).length ? { ...settings, storage } : settings,
-    });
+    }));
     publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, { workspace: updated });
     return c.json(storageResponse(updated.settings));
   });

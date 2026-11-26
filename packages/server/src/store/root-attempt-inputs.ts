@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connection.js';
 import type { CreateTaskInput } from '@multiremi/contracts/types.js';
+import type { SendMessageInput, SendMessageResult } from '@multiremi/contracts/unified-model.js';
 import { createId } from '@multiremi/ids.js';
 import { agentDependencyDigest, planFrozenAgentDependencies, type AgentDependencyRef } from './agent-dependencies.js';
 import { planVerifiedAttemptWrite } from './attempt-admission.js';
@@ -131,6 +132,20 @@ export function createRootAttempt(db: SqlDatabase, store: MultiremiStore, input:
   return writeAttempt(db, store, proof, { turnId: attemptId, attemptId, previousAttemptId: null, agentId: agent.id, workspaceId: agent.workspaceId, sessionId },
     input.runtimeId ?? input.runtime_id ?? agent.runtimeId, approval, input.prompt, input.triggerCommentId ?? input.trigger_comment_id ?? null,
     runtimeId => store.createTask({ ...input, id: attemptId, runtimeId }));
+}
+
+export function sendRootRequest(db: SqlDatabase, store: MultiremiStore, input: SendMessageInput, proof: CredentialProof,
+  approval: RootAttemptApproval, send: (attempt: Pick<CreateTaskInput, 'id' | 'runtimeId'>) => SendMessageResult): SendMessageResult {
+  if (input.to.type !== 'agent' || input.sender.type !== 'member' || input.message_kind !== 'request' || input.wake_requested !== 'now'
+    || input.source_turn_id || input.reply_to_id || input.attachment_ids?.length) reject();
+  const agent = store.getAgent(input.to.ref) ?? reject();
+  const attemptId = createId('tsk');
+  const target = { turnId: attemptId, attemptId, previousAttemptId: null, agentId: agent.id, workspaceId: agent.workspaceId, sessionId: input.session_id };
+  return writeAttempt(db, store, proof, target, agent.runtimeId, approval, input.body_md, null, runtimeId => {
+    const result = send({ id: attemptId, runtimeId });
+    if (result.turn_id !== attemptId) throw new SecurityAbort('authority_revision_conflict');
+    return result;
+  });
 }
 
 export function retryRootAttempt(db: SqlDatabase, store: MultiremiStore, turnId: string, previousAttemptId: string, proof: CredentialProof,

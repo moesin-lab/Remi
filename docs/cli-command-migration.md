@@ -540,6 +540,8 @@ remi root credential-family revoke <family> --reason-code <code> --reason <text>
 remi root audit list [--action <action>] [--target-type <type>] [--target-id <id>] [--actor-id <id>]
 ```
 
+For a root attempt, `remi message send` and `remi turn retry` accept `--approved-input-messages` as a JSON array of reviewed conversation message IDs and versions. The server resolves the actual content and execution sources in the admission transaction.
+
 Static human-only commands that an eligible effective root task may execute
 (including `agent.role.set` and `agent.supervisor.set`) remain `auth: ["human"]`
 for ordinary tasks and declare `root_conditional: true` in the Registry and

@@ -17,20 +17,26 @@ import { executionTrustNodeId, type AgentConfigurationApproval } from '@multirem
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
-import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
+import { bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
+import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 pendingTurnBackendTests('production root attempt inputs', fixture => {
-  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch'])('admits frozen inputs for %s', async scenario => {
+  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch','protected writes'])('admits frozen inputs for %s', async scenario => {
     const { store, createIssue } = fixture();
     const { db } = store as unknown as { db: SqlDatabase };
     const runtime = store.registerRuntime({ name: 'worker', provider: 'codex', workspaceId: 'local', daemonId: 'worker' });
     const agent = store.createAgent({ name: 'reviewer', provider: 'codex', runtimeId: runtime.id });
     const issue = createIssue({ title: 'inputs', assigneeType: 'agent', assigneeId: agent.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
-    const { input: login } = await bootstrap(db, store.resolveAgentDependencies);
+    const { input: login, signing: jwtSigning } = await bootstrap(db, store.resolveAgentDependencies);
     const service = store.rootManagement;
     const proof = await service.verifyIndependentPassword(login.userId, 'test-dashboard-password');
+    const bearer = service.issueIndependentDashboardSession(proof, (Math.floor(Date.now() / 1000) + 300) * 1000,
+      (tx, source, claims) => new JwtMaterials(db).issue(tx, source, claims, jwtSigning));
+    const api = rootClient(store, jwtSigning);
+    const http = scenario === 'retry WS offer' || scenario === 'protected writes';
+    if (http) store.createWorkspaceMember({ workspaceId: 'local', userId: login.userId, name: 'Root reviewer', role: 'admin' });
     const expiry = Date.now() + 3_600_000;
     const hash = createHash('sha256').update('test-daemon').digest('hex');
     db.query("INSERT INTO multiremi_authority_nodes VALUES('machine',100,1,'machine_registration','daemon','worker','system',1,?,NULL,0)").run(expiry);
@@ -72,21 +78,52 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     const scope = {type:'agent', id:agent.id};
     const action = { action:'root.agent-configuration.approve', use:'write', actualTarget:scope };
     const configPlan = service.planAgentGrant(proof, agent.id, ['trust']);
-    const approved = withSecurityWrite(db, undefined, configPlan, tx => service.approveAgentConfiguration(tx,service.authorizeWrite(tx,proof,action),agent.id,null,{sources,executions:[execution]}));
+    const previewPath = `/api/root/agents/${agent.id}/grant-preview?runtime_trust_id=trust`;
+    const approved = http ? await (await api(`/api/root/agents/${agent.id}/configuration/approve`, bearer,
+      { expected_epoch: null, sources, executions: [execution] })).json() :
+      withSecurityWrite(db, undefined, configPlan, tx => service.approveAgentConfiguration(tx,service.authorizeWrite(tx,proof,action),agent.id,null,{sources,executions:[execution]}));
     const plan = service.planAgentGrant(proof, agent.id, ['trust']);
     const taskInput = { agentId: agent.id, issueId: issue.id, prompt: 'original instruction' };
     const submit = () => store.createAdmittedTask(taskInput, proof, {messages: [], includeSubmittedPrompt: true});
     expect(submit).toThrow();
     expect(db.query("SELECT 1 FROM multiremi_authority_nodes WHERE kind='provider_trust' AND subject_id=?").get(agent.id)).toBeNull();
-    const grant = withSecurityWrite(db, undefined, plan, tx => service.grant(tx,service.authorizeWrite(tx,proof,{action:'root.grant.create',use:'management',actualTarget:scope}),
-      {subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,expected_revision:plan.expectedRevision,idempotency_key:'grant',reason:'reviewed'}));
+    const grantInput = {subject:{type:'agent' as const,id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,
+      expected_revision:plan.expectedRevision,idempotency_key:'grant',reason:'reviewed'};
+    if (http) {
+      expect(approved.digest).toBeString();
+      expect((await api(previewPath)).status).toBe(403);
+      expect(await (await api(previewPath, bearer)).json()).toMatchObject({digest: approved.digest, expected_revision: plan.expectedRevision});
+    }
+    const grant = http ? await (await api('/api/root/grants', bearer, grantInput)).json() :
+      withSecurityWrite(db, undefined, plan, tx => service.grant(tx,service.authorizeWrite(tx,proof,{action:'root.grant.create',use:'management',actualTarget:scope}),grantInput));
+    if (scenario === 'protected writes') {
+      const prompt = store.getSystemPrompt(workspace.id);
+      const update = { expectedRevision: prompt.document.revision, requestId: 'protected-reset' };
+      expect((await api(`/api/workspaces/${workspace.id}/system-prompt/reset`, undefined, update)).status).toBe(403);
+      expect((await api(`/api/agents/${agent.id}`, bearer, { name: 'Changed' }, 'PUT', { 'If-Match': '"0"' })).status).toBe(409);
+      expect((await api(`/api/agents/${agent.id}`, bearer, { name: 'Changed' }, 'PUT', { 'If-Match': '"1"' })).status).toBe(200);
+      expect(Number(db.query('SELECT config_epoch FROM multiremi_agent_config_epochs WHERE agent_id=?').get(agent.id).config_epoch)).toBe(1);
+      expect((await api('/api/root/grants', bearer, { ...grantInput, idempotency_key: 'stale-preview' })).status).toBe(409);
+      expect(await (await api(`/api/root/grants?subject_id=${agent.id}`, bearer)).json()).toMatchObject({ grants: [{effective: false}] });
+      return;
+    }
     const providerId = executionTrustNodeId(grant.grant.id,'trust',execution.provider);
-    const task = submit();
+    const task = http ? await (async () => {
+      const path = `/api/sessions/${session.id}/messages`;
+      const message = { to: {type: 'agent', ref: agent.id}, body_md: taskInput.prompt };
+      const forbidden = await api(path, undefined, message);
+      expect(forbidden.status, await forbidden.text()).toBe(403);
+      const response = await api(path, bearer, message);
+      const result = await response.json();
+      expect(response.status, JSON.stringify(result)).toBe(200);
+      return store.getTask(result.turn_id)!;
+    })() : submit();
     expect(task.issueSessionId).toBe(session.id);
     const message = db.query(`SELECT m.* FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id WHERE t.id=?`).get(task.id);
     const approvedInputs = (id: string) => JSON.parse(db.query('SELECT manifest_snapshot FROM multiremi_attempt_input_approvals WHERE attempt_id=?').get(id).manifest_snapshot);
     const source = {id:message.id, version:Number(message.revision)};
     const author = db.query('SELECT user_id FROM multiremi_workspace_members WHERE id=?').get(message.sender_id);
+    if (http) expect(author.user_id).toBe(login.userId);
     const manifest = approvedInputs(task.id);
     expect(manifest.inputs.entries).toEqual([{source,snapshot:taskInput.prompt,purpose:'instruction',author:{type:'user',id:author.user_id}}]);
     expect(manifest.inputs.sourcePolicy).toEqual({id:'inputs',version:1});
@@ -96,7 +133,14 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     if (scenario==='retry WS offer') {
       db.query("UPDATE multiremi_turn_attempts SET status='lost' WHERE id=?").run(task.id);
       db.query("UPDATE multiremi_turns SET status='failed' WHERE id=?").run(turnId);
-      attemptId=store.retryAdmittedTurn(turnId,task.id,proof,{messages:[source]}).current_attempt_id!;
+      const path = `/api/turns/${turnId}/retry`;
+      expect((await api(path, bearer, { checkpoint: 'unverified' })).status).toBe(400);
+      expect((await api(path, bearer, { approved_input_messages: [{...source, version: source.version + 1}] })).status).toBe(403);
+      expect(store.getTurn(turnId)?.current_attempt_id).toBe(task.id);
+      const response = await api(path, bearer, { approved_input_messages: [source] });
+      const result = await response.json();
+      expect(response.status, JSON.stringify(result)).toBe(200);
+      attemptId=result.turn.current_attempt_id;
     }
     if (scenario==='forged source') {
       db.run("INSERT INTO multiremi_live_terms(scope,term,holder,updated_at) VALUES('background_jobs',1,'test','now') ON CONFLICT(scope) DO UPDATE SET term=1");

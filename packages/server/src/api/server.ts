@@ -40,6 +40,7 @@ import { registerCloudRuntimeRoutes } from "./routers/cloud-runtime.js";
 import { registerCloudBillingRoutes } from "./routers/cloud-billing.js";
 import { bindDelegatedPatForRootControl, bindRootProof, requestHasRootRead } from "./helpers/root-access.js";
 import { registerRootRoutes, rootError } from "./routers/root.js";
+import { RootManagementRequestError } from '@multiremi/store/root-management.js';
 import { registerMeRoutes } from "./routers/me.js";
 import { registerWorkspaceRoutes } from "./routers/workspaces.js";
 import { registerSystemPromptRoutes } from "./routers/system-prompts.js";
@@ -796,7 +797,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
-    if (c.req.path.startsWith("/api/root/") || err instanceof SecurityAbort) {
+    if (c.req.path.startsWith("/api/root/") || err instanceof SecurityAbort || err instanceof RootManagementRequestError) {
       const response = rootError(c, err);
       if (response) return response;
     }

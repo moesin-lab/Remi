@@ -4,6 +4,7 @@ import type { RouterDeps } from "./deps.js";
 import { parseEndpointConnection, type EndpointProtocol } from "@multiremi/contracts/execution-endpoint.js";
 import { inspectEndpoint } from "@multiremi/relay/endpoint-inspection.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
+import { guardRootResourceWrite } from "../helpers/root-access.js";
 import {
   denyCurrentUserWorkspaceAccess,
   requireHumanWorkspaceAdmin,
@@ -113,15 +114,19 @@ export function registerExecutionConfigRoutes(
       const ws = workspace(c, true, body.workspace_id);
       if (ws instanceof Response) return ws;
       const id = method === "put" ? c.req.param("id") : undefined;
-      if (id && !store.getExecutionEndpoint(id, ws)) return c.json({ error: "Endpoint not found" }, 404);
-      try { return c.json({ endpoint: store.saveExecutionEndpoint(ws, body, id) }, method === "post" ? 201 : 200); }
+      const current = id ? store.getExecutionEndpoint(id, ws) : null;
+      if (id && !current) return c.json({ error: "Endpoint not found" }, 404);
+      try { return c.json({ endpoint: current ? guardRootResourceWrite(c, store, ws, 'endpoint', current.id,
+        () => store.saveExecutionEndpoint(ws, body, id), { version: current.revision }) : store.saveExecutionEndpoint(ws, body, id) }, method === "post" ? 201 : 200); }
       catch (error) { return failure(c, error); }
     });
   app.delete("/api/execution-endpoints/:id", (c) => {
     const ws = workspace(c, true);
     if (ws instanceof Response) return ws;
-    if (!store.getExecutionEndpoint(c.req.param("id"), ws)) return c.json({ error: "Endpoint not found" }, 404);
-    try { store.deleteExecutionEndpoint(c.req.param("id"), ws); return c.json({ ok: true }); }
+    const endpoint = store.getExecutionEndpoint(c.req.param("id"), ws);
+    if (!endpoint) return c.json({ error: "Endpoint not found" }, 404);
+    try { guardRootResourceWrite(c, store, ws, 'endpoint', endpoint.id, () => store.deleteExecutionEndpoint(endpoint.id, ws), { version: endpoint.revision });
+      return c.json({ ok: true }); }
     catch (error) { return failure(c, error); }
   });
   app.get("/api/execution-profiles", (c) => {
@@ -151,11 +156,13 @@ export function registerExecutionConfigRoutes(
         const ws = workspace(c, true, body.workspace_id);
         if (ws instanceof Response) return ws;
         const id = method === "put" ? c.req.param("id") : undefined;
-        if (id && !store.getExecutionProfile(id, ws))
+        const current = id ? store.getExecutionProfile(id, ws) : null;
+        if (id && !current)
           return c.json({ error: "Profile not found" }, 404);
         try {
           return c.json(
-            { profile: store.saveExecutionProfile(ws, body, id) },
+            { profile: current ? guardRootResourceWrite(c, store, ws, 'profile', current.id,
+              () => store.saveExecutionProfile(ws, body, id), { version: current.revision }) : store.saveExecutionProfile(ws, body, id) },
             method === "post" ? 201 : 200,
           );
         } catch (error) {
@@ -166,10 +173,11 @@ export function registerExecutionConfigRoutes(
   app.delete("/api/execution-profiles/:id", (c) => {
     const ws = workspace(c, true);
     if (ws instanceof Response) return ws;
-    if (!store.getExecutionProfile(c.req.param("id"), ws))
+    const profile = store.getExecutionProfile(c.req.param("id"), ws);
+    if (!profile)
       return c.json({ error: "Profile not found" }, 404);
     try {
-      store.deleteExecutionProfile(c.req.param("id"), ws);
+      guardRootResourceWrite(c, store, ws, 'profile', profile.id, () => store.deleteExecutionProfile(profile.id, ws), { version: profile.revision });
       return c.json({ ok: true });
     } catch (error) {
       return failure(c, error);
@@ -256,7 +264,8 @@ export function registerExecutionConfigRoutes(
         }
         try {
           return c.json(
-            { group: wire(store.saveExecutionGroup(ws, body, id)) },
+            { group: wire(id ? guardRootResourceWrite(c, store, ws, 'execution-group', id, () => store.saveExecutionGroup(ws, body, id))
+              : store.saveExecutionGroup(ws, body, id)) },
             method === "post" ? 201 : 200,
           );
         } catch (error) {
@@ -274,7 +283,7 @@ export function registerExecutionConfigRoutes(
       if (loaded instanceof Response) return loaded;
     }
     try {
-      store.deleteExecutionGroup(group.id, ws);
+      guardRootResourceWrite(c, store, ws, 'execution-group', group.id, () => store.deleteExecutionGroup(group.id, ws));
       return c.json({ ok: true });
     } catch (error) {
       return failure(c, error);

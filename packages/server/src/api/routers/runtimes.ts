@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
+import { guardRootResourceWrite } from "../helpers/root-access.js";
 import { bindDaemonTokenIdentityOrDeny, daemonRegisterOwnerContext, denyCurrentUserWorkspaceAccess, denyDaemonOwnerWorkspaceMembership, denyUnprivilegedOwnerlessDaemonClaim, denyDaemonRuntimeObservedStateAccess, denyDaemonTokenRuntimeIdentity, denyDaemonTokenRuntimeWorkspace, denyDaemonTokenWorkspace, isJsonApiError, isTerminalRuntimeRequestForDaemon, isValidRuntimeUpdateReportStatus, listRuntimesForCurrentUser, loadRuntimeForCurrentEditor, loadRuntimeForCurrentOwner, loadRuntimeForCurrentUser, workspaceRuntimeModelCatalog, runtimeTargetModelCatalog, executionGroupRuntimes, executionGroupModelCatalog, executionGroupRequestOwner, canCurrentUserUseRuntime, parseExpectedActiveAgentIds, promoteLegacyCliPatForDaemonHeartbeat, promoteLegacyCliPatForDaemonRegistration, readJson, readJsonStrict, readJsonStrictAllowEmpty, requireWorkspaceAdmin, safeCreateRuntimeUpdateRequest, usageQuery, validateMultiremiRuntimeProvider, validateRuntimeExecutionGroupInput } from "../helpers.js";
 import {
   authenticatedRequestUserId,
@@ -31,6 +32,9 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
+  function writeRuntime<T>(c: Context, runtime: NonNullable<ReturnType<typeof store.getRuntime>>, operation: () => T, didWrite?: (result: T) => boolean): T {
+    return guardRootResourceWrite(c, store, runtimeWorkspaceId(runtime), 'runtime', runtime.id, operation, { didWrite });
+  }
   app.get("/api/daemon/runtimes/:id/endpoint-key", (c) => {
     if (currentAccessToken(c)?.type !== "daemon") return c.json({ error: "daemon token required" }, 403);
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
@@ -54,7 +58,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<{ profile?: unknown; api_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      return c.json({ profile: store.setRuntimeCodexProfile(loaded.runtime.id, body.profile, body.api_key) });
+      return c.json({ profile: writeRuntime(c, loaded.runtime, () => store.setRuntimeCodexProfile(loaded.runtime.id, body.profile, body.api_key)) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Invalid Codex profile" }, 400);
     }
@@ -86,7 +90,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<{ profile?: unknown; api_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      return c.json({ profile: store.setRuntimeClaudeProfile(loaded.runtime.id, body.profile, body.api_key) });
+      return c.json({ profile: writeRuntime(c, loaded.runtime, () => store.setRuntimeClaudeProfile(loaded.runtime.id, body.profile, body.api_key)) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Invalid Claude profile" }, 400);
     }
@@ -201,7 +205,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const invalidGroup = validateRuntimeExecutionGroupInput(c, store, loaded.runtime.workspaceId ?? "local", loaded.runtime.provider, body);
     if (invalidGroup) return invalidGroup;
-    return c.json({ runtime: store.updateRuntime(loaded.runtime.id, body) });
+    return c.json({ runtime: writeRuntime(c, loaded.runtime, () => store.updateRuntime(loaded.runtime.id, body)) });
   });
   app.get("/api/multiremi/runtimes/:id/models", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
@@ -214,7 +218,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<{ models?: any[]; supported?: boolean }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    return c.json({ runtimeId: loaded.runtime.id, supported: body.supported !== false, models: store.updateRuntimeModels(loaded.runtime.id, body.models ?? []) });
+    return c.json({ runtimeId: loaded.runtime.id, supported: body.supported !== false,
+      models: writeRuntime(c, loaded.runtime, () => store.updateRuntimeModels(loaded.runtime.id, body.models ?? [])) });
   });
   app.post("/api/multiremi/runtimes/:id/models", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
@@ -243,7 +248,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({
       runtime_id: loaded.runtime.id,
       supported: body.supported !== false,
-      models: store.updateRuntimeModels(loaded.runtime.id, body.models ?? []).map(runtimeModelCompatibilityResponse),
+      models: writeRuntime(c, loaded.runtime, () => store.updateRuntimeModels(loaded.runtime.id, body.models ?? [])).map(runtimeModelCompatibilityResponse),
     });
   });
   app.post("/api/runtimes/:id/models", (c) => {
@@ -588,7 +593,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (hasRequestField(body, "executionGroupId", "execution_group_id")) {
       patch.executionGroupId = body.executionGroupId ?? body.execution_group_id ?? null;
     }
-    return c.json(runtimeCompatibilityResponse(Object.keys(patch).length ? store.updateRuntime(loaded.runtime.id, patch) : loaded.runtime));
+    return c.json(runtimeCompatibilityResponse(Object.keys(patch).length ? writeRuntime(c, loaded.runtime, () => store.updateRuntime(loaded.runtime.id, patch)) : loaded.runtime));
   });
   app.get("/api/runtimes/:id/usage", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
@@ -631,9 +636,9 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (abandon !== undefined && abandon !== "true" && abandon !== "false") {
       return c.json({ error: "abandon_issue_workspaces must be true or false" }, 400);
     }
-    const result = store.deleteRuntimeWithArchivedAgentCleanup(loaded.runtime.id, {
+    const result = writeRuntime(c, loaded.runtime, () => store.deleteRuntimeWithArchivedAgentCleanup(loaded.runtime.id, {
       abandonIssueWorkspaces: abandon === "true",
-    });
+    }), result => result.status === 'deleted');
     if (result.status === "active_issue_workspaces") {
       return c.json({
         error: "cannot delete runtime while it has active issue workspaces; review and explicitly abandon them",
@@ -668,9 +673,9 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (body.abandon_issue_workspaces !== undefined && typeof body.abandon_issue_workspaces !== "boolean") {
       return c.json({ error: "abandon_issue_workspaces must be a boolean" }, 400);
     }
-    const result = store.archiveAgentsAndDeleteRuntime(loaded.runtime.id, expectedIds, {
+    const result = writeRuntime(c, loaded.runtime, () => store.archiveAgentsAndDeleteRuntime(loaded.runtime.id, expectedIds, {
       abandonIssueWorkspaces: body.abandon_issue_workspaces === true,
-    });
+    }), result => result.status === 'ok');
     if (result.status === "active_issue_workspaces") {
       return c.json({
         error: "cannot delete runtime while it has active issue workspaces; review and explicitly abandon them",

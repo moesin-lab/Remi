@@ -1,5 +1,6 @@
-import { effectiveRootProof, requestHasRootRead, runRootMutation } from '../helpers/root-access.js';
+import { effectiveRootProof, guardRootResourceWrite, requestHasRootRead, runRootMutation } from '../helpers/root-access.js';
 import { rootError } from './root.js';
+import { SecurityAbort } from '@multiremi/store/security-write.js';
 import { STORAGE_SETTINGS_DEFAULTS, storageThresholdErrors, validateStorageSettingsPatch } from "@multiremi/contracts/storage.js";
 import { MultiremiApiError } from "../helpers.js";
 import { validateCoAuthoredByName, validateCoAuthoredByEmail } from "@multiremi/contracts/co-authored-by";
@@ -170,7 +171,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     }
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
-    store.updateWorkspace(workspaceId, { settings: { ...workspace.settings, magpie_url: url } });
+    guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () =>
+      store.updateWorkspace(workspaceId, { settings: { ...workspace.settings, magpie_url: url } }));
     return c.json({ url });
   });
 
@@ -295,7 +297,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const mode = parseOrganizerMode(body.mode);
     if (!mode) return c.json({ error: "mode must be report_only or act", code: "organizer_mode_invalid" }, 400);
-    store.updateWorkspace(workspaceId, { settings: organizerSettings(workspace, mode) });
+    guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () =>
+      store.updateWorkspace(workspaceId, { settings: organizerSettings(workspace, mode) }));
     return c.json({ workspace_id: workspaceId, mode });
   });
   app.get("/api/workspaces/:id/issue-topics", (c) => {
@@ -354,9 +357,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
           throw new IssueTopicConfigError(`project does not belong to this workspace: ${projectId}`);
         }
       }
-      const updated = store.updateWorkspace(workspaceId, {
+      const updated = guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () => store.updateWorkspace(workspaceId, {
         settings: { ...workspace.settings, issueTopics },
-      });
+      }));
       publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, { workspace: updated });
       return c.json(issueTopicConfigResponse(workspaceId, issueTopics));
     } catch (error) {
@@ -497,7 +500,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         nowIso(),
       );
       if (merged.settings !== workspace.settings) {
-        store.updateWorkspace(workspaceId, { settings: merged.settings });
+        guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () =>
+          store.updateWorkspace(workspaceId, { settings: merged.settings }));
       }
       return c.json(workspacePromptsResponse(merged.prompts));
     } catch (error) {
@@ -531,10 +535,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (hasOwn(body, "repos")) {
       return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
     }
-    if (!proof) return c.json(workspaceResponse(store.updateWorkspace(workspaceId, body)));
-    const use = { action: 'workspace.update', actualTarget: { type: 'workspace', id: workspaceId }, use: 'write' };
     try {
-      const updated = runRootMutation(store, proof, use, () => store.updateWorkspace(workspaceId, body), [workspaceId]);
+      const updated = guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () => store.updateWorkspace(workspaceId, body), { proof });
       return c.json(workspaceResponse(updated));
     } catch (error) {
       const response = rootError(c, error);
@@ -551,9 +553,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         store,
         workspaceId,
         createScmAwareGitRemoteInspector(store, workspaceId, deps.inspectGitRemoteRepository),
+        operation => guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, operation),
       );
       return c.json({ repositories, total: repositories.length });
     } catch (error) {
+      if (error instanceof SecurityAbort && error.code === 'root_required') {
+        const repositories = listWorkspaceRepositories(store, workspaceId);
+        return c.json({ repositories, total: repositories.length });
+      }
       if (error instanceof WorkspaceRepositoryError) {
         return c.json({ error: error.message }, error.status);
       }
@@ -1009,6 +1016,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         workspaceId,
         body,
         createScmAwareGitRemoteInspector(store, workspaceId, deps.inspectGitRemoteRepository),
+        operation => guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, operation),
       );
       publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, {
         workspace: result.workspace,
@@ -1036,6 +1044,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         c.req.param("repositoryId"),
         body,
         createScmAwareGitRemoteInspector(store, workspaceId, deps.inspectGitRemoteRepository),
+        operation => guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, operation),
       );
       publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, {
         workspace: result.workspace,
@@ -1055,11 +1064,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       ?? requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     try {
-      const result = removeWorkspaceRepository(
+      const result = guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () => removeWorkspaceRepository(
         store,
         workspaceId,
         c.req.param("repositoryId"),
-      );
+      ));
       publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, {
         workspace: result.workspace,
         repository_id: result.repository.id,
@@ -1094,8 +1103,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied && !proof) return denied;
     try {
       if (!store.hasWorkspace(workspaceId)) return c.json({ error: 'workspace not found' }, 404);
-      const deleted = proof ? runRootMutation(store, proof, use, () => store.deleteWorkspace(workspaceId), [workspaceId])
-        : store.deleteWorkspace(workspaceId);
+      const deleted = guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () => store.deleteWorkspace(workspaceId), { proof, didWrite: Boolean });
       if (!deleted) return c.json({ error: "workspace not found" }, 404);
       return c.body(null, 204);
     } catch (error) {
@@ -1144,7 +1152,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const nextEnv = mergeAgentEnv(store.getWorkspaceEnv(workspaceId), body.env ?? {});
     c.header("Cache-Control", "no-store");
-    return c.json({ workspace_id: workspaceId, env: store.setWorkspaceEnv(workspaceId, nextEnv) });
+    return c.json({ workspace_id: workspaceId, env: guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId,
+      () => store.setWorkspaceEnv(workspaceId, nextEnv)) });
   });
 
   // ── Trusted-machine SSH Mesh (owner/admin only) ───────────────

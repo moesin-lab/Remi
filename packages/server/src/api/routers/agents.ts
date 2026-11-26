@@ -289,7 +289,8 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<{ enabled?: boolean }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     if (typeof body.enabled !== "boolean") return c.json({ error: "enabled must be a boolean" }, 400);
-    const agent = writeAgent(c, loaded.agent, () => store.setAgentSupervisor(loaded.agent.id, body.enabled));
+    const enabled = body.enabled;
+    const agent = writeAgent(c, loaded.agent, () => store.setAgentSupervisor(loaded.agent.id, enabled));
     publishAgentLifecycleEvent(c, store, "agent:status", agent);
     return c.json(agentCompatibilityResponse(store, agent, c));
   });

@@ -2,6 +2,8 @@ import type { Context } from 'hono';
 import type { AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority } from '@multiremi/store/root-authority-contract.js';
 import { SecurityAbort, type SecurityTx } from '@multiremi/store/security-write.js';
 import type { MultiremiStore } from '@multiremi/store/store.js';
+import { RootManagementRequestError } from '@multiremi/store/root-management.js';
+import type { RootAttemptApproval } from '@multiremi/store/root-attempt-inputs.js';
 import { currentJwtSigningDomain } from './jwt.js';
 
 export type RegisteredProof = Extract<CredentialProof, { proofVersion: unknown }>;
@@ -49,6 +51,20 @@ export function requireRootProof(c: Context): RegisteredProof {
   return proof;
 }
 
+export function readRootAttemptApproval(value: unknown, includeSubmittedPrompt = false): RootAttemptApproval {
+  if (value === undefined) return { messages: [], includeSubmittedPrompt };
+  if (!Array.isArray(value)) throw new RootManagementRequestError(400, 'approved_input_messages must be an array');
+  const messages = value.map(entry => {
+    if (!entry || typeof entry !== 'object' || Object.keys(entry).some(key => key !== 'id' && key !== 'version')
+      || typeof entry.id !== 'string' || !entry.id.trim() || !Number.isSafeInteger(entry.version) || entry.version < 1) {
+      throw new RootManagementRequestError(400, 'Invalid approved input message reference');
+    }
+    return { id: entry.id as string, version: entry.version as number };
+  });
+  if (new Set(messages.map(entry => entry.id)).size !== messages.length) throw new RootManagementRequestError(400, 'Duplicate approved input message');
+  return { messages, includeSubmittedPrompt };
+}
+
 export function requestHasRootRead(c: Context, store: MultiremiStore, action: string, type: string, id: string): boolean {
   return !!effectiveRootProof(c, store, { action, actualTarget: { type, id }, use: 'read' });
 }
@@ -75,21 +91,31 @@ export function runRootMutation<T>(store: MultiremiStore, proof: RegisteredProof
 }
 
 export function guardRootResourceWrite<T>(c: Context, store: MultiremiStore, workspaceId: string,
-  type: string, id: string, operation: () => T, options?: { version?: number; proof?: RegisteredProof | null }): T {
+  type: string, id: string, operation: () => T,
+  options?: { version?: number; proof?: RegisteredProof | null; didWrite?: (result: T) => boolean }): T {
   if (!options?.proof && !store.jwtMaterials.isActive()) return operation();
   const root = store.rootManagement;
   const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type, id } };
-  const proof = options?.proof ?? effectiveRootProof(c, store, use);
+  const proof = c.req.method === 'GET' ? null : options?.proof ?? effectiveRootProof(c, store, use);
   const match = c.req.header('If-Match')?.match(/^"(0|[1-9]\d*)"$/);
   const expectedVersion = options?.version ?? (match ? Number(match[1]) : Number.NaN);
-  if (proof) return runRootMutation(store, proof, use, (tx, actor) => {
+  const skipped: { result?: T } = {};
+  const mutate = (tx: SecurityTx, actor: ReturnType<AuthorityKernel['authorizeWrite']> | null) => {
     root.guardProtectedMutation(tx, actor, use, expectedVersion);
-    return operation();
-  }, [workspaceId]);
-  const expectedRevision = root.readContext(null, 'open_local').security_revision;
-  return store.withSecurityWrite(undefined, { expectedRevision, workspaceIds: [workspaceId], numberKeys: [],
-    domainTargets: [`management:${type}:${id}`] }, tx => {
-    root.guardProtectedMutation(tx, null, use, expectedVersion);
-    return operation();
-  });
+    const result = operation();
+    if (options?.didWrite && !options.didWrite(result)) {
+      skipped.result = result;
+      throw skipped;
+    }
+    return result;
+  };
+  try {
+    if (proof) return runRootMutation(store, proof, use, mutate, [workspaceId]);
+    const expectedRevision = root.readContext(null, 'open_local').security_revision;
+    return store.withSecurityWrite(undefined, { expectedRevision, workspaceIds: [workspaceId], numberKeys: [],
+      domainTargets: [`management:${type}:${id}`] }, tx => mutate(tx, null));
+  } catch (error) {
+    if (error === skipped) return skipped.result as T;
+    throw error;
+  }
 }

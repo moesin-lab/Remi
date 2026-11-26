@@ -145,6 +145,10 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 已准入的 running task 可向 `POST /api/root/agent-pats` 提交有限的 `expires_at` 和 `idempotency_key`。成功提交后响应一次性交付 `token`、`family_id` 和 `origin_id`。重复签发请求返回凭据版本冲突。Agent PAT 以真实 Agent 身份访问 root 管理与 CLI 能力查询，普通 PAT 路由维持既有凭据边界。`POST /api/root/delegations/:nodeId/revoke` 使用审计原因、原因代码、期望安全 revision 与幂等键撤销指定来源。
 
+受保护资源写入保留路由原有权限检查，并在写事务中检查已登记 root proof 与依赖版本。系统提示词使用请求的 `expectedRevision`，执行端点和 Profile 使用资源自身 revision，其余已接线的配置写入口使用 `If-Match: "<version>"` 与审批或预览的引用版本对应。成功的受保护写推进配置 epoch，让旧审批和 grant 失效。普通仓库列表遇到受保护的分支信息时直接读取现有数据。
+
+新 root attempt 通过 `POST /api/sessions/:sessionId/messages` 的直接 Agent `request`（`wake_requested: "now"`）和 `POST /api/turns/:id/retry` 的成员重试进入准入。`approved_input_messages` 接收已审阅的 `{id, version}` 列表。服务端从主库读取消息、执行来源和当前 grant，并在同一次事务冻结输入与 attempt。新任务的请求作者来自登记凭证绑定的实际工作区成员。附加输入、checkpoint 与恢复状态需要独立的证明路径。
+
 ### 已准入 attempt 的首次 offer
 
 机器投递使用 `await PreparedRootDelivery.prepare(tuple, payload, publicKey)` 生成不可替换的候选。调用方先用 `rootManagement.planFirstOffer(candidate)` 合并自己的 run/Q 锁计划，再在带当前 fence 的 `withSecurityWrite` 中调用 `rootReceipts.activate(tx, candidate, lease, callback)`。`callback(activeTx, prepared)` 在同一事务完成 run/Q CAS 后返回 `rootManagement.issue(activeTx, prepared)`。只有实际 `activate` 回调中的原始对象能签发。发送方在最外层事务提交后才能交付 envelope。

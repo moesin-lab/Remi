@@ -2,8 +2,31 @@ import { createHash } from 'node:crypto';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { bootstrapAuthorizationDigest, RootManagement } from '@multiremi/store/root-management.js';
 import type { ResolveAgentDependencies } from '@multiremi/store/agent-grant-dependencies.js';
+import { createMultiremiApp } from '@multiremi/api.js';
+import type { MultiremiStore } from '@multiremi/store/store.js';
 
 const hash=(input:string)=>createHash('sha256').update(input).digest('hex');
+
+export function rootClient(store: MultiremiStore, signing: { domainId: string; keyEpoch: string; secret: string }) {
+  const master = 'isolated-master-token';
+  const { request } = createMultiremiApp({ store, authToken: master });
+  return async (path: string, token = master, body?: object, method = body ? 'POST' : 'GET', headers?: HeadersInit) => {
+    const env = { JWT_SECRET: signing.secret, MULTIREMI_JWT_SIGNING_DOMAIN: signing.domainId, MULTIREMI_JWT_KEY_EPOCH: signing.keyEpoch };
+    const prior = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    const requestHeaders = new Headers(headers);
+    requestHeaders.set('Authorization', `Bearer ${token}`);
+    if (body) requestHeaders.set('Content-Type', 'application/json');
+    try {
+      return await request(path, { method, headers: requestHeaders, ...(body && { body: JSON.stringify(body) }) });
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  };
+}
 
 export async function bootstrap(db:SqlDatabase, resolve?: ResolveAgentDependencies) {
     const service = new RootManagement(db,resolve);

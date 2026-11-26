@@ -7,7 +7,7 @@ import { RootManagement } from './root-management.js';
 import { AgentDependencies } from './agent-dependencies.js';
 import { RootReceiptStore } from './root-receipts.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
-import { createRootAttempt, retryRootAttempt, type RootAttemptApproval } from './root-attempt-inputs.js';
+import { createRootAttempt, retryRootAttempt, sendRootRequest, type RootAttemptApproval } from './root-attempt-inputs.js';
 import { SecurityAbort, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
 import type { AuthorityKernel, AuthorityUse, CredentialProof } from './root-authority-contract.js';
 import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease, type TaskLease } from './task-authority.js';
@@ -5954,15 +5954,16 @@ runMigrations(this.db);
   getMessages(...args: Parameters<InboxRepo["getMessages"]>) { return this.inbox.getMessages(...args); }
   getDaemonTurnBridge() {return new DaemonTurnBridge(this.ctx);}
   sendMessage(input:import("@multiremi/contracts/unified-model.js").SendMessageInput, uploads: CreateAttachmentInput[] = [],
-    authorizeRecipient?:(agent:MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:MultiremiAgent|null)=>void) {
+    authorizeRecipient?:(agent:MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:MultiremiAgent|null)=>void,
+    admission?: { proof: CredentialProof; approval: RootAttemptApproval }) {
     const events=createCommitEventQueue();
-    const result=this.db.transaction(()=>{
+    const write = (attempt?: Pick<CreateTaskInput, 'id' | 'runtimeId'>) => this.db.transaction(()=>{
       if (uploads.length) this.ctx.lockWorkspaceRuntimeLifecycle(uploads[0]!.workspaceId!);
       if (input.dedupe_key && this.db.query("SELECT id FROM multiremi_conversation_log WHERE session_id=? AND dedupe_key=?").get(input.session_id, input.dedupe_key)) {
         return this.inbox.sendMessageWithinTransaction(input, events, authorizeRecipient, authorizeConversation);
       }
       const attachmentIds = uploads.map(upload => this.createAttachment(upload).id);
-      const sent = this.inbox.sendMessageWithinTransaction({ ...input, attachment_ids: [...(input.attachment_ids ?? []), ...attachmentIds] },events,authorizeRecipient,authorizeConversation);
+      const sent = this.inbox.sendMessageWithinTransaction({ ...input, attachment_ids: [...(input.attachment_ids ?? []), ...attachmentIds] },events,authorizeRecipient,authorizeConversation,attempt);
       for (const id of attachmentIds) {
         const attachment = this.getAttachment(id);
         if (attachment && attachment.commentId !== sent.message.id && attachment.chatMessageId !== sent.message.id) this.deleteAttachment(id);
@@ -5975,6 +5976,7 @@ runMigrations(this.db);
       }
       return sent;
     })();
+    const result = admission ? sendRootRequest(this.db, this, input, admission.proof, admission.approval, write) : write();
     afterCommit(this.db,()=>this.ctx.emitCommitEvents(events));
     return result;
   }

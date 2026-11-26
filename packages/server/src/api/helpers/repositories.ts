@@ -81,6 +81,7 @@ export async function importWorkspaceRepository(
   workspaceId: string,
   input: ImportWorkspaceRepositoryInput,
   inspectRemote: GitRemoteInspector,
+  write: <T>(operation: () => T) => T = operation => operation(),
 ): Promise<{ repository: WorkspaceRepositoryData; workspace: MultiremiWorkspace }> {
   const workspace = workspaceId === "local"
     ? store.ensureLocalWorkspace()
@@ -113,7 +114,7 @@ export async function importWorkspaceRepository(
     imported_at: now,
     updated_at: now,
   };
-  const updated = store.mutateWorkspaceRepositories(workspaceId, (currentRaw) => {
+  const updated = write(() => store.mutateWorkspaceRepositories(workspaceId, (currentRaw) => {
     const current = normalizeWorkspaceRepositories(currentRaw);
     if (current.some((repo) => canonicalGitRemoteKey(repo.url) === key)) {
       throw new WorkspaceRepositoryError("repository is already imported", 409);
@@ -122,7 +123,7 @@ export async function importWorkspaceRepository(
       repositories: [...current, repository],
       result: repository,
     };
-  });
+  }));
   return { repository: updated.result, workspace: updated.workspace };
 }
 
@@ -146,6 +147,7 @@ export async function backfillWorkspaceRepositoryDefaultBranches(
   store: MultiremiStore,
   workspaceId: string,
   inspectRemote: GitRemoteInspector,
+  write: <T>(operation: () => T) => T = operation => operation(),
 ): Promise<WorkspaceRepositoryData[]> {
   const repositories = listWorkspaceRepositories(store, workspaceId);
   if (!store.scmOwnershipReady()) return repositories;
@@ -172,7 +174,7 @@ export async function backfillWorkspaceRepositoryDefaultBranches(
     return repositories;
   }
 
-  const updated = store.mutateWorkspaceRepositories(workspaceId, (currentRaw) => {
+  const updated = write(() => store.mutateWorkspaceRepositories(workspaceId, (currentRaw) => {
     const now = nowIso();
     const updatedRepositories = normalizeWorkspaceRepositories(currentRaw).map((repository) => {
       const resolvedBranch = branches.get(repository.id);
@@ -190,7 +192,7 @@ export async function backfillWorkspaceRepositoryDefaultBranches(
       };
     });
     return { repositories: updatedRepositories, result: updatedRepositories };
-  });
+  }));
   return updated.result;
 }
 
@@ -200,6 +202,7 @@ export async function updateWorkspaceRepository(
   repositoryId: string,
   input: UpdateWorkspaceRepositoryInput,
   inspectRemote: GitRemoteInspector,
+  write: <T>(operation: () => T) => T = operation => operation(),
 ): Promise<{ repository: WorkspaceRepositoryData; workspace: MultiremiWorkspace }> {
   const repositories = listWorkspaceRepositories(store, workspaceId);
   const repository = repositories.find((candidate) => candidate.id === repositoryId);
@@ -236,7 +239,7 @@ export async function updateWorkspaceRepository(
   }
 
   const inspectedRepositoryUrl = repository.url;
-  const updated = store.mutateWorkspaceRepositories(workspaceId, (currentRaw) => {
+  const updated = write(() => store.mutateWorkspaceRepositories(workspaceId, (currentRaw) => {
     const current = normalizeWorkspaceRepositories(currentRaw);
     const latest = current.find((candidate) => candidate.id === repositoryId);
     if (!latest) throw new WorkspaceRepositoryError("repository not found", 404);
@@ -261,7 +264,7 @@ export async function updateWorkspaceRepository(
       ),
       result: updatedRepository,
     };
-  });
+  }));
   return { repository: updated.result, workspace: updated.workspace };
 }
 

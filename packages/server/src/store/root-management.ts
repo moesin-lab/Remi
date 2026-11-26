@@ -197,6 +197,14 @@ export class RootManagement {
     });
   }
 
+  hasActiveAgentGrant(agentId: string): boolean {
+    return onPrimary(() => Boolean(this.db.query(`SELECT 1 FROM multiremi_root_subject_state s
+      JOIN multiremi_root_grants g ON g.grant_id=s.active_grant_id AND g.generation=s.generation_counter
+      JOIN multiremi_security_state state ON state.singleton=1 AND state.feature_activation=1
+      WHERE s.subject_type='agent' AND s.subject_id=? AND g.revoked_at_ms IS NULL
+      AND (g.expires_at_ms IS NULL OR g.expires_at_ms>?)`).get(agentId, Date.now())));
+  }
+
   previewAgentGrant(proof: CredentialProof, agentId: string, trustIds: readonly string[]) {
     return onPrimary(()=>{
       const plan=this.planAgentGrant(proof,agentId,trustIds);

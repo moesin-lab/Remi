@@ -110,7 +110,7 @@ export async function prepareEnrolledRecoveryFixture(fixture: PendingTurnTestFix
     const task=store.getTask(target.attemptId)!;
     const expiresAt=new Date(Date.now()+300000).toISOString();
 
-    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'test-offer'})?.id).toBe(task.id);
+    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'test-offer',rootMachineCredentialId:'machine-token'})?.id).toBe(task.id);
     const policy = store.systemPromptsRepo();
     expect(store.recordTaskOffered(task.id, runtime.id, undefined, 'test-offer')).toBe(true);
     const reportPolicy = { offer_generation: 'test-offer', content_hash: policy.getAttemptSystemPrompt(task.id)!.contentHash,

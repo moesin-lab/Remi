@@ -310,7 +310,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(retry().current_attempt_id).toBe(target.attemptId);
     if (failure==='concurrent dispatch') {
       db.run("INSERT INTO multiremi_live_terms(scope,term,holder,updated_at) VALUES('background_jobs',1,'test','now') ON CONFLICT(scope) DO UPDATE SET term=1");
-      expect(store.claimTask(runtime.id,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'race'})?.id).toBe(target.attemptId);
+      expect(store.claimTask(runtime.id,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'race',rootMachineCredentialId:'machine-token'})?.id).toBe(target.attemptId);
       const dir=mkdtempSync(join(tmpdir(),'first-offer-'));
       const file=join(dir,'store.sqlite');
       const postgres=fixture().databaseUrl;
@@ -338,7 +338,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       return;
     }
     if (failure==='first WS offer') {
-      for (const credential of [null,'different-machine']) {
+      for (const credential of [undefined,null,'different-machine']) {
         expect(store.claimTask(runtime.id,{supportsPromptPolicy:true,policyProtocol:'adopt',rootMachineCredentialId:credential})).toBeNull();
       }
       expect(store.getTask(target.attemptId)?.status).toBe('queued');
@@ -436,7 +436,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>withSecurityWrite(db,'1',offerPlan,tx=>service.issue(tx,candidate))).toThrow('credential_version_conflict');
     const receipts=new RootReceiptStore(db,service);
     expect(()=>receipts.commitFirstOffer(candidate,offerLease)).toThrow('stale_execution');
-    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true})?.id).toBe(task.id);
+    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true,rootMachineCredentialId:'machine-token'})?.id).toBe(task.id);
     const initialIssue=fixture().createIssue({title:'direct creation',assigneeType:'agent',assigneeId:agent.id});
     const initialSession=store.getOrCreateDefaultIssueSession(initialIssue.id);
     const initialExecution={...execution,attemptId:'tsk_initial'};

@@ -4369,6 +4369,7 @@ ${routing.sql}
       WHERE claim_attempt.status = 'accepted' AND t.status = 'dispatched'
         AND t.runtime_id = ? AND t.started_at IS NULL
         AND t.dispatched_at IS NOT NULL AND t.dispatched_at < ?
+        AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e WHERE e.attempt_id=claim_attempt.id AND e.eligibility='root')
         AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_system_prompts b WHERE b.task_id=claim_attempt.id
           AND ${this.ctx.db.dialect === 'postgres' ? "b.binding_json::jsonb->>'dispatch'" : "json_extract(b.binding_json,'$.dispatch')"} IS NOT NULL)
         ${leases.length ? `AND t.id NOT IN (${leases.map(() => "?").join(", ")})` : ""}
@@ -4801,11 +4802,11 @@ ${placementAfter.sql}
 
   private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean, historicalChat: boolean, rootCredential?: string | null): MultiremiTask | null {
     const { sql, params, now } = this.candidateSelection(runtime, excludedAgentIds, excludedTargets, excludedTaskIds, negotiated);
-    const rootFilter = rootCredential === undefined ? '' : `AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e
+    const rootFilter = `AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e
       WHERE e.attempt_id=claim_attempt.id AND e.eligibility='root' AND NOT EXISTS (SELECT 1 FROM multiremi_machine_enrollments m
         WHERE m.runtime_id=? AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id AND m.incarnation=e.incarnation
           AND m.retired_at_ms IS NULL AND m.credential_id=?))`;
-    if (rootCredential !== undefined) params.push(runtime.id,rootCredential ?? '');
+    params.push(runtime.id,rootCredential ?? null);
     const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql} ${rootFilter}${historicalChat ? `\n         AND ${freshIndependentChatSql}` : ''}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1

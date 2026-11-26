@@ -7,6 +7,7 @@ import { RootManagement } from './root-management.js';
 import { AgentDependencies } from './agent-dependencies.js';
 import { RootReceiptStore } from './root-receipts.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
+import { createRootAttempt, retryRootAttempt, type RootAttemptApproval } from './root-attempt-inputs.js';
 import { SecurityAbort, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
 import type { AuthorityKernel, AuthorityUse, CredentialProof } from './root-authority-contract.js';
 import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease, type TaskLease } from './task-authority.js';
@@ -5818,6 +5819,15 @@ runMigrations(this.db);
 
   withAttemptAdmission<T>(fence: string | undefined, plan: SecurityLockPlan, write: AttemptWrite, operation: () => T): T {
     return withAttemptAdmission(this.db, fence, plan, write, operation);
+  }
+
+  createAdmittedTask(input: CreateTaskInput, proof: CredentialProof, approval: RootAttemptApproval) {
+    return createRootAttempt(this.db, this, input, proof, approval);
+  }
+
+  retryAdmittedTurn(turnId: string, previousAttemptId: string, proof: CredentialProof, approval: RootAttemptApproval,
+    cold = false, authorizeConversation?: (sessionId: string) => void) {
+    return retryRootAttempt(this.db, this, turnId, previousAttemptId, proof, approval, cold, authorizeConversation);
   }
 
   withSecurityWrite<T>(fence:string|undefined, plan:SecurityLockPlan, operation:(tx:SecurityTx)=>T):T {

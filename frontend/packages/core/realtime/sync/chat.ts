@@ -90,6 +90,33 @@ export function applyChatDoneToCache(
  */
 export function createChatHandlers({ qc }: SyncContext): SyncModule {
   const socketWorkspaceId = getCurrentWsId();
+  const pendingProgress = new Map<string, Map<string, string | null>>();
+  const queryCache = qc.getQueryCache();
+  const unsubscribeProgress = queryCache.subscribe(event => {
+    const { query } = event;
+    const summaries = pendingProgress.get(query.queryHash);
+    if (!summaries) return;
+    if (event.type === "removed") {
+      pendingProgress.delete(query.queryHash);
+      return;
+    }
+    if (event.type !== "updated" || query.state.fetchStatus !== "idle") return;
+    pendingProgress.delete(query.queryHash);
+    if (socketWorkspaceId !== getCurrentWsId()) return;
+    const tasks = qc.getQueryData<AgentTask[]>(query.queryKey);
+    let missing = summaries.size;
+    let changed = false;
+    const merged = tasks?.map(task => {
+      const summary = summaries.get(task.id);
+      if (summary === undefined) return task;
+      missing--;
+      if (task.progress_summary === summary) return task;
+      changed = true;
+      return { ...task, progress_summary: summary };
+    });
+    if (changed) qc.setQueryData(query.queryKey, merged);
+    if (missing) void qc.invalidateQueries({ queryKey: query.queryKey, exact: true });
+  });
   const refreshTargets = (payload: { workspace_id?: string }) => {
     const id = payload.workspace_id ?? socketWorkspaceId ?? getCurrentWsId();
     if (id) void qc.resetQueries(deliveryTargetsOptions(id));
@@ -158,7 +185,11 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
   };
 
   return {
-    dispose: () => clearTimeout(unifiedTimer),
+    dispose: () => {
+      clearTimeout(unifiedTimer);
+      unsubscribeProgress();
+      pendingProgress.clear();
+    },
     handlers: {
       // Every follow-up queue change (enqueue, edit, delete, steer, release,
       // pause) arrives here. Released rows come in through the log stream.
@@ -270,10 +301,20 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         const summary = payload.progress_summary;
         if (typeof payload.task_id !== "string" || (typeof summary !== "string" && summary !== null)) return;
         if (typeof payload.issue_id === "string" && payload.issue_id) {
-          qc.setQueryData<AgentTask[]>(issueKeys.tasks(payload.issue_id), tasks => {
-            if (!tasks?.some(task => task.id === payload.task_id && task.progress_summary !== summary)) return tasks;
-            return tasks.map(task => task.id === payload.task_id ? { ...task, progress_summary: summary } : task);
-          });
+          const queryKey = issueKeys.tasks(payload.issue_id);
+          const query = queryCache.find({ queryKey, exact: true });
+          const tasks = qc.getQueryData<AgentTask[]>(queryKey);
+          const target = tasks?.find(task => task.id === payload.task_id);
+          if (query && query.state.fetchStatus !== "idle") {
+            const summaries = pendingProgress.get(query.queryHash) ?? new Map<string, string | null>();
+            summaries.set(payload.task_id, summary);
+            pendingProgress.set(query.queryHash, summaries);
+          } else if (query && !target) {
+            void qc.invalidateQueries({ queryKey, exact: true });
+          }
+          if (tasks && target && target.progress_summary !== summary) {
+            qc.setQueryData(queryKey, tasks.map(task => task === target ? { ...task, progress_summary: summary } : task));
+          }
         }
         if (invalidateWorkSessionTask(payload)) return;
         if (typeof payload.chat_session_id !== "string") return;

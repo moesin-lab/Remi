@@ -84,6 +84,22 @@ it('pre-scans a co-resident damaged journal before recovering unread input or se
   } finally {await outbox.close(); db.close(); evidence.close();}
 });
 
+it('rejects delayed receives and installation transitions after a newer run is journaled', () => {
+  const path = join(root(), 'receipts.db');
+  const original = journal(path), recovered = journal(path);
+  const tuple = fixtureDeliveryTuple, digest = fixtureDeliveryStatusResponse.envelope_digest;
+  const first = original.receiveRootExecution(tuple, digest);
+  const locator = { ...fixtureExecutionLocator, launch_identity: first.launchIdentity };
+  original.advanceRootExecution(tuple, digest, locator, 'installed');
+  const next = { ...tuple, receipt_id: 'next', run_generation: tuple.run_generation + 1, material_version: tuple.material_version + 1 };
+  const current = recovered.receiveRootExecution(next, digest);
+  expect(() => original.receiveRootExecution(tuple, digest)).toThrow('stale_execution');
+  expect(() => original.advanceRootExecution(tuple, digest, locator, 'confirmed')).toThrow('receipt_conflict');
+  expect(() => recovered.receiveRootExecution({ ...next, receipt_id: 'rollback', run_generation: next.run_generation + 1,
+    material_version: tuple.material_version }, digest)).toThrow('stale_execution');
+  expect(journal(path).receiveRootExecution(next, digest)).toEqual(current);
+});
+
 it("journals only after provider/report/trace quiescence, and only acknowledges a committed remote checkpoint", async () => {
   const path = join(root(), "journal.db"), local = journal(path);
   const order: string[] = [];

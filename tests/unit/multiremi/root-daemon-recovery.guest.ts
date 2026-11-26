@@ -53,7 +53,11 @@ pendingTurnBackendTests('multi-UID root consumer with one authority database', (
       const key = launch(['/usr/bin/python3',`${tests}/root-daemon-recovery-key.py`,root],1102);
       const publicKeys = JSON.parse(await key.next()); expect(publicKeys.uid).toBe(1102);
       const controller = (mode: string) => launch(['/bun',`${tests}/root-daemon-recovery-controller.ts`,root,mode],1101);
-      const {target,human,signing,execution} = await prepareRecoveryAdmission(fixture(),publicKeys.signing,publicKeys.recipient,async challenge=>{
+      const bindingReader = controller('binding');
+      const binding = JSON.parse(await bindingReader.next());
+      expect(await bindingReader.exited).toBe(0);
+      expect(binding).toMatchObject({signingSpki:publicKeys.signing,recipientSpki:publicKeys.recipient});
+      const {target,human,signing,execution} = await prepareRecoveryAdmission(fixture(),binding,async challenge=>{
         const signer = controller('sign'); signer.child.stdin.end(JSON.stringify(challenge));
         const proof = JSON.parse(await signer.next()); expect(await signer.exited).toBe(0); return proof;
       });

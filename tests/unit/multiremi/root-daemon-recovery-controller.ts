@@ -9,10 +9,10 @@ import { classifyDaemonTaskOfferPayload } from '@multiremi/contracts/root-delive
 
 const [root, fault] = process.argv.slice(2);
 if (process.geteuid!() !== 1101 || process.getgid!() !== 1101) throw Error('Expected the guest daemon identity');
-if (fault === 'sign') {
+if (fault === 'binding' || fault === 'sign') {
   const keys = new RootMachineClient(`${root}/machine`,1102);
-  const challenge = JSON.parse(await Bun.stdin.text());
-  console.log(JSON.stringify(await keys.answerChallenge(challenge)));
+  const reply = fault === 'binding' ? await keys.publicBinding() : await keys.answerChallenge(JSON.parse(await Bun.stdin.text()));
+  console.log(JSON.stringify(reply));
   process.exit(0);
 }
 const { tuple, digest, origin, reportPolicy } = JSON.parse(readFileSync(`${root}/offer`, 'utf8'));

@@ -1,5 +1,6 @@
 import { expect } from 'bun:test';
-import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, sign as signDeployment } from 'node:crypto';
+import { machineEnrollmentPayload } from '@multiremi/store/machine-enrollment.js';
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
 import type { StoreContext } from '@multiremi/store/context.js';
 import { beginMachineChallenge, verifyMachineChallenge } from '@multiremi/store/machine-proof.js';
@@ -21,8 +22,7 @@ export async function prepareRecoveryFixture(fixture: PendingTurnTestFixture) {
   const signingKeys = generateKeyPairSync('ed25519');
   const recipientKeys = generateKeyPairSync('rsa', {modulusLength:3072});
   const machine = new RootMachineKeys(recoveryIdentity(), recipientKeys.privateKey, signingKeys.privateKey);
-  const result = await prepareEnrolledRecoveryFixture(fixture, signingKeys.publicKey.export({type:'spki',format:'pem'}).toString(),
-    recipientKeys.publicKey.export({type:'spki',format:'pem'}).toString(), async challenge=>machine.answerChallenge(challenge));
+  const result = await prepareEnrolledRecoveryFixture(fixture, machine.publicBinding(), async challenge=>machine.answerChallenge(challenge));
   const decryptionKey = await crypto.subtle.importKey('jwk', recipientKeys.privateKey.export({format:'jwk'}), {name:'RSA-OAEP',hash:'SHA-256'}, false, ['decrypt']);
   return { ...result, machine, decryptionKey };
 }
@@ -32,32 +32,46 @@ export function recoveryIdentity() {
     deploymentId:'deploy', credentialId:'machine-token', credentialDigest:hash('machine-token'), keyExpiresAtMs:Date.now()+300000 };
 }
 
-export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, signer: string, recipient: string,
+export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, binding: ReturnType<RootMachineKeys['publicBinding']>,
   sign: (challenge: MachineChallenge) => Promise<ReturnType<RootMachineKeys['answerChallenge']>>) {
     const {store} = fixture;
     const db = (store as unknown as {ctx:StoreContext}).ctx.db;
-    const {service,passwordProof,created,signing}=await bootstrap(db, store.resolveAgentDependencies);
+    const {service,passwordProof,signing}=await bootstrap(db, store.resolveAgentDependencies);
     const runtime=store.registerRuntime({id:'rt_auth',name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
     const agent=store.createAgent({name:'admitted',provider:'codex',runtimeId:runtime.id});
     const issue=fixture.createIssue({title:'admission',assigneeType:'agent',assigneeId:agent.id});
-    const parent=created.grant.authority_node_id;
     const nodes=(id:string,kind:string,type:string,subject:string,parents:string[])=>{
       const seq=Number(db.query('SELECT MAX(issued_seq) AS maximum FROM multiremi_authority_nodes').get().maximum)+1;
       db.query(`INSERT INTO multiremi_authority_nodes VALUES(?,?,1,?,?,?,'system',2,9999999999999,NULL,?)`).run(id,seq,kind,type,subject,parents.length);
       for (const source of parents) db.query(`INSERT INTO multiremi_authority_edges SELECT ?,1,?,node_id,generation,issued_seq,'continuous'
         FROM multiremi_authority_nodes WHERE node_id=?`).run(id,seq,source);
     };
-    nodes('machine','machine_registration','daemon','daemon',[]);
-    nodes('runtime-trust','runtime_trust','runtime',runtime.id,['machine',parent]);
+    nodes('deployment','deployment_origin','deployment','deploy',[]);
+    const deployment=generateKeyPairSync('ed25519');
+    const attestor=generateKeyPairSync('ed25519');
+    db.query("INSERT INTO multiremi_machine_deployment_roots VALUES('deploy','deployment',?,?)").run(
+      deployment.publicKey.export({type:'spki',format:'pem'}),attestor.publicKey.export({type:'spki',format:'pem'}));
     db.query("INSERT INTO multiremi_access_tokens(id,name,type,workspace_id,daemon_id,token_hash,token_prefix,created_at) VALUES('machine-token','test','daemon','local','daemon',?,'test','now')").run(hash('machine-token'));
-    db.query(`INSERT INTO multiremi_machine_enrollments VALUES('inc','deploy','consumer','rt_auth','daemon','machine-token',?,'machine',1,?,?,'key',9999999999999,1,NULL,1,9999999999999,'test')`)
-      .run(hash('machine-token'),signer,recipient);
-    const challenge=withSecurityWrite(db,undefined,{expectedRevision:1,workspaceIds:[],numberKeys:[],domainTargets:['authority:machine','machine:rt_auth']},
+    const now=Date.now();
+    const attestation={id:'guest-attestation',isolationVerifiedAtMs:now,immutableCarrierVerifiedAtMs:now,expiresAtMs:binding.keyExpiresAtMs};
+    const deploymentSignature=signDeployment(null,machineEnrollmentPayload('deployment',binding,attestation,0),deployment.privateKey).toString('base64url');
+    const signature=signDeployment(null,machineEnrollmentPayload('attestation',binding,attestation,0),attestor.privateKey).toString('base64url');
+    const machine=withSecurityWrite(db,undefined,{expectedRevision:1,workspaceIds:['local'],numberKeys:[],domainTargets:['authority:deployment','machine:rt_auth']},
+      tx=>service.enrollMachine(tx,deploymentSignature,{...attestation,signature},binding,0));
+    const machinePlan={expectedRevision:2,workspaceIds:['local'],numberKeys:[],domainTargets:[`authority:${machine.nodeId}`,'machine:rt_auth'].sort()};
+    const challenge=withSecurityWrite(db,undefined,machinePlan,
       tx=>beginMachineChallenge(db,tx,'machine-token','rt_auth','root.runtime-trust.grant','rt_auth'));
     const proof = await sign(challenge);
-    withSecurityWrite(db,undefined,{expectedRevision:1,workspaceIds:[],numberKeys:[],domainTargets:['authority:machine','machine:rt_auth']},
+    const verified=withSecurityWrite(db,undefined,machinePlan,
       tx=>verifyMachineChallenge(db,tx,'machine-token',challenge.id,challenge.purpose,challenge.targetId,proof));
-    db.query(`INSERT INTO multiremi_runtime_trusts VALUES('trust','rt_auth',1,'inc',?,'runtime-trust','{}',NULL)`).run(challenge.id);
+    const human = service.issueIndependentDashboardSession(passwordProof,(Math.floor(Date.now()/1000)+1800)*1000,
+      (tx,source,claims)=>new JwtMaterials(db).issue(tx,source,claims,signing));
+    const dashboard = service.registeredCredentials.verifyJwt(human,signing);
+    const trustUse={action:'root.runtime-trust.grant',use:'management',actualTarget:{type:'runtime',id:runtime.id}};
+    const trustPlan=service.plan(dashboard,trustUse);
+    const {trust}=withSecurityWrite(db,undefined,trustPlan,tx=>service.grantRuntimeTrust(tx,service.authorizeWrite(tx,dashboard,trustUse),{
+      runtime_id:runtime.id,daemon_id:'daemon',incarnation:'inc',recipient_key_id:'key',recipient_key_fingerprint:proof.recipient_key_fingerprint,
+      challenge_id:challenge.id,challenge_response:verified.proofDigest,expected_revision:trustPlan.expectedRevision,reason:'approved guest',idempotency_key:'guest-trust'}));
     const sources: Array<AgentConfigurationApproval['sources'][number]> = [];
     function record(kind:string,id:string,use:string,value:unknown) {
       const ref = {kind,id,use,version:1,digest:agentDependencyDigest(value)};
@@ -81,18 +95,16 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
     const inputPolicy = record('input-policy','input','accept','input');
     const actualTarget = {type:'agent',id:agent.id};
     const approvalUse = {action:'root.agent-configuration.approve',use:'write',actualTarget};
-    const plan = service.planAgentGrant(passwordProof,agent.id,['trust']);
+    const plan = service.planAgentGrant(passwordProof,agent.id,[trust.id]);
     const approved = withSecurityWrite(db,undefined,plan,tx=>service.approveAgentConfiguration(tx,service.authorizeWrite(tx,passwordProof,approvalUse),agent.id,null,
-      {sources,executions:[{trustId:'trust',profileDigest,provider,checkpointPolicy,inputPolicy}]}));
-    const human = service.issueIndependentDashboardSession(passwordProof,(Math.floor(Date.now()/1000)+1800)*1000,
-      (tx,source,claims)=>new JwtMaterials(db).issue(tx,source,claims,signing));
-    const dashboard = service.registeredCredentials.verifyJwt(human,signing);
-    const grantPlan = service.planAgentGrant(dashboard,agent.id,['trust']);
+      {sources,executions:[{trustId:trust.id,profileDigest,provider,checkpointPolicy,inputPolicy}]}));
+    const grantPlan = service.planAgentGrant(dashboard,agent.id,[trust.id]);
     const grantUse = {action:'root.grant.create',use:'management',actualTarget};
     const {grant} = withSecurityWrite(db,undefined,grantPlan,tx=>service.grant(tx,service.authorizeWrite(tx,dashboard,grantUse),{
-      subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,
+      subject:{type:'agent',id:agent.id},runtime_trust_ids:[trust.id],accepted_dependency_digest:approved.digest,
       expected_revision:grantPlan.expectedRevision,idempotency_key:'recovery-grant',reason:'approved recovery fixture'}));
-    nodes('provider','provider_trust','agent',agent.id,['runtime-trust',grant.authority_node_id]);
+    const trustNode=db.query('SELECT authority_node_id FROM multiremi_runtime_trusts WHERE trust_id=?').get(trust.id).authority_node_id;
+    nodes('provider','provider_trust','agent',agent.id,[trustNode,grant.authority_node_id]);
     const directProof = await store.rootManagement.verifyIndependentPassword('usr_auth', 'test-dashboard-password');
     const task = store.createAdmittedTask({agentId:agent.id,issueId:issue.id,prompt:'Recover the original execution'},directProof,{messages:[],includeSubmittedPrompt:true});
     const target = {attemptId:task.id};
@@ -101,13 +113,14 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
     return {db,store,target,execution,runtime,human,signing,grant,approved,turnId,service};
 }
 
-export async function prepareEnrolledRecoveryFixture(fixture: PendingTurnTestFixture, signer: string, recipient: string,
+export async function prepareEnrolledRecoveryFixture(fixture: PendingTurnTestFixture, binding: ReturnType<RootMachineKeys['publicBinding']>,
   sign: (challenge: MachineChallenge) => Promise<ReturnType<RootMachineKeys['answerChallenge']>>) {
-    const {db,store,target,execution,runtime,human,signing,grant,approved,turnId,service} = await prepareRecoveryAdmission(fixture,signer,recipient,sign);
+    const {db,store,target,execution,runtime,human,signing,grant,approved,turnId,service} = await prepareRecoveryAdmission(fixture,binding,sign);
+    const recipient=binding.recipientSpki;
     const manifest=JSON.parse(db.query('SELECT manifest_json FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(target.attemptId).manifest_json);
 
     const task=store.getTask(target.attemptId)!;
-    const expiresAt=new Date(Date.now()+300000).toISOString();
+    const expiresAt=new Date(Date.now()+180000).toISOString();
 
     expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'test-offer',rootMachineCredentialId:'machine-token'})?.id).toBe(task.id);
     const policy = store.systemPromptsRepo();

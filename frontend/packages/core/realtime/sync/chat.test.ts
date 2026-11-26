@@ -17,11 +17,12 @@ const session: ChatSession = {
   last_message: null, created_at: "2026-09-11T00:00:00Z", updated_at: "2026-09-11T00:00:00Z",
 };
 let qc: QueryClient;
+let dispose: (() => void) | undefined;
 let handlers: ReturnType<typeof createChatHandlers>["handlers"];
 beforeEach(() => {
   vi.clearAllMocks();
   qc = new QueryClient();
-  handlers = createChatHandlers({ qc } as Parameters<typeof createChatHandlers>[0]).handlers;
+  ({ handlers, dispose } = createChatHandlers({ qc } as Parameters<typeof createChatHandlers>[0]));
   qc.setQueryData(chatKeys.pendingTask("chat-1"), { task_id: "task-1", status: "running", supports_queue: true });
   qc.setQueryData(chatKeys.sessions("ws-1"), [session]);
   qc.setQueryData(chatKeys.sessionList("ws-1", "active"), [session]);
@@ -29,9 +30,95 @@ beforeEach(() => {
   qc.setQueryData(chatKeys.session("ws-1", "chat-1"), session);
   qc.setQueryData(chatKeys.sessions("ws-2"), [{ ...session, workspace_id: "ws-2" }]);
 });
-afterEach(() => qc.clear());
+afterEach(() => {
+  dispose?.();
+  qc.clear();
+  vi.useRealTimers();
+});
 
 describe("chat queue realtime", () => {
+  it.each(["background refetch", "initial load"])("merges progress into the %s response", async mode => {
+    const queryKey = issueKeys.tasks("issue-1");
+    const old = { id: "task-1", status: "queued", progress_summary: "old" };
+    if (mode === "background refetch") qc.setQueryData(queryKey, [old]);
+    const response = [{ ...old, status: "running" }, { ...old, id: "task-2" }];
+    let finish!: (tasks: typeof response) => void;
+    const queryFn = vi.fn(() => new Promise<typeof response>(resolve => { finish = resolve; }));
+    const read = qc.fetchQuery({ queryKey, queryFn });
+    for (const progress_summary of ["first", "latest"]) {
+      handlers["task:progress"]?.({ task_id: old.id, issue_id: "issue-1", progress_summary });
+    }
+    expect(qc.getQueryData(queryKey)).toEqual(mode === "initial load" ? undefined : [{ ...old, progress_summary: "latest" }]);
+    finish(response);
+    await read;
+    expect(qc.getQueryData(queryKey)).toEqual([{ ...response[0], progress_summary: "latest" }, response[1]]);
+    expect(queryFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards pending progress when the sync module is disposed during a read", async () => {
+    const queryKey = issueKeys.tasks("issue-1");
+    const tasks = [{ id: "task-1", progress_summary: "from GET" }];
+    const read = qc.fetchQuery({ queryKey, queryFn: async () => tasks });
+    handlers["task:progress"]?.({ task_id: "task-1", issue_id: "issue-1", progress_summary: "from socket" });
+    dispose?.();
+    await read;
+    expect(qc.getQueryData(queryKey)).toEqual(tasks);
+  });
+
+  it("reads the active Issue list once more when the first response lacks the task", async () => {
+    const queryKey = issueKeys.tasks("issue-1");
+    const authoritative = [{ id: "task-1", progress_summary: "latest" }, { id: "task-2", progress_summary: null }];
+    let finish!: (tasks: typeof authoritative) => void;
+    const queryFn = vi.fn(async () => authoritative)
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const observer = new QueryObserver(qc, { queryKey, queryFn });
+    const unsubscribe = observer.subscribe(() => {});
+    try {
+      for (const progress_summary of ["first", "latest"]) {
+        handlers["task:progress"]?.({ task_id: "task-1", issue_id: "issue-1", progress_summary });
+      }
+      finish([]);
+      await vi.waitFor(() => expect(qc.getQueryData(queryKey)).toEqual(authoritative));
+      expect(queryFn).toHaveBeenCalledTimes(2);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("patches only the matching Issue task without scheduling prefix refreshes", () => {
+    vi.useFakeTimers();
+    const tasks = [{ id: "task-1" }, { id: "task-2" }];
+    qc.setQueryData(issueKeys.tasks("issue-1"), tasks);
+    qc.setQueryData(issueKeys.tasks("issue-2"), tasks);
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const prefix = createPrefixRefresh({ qc } as Parameters<typeof createPrefixRefresh>[0]);
+    for (const summary of ["working", null]) {
+      const payload = { task_id: "task-1", issue_id: "issue-1", issue_session_id: "session-1", progress_summary: summary };
+      handlers["task:progress"]?.(payload);
+      prefix.onAny({ type: "task:progress", payload });
+      expect(qc.getQueryData(issueKeys.tasks("issue-1"))).toEqual([{ id: "task-1", progress_summary: summary }, tasks[1]]);
+    }
+    vi.advanceTimersByTime(4000);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(qc.getQueryData(issueKeys.tasks("issue-2"))).toBe(tasks);
+    prefix.dispose();
+  });
+
+  it("coalesces Chat lifecycle refreshes and leaves Issue decision surfaces fresh", () => {
+    vi.useFakeTimers();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const payload = { task_id: "task-1", chat_session_id: "chat-1" };
+    for (const event of ["task:running", "task:awaiting_human", "task:running"] as const) handlers[event]?.(payload);
+    vi.advanceTimersByTime(100);
+    expect(invalidate.mock.calls.map(([filter]) => filter?.queryKey).filter(key =>
+      ["turns", "inbox", "issues", "question"].includes(String(key?.[0])))).toEqual([["turns", "ws-1"], ["inbox", "ws-1"]]);
+    invalidate.mockClear();
+    handlers["task:dispatch"]?.(payload);
+    dispose?.();
+    vi.advanceTimersByTime(100);
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["turns", "ws-1"] });
+  });
+
   it.each([
     "task:queued", "task:dispatch", "task:running", "task:progress",
     "task:waiting_local_directory", "task:awaiting_human",

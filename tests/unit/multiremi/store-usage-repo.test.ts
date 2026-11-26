@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Sibling test for packages/server/src/store/repos/usage-repo.ts.
 // Drives the carved-out repo directly over its StoreContext (not through the
@@ -24,7 +25,7 @@ function seedCompletedTaskWithUsage(): void {
   const runtime = store!.registerRuntime({ name: "usage-runtime", provider: "claude" });
   const agent = store!.createAgent({ name: "Usage worker", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
   const task = store!.createTask({ agentId: agent.id, prompt: "burn tokens", workspaceId: "local" });
-  store!.claimTask(runtime.id);
+  claimWithCurrentRuntime(store!, runtime.id);
   store!.startTask(task.id);
   store!.reportTaskUsage(task.id, [
     { provider: "claude", model: "opus", inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 1 },
@@ -71,7 +72,7 @@ describe("UsageRepo", () => {
     const runtime = store!.registerRuntime({ name: "totals-runtime", provider: "claude" });
     const agent = store!.createAgent({ name: "Totals worker", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store!.createTask({ agentId: agent.id, prompt: "history", workspaceId: "local" });
-    store!.claimTask(runtime.id);
+    claimWithCurrentRuntime(store!, runtime.id);
     store!.startTask(task.id);
     // Legacy total semantics are ambiguous; context cannot be inferred either.
     store!.reportTaskUsage(task.id, [{ provider: "claude", model: "opus", inputTokens: 0, outputTokens: 0, totalTokens: 78048 }]);
@@ -94,7 +95,7 @@ describe("UsageRepo", () => {
     const issue = createResponsibleTestIssue(store!,{ title: "Work", workspaceId: "local", projectId: project.id });
     const agent = store!.createAgent({ name: "worker", workspaceId: "local", provider: "claude", runtimeId: first.id });
     const task = store!.createTask({ agentId: agent.id, issueId: issue.id, prompt: "cross day", workspaceId: "local" });
-    store!.claimTask(first.id); store!.startTask(task.id);
+    claimWithCurrentRuntime(store!, first.id); store!.startTask(task.id);
     const units = ["2026-10-01T15:30:00Z", "2026-10-01T16:30:00Z"].map((occurredAt,index) => ({
       unitId: String(index), revision: 1, provider: "claude", model: "opus", source: "provider_request" as const, scope: "request" as const, accuracy: "exact" as const,
       inputTokens: (index + 1) * 100, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, actualUnsplitTokens: 0,
@@ -121,7 +122,7 @@ describe("UsageRepo", () => {
     const runtime = store!.registerRuntime({ name: "failing-runtime", provider: "claude" });
     const agent = store!.createAgent({ name: "Failing worker", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store!.createTask({ agentId: agent.id, prompt: "will fail", workspaceId: "local" });
-    store!.claimTask(runtime.id);
+    claimWithCurrentRuntime(store!, runtime.id);
     store!.startTask(task.id);
     store!.failTask(task.id, { error: "boom" });
 

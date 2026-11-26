@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from './pending-turn-test-backends.js';
 import { StoreContext, createCommitEventQueue } from '@multiremi/store/context.js';
@@ -24,10 +25,10 @@ function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, 
     store.updateAgent(worker.id, { runtimeId: runtime.id });
   }
   const busyTask = busyOwner ? store.createTask({ agentId: leader.id, issueId: issue.id, prompt: 'Already coordinating this Issue' }) : null;
-  if (busyTask) { expect(store.claimTask(leaderRuntime!.id)?.id).toBe(busyTask.id); store.startTask(busyTask.id); }
+  if (busyTask) { expect(claimWithCurrentRuntime(store, leaderRuntime!.id)?.id).toBe(busyTask.id); store.startTask(busyTask.id); }
   const source = separateSource ? store.createIssueSession(issue.id, { title: 'Original worker context', holdsWorkspace: false }) : null;
   const task = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: source?.id, prompt: 'Original task' });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   const turn = store.getTurnForAttempt(task.id)!;
   const bridge = store.getDaemonTurnBridge();
   const scope = { runtimeId: runtime.id, daemonId: 'questions-daemon', workspaceId: 'local' };
@@ -189,7 +190,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     const issue = store.createIssue({ title: 'Second Squad owns this work', assigneeType: 'squad', assigneeId: assignedSquad.id });
     const session = store.createIssueSession(issue.id, { title: 'Original private Worker lane', holdsWorkspace: false });
     const task = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: session.id, prompt: 'Ask the actual Issue owner', priority: 200 });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!, bridge = store.getDaemonTurnBridge();
     const scope = { runtimeId: runtime.id, daemonId: runtime.daemonId!, workspaceId: 'local' };
     const created = bridge.rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id, wait_id: `two-squad:${task.id}`,
@@ -204,11 +205,11 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     expect(notifications.map(message => message.to_agent_id)).toEqual([second.id]);
     const unrelatedSession = store.createIssueSession(issue.id, { title: 'First Squad unrelated work', holdsWorkspace: false });
     const unrelated = store.createTask({ agentId: first.id, issueId: issue.id, issueSessionId: unrelatedSession.id, prompt: 'No Q was assigned here', priority: 300 });
-    expect(store.claimTask(runtime.id)?.id).toBe(unrelated.id); store.startTask(unrelated.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(unrelated.id); store.startTask(unrelated.id);
     const wrongToken = await store.createTaskAccessToken(store.getTask(unrelated.id)!, 'local');
     const notified = store.getTurn(String(notifications[0]!.metadata.delivery_turn_id))!;
     db.run('UPDATE multiremi_turns SET priority=400 WHERE id=?', [notified.id]);
-    const handler = store.claimTask(runtime.id)!;
+    const handler = claimWithCurrentRuntime(store, runtime.id)!;
     expect(handler.id).toBe(notified.current_attempt_id!); expect(handler.agentId).toBe(second.id); store.startTask(handler.id);
     const token = await store.createTaskAccessToken(store.getTask(handler.id)!, 'local');
     const api = createMultiremiApp({ store, authToken: 'two-squad-master' });
@@ -422,7 +423,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     h.store.answerQuestion(h.q.id, { expected_route_revision: 1, response: { answer: 'A' } },
       { type: 'agent', id: h.leader.id }, h.agentTurn(h.leader.id));
     const bound = h.store.getQuestion(h.q.id)!.recovery.consumer_turn_id!;
-    const attempt = h.store.claimTask(h.runtime.id)!;
+    const attempt = claimWithCurrentRuntime(h.store, h.runtime.id)!;
     expect(h.store.getTurnForAttempt(attempt.id)!.id).toBe(bound);
     h.store.startTask(attempt.id);
     const acknowledge = (attemptId: string) => {
@@ -437,7 +438,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     };
     h.store.sendMessage({ session_id: h.q.session_id, sender: { type: 'member', id: 'mem_local_local' },
       to: { type: 'agent', ref: h.worker.id }, execution_scope: 'observer', message_kind: 'request', wake_requested: 'now', body_md: 'Read context in another scope' });
-    const observer = h.store.claimTask(h.runtime.id)!;
+    const observer = claimWithCurrentRuntime(h.store, h.runtime.id)!;
     h.store.startTask(observer.id);
     acknowledge(observer.id);
     expect(h.store.getQuestion(h.q.id)).toMatchObject({ wait_status: 'continuation_pending', recovery: { consumer_turn_id: bound } });
@@ -447,7 +448,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     const reopened = new MultiremiStore(h.db);
     const next = reopened.sendMessage({ session_id: h.q.session_id, sender: { type: 'member', id: 'mem_local_local' },
       to: { type: 'agent', ref: h.worker.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Continue after recovery' });
-    const successor = reopened.claimTask(h.runtime.id)!;
+    const successor = claimWithCurrentRuntime(reopened, h.runtime.id)!;
     reopened.startTask(successor.id);
     const nextTurn = acknowledge(successor.id);
     expect(nextTurn).toBe(next.turn_id!);
@@ -728,7 +729,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     const issue = store.createIssue({ title: 'Team work', assigneeType: 'squad', assigneeId: team.id });
     db.run('UPDATE multiremi_squads SET leader_id=NULL WHERE id=?', [team.id]);
     const task = store.createTask({ agentId: worker.id, issueId: issue.id, prompt: 'Ask the team' });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const created = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id, dedupe_key: `leaderless:${task.id}`, wait_id: `leaderless:${task.id}`,
       body_md: 'Which team decision?', options: [{ label: 'A', value: 'A' }], metadata: { kind: 'question', questions: [{ question: 'Which team decision?', options: [{ label: 'A' }] }] } },
@@ -843,7 +844,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     const owner = store.createAgent({ name: 'Configured later', provider: 'codex' });
     const issue = store.createIssue({ title: 'Root without an owner' });
     const task = store.createTask({ agentId: worker.id, issueId: issue.id, prompt: 'Ask before an owner exists' });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const scope = { runtimeId: runtime.id, daemonId: 'unowned-root-daemon', workspaceId: 'local' };
     const bridge = store.getDaemonTurnBridge();

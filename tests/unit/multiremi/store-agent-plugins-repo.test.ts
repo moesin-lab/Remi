@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { receiveRuntimeInputs } from '../../fixtures/runtime-downlinks.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
@@ -490,7 +491,7 @@ describe("AgentPluginsRepo", () => {
     expect(store.runtimeHasReadyAgentPlugins(runtime.id, agent.id)).toBe(false);
 
     const task = store.createTask({ agentId: agent.id, prompt: "wait for rebound" });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.reportAgentPluginRuntimeState(runtime.id, versionId, {
       status: "ready",
       observedDigest: digest,
@@ -500,14 +501,14 @@ describe("AgentPluginsRepo", () => {
       status: "pending",
       retryGeneration: 1,
     });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
 
     store.reportAgentPluginRuntimeState(runtime.id, versionId, {
       status: "ready",
       observedDigest: digest,
       retryGeneration: 1,
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   });
 
   it("preflights candidates before activation and keeps exact versions rollback-safe", () => {

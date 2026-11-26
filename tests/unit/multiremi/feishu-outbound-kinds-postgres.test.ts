@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -86,7 +87,7 @@ describe.skipIf(!adminUrl)("C5 delivery on real PostgreSQL", () => {
       expect(splitTasks).toContain(secondTask);
       for (const taskId of tasks) {
         if (store.getTask(taskId)?.status === "queued") {
-          expect(store.claimTask("rt_kinds")?.id).toBe(taskId);
+          expect(claimWithCurrentRuntime(store, "rt_kinds")?.id).toBe(taskId);
           store.startTask(taskId);
         }
         store.completeTask(taskId, { output: "PG answer" });

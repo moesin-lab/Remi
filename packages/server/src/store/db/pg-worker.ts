@@ -1,4 +1,5 @@
 import { DatabaseUnavailableError, isDatabaseConnectionError } from "@shared/db/recovery.js";
+import type { PgDirectTarget } from './postgres.js';
 /**
  * Postgres bridge worker.
  *
@@ -15,6 +16,7 @@ const workerSelf = self as unknown as Worker;
 
 let sql: any = null;
 let databaseUrl = "";
+let expectedTarget: PgDirectTarget | undefined;
 let backend: { pid: number; started: string; generation: number } | null = null;
 const STATUS_DONE = 1;
 const STATUS_ERROR = 2;
@@ -38,8 +40,9 @@ function transactionVerb(query: string | undefined): "BEGIN" | "COMMIT" | "ROLLB
   return verb === "BEGIN" || verb === "COMMIT" || verb === "ROLLBACK" ? verb : null;
 }
 
-function connect(url: string, track = true): any {
+export function connect(url: string, track = true, target = expectedTarget): Bun.SQL {
   const client = new Bun.SQL(url, {
+    ...(target && { adapter: 'postgres', hostname: target.hostname, port: target.port, database: target.database }),
     max: 1,
     connectionTimeout: 2,
     onconnect: () => { if (track) connectionGeneration += 1; },
@@ -47,14 +50,22 @@ function connect(url: string, track = true): any {
       if (sql === client && transactionGeneration !== null) transactionConnectionLost = true;
     },
   });
+  if (target) {
+    const effective = client.options;
+    if (effective.adapter !== 'postgres' || effective.hostname !== target.hostname || effective.port !== target.port ||
+        effective.database !== target.database || effective.path) {
+      throw new Error('PostgreSQL driver target mismatch. Use the pinned direct TCP endpoint.');
+    }
+  }
   return client;
 }
 
 workerSelf.onmessage = async (event: MessageEvent) => {
-  const { control, data, init, sql: query, params, timeoutMs } = event.data as {
+  const { control, data, init, expectedTarget: requestedTarget, sql: query, params, timeoutMs } = event.data as {
     control: SharedArrayBuffer;
     data: SharedArrayBuffer;
     init?: string;
+    expectedTarget?: PgDirectTarget;
     sql?: string;
     params?: unknown[];
     timeoutMs?: number;
@@ -100,6 +111,7 @@ workerSelf.onmessage = async (event: MessageEvent) => {
   try {
     if (init) {
       databaseUrl = init;
+      expectedTarget = requestedTarget;
       sql = connect(init);
       const rows = await sql`SELECT pg_backend_pid() AS pid, backend_start::text AS started FROM pg_stat_activity WHERE pid = pg_backend_pid()`;
       backend = { pid: Number(rows[0].pid), started: rows[0].started, generation: connectionGeneration };

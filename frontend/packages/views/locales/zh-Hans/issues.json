@@ -318,7 +318,7 @@
       "error": "准备失败"
     },
     "change_requests_loading": "加载中…",
-    "change_requests_empty": "还没有关联的代码变更。在分支名、标题或描述中引用本 Issue 编号即可自动关联。",
+    "change_requests_empty": "还没有关联的代码变更。",
     "change_request_github_reference": "GitHub PR #{{number}}",
     "change_request_codebase_reference": "Codebase MR !{{number}}",
     "change_request_generic_reference": "代码变更 #{{number}}",

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
+  AdvanceScmEntitySnapshotResult,
+  RecordScmCanonicalEventInput,
   MultiremiScmEntitySnapshot,
   MultiremiScmEventFidelity,
   MultiremiScmEventSource,
@@ -32,50 +34,51 @@ export interface ReconcileObservationResult {
 }
 
 export function reconcileObservation(input: ReconcileObservationInput): ReconcileObservationResult {
-  const {
-    store,
-    binding,
-    observation,
-    baseline,
-    source = "poll",
-    fidelity = source === "webhook" ? "exact" : "inferred",
-  } = input;
+  const { store, binding, observation } = input;
   const contentHash = stableJsonHash(observation.payload);
-  let changed = false;
   const written = store.advanceEntitySnapshotWithEvents(
     observationSnapshotInput(binding, observation, contentHash),
-    (advanced) => {
-      const previous = advanced.previous;
-      changed = advanced.applied
-        && (previous?.contentHash !== contentHash || previous?.version !== observation.version);
-      if (!changed || baseline) return [];
-
-      return deriveCanonicalCandidates(observation, previous).map((candidate) => {
-        const logicalKey = buildScmLogicalKey(binding.repositoryId, candidate);
-        return {
-          workspaceId: binding.workspaceId,
-          connectionId: binding.connectionId,
-          repositoryId: binding.repositoryId,
-          type: candidate.type,
-          subjectType: candidate.subjectType,
-          subjectId: candidate.subjectId,
-          logicalKey,
-          fidelity,
-          occurredAt: candidate.occurredAt,
-          observedAt: observation.observedAt,
-          payload: candidate.payload,
-          evidence: {
-            source,
-            providerEventId: input.providerEventId ?? null,
-            dedupeKey: buildEvidenceDedupeKey(source, input.providerEventId, logicalKey, contentHash),
-            payload: input.evidencePayload ?? observation.payload,
-            rawBody: input.rawBody ?? null,
-          },
-        };
-      });
-    },
+    advanced => observationCanonicalEvents(input, advanced),
   );
+  const changed = written.advance.applied
+    && (written.advance.previous?.contentHash !== contentHash || written.advance.previous?.version !== observation.version);
   return { changed, snapshot: written.advance.snapshot, events: written.events };
+}
+
+export function observationCanonicalEvents(
+  input: Omit<ReconcileObservationInput, "store">,
+  advanced: AdvanceScmEntitySnapshotResult,
+): RecordScmCanonicalEventInput[] {
+  const { binding, observation, baseline, source = "poll", fidelity = source === "webhook" ? "exact" : "inferred" } = input;
+  const contentHash = stableJsonHash(observation.payload);
+  const previous = advanced.previous;
+  const changed = advanced.applied
+    && (previous?.contentHash !== contentHash || previous?.version !== observation.version);
+  // A known PR/MR already has an entity baseline, even before the stream's first poll.
+  if (!changed || (baseline && !(previous && observation.entityType === "change_request"))) return [];
+  return deriveCanonicalCandidates(observation, previous).map(candidate => {
+    const logicalKey = buildScmLogicalKey(binding.repositoryId, candidate);
+    return {
+      workspaceId: binding.workspaceId,
+      connectionId: binding.connectionId,
+      repositoryId: binding.repositoryId,
+      type: candidate.type,
+      subjectType: candidate.subjectType,
+      subjectId: candidate.subjectId,
+      logicalKey,
+      fidelity,
+      occurredAt: candidate.occurredAt,
+      observedAt: observation.observedAt,
+      payload: candidate.payload,
+      evidence: {
+        source,
+        providerEventId: input.providerEventId ?? null,
+        dedupeKey: buildEvidenceDedupeKey(source, input.providerEventId, logicalKey, contentHash),
+        payload: input.evidencePayload ?? observation.payload,
+        rawBody: input.rawBody ?? null,
+      },
+    };
+  });
 }
 
 export function observationSnapshotInput(

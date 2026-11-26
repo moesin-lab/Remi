@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../multiremi/helpers.js";
 import { readOfferedTurnInput, turnCompletion, completionResponse } from "../../fixtures/turn-report.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
@@ -13,7 +14,7 @@ function fixture() {
     metadata: { parallel_agent_execution: 1 } });
   const agent = store.createAgent({ name: "Reconnect", provider: "claude", runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, prompt: "synthetic reconnect" });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   readOfferedTurnInput(store, task.id);
   const report = (type: string, patch: Record<string, unknown> = {}) => reportFrame(store, type,
     type === "turn.complete" ? turnCompletion(store, task.id, String(patch.output),
@@ -54,7 +55,7 @@ function fixture() {
     const payload = { ...input, message_ids: input.input_messages.map(message => message.id) };
     expect(bridge.rpc("turn.input", payload, scope)).toEqual({ ok: true, input_to_seq: input.input_to_seq });
     expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(store.requeueTaskOffer(task.id, runtime.id, "rejected")).toBe(true);
     expect(store.getTask(task.id)?.offeredAt).toBeNull();
     const before = store.getTurn(input.turn_id);
@@ -203,10 +204,10 @@ function fixture() {
     const agent = store.getAgent(first.agentId)!;
     const chat = store.createChatSession({ agentId: agent.id });
     const active = store.sendChatMessage(chat.id, { content: "first" });
-    expect(store.claimTask(runtime.id)?.id).toBe(active.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(active.task.id);
     store.startTask(active.task.id); store.completeTask(active.task.id, { output: "done" });
     const pending = store.sendChatMessage(chat.id, { content: "old input" });
-    expect(store.claimTask(runtime.id)?.id).toBe(pending.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(pending.task.id);
     readOfferedTurnInput(store, pending.task.id);
     store.recordTaskOffered(pending.task.id, runtime.id);
     store.requeueTaskOffer(pending.task.id, runtime.id);
@@ -227,7 +228,7 @@ function fixture() {
     const original = sendEnvelope(to, "original");
     expect(original.action).toBe("created");
     const oldId = original.task!.id;
-    expect(store.claimTask(runtime.id)?.id).toBe(oldId);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(oldId);
     readOfferedTurnInput(store, oldId);
     store.recordTaskOffered(oldId, runtime.id); store.requeueTaskOffer(oldId, runtime.id);
     const before = store.getTask(oldId);
@@ -257,7 +258,7 @@ function fixture() {
     const to = { role: "chat" as const, chatSessionId: chat.id, agentId: task.agentId };
     const original = sendEnvelope(to, "original");
     const oldId = original.task!.id;
-    expect(store.claimTask(runtime.id)?.id).toBe(oldId);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(oldId);
     readOfferedTurnInput(store, oldId);
     store.recordTaskOffered(oldId, runtime.id); store.requeueTaskOffer(oldId, runtime.id);
     const before = store.getTask(oldId);

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { openRuntimeDownlinks, receiveRuntimeInputs } from '../../fixtures/runtime-downlinks.js';
 // MUL-389: the heartbeat's seven async-request polls are merged into one probe.
 //
@@ -219,7 +220,7 @@ describe("merged heartbeat poll", () => {
     const { store, runtime } = fixture();
     const agent = store.createAgent({ name: "Drain agent", provider: "codex", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "drain", runtimeId: runtime.id });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(task.id);
 
     const update = store.createRuntimeUpdateRequest(runtime.id, { targetVersion: "9.9.9" });

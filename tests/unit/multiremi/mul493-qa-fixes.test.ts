@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, beforeEach, expect, it } from 'bun:test';
@@ -49,7 +50,7 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
       if (issueId) store.reportIssueWorkspace({ issueId, runtimeId: scope.runtimeId, rootPath: '/tmp/qa-fix-source',
         branchName: `agent/${store.getIssue(issueId)!.key}`, status: 'ready', repos: [] });
       const task = store.createTask({ agentId: worker.id, prompt: 'Review', ...(issueId ? { issueId } : {}) });
-      expect(store.claimTask(scope.runtimeId)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, scope.runtimeId)?.id).toBe(task.id);
       store.startTask(task.id);
       return task;
     }
@@ -99,7 +100,7 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
     const replacement = f.store.getTurn(turn.id)!.current_attempt_id!;
     expect(replacement).not.toBe(source.id);
     expect(Number(f.db.query('SELECT COUNT(*) AS n FROM multiremi_feishu_bot_round_pushes').get().n)).toBe(0);
-    expect(f.store.claimTask(scope.runtimeId)?.id).toBe(replacement);
+    expect(claimWithCurrentRuntime(f.store, scope.runtimeId)?.id).toBe(replacement);
     f.store.startTask(replacement);
     f.store.completeTask(replacement, { output: 'Recovered' });
     expect(f.db.query('SELECT leader_task_id FROM multiremi_feishu_bot_round_pushes WHERE issue_id=?').all(target.issue.id)).toEqual([{ leader_task_id: turn.id }]);
@@ -114,7 +115,7 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
       const f = setup();
       const id = kind === 'direct' ? f.store.createTask({ agentId: f.worker.id, prompt: 'Original input' }).id
         : f.store.runAutopilot(createResponsibleTestAutopilot(f.store, { title: 'Independent run', assigneeId: f.worker.id, executionMode: 'run_only' }).id, { prompt: 'Original input' }).taskId!;
-      expect(f.store.claimTask(scope.runtimeId)?.id).toBe(id);
+      expect(claimWithCurrentRuntime(f.store, scope.runtimeId)?.id).toBe(id);
       f.store.startTask(id);
       const turn = f.store.getTurnForAttempt(id)!, bridge = f.store.getDaemonTurnBridge();
       const offer = bridge.offerInput(f.store.getTaskWithAgent(id)!);
@@ -149,7 +150,7 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
         expect(successor).toMatchObject({ status: 'pending', execution_scope: f.turn.execution_scope, trigger_message_id: f.late.message.id });
         expect(successor.trigger_message_id).not.toBe(other.message.id);
         expect(f.store.getSessionAgentReadProgress(f.turn.session_id, f.worker.id, f.id).seq).toBe(f.offer.input_to_seq);
-        const claimed = f.store.claimTask(scope.runtimeId)!;
+        const claimed = claimWithCurrentRuntime(f.store, scope.runtimeId)!;
         expect(claimed.id).toBe(successor.current_attempt_id!);
         f.store.startTask(claimed.id);
         expect(f.bridge.offerInput(f.store.getTaskWithAgent(claimed.id)!).input_messages.some(m => m.id === f.late.message.id)).toBe(true);
@@ -178,7 +179,7 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
     const body = '😀中文'.repeat(30_000);
     const first = f.store.sendMessage({ session_id: target.chat.id, sender: { type: 'member', id: 'mem_local_local' },
       to: { type: 'agent', ref: f.concierge.id }, message_kind: 'request', wake_requested: 'inbox_only', body_md: body }).message;
-    const claimed = f.store.claimTask(scope.runtimeId)!;
+    const claimed = claimWithCurrentRuntime(f.store, scope.runtimeId)!;
     expect(claimed.chatSessionId).toBe(target.chat.id);
     const issueHead = f.store.getConversationLogHead(target.session.id)!.headSeq;
     const head = f.store.getConversationLogHead(target.chat.id)!.headSeq;
@@ -250,7 +251,7 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
         message_ids: input.input_messages.map(message => message.id) }, scope).ok).toBe(true);
       expect(receipt().input_ack_seq).toBe(input.input_to_seq);
       const replacement = f.store.retryTurn(turn.id).current_attempt_id!;
-      expect(f.store.claimTask(scope.runtimeId)?.id).toBe(replacement);
+      expect(claimWithCurrentRuntime(f.store, scope.runtimeId)?.id).toBe(replacement);
       await expectOfferedRange(replacement, 0, head, issueHead);
       f.store.startTask(replacement);
       expect(() => progress(claimed.id)).toThrow('stale_attempt');
@@ -265,7 +266,7 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
       f.store.completeTask(nextSource.id, { output: 'Second source done' });
       const increment = f.store.sendMessage({ session_id: target.chat.id, sender: { type: 'member', id: 'mem_local_local' },
         to: { type: 'agent', ref: f.concierge.id }, message_kind: 'request', wake_requested: 'inbox_only', body_md: 'Own Chat increment' }).message;
-      const next = f.store.claimTask(scope.runtimeId)!;
+      const next = claimWithCurrentRuntime(f.store, scope.runtimeId)!;
       expect(next.chatSessionId).toBe(target.chat.id);
       const nextOffer = daemonTaskClaimResponse(f.store, next);
       const nextFrom = f.store.getTask(next.id)!.projectionFromSeq!;

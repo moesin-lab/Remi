@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, expect, it } from 'bun:test';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 import { resetMultiremiTestEnv } from './helpers.js';
@@ -34,7 +35,7 @@ pendingTurnBackendTests('persistent native Q reminders', fixture => {
     const root = store.claimFeishuBotOutbound('local', runtime.id)!;
     store.reportFeishuBotOutbound('local', runtime.id, root.id, { claimToken: root.claimToken, status: 'sent', externalMessageId: 'om_reminder_root' });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: 'Ask once' });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const created = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id,
       body_md: 'Continue the original work?', dedupe_key: `reminder:${task.id}`, wait_id: `wait:${task.id}`, timeout_ms: 300_000,

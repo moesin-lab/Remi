@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
@@ -151,7 +152,7 @@ async function workerQuestion(suffix: string) {
   // A Chat Q never asks Remi to present it: no request, no Remi Chat, no Remi turn.
   expect(db!.query("SELECT id FROM multiremi_conversation_log WHERE kind='message' AND metadata LIKE '%question_present_request%'").all()).toEqual([]);
   expect(db!.query("SELECT id FROM multiremi_chat_sessions WHERE agent_id=?").all(f.agent.id)).toEqual([]);
-  expect(f.store.claimTask(f.runtimeId)).toBeNull();
+  expect(claimWithCurrentRuntime(f.store, f.runtimeId)).toBeNull();
   const app = createMultiremiApp({ store: f.store, authToken: "kind-question-master" });
   return { ...f, worker, request, original, app };
 }
@@ -368,7 +369,7 @@ describe("C5 full fake-channel delivery", () => {
     const f = await workerQuestion("present_lane"), { request, original, app } = f;
     const unrelated = f.store.createChatSession({ agentId: f.agent.id, creatorId: "local", title: "Unrelated Remi work" });
     const other = f.store.createTask({ agentId: f.agent.id, chatSessionId: unrelated.id, prompt: "No Q notification", priority: 100 });
-    expect(f.store.claimTask(f.runtimeId)?.id).toBe(other.id); f.store.startTask(other.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtimeId)?.id).toBe(other.id); f.store.startTask(other.id);
     const token = await f.store.createTaskAccessToken(f.store.getTask(other.id)!, "local");
     const remi = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
     expect((await app.request(`/api/messages/${request.id}/question`, { headers: remi })).status).toBe(403);

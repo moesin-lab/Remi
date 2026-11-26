@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import { loadedFleet } from "./daemon-report-fleet.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
@@ -82,7 +83,7 @@ export async function createReportScaleFixture(scale: ReportScale) {
   for (let i = 0; i < scale.historicalAttempts; i++) {
     const task = f.store.createTask({ agentId: f.agent.id, maxAttempts: 1, prompt: `Historical attempt ${i}`,
       runtimeId: f.runtimeIds[0] });
-    f.store.claimTask(f.runtimeIds[0]!);
+    claimWithCurrentRuntime(f.store, f.runtimeIds[0]!);
     f.store.startTask(task.id);
     f.store.reportTaskUsage(task.id, [{ provider: 'claude', model: 'fixture', inputTokens: 10, outputTokens: 2 }]);
     f.store.failTask(task.id, { error: 'historical failure' });
@@ -112,7 +113,7 @@ export async function createReportScaleFixture(scale: ReportScale) {
     const task = f.store.sendChatMessage(chat.id, { body: `Concurrent work ${i}` }).task;
     await f.layer.drain();
     for (let claim = 0; claim < 30 && f.store.getTask(task.id)?.status === 'queued'; claim++) {
-      if (!f.store.claimTask(f.runtimeIds[0]!)) break;
+      if (!claimWithCurrentRuntime(f.store, f.runtimeIds[0]!)) break;
     }
     if (f.store.getTask(task.id)?.status === 'queued') throw new Error(`Live fixture claim failed ${i}: ${JSON.stringify(f.store.getTask(task.id))}`);
     f.store.startTask(task.id);

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -38,7 +39,7 @@ function questionBot() {
 
 function nativeQuestion(f: ReturnType<typeof configureKindBot>, taskId: string, question: string) {
   const task = f.store.getTask(taskId)!;
-  if (task.status === 'queued') { expect(f.store.claimTask(f.runtimeId)?.id).toBe(task.id); f.store.startTask(task.id); }
+  if (task.status === 'queued') { expect(claimWithCurrentRuntime(f.store, f.runtimeId)?.id).toBe(task.id); f.store.startTask(task.id); }
   const turn = f.store.getTurnForAttempt(taskId)!;
   const result = f.store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: taskId,
     wait_id: `kind:${taskId}`, dedupe_key: `kind:${taskId}`, body_md: question, options: [{ label: 'Yes', value: 'Yes' }],
@@ -236,7 +237,7 @@ describe("Feishu outbound kind leases", () => {
     for (const row of initial) expect(report(f, row, "sent")).toBe(true);
     f.store.failTask(taskId, { error: "Timeout", failureReason: "timeout" });
     const retry = f.store.listTasks().find(task => task.parentTaskId === taskId)!;
-    expect(f.store.claimTask(f.runtimeId)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtimeId)?.id).toBe(retry.id);
     f.store.startTask(retry.id);
     const retryCot = claim(f).find(row => row.kind === "cot")!;
     expect(retryCot.id).toBe(initial.find(row => row.kind === "cot")!.id);

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 import { afterEach, describe, expect, it } from "bun:test";
@@ -149,8 +150,8 @@ describe("MUL-330 independent mixed-runtime catalog regression", () => {
     expect(response.status).toBe(400);
     const saved = store.createAgent({ name: "Saved legacy", provider: "codex", model: "gateway-only" });
     const task = store.createTask({ agentId: saved.id, prompt: "Wait for actual execution member" });
-    expect(store.claimTask(fallback.id)).toBeNull();
-    expect(store.claimTask("healthy")).toBeNull();
+    expect(claimWithCurrentRuntime(store, fallback.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, "healthy")).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
   });
 
@@ -162,11 +163,11 @@ describe("MUL-330 independent mixed-runtime catalog regression", () => {
     expect(blocked.status).toBe(400);
     const saved = store.createAgent({ name: "Saved unlisted", provider: "codex", model: "gateway-only" });
     const task = store.createTask({ agentId: saved.id, prompt: "Cannot execute" });
-    expect(store.claimTask(fallback.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, fallback.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
     const allowed = store.createAgent({ name: "Actual fallback", provider: "codex", model: "bundled-model", thinkingLevel: "low" });
     const runnable = store.createTask({ agentId: allowed.id, prompt: "Actual GPT" });
-    expect(store.claimTask(fallback.id)?.id).toBe(runnable.id);
+    expect(claimWithCurrentRuntime(store, fallback.id)?.id).toBe(runnable.id);
   });
 
 });

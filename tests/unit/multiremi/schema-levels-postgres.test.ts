@@ -1,3 +1,5 @@
+import { removeScmSchema } from "../../fixtures/scm-schema-upgrade.js";
+import { assertScmOwnershipReady, classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 import { verifyFeishuWakeWordUpgrade } from "../../fixtures/feishu-wake-word-schema-upgrade.js";
 import { fileURLToPath } from "node:url";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -12,7 +14,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { PostgresSyncDatabase, advisoryLock } from '@multiremi/store/db/postgres.js';
 import { MIGRATION_ADVISORY_LOCK_KEY } from '@multiremi/store/advisory-locks.js';
-import { assertSchemaCompatible, readSchemaLevels } from '@multiremi/store/schema-levels.js';
+import { assertSchemaCompatible, readSchemaLevels, SCHEMA_EXPAND_LEVEL } from '@multiremi/store/schema-levels.js';
 import { runMigrations, runStartupMigrations } from '@multiremi/store/migrations.js';
 import { assertSchemaContractClientsOffline } from '@multiremi/store/schema-contracts.js';
 import { runSchemaExpands, runSchemaContracts, type SchemaMigration } from '@multiremi/store/schema-migration-runner.js';
@@ -37,27 +39,33 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
   it('enrolls and reopens the production migration chain on PostgreSQL', () => {
     expect(readSchemaLevels(db)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(db); runMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 6, contractLevel: 0 });
+    expect(() => assertScmOwnershipReady(db)).toThrow('cutover incomplete');
+    classifyScmLinks(db);
+    classifyScmLinks(db);
+    expect(() => assertScmOwnershipReady(db)).not.toThrow();
+    expect(db.query('SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover').all()).toEqual([{ cursor_id: '', complete: 1 }]);
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
   }, 30_000);
   it('adds A3 live terms to an enrolled level 1 database and preserves old reader compatibility', () => {
+    removeScmSchema(db);
     db.exec('DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json; DROP TABLE multiremi_live_terms');
     db.exec('DELETE FROM multiremi_schema_steps WHERE level>=2');
     db.exec('UPDATE multiremi_schema_meta SET expand_level=1');
     runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 6, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     expect(db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='multiremi_live_terms'").get()).not.toBeNull();
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 1, maxLevel: 1 })).not.toThrow();
     console.info('A3 startup expand: level 1 -> 2, live terms table exists; previous B1 reader interval [1,1] remains compatible');
   });
   it('refuses contracted schemas before historical migrations execute', () => {
-    db.exec('UPDATE multiremi_schema_meta SET expand_level=7, contract_level=7');
+    db.exec('UPDATE multiremi_schema_meta SET expand_level=10, contract_level=10');
     try {
       let refusal: Error | undefined;
       try { runStartupMigrations(db); } catch (error) { refusal = error as Error; }
-      expect(refusal?.message).toContain('contract_level=7 exceeds code maxLevel=6');
+      expect(refusal?.message).toContain('contract_level=10 exceeds code maxLevel=9');
       console.info(`startup guard: ${refusal?.message}`);
     }
-    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=6'); }
+    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=9'); }
   });
   it('upgrades existing bot rows and accepts old writers after level 5', () => {
     verifyFeishuWakeWordUpgrade(db);
@@ -65,6 +73,31 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
   it('upgrades level 2 planned restart schema atomically and preserves old drains on PostgreSQL', () => {
     verifyPlannedRestartSchemaUpgrade(db);
   }, 30_000);
+  it('classification CLI refuses other PG clients with same-command recovery and no writes', () => {
+    const before = db.query('SELECT * FROM multiremi_scm_ownership_cutover').all();
+    const held = db.query('SELECT * FROM multiremi_scm_rollback_review').all();
+    const childHome = mkdtempSync(join(tmpdir(), 'mul2-classify-cli-'));
+    let child;
+    try {
+      child = Bun.spawnSync([process.execPath, 'apps/remi/main.ts', 'db', 'classify-scm-links'], {
+        env: {
+          PATH: process.env.PATH,
+          HOME: childHome,
+          BUN_INSTALL_CACHE_DIR: join(childHome, 'install'),
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(childHome, 'transpiler'),
+          MULTIREMI_DATABASE_URL: url,
+        },
+        stdout: 'pipe', stderr: 'pipe',
+      });
+    } finally {
+      rmSync(childHome, { recursive: true, force: true });
+    }
+    expect(child.exitCode).toBe(1);
+    expect(child.stderr.toString()).toContain('Retry remi db classify-scm-links');
+    expect(child.stderr.toString()).not.toContain('db contract');
+    expect(db.query('SELECT * FROM multiremi_scm_ownership_cutover').all()).toEqual(before);
+    expect(db.query('SELECT * FROM multiremi_scm_rollback_review').all()).toEqual(held);
+  });
   it('production maintenance CLI refuses undeclared contract and retains the floor', () => {
     db.close();
     const childHome = mkdtempSync(join(tmpdir(), 'mul173-contract-cli-'));
@@ -154,7 +187,7 @@ describe.skipIf(!adminUrl)("System Prompt atomicity on real PostgreSQL (requires
     store = new MultiremiStore(db);
     store.ensureLocalWorkspace();
     db.exec("CREATE TABLE system_prompt_test_barrier (batch TEXT NOT NULL, participant TEXT NOT NULL, PRIMARY KEY(batch,participant))");
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 6, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
   }, 60_000);
 
   afterAll(async () => {

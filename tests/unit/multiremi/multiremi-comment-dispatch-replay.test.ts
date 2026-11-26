@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
 import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
@@ -66,7 +67,7 @@ pendingTurnBackendTests("MUL-492 comment intent replay", (fixture, backend) => {
     f.store.updateIssue(f.issue.id, { assigneeType: "squad", assigneeId: team.id });
     const runtime = f.store.registerRuntime({ name: "Reply runtime", provider: "codex" });
     const task = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Lead" });
-    expect(f.store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, runtime.id)?.id).toBe(task.id);
     f.store.startTask(task.id);
     const undo = reject(f, "multiremi_turn_attempts", `NEW.agent_id = '${worker.id}'`);
     const warnings: unknown[][] = [];

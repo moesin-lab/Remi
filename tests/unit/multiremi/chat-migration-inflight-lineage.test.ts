@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { runMigrations, bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -33,7 +34,7 @@ describe("drained Chat migration cannot restore private Issue lineage", () => {
         expect(store.getChatSession("chat_web_migration")?.sessionId).toBeNull();
         const runtime = store.registerRuntime({ id: "rt_legacy", name: "Machine", provider: "codex", workspaceId: "local" });
         const next = store.sendChatMessage("chat_web_migration", { content: "Next private question" }).task;
-        const claim = store.claimTask(runtime.id)!;
+        const claim = claimWithCurrentRuntime(store, runtime.id)!;
         expect(claim.id).toBe(next.id);
         expect(claim.issueId).toBeNull();
         expect(claim.sessionId).toBeNull();
@@ -80,7 +81,7 @@ describe("drained Chat migration cannot restore private Issue lineage", () => {
     const runtime = store.registerRuntime({ id: "rt_legacy", name: "Machine", provider: "codex", workspaceId: "local" });
     const next = store.sendChatMessage("chat_group_migration", { content: "Continue B" }).task;
     expect(next.issueId).toBe("iss_chat_migration");
-    const claim = store.claimTask(runtime.id)!;
+    const claim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claim.id).toBe(next.id);
     expect(claim.sessionId).toBeNull();
     store.buildTaskSessionProjection(claim.id);

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, expect, it } from "bun:test";
 import { StoreContext, createCommitEventQueue } from "@multiremi/store/context.js";
 import { Questions } from "@multiremi/store/inbox/questions.js";
@@ -61,7 +62,7 @@ function multibotFixture(f: PendingTurnTestFixture, projected = false) {
   const session = issue ? store.createIssueSession(issue.id, { chatId: chat.id, title: "Private projected work", holdsWorkspace: false })
     : store.createSession(chat.id, { title: "Second bot work", holdsWorkspace: false });
   const task = store.createSessionTask(session.id, { agentId: worker.id, prompt: "Ask in the original private working Session" });
-  expect(store.claimTask(second.runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, second.runtime.id)?.id).toBe(task.id);
   store.startTask(task.id);
   const turn = store.getTurnForAttempt(task.id)!;
   return { ...f, humans, bots, worker, chat, issue, session, task, turn };
@@ -205,7 +206,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
     const issue = store.createIssue({ title: "Actual Issue owner", responsibleMemberId: "mem_local_local" });
     const session = store.createIssueSession(issue.id, { title: "Original Issue work", holdsWorkspace: false });
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Ask the actual Issue human" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     db.run("UPDATE multiremi_turns SET issue_id=NULL WHERE id=?", turn.id);
@@ -229,7 +230,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
       const issue = store.createIssue({ title: "Actual Q Issue", responsibleMemberId: "mem_local_local" });
       const session = store.createIssueSession(issue.id, { title: "Protected Issue work", holdsWorkspace: false });
       const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Keep source and wait unchanged" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       const turn = store.getTurnForAttempt(task.id)!;
       if (mismatch === "issue") {

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { createMultiremiApp } from '@multiremi/api.js';
 import { MultiremiStore } from '@multiremi/store.js';
@@ -14,7 +15,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
       const oldComment = store.createIssueComment(issue.id, { body: 'SOURCE_ONLY_PRIVATE_HISTORY' });
       const runtime = store.registerRuntime({ name: 'Source Q Runtime', provider: 'codex', daemonId: 'rotation-source', maxConcurrency: 8 });
       const sourceTask = store.createTask({ agentId: sourceAgent.id, issueId: issue.id, prompt: 'SOURCE_ONLY_PRIVATE_TASK' });
-      expect(store.claimTask(runtime.id)?.id).toBe(sourceTask.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sourceTask.id);
       store.startTask(sourceTask.id);
       const sourceTurn = store.getTurnForAttempt(sourceTask.id)!;
       const decision = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: sourceTurn.id, attempt_id: sourceTask.id,
@@ -199,7 +200,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     const agent = store.createAgent({ name: 'Adoption source worker', provider: 'codex' });
     const runtime = store.registerRuntime({ name: 'Adoption source runtime', provider: 'codex' });
     const task = store.createSessionTask(sourceMain.id, { agentId: agent.id, prompt: 'SOURCE_ONLY_ADOPTED_MAIN_INPUT' });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const question = store.createTaskHumanRequest({ taskId: task.id, kind: 'question', payload: { title: 'SOURCE_ONLY_ADOPTED_MAIN_QUESTION' } });
     store.completeTask(task.id, { output: 'SOURCE_ONLY_ADOPTED_MAIN_OUTPUT' });
@@ -334,7 +335,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     const agent = store.createAgent({ name: 'Source provider owner', provider: 'codex' });
     const runtime = store.registerRuntime({ name: 'Source provider runtime', provider: 'codex' });
     const task = store.createSessionTask(main.id, { agentId: agent.id, prompt: 'SOURCE_ONLY_UPGRADE_INPUT' });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const question = store.createTaskHumanRequest({ taskId: task.id, kind: 'question', payload: { title: 'SOURCE_ONLY_UPGRADE_QUESTION' } });
     store.completeTask(task.id, { output: 'SOURCE_ONLY_UPGRADE_OUTPUT', sessionId: 'source-provider-before-move', workDir: '/source/history' });

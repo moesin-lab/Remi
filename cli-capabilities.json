@@ -69,6 +69,18 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "db.classify-scm-links": {
+      "command": "remi db classify-scm-links",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "db.contract": {
       "command": "remi db contract",
       "aliases": [],
@@ -7571,6 +7583,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "scm.change-request.bind": {
+      "command": "remi scm change-request bind",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.bind",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "scm.change-request.link": {
       "command": "remi scm change-request link",
       "aliases": [],
@@ -14443,6 +14472,9 @@
     },
     "PUT /api/issues/:issueId/change-requests/:changeRequestId": {
       "command": "scm.change-request.link"
+    },
+    "PUT /api/issues/:issueId/change-requests/by-reference": {
+      "command": "scm.change-request.bind"
     },
     "PUT /api/labels/:id": {
       "command": "label.update"

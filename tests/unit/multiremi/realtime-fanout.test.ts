@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 /**
  * MUL-462 acceptance: the fanout's role routing, the peer path between two real
  * API servers sharing one SQLite file, the loop guard, and the no-peer case.
@@ -554,7 +555,7 @@ describe("realtime fanout — two servers over one database", () => {
         await drained();
         const postsBeforeCreate = { ...two.postCounts };
         const task = storeA.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Ask a member before shipping" });
-        expect(storeA.claimTask("rt_peer_decision")?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(storeA, "rt_peer_decision")?.id).toBe(task.id);
         storeA.startTask(task.id);
         const turn = storeA.getTurnForAttempt(task.id)!;
         const raised = storeA.getDaemonTurnBridge().rpc("turn.decision", {

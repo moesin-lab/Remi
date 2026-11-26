@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { attemptMessagesPath, requestMessageBody, sentTask } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -18,7 +19,7 @@ function createRunningTask(store: MultiremiStore): MultiremiTask {
   const issue=createResponsibleTestIssue(store, {title:"Steer input"});
   const task = store.createTask({ agentId: agent.id, issueId:issue.id, prompt: "test" });
   store.registerRuntime({ id: "rt_steer", name: "steer-runtime", provider: "claude", workspaceId: "local", ownerId: "local" });
-  const claimed = store.claimTask("rt_steer");
+  const claimed = claimWithCurrentRuntime(store, "rt_steer");
   expect(claimed?.id).toBe(task.id);
   return store.startTask(task.id);
 }

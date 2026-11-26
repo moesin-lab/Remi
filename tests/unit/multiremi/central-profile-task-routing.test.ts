@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createLocalStore, createResponsibleTestIssue, resetMultiremiTestEnv } from "./helpers.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
@@ -41,7 +42,7 @@ describe("central profile task routing", () => {
     store.updateAgent(agentA.id, { model: "alternate-model" });
     ready(a.id);
     const task = store.createTask({ agentId: agentA.id, prompt: "Use allowed alternate" });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(task.id);
     const { models: _models, ...snapshot } = updated.profile;
     expect(claimed.codexProfile).toEqual({ ...snapshot, model: "alternate-model" });
@@ -52,9 +53,9 @@ describe("central profile task routing", () => {
     const { store, runtime, a, b, agentA, agentB, second, ready } = setup();
     const blocked = store.createTask({ agentId: agentA.id, prompt: "wait" });
     const runnable = store.createTask({ agentId: agentB.id, prompt: "execute" });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     ready(b.id);
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(runnable.id);
     expect(claimed.codexProfile).toEqual(second.profile);
     expect(store.getTask(blocked.id)?.status).toBe("queued");
@@ -72,7 +73,7 @@ describe("central profile task routing", () => {
     ready(a.id);
     // Recovery stamps the effective target separately from the Agent default.
     const task = store.createTask({ agentId: agentA.id, prompt: "Fallback recovery", executionModel: "fallback-model" });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(task.id);
     expect(claimed.executionModel).toBe("fallback-model");
     expect(claimed.codexProfile).toEqual({ ...first.profile, model: "fallback-model" });
@@ -86,14 +87,14 @@ describe("central profile task routing", () => {
     store.updateAgent(agentA.id, { model: "native-model" });
     ready(a.id);
     const task = store.createTask({ agentId: agentA.id, issueId: createResponsibleTestIssue(store, { title: "Native retry" }).id, prompt: "Original" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.failTask(task.id, { error: "Runtime unavailable", failureReason: "runtime_offline" });
     const retry = store.listTasks().find(candidate => candidate.parentTaskId === task.id)!;
     expect(retry.codexProfile).toBeNull();
     store.updateRuntimeModels(runtime.id, [{ id: "replacement", label: "Replacement", provider: "codex", default: true }]);
     const newer = store.createTask({ agentId: agentA.id, prompt: "New work", priority: 10 });
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
     expect(store.getTask(newer.id)?.status).toBe("queued");
   });
 
@@ -101,7 +102,7 @@ describe("central profile task routing", () => {
     const { store, runtime, first, a, agentA, ready } = setup();
     ready(a.id);
     const task = store.createTask({ agentId: agentA.id, prompt: "original" });
-    const original = store.claimTask(runtime.id)!;
+    const original = claimWithCurrentRuntime(store, runtime.id)!;
     expect(original.codexProfile).toEqual(first.profile);
     store.startTask(task.id);
     const updated = store.saveExecutionProfile("local", {
@@ -110,11 +111,11 @@ describe("central profile task routing", () => {
     expect(store.getTask(task.id)?.codexProfile).toEqual(first.profile);
     store.completeTask(task.id, { output: "done" });
     const queued = store.createTask({ agentId: agentA.id, prompt: "updated" });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.recordRuntimeExecutionBindingAcks(runtime.id, [{ groupId: a.id, profileId: first.id, profileRevision: first.revision, status: "ready" }]);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     ready(a.id);
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(queued.id);
     expect(claimed.codexProfile).toEqual(updated.profile);
     expect(claimed.executionFingerprint).not.toBe(original.executionFingerprint);
@@ -125,14 +126,14 @@ describe("central profile task routing", () => {
     store.updateAgent(agentA.id, { model: first.profile.model });
     ready(a.id);
     const task = store.createTask({ agentId: agentA.id, prompt: "recover frozen dispatch" });
-    const original = store.claimTask(runtime.id)!;
+    const original = claimWithCurrentRuntime(store, runtime.id)!;
     store.saveExecutionProfile("local", {
       name: first.name, provider: "codex",
       profile: { ...first.profile, base_url: "https://next.example/v1", model: "next-model" },
     }, first.id);
     mutateExecutionFixture(store, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?",
       ["2000-01-01T00:00:00.000Z", task.id]);
-    const recovered = store.claimTask(runtime.id)!;
+    const recovered = claimWithCurrentRuntime(store, runtime.id)!;
     expect(recovered.id).toBe(task.id);
     expect(recovered.codexProfile).toEqual(original.codexProfile);
     expect(recovered.executionFingerprint).toBe(original.executionFingerprint);
@@ -142,7 +143,7 @@ describe("central profile task routing", () => {
     const { store, runtime, first, a, agentA, ready } = setup();
     ready(a.id);
     const firstTask = store.createTask({ agentId: agentA.id, prompt: "unstarted" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.saveExecutionProfile("local", {
       name: first.name, provider: "codex", profile: { ...first.profile, model: "replacement" },
     }, first.id);
@@ -150,7 +151,7 @@ describe("central profile task routing", () => {
     expect(store.getTask(firstTask.id)?.status).toBe("cancelled");
     ready(a.id);
     const secondTask = store.createTask({ agentId: agentA.id, prompt: "running" });
-    expect(store.claimTask(runtime.id)?.id).toBe(secondTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(secondTask.id);
     store.startTask(secondTask.id);
     store.updateAgent(agentA.id, { thinkingLevel: "high" });
     expect(store.getTask(secondTask.id)?.status).toBe("running");
@@ -163,7 +164,7 @@ describe("central profile task routing", () => {
     store.saveExecutionGroup("local", { name: "Default", provider: "codex", profile_id: null, runtime_ids: [runtime.id] }, a.id);
     ready(a.id);
     const task = store.createTask({ agentId: agentA.id, prompt: "default" });
-    expect(store.claimTask(runtime.id)?.codexProfile).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.codexProfile).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("dispatched");
   });
 
@@ -172,10 +173,10 @@ describe("central profile task routing", () => {
     ready(a.id);
     const task = store.createTask({ agentId: agentA.id, prompt: "membership" });
     store.saveExecutionGroup("local", { name: a.name, provider: "codex", profile_id: first.id, runtime_ids: [] }, a.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.saveExecutionGroup("local", { name: a.name, provider: "codex", profile_id: first.id, runtime_ids: [runtime.id] }, a.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     ready(a.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   });
 });

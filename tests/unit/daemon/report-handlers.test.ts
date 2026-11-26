@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { Database } from "bun:sqlite";
@@ -26,7 +27,7 @@ function fixture() {
   const runtime = store.registerRuntime({ id: "runtime", name: "reports", provider: "claude", daemonId: "reports-daemon" });
   const agent = store.createAgent({ name: "Reports", provider: "claude", maxConcurrentTasks: 10 });
   const task = store.createTask({ agentId: agent.id, prompt: "report" });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   inputs.set(store, store.getDaemonTurnBridge().offerInput(store.getTaskWithAgent(task.id)!));
   return { db, store, runtime, agent, task,
     report: (type: string, p: Record<string, unknown> = {}) => sendReport(store, type, { task_id: task.id, ...p }, { runtimeId: runtime.id }),
@@ -394,7 +395,7 @@ describe("v2 reports", () => {
     const prompt = "assembled prompt";
     const sha256 = new Bun.CryptoHasher("sha256").update(prompt).digest("hex");
     for (let i = 0; i < 2; i++) {
-      expect(await report("task.prompt", { prompt, sha256, mode: "bootstrap" })).toEqual({ ok: true });
+      expect(await report("task.prompt", { prompt, sha256, mode: "bootstrap", system_prompt_policy: store.getAttemptSystemPrompt(task.id) })).toEqual({ ok: true });
       expect(await report("task.usage", { usage: [{ provider: "claude", model: "model", input_tokens: 5, output_tokens: 2 }] })).toEqual({ ok: true });
     }
     expect(await report("task.session_pin", { session_id: "session", work_dir: "/tmp/task" })).toEqual({ ok: true });

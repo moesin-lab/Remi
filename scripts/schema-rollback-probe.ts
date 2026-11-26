@@ -17,7 +17,7 @@ try {
   const agent = store.createAgent({ name: `mixed-${crypto.randomUUID()}`, provider: 'codex', workspaceId: 'local', runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, prompt: 'MUL-173 mixed-version PostgreSQL core probe', workspaceId: 'local' });
   assert.equal(store.getTask(task.id)?.status, 'queued');
-  assert.equal(store.claimTask(runtime.id)?.id, task.id);
+  assert.equal(store.claimTask(runtime.id, { supportsPromptPolicy: true })?.id, task.id);
   store.startTask(task.id);
   assert.equal(store.getTask(task.id)?.status, 'running');
   store.completeTask(task.id, { output: 'completed against shared schema' });

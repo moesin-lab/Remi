@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 import { writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { createMultiremiApp } from "../../packages/server/src/api/server.js";
@@ -44,7 +45,7 @@ try {
     daemonId: "daemon-c1-probe", ownerId: "local",
   });
   const task = store.createTask({ id: "tsk_c1_probe", agentId: agent.id, workspaceId: "local", prompt: "C1 probe" });
-  if (store.claimTask("rt_c1_probe")?.id !== task.id) throw new Error("Probe task was not claimed");
+  if (claimWithCurrentRuntime(store, "rt_c1_probe")?.id !== task.id) throw new Error("Probe task was not claimed");
   store.startTask(task.id);
   const access = await store.createAccessToken({
     name: "C1 local probe", type: "daemon", workspaceId: "local", daemonId: "daemon-c1-probe",

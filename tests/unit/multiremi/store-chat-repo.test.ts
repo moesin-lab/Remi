@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // Sibling test for packages/server/src/store/repos/chat-repo.ts.
 // Drives the carved-out repo directly over its StoreContext (not through the
 // MultiremiStore facade) so a broken delegation cannot mask a broken move.
@@ -99,7 +100,7 @@ describe("ChatRepo", () => {
       const runtime = store!.registerRuntime({ name: "Chat runtime", provider: "codex" });
       const chat = repo.createChatSession({ agentId: agent.id, creatorId: user.id });
       const sent = repo.sendChatMessage(chat.id, { body: "Request" });
-      expect(store!.claimTask(runtime.id)?.id).toBe(sent.task.id);
+      expect(claimWithCurrentRuntime(store!, runtime.id)?.id).toBe(sent.task.id);
       store!.startTask(sent.task.id);
       if (outcome === "completed") store!.completeTask(sent.task.id, { output: "Result" });
       else store!.failTask(sent.task.id, { error: "Failure", failureReason: "unknown" });

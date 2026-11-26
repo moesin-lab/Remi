@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, turnApiPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
 // Chat session persistence/resume plus shared human HTTP surfaces.
@@ -18,7 +19,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     expect(first.message.role).toBe("user");
     expect(first.task.chatSessionId).toBe(session.id);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id);
     store.startTask(first.task.id);
     store.completeTask(first.task.id, {
       output: "Start with a small patch.",
@@ -40,7 +41,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     const second = store.sendChatMessage(session.id, { body: "Continue" });
     expect(second.task.sessionId).toBe("provider-session-1");
     expect(second.task.workDir).toBe("/tmp/multiremi-chat");
-    expect(store.claimTask(runtime.id)?.id).toBe(second.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.task.id);
     store.startTask(second.task.id);
     store.failTask(second.task.id, {
       error: "Invalid request",
@@ -85,7 +86,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     const issue = createResponsibleTestIssue(store, { title: "Former accidental binding" });
     const chat = store.createChatSession({ agentId: agent.id });
     const sent = store.sendChatMessage(chat.id, { body: "Continue" });
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.startTask(sent.task.id);
     // An in-flight pre-upgrade task keeps its audit association after migration.
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET issue_id = ? WHERE id = ?", [issue.id, sent.task.id]);
@@ -95,7 +96,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     });
     const retry = store.getTask(store.getTurnForAttempt(sent.task.id)!.current_attempt_id!)!;
     expect(retry).toMatchObject({ chatSessionId: chat.id, issueId: null, issueSessionId: null, sessionId: null });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(retry.id);
     expect(claimed.sessionId).toBeNull();
     expect(claimed.issue).toBeNull();
@@ -193,7 +194,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     const pendingBob = await app.request("/api/turns?status=pending", { headers: bobAuthHeaders });
     expect((await pendingBob.json()).turns.map((task: any) => task.session_id)).toEqual([createdBody.id]);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(sentTask(store, sentBody).id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sentTask(store, sentBody).id);
     store.startTask(sentTask(store, sentBody).id);
     store.completeTask(sentTask(store, sentBody).id, { output: "Done with chat", sessionId: "provider-chat-session" });
     const unreadDetail = await app.request(`/api/chat/sessions/${createdBody.id}`, { headers: aliceAuthHeaders });

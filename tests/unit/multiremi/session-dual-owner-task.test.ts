@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { daemonTaskClaimResponse, taskRealtimePayload } from "@multiremi/api/wire/tasks.js";
@@ -32,7 +33,7 @@ describe("Session Task dual ownership", () => {
         store.appendSessionEvent(session.id, { authorType: "member", body: "Visible Session request" });
         const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Execute this Session" });
         expect(task).toMatchObject({ issueSessionId: session.id, chatSessionId: chat?.id ?? null, issueId: issue?.id ?? null });
-        const claimed = store.claimTask(runtime.id)!;
+        const claimed = claimWithCurrentRuntime(store, runtime.id)!;
         expect(claimed.id).toBe(task.id);
         const wire = daemonTaskClaimResponse(store, claimed);
         expect(wire.session_projection).toMatchObject({ session_id: session.id, mode: "bootstrap" });
@@ -78,7 +79,7 @@ describe("Session Task dual ownership", () => {
     it(`keeps a projected Chat Session's ${status} body out of public Issue comments and activity`, () => {
       const { store, runtime, agent, issue, session } = fixture("chat", true);
       const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Private projected request" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       const privateBody = `private-chat-${status}-content`;
       if (status === "completed") store.completeTask(task.id, { output: privateBody });
@@ -180,26 +181,26 @@ describe("Session Task dual ownership", () => {
           .toBe(`/tmp/chat-lease-workspaces/work/${chat.id}`);
       }
       const first = firstSurface === "session-a" ? taskA : firstSurface === "session-b" ? taskB : ordinary;
-      expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
       // A dispatched offer already holds the lease before the start ACK.
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
       store.startTask(first.id);
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
       expect(sharedTasks.filter(task => task.id !== first.id).map(task => store.getTask(task.id)!.status)).toEqual(["queued", "queued"]);
 
       const otherChat = store.createChatSession({ agentId: agents[3]!.id });
       const otherChatTask = store.createTask({ agentId: agents[3]!.id, chatSessionId: otherChat.id, prompt: "Other Chat request", priority: 50 });
       const issueTask = store.createSessionTask(store.getOrCreateDefaultIssueSession(issue.id).id,
         { agentId: agents[4]!.id, prompt: "Issue-owned request", priority: 40 });
-      expect(store.claimTask(runtime.id)?.id).toBe(otherChatTask.id);
-      expect(store.claimTask(runtime.id)?.id).toBe(issueTask.id);
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(otherChatTask.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(issueTask.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
 
       store.completeTask(first.id, { output: "Shared checkout lease released" });
       const remaining = sharedTasks.filter(task => task.id !== first.id).sort((left, right) => right.priority - left.priority);
       for (const task of remaining) {
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
-        expect(store.claimTask(runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
         store.startTask(task.id);
         store.completeTask(task.id, { output: "Next shared checkout request completed" });
       }
@@ -215,7 +216,7 @@ describe("Session Task dual ownership", () => {
       const otherAgent = store.createAgent({ name: "Other Session offer", provider: "claude", runtimeId: runtime.id });
       const otherSession = store.createSession(chat!.id, { title: "Other Session offer" });
       const offered = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Original offered request", priority: 10 });
-      expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(offered.id);
       expect(store.recordTaskOffered(offered.id, runtime.id)).toBe(true);
       expect(store.requeueTaskOffer(offered.id, runtime.id, outcome)).toBe(true);
       const other = store.createSessionTask(otherSession.id, { agentId: otherAgent.id, prompt: "Higher priority request", priority: 100 });
@@ -224,17 +225,17 @@ describe("Session Task dual ownership", () => {
       if (outcome === "unknown") {
         expect(store.getTask(offered.id)?.offeredAt).not.toBeNull();
         // The old offer can be reclaimed without treating itself as a blocker.
-        expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(offered.id);
         expect(store.requeueTaskOffer(offered.id, runtime.id, "unknown")).toBe(true);
         expect(store.getTask(other.id)?.status).toBe("queued");
         expect(() => store.startTaskFromDaemon(other.id, authority)).toThrow("server_error");
         expect(store.startTaskFromDaemon(offered.id, authority)).toBe("started");
-        expect(store.claimTask(runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
         store.completeTask(offered.id, { output: "Original offer completed" });
-        expect(store.claimTask(runtime.id)?.id).toBe(other.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(other.id);
       } else {
         expect(store.getTask(offered.id)?.offeredAt).toBeNull();
-        expect(store.claimTask(runtime.id)?.id).toBe(other.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(other.id);
         expect(() => store.startTaskFromDaemon(offered.id, authority)).toThrow("server_error");
       }
     });
@@ -247,7 +248,7 @@ describe("Session Task dual ownership", () => {
       store.updateAgent(agent.id, { maxConcurrentTasks: 10 });
       const offered = store.createTask({ agentId: agent.id, chatSessionId: chat!.id, prompt: "Reserved ordinary Chat offer", priority: 10 });
       expect(offered.issueSessionId).toBeNull();
-      expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(offered.id);
       expect(store.recordTaskOffered(offered.id, runtime.id)).toBe(true);
       expect(store.requeueTaskOffer(offered.id, runtime.id, "unknown")).toBe(true);
       const workSession = store.createSession(chat!.id, { title: "New higher priority Chat work" });
@@ -255,8 +256,8 @@ describe("Session Task dual ownership", () => {
       expect(newer.id).not.toBe(offered.id);
       // A different Session has its own pending turn but shares this checkout.
       // Its higher priority cannot take the ordinary offer's occupied root.
-      expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(offered.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
       expect(store.getTask(newer.id)?.status).toBe("queued");
 
       if (release === "rejected") {
@@ -266,7 +267,7 @@ describe("Session Task dual ownership", () => {
         store.startTask(offered.id);
         store.completeTask(offered.id, { output: "Reserved Chat offer completed" });
       }
-      expect(store.claimTask(runtime.id)?.id).toBe(newer.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(newer.id);
       expect(store.getTask(newer.id)?.priority).toBe(100);
       expect(store.getTask(offered.id)?.priority).toBe(10);
     });
@@ -284,7 +285,7 @@ describe("Session Task dual ownership", () => {
     const publicResult = store.publishSessionResult(publicSibling.id, { title: "Issue result", body: "Public curated evidence" });
     for (const [target, expected] of [[session, [publicResult.id]], [issueSibling, [publicResult.id]], [ownSibling, [own.id]]] as const) {
       const task = store.createSessionTask(target.id, { agentId: agent.id, prompt: "Read curated sibling results" });
-      const claimed = store.claimTask(runtime.id)!;
+      const claimed = claimWithCurrentRuntime(store, runtime.id)!;
       expect(claimed.id).toBe(task.id);
       const wire = daemonTaskClaimResponse(store, claimed);
       expect(wire).not.toHaveProperty("issue_session_results");

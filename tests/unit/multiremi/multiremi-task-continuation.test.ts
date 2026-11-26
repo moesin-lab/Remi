@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -126,7 +127,7 @@ describe("delegated conversation continuation",()=>{
   it("interrupts the current lane without creating another attempt",async()=>{
     const f=fixture(),runtime=completeInitialDelegation(f);
     const continued=await createContinuation(f,"Fix review feedback");
-    expect(f.store.claimTask(runtime.id)?.id).toBe(continued.task.id);
+    expect(claimWithCurrentRuntime(f.store, runtime.id)?.id).toBe(continued.task.id);
     f.store.startTask(continued.task.id);
     const before=f.store.listTasks().length;
     const amended=await createContinuation(f,"Also test failure");
@@ -146,7 +147,7 @@ describe("delegated conversation continuation",()=>{
   it("keeps the turn and delegation scope when an infrastructure retry replaces the attempt",async()=>{
     const f=fixture(),runtime=completeInitialDelegation(f);
     const continued=await createContinuation(f,"Retry safely");
-    expect(f.store.claimTask(runtime.id)?.id).toBe(continued.task.id);
+    expect(claimWithCurrentRuntime(f.store, runtime.id)?.id).toBe(continued.task.id);
     f.store.startTask(continued.task.id);
     const before=f.store.getTurnForAttempt(continued.task.id)!;
     f.store.failTask(continued.task.id,{error:"offline",failureReason:"runtime_offline"});

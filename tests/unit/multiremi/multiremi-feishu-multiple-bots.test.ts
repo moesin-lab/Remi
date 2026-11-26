@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
@@ -162,7 +163,7 @@ describe("multiple Feishu bots", () => {
       revision: 1, externalMessageId: "om_shared", externalSessionKey: "oc_shared", chatId: "oc_shared", chatType: "p2p", text: "hello", deliveryMode: "native_cot_v1",
     }));
     for (const task of tasks) {
-      expect(store.claimTask("rt_one")?.id).toBe(task.taskId);
+      expect(claimWithCurrentRuntime(store, "rt_one")?.id).toBe(task.taskId);
       store.startTask(task.taskId);
       store.completeTask(task.taskId, { output: `Reply for ${task.agentId}` });
     }

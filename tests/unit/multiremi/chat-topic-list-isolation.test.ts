@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -20,7 +21,7 @@ describe("Chat list isolation from Feishu Issue topics", () => {
     expect(topic.creatorId).toBe("local");
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const issueTask = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Report the Issue" });
-    expect(store.claimTask(runtime.id)?.id).toBe(issueTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(issueTask.id);
     store.startTask(issueTask.id);
     const privateChat = store.createChatSession({ agentId: agent.id, creatorId: "local", title: "Private conversation" });
     const privateTask = store.sendChatMessage(privateChat.id, { body: "Private message" }).task;

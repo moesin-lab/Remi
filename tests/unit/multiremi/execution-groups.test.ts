@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { executionGroupModelCatalog } from "@multiremi/api/helpers/agents.js";
@@ -119,12 +120,12 @@ describe("Execution groups", () => {
     const b = store.createAgent({ name: "B", provider: "codex", executionGroupId: "legacy", model: "b" });
     const taskA = store.createTask({ agentId: a.id, prompt: "A" });
     const taskB = store.createTask({ agentId: b.id, prompt: "B" });
-    expect(store.claimTask(second.id)?.id).toBe(taskB.id);
-    expect(store.claimTask(first.id)?.id).toBe(taskA.id);
+    expect(claimWithCurrentRuntime(store, second.id)?.id).toBe(taskB.id);
+    expect(claimWithCurrentRuntime(store, first.id)?.id).toBe(taskA.id);
     store.cancelTask(taskA.id);
     store.updateRuntime(first.id, { models: [] });
     const queued = store.createTask({ agentId: a.id, prompt: "No evidence" });
-    expect(store.claimTask(first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
     expect(store.getTask(queued.id)?.status).toBe("queued");
   });
 
@@ -136,8 +137,8 @@ describe("Execution groups", () => {
     const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "original" });
     const task = store.createTask({ agentId: agent.id, prompt: "Group only" });
     legacyGroup(store, "original", [second.id]);
-    expect(store.claimTask(first.id)).toBeNull();
-    expect(store.claimTask(second.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, second.id)?.id).toBe(task.id);
   });
 
   it("reclaims a lost dispatch only within its group after a member leaves", () => {
@@ -147,12 +148,12 @@ describe("Execution groups", () => {
     legacyGroup(store, "original", [first.id, second.id]);
     const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "original" });
     const task = store.createTask({ agentId: agent.id, prompt: "Lost claim" });
-    expect(store.claimTask(first.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, first.id)?.id).toBe(task.id);
     legacyGroup(store, "original", [second.id]);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
-    expect(store.claimTask(first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.claimTask(second.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, second.id)?.id).toBe(task.id);
   });
 
   it("cancels a frozen dispatch when its agent switches groups", () => {
@@ -163,12 +164,12 @@ describe("Execution groups", () => {
     legacyGroup(store, "target", [second.id]);
     const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "original" });
     const task = store.createTask({ agentId: agent.id, prompt: "Not started" });
-    expect(store.claimTask(first.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, first.id)?.id).toBe(task.id);
     store.updateAgent(agent.id, { executionGroupId: "target" });
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     expect(store.getTask(task.id)?.status).toBe("cancelled");
-    expect(store.claimTask(first.id)).toBeNull();
-    expect(store.claimTask(second.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, second.id)).toBeNull();
   });
 
   for (const authMode of ["env", "api_key"] as const) {
@@ -190,7 +191,7 @@ describe("Execution groups", () => {
         expect(models[0]?.thinking?.supported_levels.map(level => level.value)).toEqual(["high"]);
         migrated.recordRuntimeExecutionBindingAcks(runtime.id, migrated.getRuntimeExecutionBindings(runtime.id).map(binding => ({ ...binding, status: "ready" })));
         const task = migrated.createTask({ agentId: agent.id, prompt: "Still supports high" });
-        expect(migrated.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(migrated, runtime.id)?.id).toBe(task.id);
         migrated.cancelTask(task.id);
         migrated.saveExecutionProfile("local", { name: "Renamed", provider: "codex", profile: profile.profile }, profile.id);
         expect(executionGroupModelCatalog(migrated, "local", "old", "local")[0]?.models[0]?.thinking).toBeDefined();

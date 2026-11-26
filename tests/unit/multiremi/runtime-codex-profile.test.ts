@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runtimeProviderProfileCases } from "./runtime-provider-profile-cases.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
@@ -28,15 +29,15 @@ describe("Runtime Codex profile-only retry rules", () => {
     const agent = store.createAgent({ name: "Custom", provider: "codex", model: "custom-alternative", thinkingLevel: "low" });
     const chat = store.createChatSession({ agentId: agent.id });
     const first = store.sendChatMessage(chat.id, { body: "First" }).task;
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.failTask(first.id, { error: "Runtime unavailable", failureReason: "runtime_offline" });
     const retry = store.listTasks().find(task => task.parentTaskId === first.id)!;
     store.updateAgent(agent.id, { thinkingLevel: "high" });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(retry.id)?.status).toBe("queued");
     store.updateAgent(agent.id, { thinkingLevel: "low" });
-    expect(store.claimTask(runtime.id)).toMatchObject({
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({
       id: retry.id, codexProfile: { ...profile, model: "custom-alternative" }, agent: { thinkingLevel: "low" },
     });
   });
@@ -56,7 +57,7 @@ describe("Runtime Codex profile-only retry rules", () => {
         const agent = store.createAgent({ name: "Custom", provider });
         const chat = store.createChatSession({ agentId: agent.id });
         const task = store.sendChatMessage(chat.id, { body: "work" }).task;
-        const original = store.claimTask(runtime.id)!;
+        const original = claimWithCurrentRuntime(store, runtime.id)!;
         expect(original.id).toBe(task.id);
         store.startTask(task.id);
         if (change === "provider") store.updateAgent(agent.id, { provider: nextProvider });
@@ -69,8 +70,8 @@ describe("Runtime Codex profile-only retry rules", () => {
           expect(retry.codexProfile).toEqual(original.codexProfile);
           expect(retry.claudeProfile).toEqual(original.claudeProfile);
           expect(retry.executionFingerprint).toBe(original.executionFingerprint);
-          expect(store.claimTask(replacement.id)).toBeNull();
-          expect(store.claimTask(runtime.id)).toMatchObject({ id: retry.id, provider,
+          expect(claimWithCurrentRuntime(store, replacement.id)).toBeNull();
+          expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: retry.id, provider,
             codexProfile: original.codexProfile, claudeProfile: original.claudeProfile });
           const credentialId = (retry.codexProfile ?? retry.claudeProfile)!.credential_id!;
           expect(store.getRuntimeCodexProfileKey(runtime.id, credentialId)).toBe("original-runtime-key");
@@ -81,8 +82,8 @@ describe("Runtime Codex profile-only retry rules", () => {
         expect(retry.codexProfile).toBeNull();
         expect(retry.claudeProfile).toBeNull();
         expect(retry.executionFingerprint).toBeNull();
-        expect(store.claimTask(runtime.id)).toBeNull();
-        const claimed = store.claimTask(replacement.id)!;
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
+        const claimed = claimWithCurrentRuntime(store, replacement.id)!;
         expect(claimed.id).toBe(retry.id);
         expect(claimed.provider).toBe(nextProvider);
         expect(claimed.codexProfile).toBeNull();

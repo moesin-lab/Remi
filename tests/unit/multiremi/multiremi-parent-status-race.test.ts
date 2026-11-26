@@ -1,3 +1,5 @@
+import { linkProjectedTestChangeRequest } from "./helpers.js";
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 import { createResponsibleTestIssue, acceptTestIssueDelivery, testWorkspaceMember } from './helpers.js';
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -75,6 +77,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         database.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 0");
       }
       store = new MultiremiStore(database);
+      classifyScmLinks(database);
       store.ensureLocalWorkspace();
       process.env.MULTIREMI_SCM_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
       store.updateWorkspace("local", {
@@ -203,6 +206,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
                 revisionAt: new Date().toISOString(), revision: `v${sequence}`, contentHash: `race-${sequence}`,
                 payload: { number: sequence, title: `${parent.key} delivery`, state: "merged", source_branch: `agent/${parent.key}` },
               });
+              if (path === "scm") linkProjectedTestChangeRequest(store, parent.id, connectionId, "repo_mul471", sequence);
               const status = path === "scm" ? "done" : (["done", "in_review"] as const)[round % 2]!;
               const parentControl = new Int32Array(new SharedArrayBuffer(8));
               const childControl = new Int32Array(new SharedArrayBuffer(8));

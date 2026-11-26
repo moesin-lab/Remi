@@ -1,3 +1,4 @@
+import { fixtureOfferReceipt } from './task-offer.js';
 import { DAEMON_MIN_CLI_VERSION, daemonFrameCategory, type DaemonRuntimeCapabilities } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiStore } from "@multiremi/store.js";
 import type { MultiremiAccessToken } from "@multiremi/contracts/types.js";
@@ -70,7 +71,8 @@ export async function reportFrame(
     ?? (typeof payload.task_id === "string" ? store.getTask(payload.task_id)?.runtimeId : null)
     ?? runtimes.find(runtime => !token || (runtime.daemonId === token.daemonId && runtime.workspaceId === token.workspaceId))?.id;
   const runtime = runtimeId ? store.getRuntimeLite(runtimeId) : null;
-  const daemonId = token?.daemonId ?? runtime?.daemonId ?? "fixture-reports";
+  const receipt = fixtureOfferReceipt(store, String(payload.task_id ?? payload.attempt_id));
+  const daemonId = token?.daemonId ?? runtime?.daemonId ?? receipt?.daemon_id ?? "fixture-reports";
   const recordCard = store.recordTurnCardCompletionFieldsWithinTransaction;
   if (options.onRoundCard) store.recordTurnCardCompletionFieldsWithinTransaction = (taskId, fields) => {
     options.onRoundCard?.(taskId, fields);
@@ -92,7 +94,7 @@ export async function reportFrame(
   }, identity);
   try {
     await session.handleMessage(JSON.stringify({ v: 2, t: "hello", p: {
-      protocol: 2, cli_version: DAEMON_MIN_CLI_VERSION, daemon_id: daemonId,
+      protocol: 2, cli_version: DAEMON_MIN_CLI_VERSION, daemon_id: daemonId, caps: receipt ? ["prompt.policy.adopt.v1"] : [],
       runtimes: runtimeId ? [{ runtime_id: runtimeId, provider: runtime?.provider ?? "claude", max_concurrency: 1,
         active_task_ids: [], capabilities: options.capabilities }] : [],
     } }));
@@ -101,7 +103,7 @@ export async function reportFrame(
     const event = category === "event";
     const re = event ? String(seq) : "fixture-rpc";
     const frame = JSON.stringify({ v: 2, t: type, ...(event ? { seq } : category === "rpc" ? { id: re } : {}),
-      ...(runtimeId ? { rt: runtimeId } : {}), p: payload });
+      ...(runtimeId ? { rt: runtimeId } : {}), p: { ...receipt, ...payload } });
     options.beforeFrame?.();
     await session.handleMessage(options.rawPayload === undefined ? frame : frame.slice(0, frame.lastIndexOf('"p":')) + `"p":${options.rawPayload}}`);
     if (closed !== undefined) return { closed };

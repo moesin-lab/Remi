@@ -71,8 +71,9 @@ running 尝试保持原快照。`prompt.policy.adopt.v1` 单独协商。daemon �
 连接存活而采用 RPC 超时时，daemon 对同一收据串行退避重试，间隔从 500ms 增至最多 5s。每次先查询该身份的状态，再申请原授权。断开连接取消等待，下一次 ready 从本地 prepared 收据恢复。服务端首次领取时验证该 attempt 没有既往绑定、发送、启动或领取留下的 trace 记录，才在该代 offer 上标记 `exclusive_delivery`。其他物理 lane 的坏 journal 允许这样的首次投递；既有隔离成员及来源不明的旧报告继续保全。
 
 启动权与执行者 PID 在同一个本地事务登记。冷启动可对已退出进程的收据逐一对账。daemon 保留仍有未确认上报、隔离或 planned restart 的分区。对已采用、原进程已退出的执行，`runtime.ready.exited_launches` 携带准确收据，服务端在 workspace 生命周期锁内重核归属、活跃状态与 handoff，按原重试规则结束该 attempt。PID 仍在使用或进程状态无法验证时继续保留。
-当 mode 为 custom，或当前服务端默认不等于首版 `LEGACY_BASELINE_DEFAULT_REVISION` 时，claim 前必须具备此能力，
-否则等待并提供升级诊断。仅 default 且默认仍等价于基线时允许旧 daemon 兼容执行；reset 不绕过未来默认升级的能力门禁。
+支持 `prompt.policy.adopt.v1` 的连接始终领取实际工作区快照。旧连接可执行首版 default；另有一对经过验证的默认 revision：从 `ea7a6720b718feb7d1b52a28dc7a000fa4f8457a968d207310ad5debf08bf0a3` 到 `c4697354857a11995ee9c1aa05e511c991bd7cb49cec75183354c27c361f3932`。两版仅代码交付槽不同。普通独立 Chat 不渲染该槽，因此协商为 legacy 的会话可首次领取它。claim 按任务排除 Issue、Issue Session、飞书绑定 Issue、项目、仓库及自动检出、Wiki、runtime workspace、Autopilot 和来源不明的任务。发送前再次校验实际载荷。其他候选保留原优先级和 lane 约束。
+
+这条例外将历史五槽、revision 与内容哈希一起写入 attempt。查看工作区 `/system-prompt` 仍返回当前默认，`--attempt` 返回实际执行快照。reset 遵循当前 default 规则；custom、未来未审核的默认或已有投递不能借用此例外。需要新能力的任务继续排队并显示升级诊断。
 整个 `system_prompt_policy` 属于执行绑定，预算降级不得删除或截短其字符串。
 
 切换 server 或 daemon 版本前须检查仍在途的 planned restart。可验证原策略时，由原兼容的执行者完成任务并排空可靠上报。旧 journal 缺少原采用收据，单独升级 server 无法补证。出现历史 A/B 不一致时应保留两端证据。新 checkpoint 在双方同时协商 `turn.restart` 与 `prompt.policy.adopt.v1`、只读对账匹配后使用 `turn.restart.resume_bound`。原 offer 代次和收据沿用，数字 restart generation 仍标识此次续接。旧 server 对 suspended 有原生孤儿保护，requested 或 resuming 仍可能独立过期。
@@ -1201,6 +1202,8 @@ daemon protocol rejected by server (min X, self Y); waiting for pending_update, 
 `launched_by = desktop` 的 daemon 会拒绝 CLI 更新（现有逻辑），fleet 里目前没有这种情况。
 
 ### 7.4b N-1 与 contract 发布
+
+双向混版验收使用真实相邻版本，验证普通 Chat 完成和取消。上一节的逐任务兼容只覆盖已审核 revision 对；代码交付耗用 daemon 二进制内的固定段，部署仍须排空并升级相关 daemon、CLI 和 server，验证 bind/list 后恢复调度。
 
 当前 contract 最低版本保持 `0.2.90`（首个「轮 + 条目」trace，ADR 0019）。
 普通发布只增加字段、帧和具名能力，不能抬高 `min_cli_version`，也不能从 CLI 版本或 build 号推断能力。

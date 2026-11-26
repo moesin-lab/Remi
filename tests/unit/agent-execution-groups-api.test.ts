@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createStore, db, resetMultiremiTestEnv } from "./multiremi/helpers.js";
@@ -48,7 +49,7 @@ describe("execution group API", () => {
     const agent = await response.json();
     expect(agent.provider).toBe("antigravity");
     const task = store.createTask({ agentId: agent.id, prompt: "Run in the group" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const catalog = await (await app.request("/api/models?execution_group_id=agy-group")).json();
     expect(catalog.providers[0].provider).toBe("antigravity");
   });
@@ -59,17 +60,17 @@ describe("execution group API", () => {
     const waiting = store.createTask({ agentId: routed.id, prompt: "Needs peer model" });
     const compatible = store.createAgent({ name: "Compatible", provider: "codex", model: "common" });
     const runnable = store.createTask({ agentId: compatible.id, prompt: "Can run here" });
-    expect(store.claimTask(runtime.id)?.id).toBe(runnable.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(runnable.id);
     expect(store.getTask(waiting.id)?.status).toBe("queued");
-    expect(store.claimTask(peer.id)?.id).toBe(waiting.id);
+    expect(claimWithCurrentRuntime(store, peer.id)?.id).toBe(waiting.id);
   });
 
   it("matches thinking requirements even when the Runtime default model is used", () => {
     const { store, runtime, peer } = setup();
     const agent = store.createAgent({ name: "Thinking routed", provider: "codex", thinkingLevel: "high" });
     const task = store.createTask({ agentId: agent.id, prompt: "Needs high thinking" });
-    expect(store.claimTask(peer.id)).toBeNull();
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, peer.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   });
 
   it("rechecks model capabilities after enqueue and keeps fixed groups bounded", () => {
@@ -77,10 +78,10 @@ describe("execution group API", () => {
     const group = store.listExecutionGroups("local").find(entry => entry.runtimeIds.includes(runtime.id))!;
     const fixed = store.createAgent({ name: "Fixed", provider: "codex", executionGroupId: group.id, model: "peer-only" });
     const fixedTask = store.createTask({ agentId: fixed.id, prompt: "Stay in group" });
-    expect(store.claimTask(peer.id)).toBeNull();
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, peer.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.updateRuntimeModels(runtime.id, [{ id: "peer-only", label: "Peer", provider: "openai", default: true }]);
-    expect(store.claimTask(runtime.id)?.id).toBe(fixedTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(fixedTask.id);
   });
 
   for (const provider of ["codex", "claude"] as const) {
@@ -115,7 +116,7 @@ describe("execution group API", () => {
       expect(response.status).toBe(201);
       const agent = await response.json();
       const task = store.createTask({ agentId: agent.id, prompt: "Use the configured connection" });
-      const claimed = store.claimTask(runtime.id)!;
+      const claimed = claimWithCurrentRuntime(store, runtime.id)!;
       expect(claimed.id).toBe(task.id);
       expect((provider === "codex" ? claimed.codexProfile : claimed.claudeProfile)?.model).toBe("alternative-model");
       // Changing a connection must invalidate capabilities from its previous endpoint.
@@ -133,7 +134,7 @@ describe("execution group API", () => {
     expect((await request(`/api/agents/${agent.id}`, { execution_group_id: null }, "PUT")).status).toBe(200);
     expect(store.getAgent(agent.id)).toMatchObject({ runtimeId: null, executionGroupId: null });
     const task = store.createTask({ agentId: agent.id, prompt: "Run on another machine" });
-    expect(store.claimTask(peer.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, peer.id)?.id).toBe(task.id);
   });
 
   it("lists existing legacy machine/type groups and exposes membership in Runtime responses", async () => {

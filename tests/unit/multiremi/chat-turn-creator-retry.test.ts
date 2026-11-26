@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "./helpers.js";
 import { expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -26,7 +27,7 @@ pendingTurnBackendTests("Chat creator turn retry", (fixture) => {
     /** Send a Chat message and run its attempt; returns the attempt and its turn. */
     const run = (body: string) => {
       const task = store.sendChatMessage(chat.id, { body }).task;
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       return { task, turn: store.getTurnForAttempt(task.id)! };
     };
@@ -53,7 +54,7 @@ pendingTurnBackendTests("Chat creator turn retry", (fixture) => {
     expect(f.store.getTask(first.task.id)?.status).toBe("failed");
     expect(f.store.getTask(warmAttempt)).toMatchObject({ status: "queued", sessionId: "provider-1", chatSessionId: f.chat.id });
 
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(warmAttempt);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(warmAttempt);
     f.store.startTask(warmAttempt);
     f.store.cancelTurn(first.turn.id);
     expect(f.store.getTurn(first.turn.id)?.status).toBe("cancelled");
@@ -86,7 +87,7 @@ pendingTurnBackendTests("Chat creator turn retry", (fixture) => {
     const f = await scaffold();
     const issue = createResponsibleTestIssue(f.store, { title: "Issue work", assigneeType: "agent", assigneeId: f.agent.id, responsibleMemberId: f.member.id });
     const task = f.store.createTask({ agentId: f.agent.id, prompt: "Work", issueId: issue.id });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(task.id);
     f.store.startTask(task.id);
     const turn = f.store.getTurnForAttempt(task.id)!;
     f.store.cancelTurn(turn.id);

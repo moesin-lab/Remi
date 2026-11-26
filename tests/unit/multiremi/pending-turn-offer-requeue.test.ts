@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -20,7 +21,7 @@ pendingTurnBackendTests("pending turn offer rescind", (fixture) => {
       const input = { agentId: agent.id, wakeSource: "inbox",
         ...(kind === "issue" ? { issueId: issue.id, issueSessionId: session.id } : { chatSessionId: session.id }) };
       const first = store.createTask({ ...input, prompt: "First wake" });
-      expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
       const second = store.createTask({ ...input, prompt: "Second wake" });
       db.run("UPDATE multiremi_agents SET archived_at = ? WHERE id = ?", [new Date().toISOString(), agent.id]);
       if (kind === "chat") db.run("UPDATE multiremi_chat_sessions SET status = 'archived' WHERE id = ?", [session.id]);
@@ -30,7 +31,7 @@ pendingTurnBackendTests("pending turn offer rescind", (fixture) => {
       expect(store.getTask(first.id)?.status).toBe("queued");
       expect(store.getTask(second.id)?.status).toBe("queued");
       expect(store.getIssue(issue.id)?.status).toBe(status);
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
       expect(store.listConversationLogEntries(session.id).filter(row => row.kind === "message").map(row => row.body_md))
         .toEqual(["First wake", "Second wake"]);
       expect(store.getTurnForAttempt(first.id)?.reply_message_id).toBeNull();
@@ -45,7 +46,7 @@ pendingTurnBackendTests("pending turn offer rescind", (fixture) => {
       const input = { agentId: agent.id,
         ...(kind === "issue" ? { issueId: issue.id, issueSessionId: session.id } : { chatSessionId: session.id }) };
       const human = store.createTask({ ...input, prompt: "Human context" });
-      expect(store.claimTask(runtime.id)?.id).toBe(human.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(human.id);
       const platform = store.createTask({ ...input, prompt: "Platform context", wakeSource: "inbox" });
       expect(store.requeueTaskOffer(human.id, runtime.id)).toBe(true);
       expect(store.getTask(human.id)).toMatchObject({ status: "queued", prompt: "Human context" });

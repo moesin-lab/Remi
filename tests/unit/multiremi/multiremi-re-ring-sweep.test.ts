@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
 import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
@@ -261,7 +262,7 @@ pendingTurnBackendTests("MUL-492 periodic re-ring", (fixture, backend) => {
     expect(f.store.sweepIdleIssueLanes(f.now).rang).toBe(1);
     const recovered = queued(f)[0]!;
     expect(recovered.chatSessionId).toBe(f.session.chatId);
-    expect(f.store.claimTask(wrong.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, wrong.id)).toBeNull();
     expect(f.store.getTask(chatTask.id)!.status).toBe("queued");
     expect(f.store.getTask(recovered.id)!.runtimeId).toBe(dedicated.id);
   });
@@ -321,7 +322,7 @@ pendingTurnBackendTests("MUL-492 periodic re-ring", (fixture, backend) => {
     const f = setup();
     const runtime = f.store.registerRuntime({ name: "Sweep runtime", provider: "codex" });
     runTurnExecutionMutation(f.db as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET status = 'queued', max_attempts = 1 WHERE id = ?", [f.delivery.task!.id]);
-    expect(f.store.claimTask(runtime.id)?.id).toBe(f.delivery.task!.id);
+    expect(claimWithCurrentRuntime(f.store, runtime.id)?.id).toBe(f.delivery.task!.id);
     f.store.startTask(f.delivery.task!.id);
     f.db.run('UPDATE multiremi_turns SET trigger_message_id=? WHERE current_attempt_id=?',[f.delivery.entry.id,f.delivery.task!.id]);
     f.store.failTask(f.delivery.task!.id, { error: "overflow", failureReason: "agent_error.context_overflow" });

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createRoutingMatrixDatabase } from "../../helpers/routing-matrix-database.js";
 import { createPostgresStoreTemplate } from "../../helpers/postgres-store-template.js";
@@ -82,7 +83,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const task = store.createTask({ agentId: agent.id, prompt: "committed claim" });
         let observed: string | undefined;
         const unsubscribe = store.onTaskEvent(event => { observed = event.task.id; });
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         store.startTask(task.id);
         unsubscribe();
         // This event is delivered by the real Store commit, before reset.

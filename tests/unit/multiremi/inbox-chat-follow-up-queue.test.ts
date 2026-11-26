@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { expect, it } from 'bun:test';
 import { QueuedMessageError } from '@multiremi/store/inbox/queued-messages.js';
@@ -34,7 +35,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
     /** A running turn whose trigger is `body`. */
     const running = (body = 'First request') => {
       const sent = send(body);
-      const attempt = store.claimTask(runtime.id)!;
+      const attempt = claimWithCurrentRuntime(store, runtime.id)!;
       store.startTask(attempt.id);
       return { turnId: sent.turn_id!, attemptId: attempt.id, message: sent.message };
     };
@@ -98,7 +99,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
       expect(created).toHaveLength(1);
       expect(created[0]).toMatchObject({ status: 'pending', trigger_message_id: message.id, wake_seq: message.seq });
       expect(message.metadata.delivery_turn_id).toBe(created[0]!.id);
-      const attempt = f.store.claimTask(f.runtime.id)!;
+      const attempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
       expect(attempt.id).toBe(created[0]!.current_attempt_id!);
       f.store.startTask(attempt.id);
       // The offer's unread part holds this one queued body; earlier queued rows were read by earlier turns.
@@ -122,14 +123,14 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
     expect(a.item.status).toBe('released');
     expect(b).toMatchObject({ item: { status: 'queued' }, released: null });
     expect(f.turns()).toHaveLength(1);
-    const attempt = f.store.claimTask(f.runtime.id)!;
+    const attempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(attempt.id).toBe(f.store.getTurn(a.released!.turn_id!)!.current_attempt_id!);
     f.store.startTask(attempt.id);
     f.store.completeTask(attempt.id, { output: 'A answer' });
     expect(f.row(b.item.id)).toMatchObject({ status: 'released', released_via: 'turn' });
     // Rows kept while the Chat was archived go first: the new row waits behind them.
     const second = f.turns().find(turn => turn.status === 'pending')!;
-    const running = f.store.claimTask(f.runtime.id)!;
+    const running = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(running.id).toBe(second.current_attempt_id!);
     f.store.startTask(running.id);
     const kept = ['Kept 1', 'Kept 2'].map(body => f.enqueue(body).item);
@@ -171,7 +172,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
       // A direct steer still starts work. Its completion clears turn_ended and releases;
       // a member's interrupted pause leaves the queue alone until resume.
       const direct = f.send('Direct message');
-      const attempt = f.store.claimTask(f.runtime.id)!;
+      const attempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
       expect(attempt.id).toBe(f.store.getTurn(direct.turn_id!)!.current_attempt_id!);
       f.store.startTask(attempt.id);
       f.store.completeTask(attempt.id, { output: 'Direct answer' });
@@ -192,7 +193,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
       expect(resumed.released.map(entry => entry.message.body_md)).toEqual(['After stop']);
       const pending = f.store.getTurn(resumed.released[0]!.turn_id!)!;
       expect(pending.status).toBe('pending');
-      const resumedAttempt = f.store.claimTask(f.runtime.id)!;
+      const resumedAttempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
       expect(resumedAttempt.id).toBe(pending.current_attempt_id!);
       f.store.startTask(resumedAttempt.id);
       f.store.completeTask(resumedAttempt.id, { output: 'After stop answer' });
@@ -208,7 +209,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
     expect(f.pause()).toMatchObject({ reason: 'turn_ended' });
     const retried = f.store.retryTurnAsMember(first.turnId, false);
     expect(retried.current_attempt_id).not.toBe(first.attemptId);
-    const attempt = f.store.claimTask(f.runtime.id)!;
+    const attempt = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(attempt.id).toBe(retried.current_attempt_id!);
     f.store.startTask(attempt.id);
     expect(f.row(queued.id)).toMatchObject({ status: 'queued' });
@@ -412,7 +413,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
     const retry = f.enqueue('Different body', { client_id: 'same-client' });
     expect(retry.item.id).toBe(idle.item.id);
     expect(retry.released?.message.id).toBe(idle.released!.message.id);
-    f.store.claimTask(f.runtime.id);
+    claimWithCurrentRuntime(f.store, f.runtime.id);
     expect(queueError(() => f.enqueue('   ', { client_id: 'blank' }))).toMatchObject({ status: 400, code: 'invalid_queue_input' });
     expect(queueError(() => f.enqueue('Too many', { attachment_ids: Array.from({ length: 11 }, (_, i) => `att_${i}`) })))
       .toMatchObject({ status: 400, code: 'invalid_queue_input' });

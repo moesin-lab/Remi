@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import { ChatValidationError } from "@multiremi/store/repos/chat-repo.js";
@@ -105,15 +106,15 @@ describe("Chat Project binding", () => {
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
     const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, runtimeId: other.id, prompt: "Work" });
     expect(task.runtimeId).toBe(directory.id);
-    expect(store.claimTask(other.id)).toBeNull();
-    expect(store.claimTask(directory.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, directory.id)?.id).toBe(task.id);
     store.buildTaskSessionProjection(task.id);
     store.startTask(task.id);
     store.failTask(task.id, { error: "Stale session", failureReason: "agent_error.stale_session", sessionId: "unsafe" });
     const retry = store.listTasks().find((row) => row.parentTaskId === task.id)!;
     expect(retry).toMatchObject({ runtimeId: directory.id, sessionId: null });
-    expect(store.claimTask(other.id)).toBeNull();
-    expect(store.claimTask(directory.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, directory.id)?.id).toBe(retry.id);
   });
 
   it("waits for a missing directory daemon and preserves its pin across provider changes", () => {
@@ -125,7 +126,7 @@ describe("Chat Project binding", () => {
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
     const task = store.sendChatMessage(chat.id, { body: "Wait" }).task;
     expect(task.runtimeId).toBe(daemonRuntimeId("missing", "codex"));
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     store.updateAgent(agent.id, { provider: "claude" });
     expect(store.getTask(task.id)?.runtimeId).toBe(daemonRuntimeId("missing", "claude"));
   });
@@ -140,8 +141,8 @@ describe("Chat Project binding", () => {
     const agent = store.createAgent({ name: "Chat", provider: "codex" });
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
     const task = store.sendChatMessage(chat.id, { body: "Use device" }).task;
-    expect(store.claimTask(other.id)).toBeNull();
-    expect(store.claimTask(directory.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, directory.id)?.id).toBe(task.id);
   });
 
   for (const unavailable of ["archived", "deleted"] as const) {
@@ -172,13 +173,13 @@ describe("Chat Project binding", () => {
           expect(wire).not.toHaveProperty(field);
         }
       }
-      expect(store.claimTask(available.id)).toMatchObject({ id: task.id, project: null, repos: [] });
+      expect(claimWithCurrentRuntime(store, available.id)).toMatchObject({ id: task.id, project: null, repos: [] });
       store.buildTaskSessionProjection(task.id);
       store.startTask(task.id);
       store.completeTask(task.id, { output: "Chat continues" });
       const next = store.sendChatMessage(chat.id, { body: "Still usable" }).task;
       expect(next.runtimeId).toBeNull();
-      expect(store.claimTask(available.id)?.id).toBe(next.id);
+      expect(claimWithCurrentRuntime(store, available.id)?.id).toBe(next.id);
       // Provider changes also consult the shared directory-affinity helper.
       store.updateAgent(agent.id, { provider: "claude" });
     });
@@ -198,7 +199,7 @@ describe("Chat Project binding", () => {
         if (source === "dedicated_runtime") store.updateDaemonDedicated("local", "project-owner", true, "local");
         const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
         const first = store.sendChatMessage(chat.id, { body: "Work with the Project" }).task;
-        expect(store.claimTask(previous.id)?.id).toBe(first.id);
+        expect(claimWithCurrentRuntime(store, previous.id)?.id).toBe(first.id);
         store.buildTaskSessionProjection(first.id);
         store.startTask(first.id);
         const previousWorkDir = source === "local_directory" ? "/abs/user-project" : `/old-platform/workspaces/chats/${chat.id}`;
@@ -212,8 +213,8 @@ describe("Chat Project binding", () => {
           sessionRuntimeId: null, sessionProvider: null, sessionExecutionFingerprint: null });
         // A dedicated Project machine cannot claim projectless work. A pool
         // machine must be able to claim this turn without inheriting its path.
-        if (source === "dedicated_runtime") expect(store.claimTask(previous.id)).toBeNull();
-        const fallback = store.claimTask(available.id);
+        if (source === "dedicated_runtime") expect(claimWithCurrentRuntime(store, previous.id)).toBeNull();
+        const fallback = claimWithCurrentRuntime(store, available.id);
         expect(fallback).toMatchObject({ id: second.id, project: null, sessionId: null, workDir: null, repos: [] });
         expect(fallback?.projectResources).toEqual([]);
         store.buildTaskSessionProjection(second.id);
@@ -223,7 +224,7 @@ describe("Chat Project binding", () => {
 
         const third = store.sendChatMessage(chat.id, { body: "Keep this pure context" }).task;
         expect(third).toMatchObject({ sessionId: "pure-provider-session", workDir: managedWorkDir, runtimeId: available.id });
-        const resumed = store.claimTask(available.id);
+        const resumed = claimWithCurrentRuntime(store, available.id);
         expect(resumed).toMatchObject({ id: third.id, project: null, sessionId: "pure-provider-session", workDir: managedWorkDir });
         expect(store.getChatSession(chat.id)?.projectId).toBe(project.id);
       });
@@ -237,12 +238,12 @@ describe("Chat Project binding", () => {
     const project = store.createProject({ title: "Project" });
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
     const first = store.sendChatMessage(chat.id, { body: "First" }).task;
-    store.claimTask(runtime.id);
+    claimWithCurrentRuntime(store, runtime.id);
     store.buildTaskSessionProjection(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "First", sessionId: "legacy-project-session", workDir: "/abs/user-project" });
     const second = store.sendChatMessage(chat.id, { body: "Still working" }).task;
-    const retained = store.claimTask(runtime.id)!;
+    const retained = claimWithCurrentRuntime(store, runtime.id)!;
     store.buildTaskSessionProjection(second.id);
     store.startTask(second.id);
     db!.run("UPDATE multiremi_chat_sessions SET session_id = NULL, session_execution_fingerprint = NULL WHERE id = ?", [chat.id]);
@@ -255,7 +256,7 @@ describe("Chat Project binding", () => {
       sessionRuntimeId: null, sessionProvider: null, sessionExecutionFingerprint: null });
     const fallback = store.sendChatMessage(chat.id, { body: "Pure Chat" }).task;
     expect(fallback).toMatchObject({ sessionId: null, workDir: null, runtimeId: null });
-    expect(store.claimTask(runtime.id)).toMatchObject({ id: fallback.id, sessionId: null, workDir: null });
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: fallback.id, sessionId: null, workDir: null });
   });
 
   it("drops an old retained claim's cwd after the same dispatched task is reclaimed in fallback mode", () => {
@@ -268,21 +269,21 @@ describe("Chat Project binding", () => {
     ] });
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
     const first = store.sendChatMessage(chat.id, { body: "First" }).task;
-    store.claimTask(previous.id);
+    claimWithCurrentRuntime(store, previous.id);
     store.buildTaskSessionProjection(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "First", sessionId: "old-session", workDir: "/abs/user-project" });
     const second = store.sendChatMessage(chat.id, { body: "Queued" }).task;
-    const retained = store.claimTask(previous.id)!;
+    const retained = claimWithCurrentRuntime(store, previous.id)!;
     expect(retained).toMatchObject({ id: second.id, sessionId: "old-session", workDir: "/abs/user-project" });
     store.archiveProject(project.id);
     // Fresh dispatches are already leased: another poll must not relabel an
     // in-flight execution. Only the existing stale-claim recovery window can.
-    expect(store.claimTask(replacement.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, replacement.id)).toBeNull();
     expect(store.getTask(second.id)).toMatchObject({ status: "dispatched", runtimeId: previous.id,
       executionFingerprint: retained.executionFingerprint, sessionId: "old-session", workDir: "/abs/user-project" });
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", second.id]);
-    const fallback = store.claimTask(replacement.id)!;
+    const fallback = claimWithCurrentRuntime(store, replacement.id)!;
     expect(fallback).toMatchObject({ id: second.id, sessionId: null, workDir: null, project: null });
     expect(fallback.executionFingerprint).not.toBe(retained.executionFingerprint);
     const wire = daemonTaskClaimResponse(store, retained);
@@ -307,7 +308,7 @@ describe("Chat Project binding", () => {
       if (target === "new_runtime") store.updateDaemonDedicated("local", "project-owner", true, "local");
       const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
       const first = store.sendChatMessage(chat.id, { body: "First" }).task;
-      const frozen = store.claimTask(previous.id)!;
+      const frozen = claimWithCurrentRuntime(store, previous.id)!;
       store.buildTaskSessionProjection(first.id);
       store.startTask(first.id);
       store.failTask(first.id, { error: "Temporary outage", failureReason: "runtime_offline", sessionId: "old-session", workDir: "/abs/old" });
@@ -321,7 +322,7 @@ describe("Chat Project binding", () => {
       store.setRuntimeCodexProfile(previous.id, { ...profile, name: "changed", model: "changed-model" });
       store.archiveProject(project.id);
       const selected = target === "same_runtime" ? previous : replacement;
-      const claimed = store.claimTask(selected.id)!;
+      const claimed = claimWithCurrentRuntime(store, selected.id)!;
       expect(claimed).toMatchObject({ id: retry.id, provider: "codex", sessionId: null, workDir: null });
       expect(claimed.pluginSnapshot).toEqual(frozen.pluginSnapshot);
       expect(claimed.pluginSnapshot).toEqual([]);

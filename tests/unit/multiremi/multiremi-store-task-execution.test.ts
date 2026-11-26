@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // What happens while a claimed task runs: ACP message ingress, completion
@@ -110,7 +111,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     // Direct work also has a request message; the final reply threads under it.
     const issue = createResponsibleTestIssue(store, { title: "总结项目", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "总结项目" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "Remi 是一个 AI 消息路由器。" });
     const comments = store.listIssueComments(issue.id);
@@ -134,7 +135,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
       body: `[@Reply Bot](mention://agent/${agent.id}) 再说一遍`,
     });
     const mentionTask = store.listTasks().find((item) => item.triggerCommentId === trigger.id)!;
-    expect(store.claimTask(runtime.id)?.id).toBe(mentionTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(mentionTask.id);
     store.startTask(mentionTask.id);
     store.completeTask(mentionTask.id, { output: "好的:是一个消息路由器。" });
     const reply = store.listIssueComments(issue.id).find((c) => c.parentId === trigger.id);
@@ -150,7 +151,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
 
     // Placeholder / empty outputs post nothing.
     const silent = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "quiet" });
-    expect(store.claimTask(runtime.id)?.id).toBe(silent.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(silent.id);
     store.startTask(silent.id);
     const before = store.listIssueComments(issue.id).length;
     store.completeTask(silent.id, { output: "Task completed." });
@@ -163,7 +164,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const agent = store.createAgent({ name: "Self Bot", provider: "claude", runtimeId: runtime.id });
     const issue = createResponsibleTestIssue(store, { title: "架构", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "总结架构" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
 
     // Agent posts its own formatted reply via a tool during execution.
@@ -184,7 +185,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const agent = store.createAgent({ name: "Event Bot", provider: "claude", runtimeId: runtime.id });
     const issue = createResponsibleTestIssue(store, { title: "实时推送", workspaceId: "local", assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "回答" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
 
     const events: Array<{ type: string; workspaceId: string; payload: Record<string, unknown> }> = [];
@@ -263,7 +264,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
       body: `Please inspect this too [@Comment Bot](mention://agent/${agent.id}).`,
     });
     const deletedTask = store.listTasks().find((task) => task.triggerCommentId === deleted.id)!;
-    expect(store.claimTask(runtime.id)?.id).toBe(deletedTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(deletedTask.id);
 
     store.deleteIssueComment(deleted.id);
     expect(store.getTask(deletedTask.id)?.status).toBe("cancelled");
@@ -279,24 +280,24 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const secondA = store.createTask({ agentId: agent.id, issueId: issueA.id, prompt: "A2" });
     const firstB = store.createTask({ agentId: agent.id, issueId: issueB.id, prompt: "B1" });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(firstA.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(firstB.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(firstA.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(firstB.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
 
     store.completeTask(firstA.id, { output: "done" });
     expect(secondA.id).toBe(firstA.id);
     expect(store.getIssue(issueA.id)?.status).toBe("in_review");
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     const followUp = store.createTask({ agentId: agent.id, issueId: issueA.id, prompt: "A3" });
-    expect(store.claimTask(runtime.id)?.id).toBe(followUp.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(followUp.id);
 
     const cappedAgent = store.createAgent({ name: "Capped", provider: "codex", maxConcurrentTasks: 1 });
     const cappedFirst = store.createTask({ agentId: cappedAgent.id, prompt: "one" });
     const cappedSecond = store.createTask({ agentId: cappedAgent.id, prompt: "two" });
-    expect(store.claimTask(runtime.id)?.id).toBe(cappedFirst.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(cappedFirst.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.completeTask(cappedFirst.id, { output: "done" });
-    expect(store.claimTask(runtime.id)?.id).toBe(cappedSecond.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(cappedSecond.id);
   });
 
   it("reclaims stale dispatched tasks before applying runtime capacity", () => {
@@ -305,11 +306,11 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex", maxConcurrency: 1 });
     const task = store.createTask({ agentId: agent.id, prompt: "Recover claim response" });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const stale = new Date(Date.now() - 2 * 60 * 1000).toISOString();
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ?, updated_at = ? WHERE id = ?", [stale, stale, task.id]);
 
-    const reclaimed = store.claimTask(runtime.id);
+    const reclaimed = claimWithCurrentRuntime(store, runtime.id);
     expect(reclaimed?.id).toBe(task.id);
     expect(Date.parse(store.getTask(task.id)!.dispatchedAt!)).toBeGreaterThan(Date.parse(stale));
   });
@@ -320,14 +321,14 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex", maxConcurrency: 1 });
     const task = store.createTask({ agentId: agent.id, prompt: "Wait for workspace preparation" });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const stale = new Date(Date.now() - 2 * 60 * 1000).toISOString();
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ?, updated_at = ? WHERE id = ?", [stale, stale, task.id]);
 
     const renewed = store.renewTaskDispatchLease(task.id);
     expect(renewed.status).toBe("dispatched");
     expect(Date.parse(renewed.dispatchedAt!)).toBeGreaterThan(Date.parse(stale));
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
   });
 
   it("tracks waiting_local_directory as an active in-flight state", () => {
@@ -339,12 +340,12 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const second = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Second" });
 
     expect(() => store.startTask(first.id)).toThrow("Task not found or not dispatched");
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     const waiting = store.markTaskWaitingLocalDirectory(first.id, "/tmp/worktree");
     expect(waiting.status).toBe("waiting_local_directory");
     expect(waiting.waitReason).toBe("/tmp/worktree");
     expect(store.getRuntime(runtime.id)!.activeTaskCount).toBe(1);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     // PR 6 §2.8: a waiting attempt takes a new reason (its folder's holder parked); the same one again is a no-op.
     const events: string[] = [];
     const unsubscribe = store.onTaskEvent((event) => { events.push(event.type); });
@@ -366,7 +367,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     expect(() => store.startTask(first.id)).toThrow("Task not found or not dispatched");
     store.completeTask(first.id, { output: "done" });
     expect(second.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
   });
 
   it("honors runtime max concurrency and derives stale liveness", () => {
@@ -378,11 +379,11 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const second = store.createTask({ agentId: agent.id, issueId: secondIssue.id, prompt: "Second" });
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex", maxConcurrency: 1 });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
 
     store.completeTask(first.id, { output: "done" });
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
 
     const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     db!.run("UPDATE multiremi_runtimes SET last_heartbeat_at = ?, updated_at = ? WHERE id = ?", [stale, stale, runtime.id]);
@@ -425,8 +426,8 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
       ownerId: null,
     });
     expect(reconnected.ownerId).toBe(member.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
     store.startTask(first.id);
     store.reportTaskUsage(first.id, [
       { provider: "codex", model: "gpt-5", inputTokens: 100, outputTokens: 25, cacheReadTokens: 5 },

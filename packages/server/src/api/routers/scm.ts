@@ -7,6 +7,7 @@ import type {
 } from "@multiremi/contracts/types.js";
 import { GitHubScmOperations, ScmOperationError } from "@multiremi/scm/operations.js";
 import { ScmHttpError } from "@multiremi/scm/http.js";
+import { bindScmChangeRequestReference, parseChangeRequestReference, ScmBindingError } from "@multiremi/scm/change-request-binding.js";
 import { ScmCredentialEncryptionError } from "@multiremi/scm/credentials.js";
 import { matchScmRepositoryBindings } from "@multiremi/scm/repository-reference.js";
 import {
@@ -61,6 +62,19 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
         };
       });
     return c.json({ changeRequests, total: changeRequests.length });
+  });
+
+  app.put("/api/issues/:issueId/change-requests/by-reference", async (c) => {
+    const issue = store.getIssue(c.req.param("issueId"));
+    if (!issue) return c.json({ error: "issue not found" }, 404);
+    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
+    if (denied) return denied;
+    const body = await readJsonStrict<unknown>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    try {
+      const reference = parseChangeRequestReference(body);
+      return c.json(await bindScmChangeRequestReference({ store, workspaceId: issue.workspaceId, issueId: issue.id, reference, signal: c.req.raw.signal }));
+    } catch (error) { return scmErrorResponse(c, error); }
   });
 
   app.put("/api/issues/:issueId/change-requests/:changeRequestId", (c) => {
@@ -317,6 +331,7 @@ function eventPageLimit(value: string | undefined): number {
 
 function scmErrorResponse(c: Context, error: unknown): Response {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof ScmBindingError) return c.json({ error: message, code: error.code }, error.status);
   if (error instanceof ScmOperationError) {
     const status = error.code === "scm_capability_unavailable" ? 501
       : /conflict|ambiguous/u.test(error.code) ? 409 : 400;

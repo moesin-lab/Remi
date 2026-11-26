@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterAll, describe, expect, it } from "bun:test";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import type { TasksRepo } from "@multiremi/store/repos/tasks-repo.js";
@@ -16,7 +17,7 @@ for (const backend of backends) describe.skipIf(!backend.available)(`daemon inpu
       const runtime = store.registerRuntime({ name: "Input host", provider: "codex", workspaceId: "local" });
       const agent = store.createAgent({ name: "Input worker", provider: "codex", runtimeId: runtime.id });
       const task = store.createTask({ agentId: agent.id, prompt: "Work" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       const db = (store as unknown as { db: SqlDatabase }).db;
       const events: Array<{ taskId: unknown; inTransaction: boolean }> = [];
@@ -39,7 +40,7 @@ for (const backend of backends) describe.skipIf(!backend.available)(`daemon inpu
       const agent = store.createAgent({ name: "Question worker", provider: "codex", runtimeId: runtime.id });
       const issue = store.createIssue({ title: "Question source", assigneeType: "agent", assigneeId: agent.id, responsibleMemberId: "mem_local_local" });
       const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Ask" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
       const question = store.getDaemonTurnBridge().rpc("turn.decision", { turn_id: store.getTurnForAttempt(task.id)!.id, attempt_id: task.id,
         wait_id: "input-commit-native-wait", dedupe_key: "input-commit-question", body_md: "Continue?", options: [],
         metadata: { kind: "question", questions: [{ question: "Continue?" }] } },

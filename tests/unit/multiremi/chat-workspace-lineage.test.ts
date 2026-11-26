@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
@@ -15,7 +16,7 @@ function fixture() {
   const resource = store.listProjectResources(project.id)[0]!;
   const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
   const first = store.sendChatMessage(chat.id, { body: "First" }).task;
-  store.claimTask(previous.id);
+  claimWithCurrentRuntime(store, previous.id);
   store.startTask(first.id);
   store.completeTask(first.id, { output: "Done", sessionId: "old-provider", workDir: "/abs/user-project" });
   return { store, previous, replacement, agent, project, resource, chat };
@@ -45,8 +46,8 @@ function multipleDirectoryFixture(includeThird = false) {
   const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
   const first = store.sendChatMessage(chat.id, { body: "First" }).task;
   expect(first.runtimeId).toBe(previous.id);
-  expect(store.claimTask(replacement.id)).toBeNull();
-  expect(store.claimTask(previous.id)?.id).toBe(first.id);
+  expect(claimWithCurrentRuntime(store, replacement.id)).toBeNull();
+  expect(claimWithCurrentRuntime(store, previous.id)?.id).toBe(first.id);
   store.startTask(first.id);
   store.completeTask(first.id, { output: "A", sessionId: "provider-a", workDir: "/abs/directory-a" });
   return { store, previous, replacement, third, agent, project, chat, selected: selected!, alternative: alternative!, last };
@@ -119,8 +120,8 @@ describe("Chat selects one ordered local directory", () => {
         expect(store.listProjectResources(project.id).map((resource) => resource.id)).toEqual(["pres_tie_a", "pres_tie_b"]);
         const next = store.sendChatMessage(chat.id, { body: "Continue" }).task;
         expect(next.runtimeId).toBe(runtimeA.id);
-        expect(store.claimTask(runtimeB.id)).toBeNull();
-        const claimed = store.claimTask(runtimeA.id)!;
+        expect(claimWithCurrentRuntime(store, runtimeB.id)).toBeNull();
+        const claimed = claimWithCurrentRuntime(store, runtimeA.id)!;
         expect(claimed).toMatchObject({ id: next.id, sessionId: completed ? "provider-a" : null,
           workDir: completed ? "/abs/directory-a" : null });
         if (completed) expect(claimed.executionFingerprint).toBe(fingerprint);
@@ -139,7 +140,7 @@ describe("Chat selects one ordered local directory", () => {
         const queued = timing === "queued" ? f.store.sendChatMessage(f.chat.id, { body: "Queued" }).task : null;
         const selectedRuntimeId = change(f);
         const next = queued ?? f.store.sendChatMessage(f.chat.id, { body: "Continue" }).task;
-        const claimed = f.store.claimTask(f.previous.id)!;
+        const claimed = claimWithCurrentRuntime(f.store, f.previous.id)!;
         expect(claimed).toMatchObject({ id: next.id, sessionId: null, workDir: null, chatProjectId: f.project.id });
         expect(claimed.project?.id).toBe(f.project.id);
         expect(claimed.projectResources.some((resource) => resource.resourceType === "local_directory")).toBe(false);
@@ -150,7 +151,7 @@ describe("Chat selects one ordered local directory", () => {
         f.store.completeTask(next.id, { output: "Managed", sessionId: "managed-provider", workDir: managedWorkDir });
         const third = f.store.sendChatMessage(f.chat.id, { body: "Resume" }).task;
         expect(third).toMatchObject({ sessionId: "managed-provider", workDir: managedWorkDir, runtimeId: f.previous.id });
-        const resumed = f.store.claimTask(f.previous.id)!;
+        const resumed = claimWithCurrentRuntime(f.store, f.previous.id)!;
         expect(resumed).toMatchObject({ id: third.id, sessionId: "managed-provider", workDir: managedWorkDir });
         expect(resumed.projectResources.some((resource) => resource.resourceType === "local_directory")).toBe(false);
         f.store.startTask(third.id);
@@ -160,7 +161,7 @@ describe("Chat selects one ordered local directory", () => {
         const fresh = f.store.createChatSession({ agentId: f.agent.id, projectId: f.project.id });
         const freshTask = f.store.sendChatMessage(fresh.id, { body: "Use the current assignment" }).task;
         expect(freshTask.runtimeId).toBe(selectedRuntimeId);
-        expect(f.store.claimTask(selectedRuntimeId)?.id).toBe(freshTask.id);
+        expect(claimWithCurrentRuntime(f.store, selectedRuntimeId)?.id).toBe(freshTask.id);
       });
     }
   }
@@ -191,7 +192,7 @@ describe("Chat selects one ordered local directory", () => {
       change(f);
       const next = f.store.sendChatMessage(f.chat.id, { body: "Keep working in A" }).task;
       expect(next).toMatchObject({ sessionId: "provider-a", workDir: "/abs/directory-a", runtimeId: f.previous.id });
-      const claimed = f.store.claimTask(f.previous.id)!;
+      const claimed = claimWithCurrentRuntime(f.store, f.previous.id)!;
       expect(claimed).toMatchObject({ id: next.id, sessionId: "provider-a", workDir: "/abs/directory-a", executionFingerprint: fingerprint });
       expect(f.store.getChatSession(f.chat.id)?.sessionExecutionFingerprint).toBe(fingerprint);
     });
@@ -201,7 +202,7 @@ describe("Chat selects one ordered local directory", () => {
     it(`rejects a ${lineage} task on an unselected directory even though that daemon and path are Project members`, () => {
       const f = multipleDirectoryFixture();
       const next = f.store.sendChatMessage(f.chat.id, { body: "Continue" }).task;
-      f.store.claimTask(f.previous.id);
+      claimWithCurrentRuntime(f.store, f.previous.id);
       mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET work_dir = ?, runtime_id = ? WHERE id = ?", [
         "/abs/directory-b", f.replacement.id, next.id,
       ]);
@@ -234,16 +235,16 @@ describe("Chat workspace assignment lineage", () => {
       store.updateDaemonDedicated("local", "previous", true, "local");
       const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
       const first = store.sendChatMessage(chat.id, { body: "First" }).task;
-      expect(store.claimTask(previous.id)?.id).toBe(first.id);
+      expect(claimWithCurrentRuntime(store, previous.id)?.id).toBe(first.id);
       store.startTask(first.id);
       store.failTask(first.id, { error: "Runtime unavailable", failureReason: "runtime_offline" });
       const retry = store.listTasks().find(task => task.parentTaskId === first.id)!;
       store.updateAgent(agent.id, { model: "later-selection" });
       store.archiveProject(project.id);
-      expect(store.claimTask(destination.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, destination.id)).toBeNull();
       expect(store.getTask(retry.id)?.status).toBe("queued");
       store.updateRuntimeModels(destination.id, [{ id: "selected-model", label: "Selected model", provider, default: false }]);
-      const claimed = store.claimTask(destination.id)!;
+      const claimed = claimWithCurrentRuntime(store, destination.id)!;
       expect(claimed).toMatchObject({ id: retry.id, executionModel: "selected-model", codexProfile: null, claudeProfile: null });
     });
 
@@ -273,7 +274,7 @@ describe("Chat workspace assignment lineage", () => {
         store.updateDaemonDedicated("local", "previous", true, "local");
         const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
         const first = store.sendChatMessage(chat.id, { body: "First" }).task;
-        const initial = store.claimTask(previous.id)!;
+        const initial = claimWithCurrentRuntime(store, previous.id)!;
         expect((initial.codexProfile ?? initial.claudeProfile)?.model ?? null).toBe(priorProfile ? "selected-model" : null);
         store.startTask(first.id);
         store.failTask(first.id, { error: "Runtime unavailable", failureReason: "runtime_offline",
@@ -281,7 +282,7 @@ describe("Chat workspace assignment lineage", () => {
         const retry = store.listTasks().find((task) => task.parentTaskId === first.id)!;
         if (priorProfile) store.updateAgent(agent.id, { model: "later-selection" });
         store.archiveProject(project.id);
-        const claimed = store.claimTask(destination.id)!;
+        const claimed = claimWithCurrentRuntime(store, destination.id)!;
         expect(claimed).toMatchObject({ id: retry.id, sessionId: null, workDir: null });
         expect(claimed.codexProfile ?? claimed.claudeProfile).toEqual({ ...nextProfile, model: "selected-model" });
       });
@@ -292,7 +293,7 @@ describe("Chat workspace assignment lineage", () => {
     it(`retains the rejection decision while stripping a ${lineage} claim's inherited path`, () => {
       const f = fixture();
       const next = f.store.sendChatMessage(f.chat.id, { body: "Dispatch" }).task;
-      const retained = f.store.claimTask(f.previous.id)!;
+      const retained = claimWithCurrentRuntime(f.store, f.previous.id)!;
       if (lineage === "legacy") {
         mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET execution_fingerprint = ? WHERE id = ?", ["legacy-plugin-hash", next.id]);
         mutate(f, "path");
@@ -316,7 +317,7 @@ describe("Chat workspace assignment lineage", () => {
         const queued = timing === "queued" ? f.store.sendChatMessage(f.chat.id, { body: "Queued" }).task : null;
         mutate(f, change);
         const next = queued ?? f.store.sendChatMessage(f.chat.id, { body: "Continue" }).task;
-        const claimed = f.store.claimTask(f.previous.id)!;
+        const claimed = claimWithCurrentRuntime(f.store, f.previous.id)!;
         expect(claimed).toMatchObject({ id: next.id, sessionId: null, workDir: null, chatProjectId: f.project.id });
         expect(claimed.project?.id).toBe(f.project.id);
         expect(claimed.projectResources.some((r) => r.resourceType === "local_directory")).toBe(false);
@@ -327,7 +328,7 @@ describe("Chat workspace assignment lineage", () => {
         f.store.completeTask(next.id, { output: "Managed", sessionId: "managed-provider", workDir: managedWorkDir });
         const third = f.store.sendChatMessage(f.chat.id, { body: "Resume" }).task;
         expect(third).toMatchObject({ sessionId: "managed-provider", workDir: managedWorkDir, runtimeId: f.previous.id });
-        const resumed = f.store.claimTask(f.previous.id)!;
+        const resumed = claimWithCurrentRuntime(f.store, f.previous.id)!;
         expect(resumed).toMatchObject({ sessionId: "managed-provider", workDir: managedWorkDir });
         expect(resumed.projectResources.some((r) => r.resourceType === "local_directory")).toBe(false);
       });
@@ -336,9 +337,9 @@ describe("Chat workspace assignment lineage", () => {
     it(`keeps active dispatch leases and rejects cached claims and late promotion after ${change}`, () => {
       const f = fixture();
       const next = f.store.sendChatMessage(f.chat.id, { body: "In flight" }).task;
-      const retained = f.store.claimTask(f.previous.id)!;
+      const retained = claimWithCurrentRuntime(f.store, f.previous.id)!;
       mutate(f, change);
-      expect(f.store.claimTask(f.replacement.id)).toBeNull();
+      expect(claimWithCurrentRuntime(f.store, f.replacement.id)).toBeNull();
       expect(f.store.getTask(next.id)).toMatchObject({ status: "dispatched", runtimeId: f.previous.id,
         executionFingerprint: retained.executionFingerprint });
       const wire = daemonTaskClaimResponse(f.store, retained);
@@ -354,10 +355,10 @@ describe("Chat workspace assignment lineage", () => {
     it(`reclaims a stale dispatch after ${change} without lending its old cwd`, () => {
       const f = fixture();
       const next = f.store.sendChatMessage(f.chat.id, { body: "Dispatch" }).task;
-      const retained = f.store.claimTask(f.previous.id)!;
+      const retained = claimWithCurrentRuntime(f.store, f.previous.id)!;
       mutate(f, change);
       mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", next.id]);
-      const reclaimed = f.store.claimTask(f.replacement.id)!;
+      const reclaimed = claimWithCurrentRuntime(f.store, f.replacement.id)!;
       expect(reclaimed).toMatchObject({ id: next.id, sessionId: null, workDir: null });
       expect(reclaimed.executionFingerprint).not.toBe(retained.executionFingerprint);
       expect(reclaimed.projectResources.some((r) => r.resourceType === "local_directory")).toBe(false);

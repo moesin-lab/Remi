@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 import { readOfferedTurnInput, turnCompletion } from "../fixtures/turn-report.js";
 import { expect, it } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -49,7 +50,7 @@ it("presents continuous CoT through a real local daemon/API disconnect, replayin
     const runtimeId = (h.daemon as any).options.runtimeId as string;
     const agent = h.store.createAgent({ name: "MUL-447 local fixture", provider: "claude" });
     const task = h.store.createTask({ agentId: agent.id, prompt: "Synthetic CoT subscription fixture" });
-    expect(h.store.claimTask(runtimeId)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(h.store, runtimeId)?.id).toBe(task.id);
     readOfferedTurnInput(h.store, task.id);
     h.store.startTask(task.id);
     // This manually claimed fixture must be advertised as active on reconnect.
@@ -162,7 +163,7 @@ it("carries a doorbell turn and its background task through a real local daemon/
     const runtimeId = (h.daemon as any).options.runtimeId as string;
     const agent = h.store.createAgent({ name: "PR 6 E1 local fixture", provider: "claude" });
     const task = h.store.createTask({ agentId: agent.id, prompt: "后台任务已结束：npm test（已完成，用时 45 秒）" });
-    expect(h.store.claimTask(runtimeId)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(h.store, runtimeId)?.id).toBe(task.id);
     readOfferedTurnInput(h.store, task.id);
     h.store.startTask(task.id);
     const transport = (h.daemon as any).ensureTrace() as DaemonTraceTransport;

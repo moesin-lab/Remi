@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { seedHistoricalDecision, seedQuestionHumanMapping } from './fixtures/historical-decision.js';
 /**
@@ -454,7 +455,7 @@ describe.skipIf(!available)("MUL-412 decision cards on Postgres", () => {
       sender: { type: 'platform', id: null }, to: { type: 'agent', ref: scope.agentId }, message_kind: 'request',
       wake_requested: 'now', body_md: 'Process this same historical question',
       metadata: { question_notification: true, root_question_id: decision.id, question_route_revision: 1 } });
-    const ownerTask = store.claimTask(ownerRuntime.id)!;
+    const ownerTask = claimWithCurrentRuntime(store, ownerRuntime.id)!;
     expect(ownerTask.id).toBe(store.getTurn(notice.turn_id!)!.current_attempt_id!);
     store.startTask(ownerTask.id);
     const escalateQuestion = () => store.escalateQuestion(decision.id,

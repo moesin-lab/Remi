@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { executionGroupModelCatalog } from "@multiremi/api/helpers/agents.js";
 import { parseRuntimeCodexProfile } from "@multiremi/contracts/codex-profile.js";
@@ -40,9 +41,9 @@ describe("capability-group model discovery", () => {
   it("waits for every member then freezes the common model rather than the claim machine's default", () => {
     const { store, runtimes, group, agent, report } = setup();
     const task = store.createTask({ agentId: agent.id, prompt: "Auto select" });
-    expect(store.claimTask(runtimes[0]!.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)).toBeNull();
     report(0, [model("x", true, ["low"]), model("y", false)]);
-    expect(store.claimTask(runtimes[0]!.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)).toBeNull();
     report(1, [model("y", true, ["high"]), model("z", false)]);
     const catalog = executionGroupModelCatalog(store, "local", group.id, "local")[0]!;
     expect(catalog.model_catalog_status).toBe("ready");
@@ -50,7 +51,7 @@ describe("capability-group model discovery", () => {
     expect(catalog.models[0]!.thinking?.supported_levels.map(level => level.value)).toEqual(["high"]);
     expect(catalog.models[0]!.default).toBe(true);
     expect(catalog.default_thinking?.supported_levels.map(level => level.value)).toEqual(["high"]);
-    const claimed = store.claimTask(runtimes[0]!.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtimes[0]!.id)!;
     expect(claimed.id).toBe(task.id);
     expect(claimed.executionModel).toBe("y");
     expect(claimed.codexProfile?.model).toBe("y");
@@ -79,7 +80,7 @@ describe("capability-group model discovery", () => {
     expect(store.getRuntimeBindingModelCatalog(group.id, runtimes[0]!.id)).toBeNull();
     expect(executionGroupModelCatalog(store, "local", group.id, "local")[0]!.models).toEqual([]);
     store.createTask({ agentId: agent.id, prompt: "Do not use stale discovery" });
-    expect(store.claimTask(runtimes[0]!.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)).toBeNull();
     expect(store.listRuntimeModels(runtimes[0]!.id).map(model => model.id)).toEqual(["native"]);
   });
 
@@ -112,7 +113,7 @@ describe("capability-group model discovery", () => {
         model_catalog: { status: "error", models: [] } }]);
     store.updateAgent(agent.id, { model: "alias" });
     const task = store.createTask({ agentId: agent.id, prompt: "Manual alias" });
-    expect(store.claimTask(runtimes[0]!.id)?.codexProfile?.model).toBe("alias");
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)?.codexProfile?.model).toBe("alias");
     expect(store.getTask(task.id)?.executionModel).toBe("alias");
   });
 
@@ -135,7 +136,7 @@ describe("capability-group model discovery", () => {
     report(0, [model("frozen", true)]);
     report(1, [model("frozen", true)]);
     const original = store.createTask({ agentId: agent.id, prompt: "Original automatic target", maxAttempts: 1 });
-    const claimed = store.claimTask(runtimes[0]!.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtimes[0]!.id)!;
     expect(claimed.id).toBe(original.id);
     store.startTask(original.id);
     store.failTask(original.id, { error: "offline", failureReason: "runtime_offline" });
@@ -144,7 +145,7 @@ describe("capability-group model discovery", () => {
     const fresh = store.createTask({ agentId: agent.id, prompt: "Wait for the new supplier", priority: 10 });
     const retry = store.createTask({ agentId: agent.id, prompt: "Keep the frozen target", executionModel: claimed.executionModel,
       executionFingerprint: claimed.executionFingerprint, codexProfile: claimed.codexProfile, provider: "codex" });
-    expect(store.claimTask(runtimes[0]!.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)?.id).toBe(retry.id);
     expect(store.getTask(retry.id)?.codexProfile?.model).toBe("frozen");
     expect(store.getTask(fresh.id)?.status).toBe("queued");
   });
@@ -155,9 +156,9 @@ describe("capability-group model discovery", () => {
     report(1, [model("y", true, ["high"]), model("z", false)]);
     store.updateAgent(agent.id, { thinkingLevel: "medium" });
     const task = store.createTask({ agentId: agent.id, prompt: "Require matching group reasoning" });
-    expect(store.claimTask(runtimes[0]!.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)).toBeNull();
     store.updateAgent(agent.id, { thinkingLevel: "high" });
-    const claimed = store.claimTask(runtimes[0]!.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtimes[0]!.id)!;
     expect(claimed.id).toBe(task.id);
     expect(taskExecutionTarget(claimed.agent, claimed)).toEqual({ model: "y", thinkingLevel: "high" });
   });
@@ -174,9 +175,9 @@ describe("capability-group model discovery", () => {
     store.recordRuntimeExecutionBindingAcks(runtimes[0]!.id, [{ ...binding, status: "ready", model_catalog: { status: "error", models: [] } }]);
     expect(executionGroupModelCatalog(store, "local", group.id, "local")[0]).toMatchObject({ model_catalog_status: "error", models: [] });
     const task = store.createTask({ agentId: agent.id, prompt: "Wait for actual discovery" });
-    expect(store.claimTask(runtimes[0]!.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)).toBeNull();
     report(0, [model("a", true)]);
-    expect(store.claimTask(runtimes[0]!.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)?.id).toBe(task.id);
   });
 
   it("does not turn a resolved automatic default into permission for a removed allowlist alias", () => {
@@ -190,7 +191,7 @@ describe("capability-group model discovery", () => {
     report(0, [model("a", true)]);
     report(1, [model("a", true)]);
     expect(executionGroupModelCatalog(store, "local", group.id, "local")[0]!.models.map(model => model.id)).toEqual(["a"]);
-    expect(store.claimTask(runtimes[0]!.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
   });
 });

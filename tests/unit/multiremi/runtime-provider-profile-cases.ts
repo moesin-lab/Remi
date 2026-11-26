@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { parseRuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
@@ -147,7 +148,7 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       const agent = store.createAgent({ name: "Custom", provider, model: "custom-alternative" });
       const chat = store.createChatSession({ agentId: agent.id });
       const first = store.sendChatMessage(chat.id, { body: "first" }).task;
-      const claimed = store.claimTask(runtime.id)!;
+      const claimed = claimWithCurrentRuntime(store, runtime.id)!;
       expect(config.readProfile(claimed)).toEqual({ ...profile, model: "custom-alternative" });
       expect(connection.get(runtime.id)).toEqual(profile);
       store.startTask(first.id);
@@ -155,7 +156,7 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       const second = store.sendChatMessage(chat.id, { body: "second" }).task;
       expect(second.sessionId).toBe("alternative-session");
       store.updateAgent(agent.id, { model: null });
-      const changed = store.claimTask(runtime.id)!;
+      const changed = claimWithCurrentRuntime(store, runtime.id)!;
       expect(changed.id).toBe(second.id);
       expect(changed.sessionId).toBeNull();
       expect(config.readProfile(changed)).toEqual(profile);
@@ -177,20 +178,20 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       const agent = store.createAgent({ name: "Custom", provider });
       const chat = store.createChatSession({ agentId: agent.id });
       const first = store.sendChatMessage(chat.id, { body: "first" }).task;
-      const claimed = store.claimTask(runtime.id)!;
+      const claimed = claimWithCurrentRuntime(store, runtime.id)!;
       expect(claimed.id).toBe(first.id);
       expect(config.readProfile(claimed)).toEqual(profile);
       store.startTask(first.id);
       store.completeTask(first.id, { output: "first", sessionId: "custom-session" });
       const second = store.sendChatMessage(chat.id, { body: "second" }).task;
       expect(second.sessionId).toBe("custom-session");
-      expect(store.claimTask(runtime.id)?.sessionId).toBe("custom-session");
+      expect(claimWithCurrentRuntime(store, runtime.id)?.sessionId).toBe("custom-session");
       store.startTask(second.id);
       store.completeTask(second.id, { output: "second", sessionId: "custom-session" });
       connection.set(runtime.id, { ...profile, base_url: "https://changed.example/v1" });
       const third = store.sendChatMessage(chat.id, { body: "third" }).task;
       expect(third.sessionId).toBeNull();
-      const changed = store.claimTask(runtime.id)!;
+      const changed = claimWithCurrentRuntime(store, runtime.id)!;
       expect(changed.executionFingerprint).not.toBe(claimed.executionFingerprint);
       expect(changed.sessionId).toBeNull();
       store.startTask(third.id);
@@ -198,7 +199,7 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       connection.set(runtime.id, null);
       const cleared = store.sendChatMessage(chat.id, { body: "fourth" }).task;
       expect(cleared.sessionId).toBeNull();
-      expect(config.readProfile(store.claimTask(runtime.id))).toBeNull();
+      expect(config.readProfile(claimWithCurrentRuntime(store, runtime.id))).toBeNull();
     });
 
     it("freezes routing and credential versions for retries, including resume-unsafe failures", () => {
@@ -209,7 +210,7 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       const agent = store.createAgent({ name: "Custom", provider, model: "custom-alternative" });
       const frozen = { ...saved, model: "custom-alternative" };
       const task = store.createTask({ agentId: agent.id, issueId: createResponsibleTestIssue(store, { title: "Retry profile" }).id, prompt: "work" });
-      const claimed = store.claimTask(runtime.id)!;
+      const claimed = claimWithCurrentRuntime(store, runtime.id)!;
       store.startTask(task.id);
       store.updateAgent(agent.id, { model: "another-model" });
       connection.set(runtime.id, { ...apiProfile, base_url: "https://new.example/v1" }, "replacement-key");
@@ -221,7 +222,7 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       expect(retry.executionFingerprint).toBe(claimed.executionFingerprint);
       expect(connection.key(runtime.id, config.readProfile(retry)!.credential_id!)).toBe("first-private-key");
       const later = store.createTask({ agentId: agent.id, prompt: "Needs the new model", priority: 10 });
-      expect(config.readProfile(store.claimTask(runtime.id))).toEqual(frozen);
+      expect(config.readProfile(claimWithCurrentRuntime(store, runtime.id))).toEqual(frozen);
       expect(store.getTask(later.id)?.status).toBe("queued");
     });
 
@@ -266,16 +267,16 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       connection.set(runtime.id, profile);
       const agent = store.createAgent({ name: "Custom", provider });
       const task = store.createTask({ agentId: agent.id, issueId: createResponsibleTestIssue(store, { title: "Downgrade retry" }).id, prompt: "work" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       store.failTask(task.id, { error: "stalled", failureReason: config.resumeUnsafeFailure });
       const retry = store.listTasks().find(candidate => candidate.parentTaskId === task.id)!;
       connection.set(runtime.id, null);
       store.updateRuntime(runtime.id, { metadata: { [config.capability]: 0 } });
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
       expect(store.getTask(retry.id)?.status).toBe("queued");
       store.updateRuntime(runtime.id, { metadata: { [config.capability]: 1 } });
-      expect(config.readProfile(store.claimTask(runtime.id))).toEqual(profile);
+      expect(config.readProfile(claimWithCurrentRuntime(store, runtime.id))).toEqual(profile);
     });
 
     it("rebinds encrypted credential versions when Runtime identities are merged", () => {

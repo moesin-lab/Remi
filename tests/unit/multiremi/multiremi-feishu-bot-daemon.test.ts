@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { describeFeishuCommand, feishuCommandDigest } from '@shared/feishu-command-semantic.js';
 import type { FeishuBotCommandRequest, FeishuBotCommandResponse } from '@multiremi/contracts/types.js';
 import { controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
@@ -604,8 +605,8 @@ describe("Feishu bot control-plane delivery", () => {
         headers: daemonHeaders(test.tokens.rt_b!),
       })).status).toBe(403);
     }
-    expect(test.store.claimTask("rt_a")).toBeNull();
-    expect(test.store.claimTask("rt_claude")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(test.store, "rt_a")).toBeNull();
+    expect(claimWithCurrentRuntime(test.store, "rt_claude")?.id).toBe(submitted.taskId);
     test.store.startTask(submitted.taskId);
     const sent = await reportFrame(test.store, "trace.append", { task_id: submitted.taskId, closed: false,
       events: [{ seq: 1, ts: "2026-09-28T00:00:00Z", type: "text", content: "Answer from Claude" }] },
@@ -686,7 +687,7 @@ describe("Feishu bot control-plane delivery", () => {
       revision: 1, externalSessionKey: "oc_question", externalMessageId: "om_question",
       chatId: "oc_question", chatType: "p2p", text: "Ask me", deliveryMode: "native_cot_v1",
     });
-    expect(test.store.claimTask("rt_claude")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(test.store, "rt_claude")?.id).toBe(submitted.taskId);
     const privateChat = test.store.createChatSession({ agentId: test.agentId, creatorId: "local" });
     const unbound = test.store.createTask({ agentId: test.agentId, chatSessionId: privateChat.id, prompt: "private" });
     // Same executing daemon as the bound Task, so only the missing binding can refuse it.

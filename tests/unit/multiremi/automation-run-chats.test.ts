@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiStore } from "@multiremi/store.js";
@@ -52,7 +53,7 @@ pendingTurnBackendTests("automation run Chats", fixture => {
 
   /** Claim, start and finish the run's current attempt. */
   function finish(store: MultiremiStore, runtimeId: string, taskId: string, outcome: "completed" | "failed" = "completed") {
-    expect(store.claimTask(runtimeId)?.id).toBe(taskId);
+    expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(taskId);
     store.buildTaskSessionProjection(taskId);
     store.startTask(taskId);
     if (outcome === "completed") store.completeTask(taskId, { output: "All good", sessionId: `provider-${taskId}` });
@@ -191,7 +192,7 @@ pendingTurnBackendTests("automation run Chats", fixture => {
       const run = store.runAutopilot(autopilot.id);
       const task = store.getTask(run.taskId!)!;
       const token = (await store.createTaskAccessToken(task, "local")).token;
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
 
       const response = await markQuiet(store, store.getTurnForAttempt(task.id)!.id, token);

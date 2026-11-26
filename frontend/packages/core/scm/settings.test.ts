@@ -5,7 +5,6 @@ describe("deriveScmSettings", () => {
   it("uses provider-independent defaults", () => {
     expect(deriveScmSettings(null)).toEqual({
       changeSidebar: true,
-      autoLink: true,
       completeIssueOnMerge: false,
       coAuthorName: "Remi",
       coAuthorEmail: "remi@openremi.fun",
@@ -23,7 +22,6 @@ describe("deriveScmSettings", () => {
       },
     })).toEqual({
       changeSidebar: false,
-      autoLink: false,
       completeIssueOnMerge: true,
       coAuthorName: "Remi",
       coAuthorEmail: "remi@openremi.fun",
@@ -45,7 +43,6 @@ describe("deriveScmSettings", () => {
       },
     })).toEqual({
       changeSidebar: true,
-      autoLink: true,
       completeIssueOnMerge: false,
       coAuthorName: "Remi",
       coAuthorEmail: "remi@openremi.fun",

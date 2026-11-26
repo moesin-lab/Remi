@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -150,8 +151,8 @@ describe("side Session code snapshots", () => {
     expect(f.store.getTaskWithAgent(task.id)?.repos).toEqual(expect.arrayContaining([
       expect.objectContaining({ url: f.repositoryUrl }),
     ]));
-    expect(f.store.claimTask(f.other.id)).toBeNull();
-    expect(f.store.claimTask(f.runtime.id)).toMatchObject({ id: task.id, runtimeId: f.runtime.id, holdsWorkspace: false });
+    expect(claimWithCurrentRuntime(f.store, f.other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toMatchObject({ id: task.id, runtimeId: f.runtime.id, holdsWorkspace: false });
   });
 
   it("captures the most recently updated parent lane's Runtime", () => {
@@ -174,20 +175,20 @@ describe("side Session code snapshots", () => {
     const task = f.store.createSessionTask(side.id, { agentId: f.agent.id, prompt: "Read code" });
     // Model a generic recovery path that re-pools a queued task.
     runTurnExecutionMutation(db! as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET runtime_id = NULL WHERE id = ?", [task.id]);
-    expect(f.store.claimTask(f.other.id)).toBeNull();
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, f.other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(task.id);
   });
 
   it("repins a stale dispatch on the wrong machine without redelivering its provider session", () => {
     const f = fixture();
     const side = f.store.createIssueSession(f.issue.id, { parentSessionId: f.parent.id, withCode: true });
     const task = f.store.createSessionTask(side.id, { agentId: f.agent.id, prompt: "Read code" });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(task.id);
     runTurnExecutionMutation(db! as unknown as UnifiedFixtureDatabase, `UPDATE multiremi_turn_execution_records SET runtime_id = ?, session_id = 'wrong_machine_session',
       dispatched_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`, [f.other.id, task.id]);
-    expect(f.store.claimTask(f.other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.other.id)).toBeNull();
     expect(f.store.getTask(task.id)).toMatchObject({ status: "queued", runtimeId: f.runtime.id, sessionId: null });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(task.id);
   });
 
   it("resolves the reading Agent's provider on the same daemon instead of the parent's provider Runtime", () => {
@@ -205,15 +206,15 @@ describe("side Session code snapshots", () => {
       prompt: "Read", runtimeId: wrongMachine.id,
     });
     expect(task.runtimeId).toBe(sameMachine.id);
-    expect(f.store.claimTask(wrongMachine.id)).toBeNull();
-    expect(f.store.claimTask(sameMachine.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(f.store, wrongMachine.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, sameMachine.id)?.id).toBe(task.id);
   });
 
   it("does not let a side lane's old provider lineage override code machine affinity", () => {
     const f = fixture();
     const side = f.store.createIssueSession(f.issue.id, { parentSessionId: f.parent.id, withCode: true });
     const previous = f.store.createSessionTask(side.id, { agentId: f.agent.id, prompt: "First read" });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(previous.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(previous.id);
     f.store.startTask(previous.id);
     f.store.completeTask(previous.id, { output: "Read", sessionId: "provider_source", workDir: "/discussion/source" });
     const before = f.store.getSessionAgentLane(side.id, f.agent.id)!;
@@ -224,15 +225,15 @@ describe("side Session code snapshots", () => {
     expect(next).toMatchObject({ runtimeId: f.runtime.id, sessionId: null, workDir: null });
     expect(f.store.getIssueSession(side.id)?.codeRuntimeId).toBe(f.runtime.id);
     expect(f.store.getSessionAgentLane(side.id, f.agent.id)!.generation).toBeGreaterThan(before.generation);
-    expect(f.store.claimTask(f.other.id)).toBeNull();
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(next.id);
+    expect(claimWithCurrentRuntime(f.store, f.other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(next.id);
   });
 
   it("keeps the code machine pin while a resume-unsafe retry clears provider lineage", () => {
     const f = fixture();
     const side = f.store.createIssueSession(f.issue.id, { parentSessionId: f.parent.id, withCode: true });
     const first = f.store.createSessionTask(side.id, { agentId: f.agent.id, prompt: "Read code" });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(first.id);
     f.store.startTask(first.id);
     f.store.failTask(first.id, {
       error: "Provider context expired", failureReason: "agent_error.stale_session",
@@ -242,7 +243,7 @@ describe("side Session code snapshots", () => {
     expect(retry).toMatchObject({
       status: "queued", runtimeId: null, holdsWorkspace: false, sessionId: null, workDir: null,
     });
-    expect(f.store.claimTask(f.other.id)).toBeNull();
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(f.store, f.other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(retry.id);
   });
 });

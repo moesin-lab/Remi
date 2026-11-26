@@ -318,7 +318,7 @@
       "error": "準備に失敗"
     },
     "change_requests_loading": "読み込み中...",
-    "change_requests_empty": "リンクされたコード変更はまだありません。ブランチ名、タイトル、または説明にこの Issue 番号を含めると自動的にリンクされます。",
+    "change_requests_empty": "リンクされたコード変更はまだありません。",
     "change_request_github_reference": "GitHub PR #{{number}}",
     "change_request_codebase_reference": "Codebase MR !{{number}}",
     "change_request_generic_reference": "変更 #{{number}}",

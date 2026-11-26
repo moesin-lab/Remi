@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
@@ -25,7 +26,7 @@ function fixture() {
   const runtime = store.registerRuntime({ name: "usage-runtime", provider: "claude", workspaceId: "local" });
   const agent = store.createAgent({ name: "accounting-worker", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, prompt: "Account for work", workspaceId: "local", maxAttempts: 1 });
-  store.claimTask(runtime.id);
+  claimWithCurrentRuntime(store, runtime.id);
   store.startTask(task.id);
   return { store, runtime, agent, task };
 }

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { resolveMigrationReportDirectory } from "@multiremi/store/migration-report-directory.js";
 import {it,expect} from 'bun:test';
@@ -23,7 +24,7 @@ pendingTurnBackendTests('MUL-506 PG process concurrency',(fixture,backend)=>{
   it('two server processes sending now messages create only one pending turn',async()=>{const f=setup();const results=await concurrent([1,2].map(i=>({databaseUrl:f.databaseUrl,operation:'send',message:{...f.message,body_md:`now ${i}`}})));
     expect(new Set(results.map(r=>r.turn_id)).size).toBe(1);expect(f.store.listTurns({workspace_id:'local',session_id:f.session.id}).filter(t=>t.status==='pending')).toHaveLength(1);expect(f.store.listMessages(f.session.id)).toHaveLength(2);},30_000);
   it('send and completion racing preserve unread input in the next pending turn',async()=>{const f=setup();f.store.registerRuntime({id:'rt_pg_inbox',daemonId:'daemon_pg_inbox',name:'PG runtime',provider:'codex',workspaceId:'local'});
-    const initial=f.store.sendMessage(f.message as any),attempt=f.store.claimTask('rt_pg_inbox')!;f.store.startTask(attempt.id);const offer=f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(attempt.id)!);
+    const initial=f.store.sendMessage(f.message as any),attempt=claimWithCurrentRuntime(f.store, 'rt_pg_inbox')!;f.store.startTask(attempt.id);const offer=f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(attempt.id)!);
     const results=await concurrent([{databaseUrl:f.databaseUrl,operation:'send',message:{...f.message,body_md:'interrupt'}},
       {databaseUrl:f.databaseUrl,operation:'complete',scope:{workspaceId:'local',runtimeId:'rt_pg_inbox',daemonId:'daemon_pg_inbox'},complete:{payload:{turn_id:initial.turn_id,attempt_id:attempt.id,input_to_seq:offer.input_to_seq,reply:{body_md:'done',message_kind:'reply'}},completionFields:null}}]);
     expect(results[1].ok).toBe(true);expect(f.store.getMessage(results[0].message.id)?.body_md).toBe('interrupt');expect(f.store.listTurns({workspace_id:'local',session_id:f.session.id}).filter(t=>t.status==='pending')).toHaveLength(1);},30_000);

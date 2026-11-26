@@ -839,6 +839,7 @@ function mappedOperationsCommand(route: string): string | null {
     [/^POST \/api\/workspaces\/:workspaceId\/feishu\/proposals\/:proposalId\/approve$/, "feishu.proposals.approve"],
     [/^POST \/api\/workspaces\/:workspaceId\/feishu\/proposals\/:proposalId\/reject$/, "feishu.proposals.reject"],
     [/^GET \/api\/issues\/:id\/change-requests$/, "scm.change-request.list"],
+    [/^PUT \/api\/issues\/:issueId\/change-requests\/by-reference$/, "scm.change-request.bind"],
     [/^PUT \/api\/issues\/:issueId\/change-requests\/:changeRequestId$/, "scm.change-request.link"],
     [/^DELETE \/api\/issues\/:issueId\/change-requests\/:changeRequestId$/, "scm.change-request.unlink"],
     [/^POST \/api\/(?:multiremi\/)?inbox\/:id\/read$/, "inbox.read"],

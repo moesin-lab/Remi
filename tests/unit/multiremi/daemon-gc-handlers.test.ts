@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // ADR 0018: the `gc.*` RPCs a daemon calls while it reclaims workspaces.
 import { afterEach, describe, expect, it } from "bun:test";
 import type { SubjectSnapshot } from "@multiremi/contracts/storage.js";
@@ -58,7 +59,7 @@ describe("gc checks", () => {
     const { store, runtime, foreign, agent, call } = fixture();
     const held = createResponsibleTestIssue(store, { title: "Moved", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: held.id, prompt: "work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.cancelTask(task.id);
     const stranger = createResponsibleTestIssue(store, { title: "Not ours", workspaceId: "local" });
     db!.run("UPDATE multiremi_issues SET workspace_id = 'other' WHERE id IN (?, ?)", [held.id, stranger.id]);
@@ -97,7 +98,7 @@ describe("gc checks", () => {
   it("answers for a task of the reporting runtime only, and no longer knows autopilot runs or workspace_cleaned", async () => {
     const { store, agent, runtime, foreign, call } = fixture();
     const task = store.createTask({ agentId: agent.id, prompt: "check" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(await call("gc.check_task", { task_id: task.id })).toMatchObject({ ok: true, status: expect.any(String) });
     expect(await call("gc.check_task", { task_id: task.id }, foreign.id)).toMatchObject({ ok: false, code: "task_not_found" });
     for (const type of ["gc.check_autopilot_run", "gc.workspace_cleaned"]) {
@@ -201,7 +202,7 @@ describe("gc.subject_reclaimed", () => {
   it("accepts a fallback task subject without changing anything", async () => {
     const { store, agent, runtime, call } = fixture();
     const task = store.createTask({ agentId: agent.id, prompt: "lone" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const before = db!.query("SELECT COUNT(*) AS count FROM multiremi_session_lanes").get();
     expect(await call("gc.subject_reclaimed", { subject: { kind: "task", id: task.id }, snapshot: null, unsaved_work: false, freed_bytes: 0 })).toEqual({ ok: true });
     expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_session_lanes").get()).toEqual(before);

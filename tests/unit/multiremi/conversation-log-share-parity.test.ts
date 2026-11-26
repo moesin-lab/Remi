@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { describe, expect, it } from 'bun:test';
 import { createMultiremiApp } from '@multiremi/api.js';
@@ -16,7 +17,7 @@ describe('Canonical shared conversation bundle',()=>{
         const deleted=store.createIssueComment(issue.id,{body:'Deleted shared wording'});store.deleteIssueComment(deleted.id);
         const task=store.createSessionTask(session.id,{agentId:agent.id,prompt:'Reply'});
         const runtime=store.registerRuntime({id:'rt_share',name:'Share',provider:'codex',workspaceId:'local'});
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);store.startTask(task.id);store.completeTask(task.id,{output:'Shared final reply'});
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);store.startTask(task.id);store.completeTask(task.id,{output:'Shared final reply'});
         const secret='synthetic-share-secret';const share=store.ensureIssueShare(issue.id,'local','local');
         const token=signIssueShareId(share.id,secret);
         const app=createMultiremiApp({store,authToken:'synthetic-share-auth',shareSecret:secret});

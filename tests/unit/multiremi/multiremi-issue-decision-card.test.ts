@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
 import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
@@ -183,12 +184,12 @@ function childWithTask(store: MultiremiStore, agentId: string, parentId: string,
     const owner = parentTask(store, parentAgentId, parentId);
     store.sendMessage({ session_id: store.getOrCreateDefaultIssueSession(child.id).id, sender: { type: "agent", id: parentAgentId }, source_turn_id: store.getTurnForAttempt(owner.id)!.id,
       to: { type: "agent", ref: agentId }, message_kind: "request", wake_requested: "now", body_md: "Execute the parent's actual delegated source work" });
-    task = store.claimTask("rt_bot")!;
+    task = claimWithCurrentRuntime(store, "rt_bot")!;
     expect(task.agentId).toBe(agentId);
     expect(task.delegationId).toBeTruthy();
   } else {
     task = store.createTask({ agentId, issueId: child.id, workspaceId: "local", prompt: "Work" });
-    expect(store.claimTask("rt_bot")?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(task.id);
   }
   store.startTask(task.id);
   return { child, task };
@@ -200,7 +201,7 @@ function parentTask(store: MultiremiStore, agentId: string, parentId: string) {
   store.updateAgent(agentId, { runtimeId: runtime.id });
   const pending = store.listTasksForIssue(parentId).find(task => task.agentId === agentId && task.status === "queued");
   const task = pending ?? store.createTask({ agentId, issueId: parentId, workspaceId: "local", prompt: "Own the parent" });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   return task;
 }
 
@@ -361,7 +362,7 @@ describe("MUL-412 issue decision cards", () => {
     expect(store.getQuestion(decision.id)?.status).toBe("pending");
     const otherSession = store.createIssueSession(child.id, { title: "Unrelated source lane", holdsWorkspace: false });
     const other = store.createTask({ agentId: task.agentId, issueId: child.id, issueSessionId: otherSession.id, workspaceId: "local", prompt: "Different lane" });
-    expect(store.claimTask("rt_bot")?.id).toBe(other.id); store.startTask(other.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(other.id); store.startTask(other.id);
     const otherTurn = store.getTurnForAttempt(other.id)!;
     expect(store.canAccessQuestionFromTurn(decision.id, task.agentId, otherTurn.id)).toBe(false);
     const original = store.getMessage(decision.id)!;
@@ -421,7 +422,7 @@ describe("MUL-412 issue decision cards", () => {
     const issue = issueWithTopic(store, "Same lane reply", { type: "agent", id: agentId });
     const sourceAgentId = store.getFeishuBotConfig("local")!.agentId!;
     const task = store.createTask({ agentId: sourceAgentId, issueId: issue.id, workspaceId: "local", prompt: "Ask from the root lane" });
-    expect(store.claimTask("rt_bot")?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(task.id); store.startTask(task.id);
     const decision = raiseDecision(store, agentId, issue.id, task.id, { kind: "production_change", title: "Same source" });
     answerDecision(store, issue.id, decision.id, { answer: "Proceed", reason: "Reviewed" }, { type: "member", id: member.id });
     const question = store.getQuestion(decision.id)!;
@@ -472,7 +473,7 @@ describe("MUL-412 issue decision cards", () => {
     const issue = issueWithTopic(store, "Same session, different scopes", { type: "agent", id: agentId });
     const sourceAgentId = store.getFeishuBotConfig("local")!.agentId!;
     const task = store.createTask({ agentId: sourceAgentId, issueId: issue.id, workspaceId: "local", prompt: "Original source scope" });
-    expect(store.claimTask("rt_bot")?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(task.id); store.startTask(task.id);
     const decision = raiseDecision(store, agentId, issue.id, task.id, { kind: "production_change", title: "Parent-scope original Q" });
     const original = store.getMessage(decision.id)!;
     db!.run("UPDATE multiremi_conversation_log SET metadata = ? WHERE id = ?", [JSON.stringify({ ...original.metadata, execution_scope: "historical-parent-scope" }), decision.id]);
@@ -546,7 +547,7 @@ describe("MUL-412 issue decision cards", () => {
     escalateDecision(store, parent.id, decision.id, { type: "agent", id: agentId, taskId: owner.id });
     expect(store.claimFeishuBotOutbound("local", "rt_bot")).toBeNull();
     expect(db!.query("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM multiremi_feishu_bot_outbound_operations WHERE unit_key = ?").get(decision.id)).toMatchObject({ n: 1 });
-    const remiTask = store.claimTask("rt_bot")!;
+    const remiTask = claimWithCurrentRuntime(store, "rt_bot")!;
     expect(remiTask.agentId).toBe(remi.id); store.startTask(remiTask.id);
     store.presentQuestion(decision.id, { expected_route_revision: store.getQuestion(decision.id)!.route_revision, summary: "Separate Remi recommendation" }, { type: "agent", id: remi.id }, store.getTurnForAttempt(remiTask.id)!.id);
     const card = store.claimFeishuBotOutbound("local", "rt_bot")!;

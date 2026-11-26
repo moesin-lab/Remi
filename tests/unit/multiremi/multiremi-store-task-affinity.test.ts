@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
@@ -18,7 +19,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const agent = store.createAgent({ name: "Projection", provider: "claude" });
     const chat = store.createChatSession({ agentId: agent.id, title: "Projection" });
     const first = store.sendChatMessage(chat.id, { body: "first" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id);
     store.startTask(first.task.id);
     const input = store.getDaemonTurnBridge().offerInput(store.getTaskWithAgent(first.task.id)!);
     expect(store.getDaemonTurnBridge().rpc("turn.input", { ...input, message_ids: input.input_messages.map(m => m.id) },
@@ -32,7 +33,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const followUp = store.sendChatMessage(chat.id, { body: "again" }).task;
 
     expect(followUp.sessionId).toBe("sess_projection");
-    expect(store.claimTask(runtime.id)?.id).toBe(followUp.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(followUp.id);
     expect(store.buildTaskSessionProjection(followUp.id)?.mode).toBe("delta");
   });
 
@@ -58,8 +59,8 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
       sessionId: null,
       workDir: "/tmp/chat-files-on-original-runtime",
     });
-    expect(store.claimTask(other.id)).toBeNull();
-    const claimed = store.claimTask(runtime.id)!;
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(followUp.id);
     expect(claimed.sessionId).toBeNull();
     expect(claimed.workDir).toBe("/tmp/chat-files-on-original-runtime");
@@ -80,7 +81,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const followUp = store.sendChatMessage(chat.id, { body: "Continue independently" }).task;
 
     expect(followUp).toMatchObject({ runtimeId: null, sessionId: null, workDir: null });
-    const claimed = store.claimTask(other.id)!;
+    const claimed = claimWithCurrentRuntime(store, other.id)!;
     expect(claimed.id).toBe(followUp.id);
     expect(claimed.workDir).toBeNull();
     expect(store.buildTaskSessionProjection(claimed.id)?.mode).toBe("bootstrap");
@@ -138,7 +139,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const agent = store.createAgent({ name: "Pref", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "dir", workspaceId: "local" });
     const warmup = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "hi" });
-    expect(store.claimTask(sessRuntime.id)?.id).toBe(warmup.id);
+    expect(claimWithCurrentRuntime(store, sessRuntime.id)?.id).toBe(warmup.id);
     store.buildTaskSessionProjection(warmup.id);
     store.startTask(warmup.id);
     store.completeTask(warmup.id, { output: "ok", sessionId: "sess_pref", workDir: "/tmp/pref" });
@@ -153,7 +154,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
     expect(task.runtimeId).toBe(dirRuntime.id);
     expect(task.sessionId).toBeNull();
-    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).toBe(task.id);
   });
 
   it("degrades a resume-safe retry to a fresh re-pool when the agent's engine changed", () => {
@@ -163,7 +164,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const agent = store.createAgent({ name: "RetrySwitch", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "i", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
-    expect(store.claimTask(codex.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(task.id);
     store.startTask(task.id);
     // Switch the agent to claude, THEN the codex run fails with a resume-safe reason.
     store.updateAgent(agent.id, { provider: "claude" });
@@ -172,7 +173,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     // The parent's codex runtime can't run a claude agent → retry re-pools fresh.
     expect(retry.runtimeId).toBeNull();
     expect(retry.sessionId).toBeNull();
-    expect(store.claimTask(claude.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(retry.id);
   });
 
   it("lets local_directory affinity override an explicit runtime override", () => {
@@ -191,8 +192,8 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     // The directory affinity wins — the task is pinned to the machine that
     // holds the directory, not the caller-supplied one.
     expect(task.runtimeId).toBe(dirRuntime.id);
-    expect(store.claimTask(wrongRuntime.id)).toBeNull();
-    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, wrongRuntime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).toBe(task.id);
   });
 
   it("keeps the directory pin on a stale task whose agent was archived", () => {
@@ -206,15 +207,15 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     });
     const issue = createResponsibleTestIssue(store, { title: "dir", workspaceId: "local", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
-    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).toBe(task.id);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", task.id]);
     store.archiveAgent(agent.id);
     // Stale recovery keeps the directory pin (archived_at parks the claim), so
     // a restore lands it back on the directory's machine, not elsewhere.
-    expect(store.claimTask(dirRuntime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)).toBeNull();
     expect(store.getTask(task.id)?.runtimeId).toBe(dirRuntime.id);
     store.restoreAgent(agent.id);
-    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).toBe(task.id);
   });
 
   it("does not redeliver a stale dispatched task after its agent is archived", () => {
@@ -222,11 +223,11 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const runtime = store.registerRuntime({ id: "rt_arch_stale", name: "r", provider: "codex" });
     const agent = store.createAgent({ name: "Archiving", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, prompt: "work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", task.id]);
     store.archiveAgent(agent.id);
     // Stale recovery must mirror the normal claim's archived-agent exclusion.
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(task.id)?.runtimeId).toBeNull();
   });
 
@@ -243,11 +244,11 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const issue = createResponsibleTestIssue(store, { title: "dir issue", workspaceId: "local", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
     expect(task.runtimeId).toBe(dirRuntime.id);
-    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).toBe(task.id);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", task.id]);
     // Human attribution does not change eligibility or the directory's machine.
     store.updateAgent(agent.id, { ownerId: "someone" });
-    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).toBe(task.id);
     expect(store.getTask(task.id)?.runtimeId).toBe(dirRuntime.id);
     expect(store.getTask(task.id)?.status).toBe("dispatched");
   });
@@ -293,7 +294,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const agent = store.createAgent({ name: "NoStamp", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "i", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
-    expect(store.claimTask(codex.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(task.id);
     store.startTask(task.id);
     // An unpinned, pre-snapshot in-flight parent that nonetheless carries a
     // provider session: no runtime stamp AND no engine snapshot. Its engine
@@ -312,7 +313,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const agent = store.createAgent({ name: "Unpinned", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "i", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
-    expect(store.claimTask(codex.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(task.id);
     store.startTask(task.id);
     // A parent that kept its engine snapshot AND a machine-local session but
     // lost its runtime pin. We no longer know which machine holds the session,
@@ -338,7 +339,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const issue = createResponsibleTestIssue(store, { title: "dir", workspaceId: "local", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
     expect(task.runtimeId).toBe(dirRuntime.id);
-    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     // The run produced a provider session on the directory machine.
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET session_id = ? WHERE id = ?", ["dir-session", task.id]);
@@ -372,7 +373,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(repinned.runtimeId).toBe(daemonRuntimeId("daemon-repin", "codex"));
     expect(repinned.status).toBe("queued");
     const codex2 = store.registerRuntime({ id: daemonRuntimeId("daemon-repin", "codex"), name: "codex2", provider: "codex", daemonId: "daemon-repin" });
-    expect(store.claimTask(codex2.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, codex2.id)?.id).toBe(task.id);
   });
 
   it("rejects an archived squad leader without persisting the squad", () => {
@@ -388,12 +389,12 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const runtime = store.registerRuntime({ id: "rt_stale", name: "stale", provider: "codex", ownerId: "alice", visibility: "private" });
     const agent = store.createAgent({ name: "Stale", provider: "codex", ownerId: "alice" });
     const task = store.createTask({ agentId: agent.id, prompt: "work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     // The dispatch response was lost (never started) and the recovery window passed.
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", task.id]);
     // Attribution changes do not remove a compatible workspace runtime.
     store.updateAgent(agent.id, { ownerId: "bob" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(store.getTask(task.id)?.status).toBe("dispatched");
     expect(store.getTask(task.id)?.runtimeId).toBe(runtime.id);
   });
@@ -434,7 +435,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const agent = store.createAgent({ name: "Owned", provider: "codex", ownerId: "alice" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(alicePrivate.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, alicePrivate.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_owner", workDir: "/tmp/owner" });
     const followUp = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "again" });
@@ -443,8 +444,8 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     // The provider session is still on the same machine after an attribution edit.
     store.updateAgent(agent.id, { ownerId: "bob" });
     expect(store.getTask(followUp.id)).toMatchObject({ runtimeId: alicePrivate.id, sessionId: "sess_owner" });
-    expect(store.claimTask(bobPrivate.id)).toBeNull();
-    expect(store.claimTask(alicePrivate.id)?.id).toBe(followUp.id);
+    expect(claimWithCurrentRuntime(store, bobPrivate.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, alicePrivate.id)?.id).toBe(followUp.id);
   });
 
   it("cancels an agent's queued tasks when its workspace changes", () => {
@@ -458,8 +459,8 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     // migrating it and leaving a cross-workspace link); neither runtime claims it.
     store.updateAgent(agent.id, { workspaceId: "wsB" });
     expect(store.getTask(task.id)?.status).toBe("cancelled");
-    expect(store.claimTask(codexA.id)).toBeNull();
-    expect(store.claimTask(codexB.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, codexA.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, codexB.id)).toBeNull();
   });
 
   it("re-homes an agent's queued tasks when its engine switches", () => {
@@ -469,7 +470,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const agent = store.createAgent({ name: "Switcher", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(codex.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_switch", workDir: "/tmp/switch" });
     // A follow-up is queued and pinned to the codex machine by session affinity.
@@ -482,7 +483,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(rehomed.runtimeId).toBeNull();
     expect(rehomed.sessionId).toBeNull();
     // The claude machine can now claim it.
-    expect(store.claimTask(claude.id)?.id).toBe(followUp.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(followUp.id);
   });
 
   it("preserves explicitly addressed historical defaults while sharing runtime eligibility", () => {
@@ -495,7 +496,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(bobDefault.ownerId).toBe("bob");
     // A compatible workspace runtime also runs a differently attributed default.
     const task = store.createTask({ agentId: aliceDefault.id, prompt: "onboard" });
-    expect(store.claimTask(bobPrivate.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, bobPrivate.id)?.id).toBe(task.id);
   });
 
   it("keeps unbound agents unbound when a daemon registers", async () => {
@@ -529,7 +530,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
     expect(first.runtimeId).toBeNull();
 
-    expect(store.claimTask(codexB.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codexB.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "done", sessionId: "sess_chat_affinity", workDir: "/tmp/chat" });
     expect(store.getChatSession(session.id)?.sessionId).toBe("sess_chat_affinity");
@@ -577,7 +578,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const orphanTask = store.createTask({ agentId: agent.id, issueId: orphanIssue.id, prompt: "no machine has this" });
     expect(orphanTask.runtimeId).toBe(daemonRuntimeId("daemon-gone", "codex"));
     // Not claimable by machines that don't have the directory.
-    expect(store.claimTask(dirRuntime.id)?.id).not.toBe(orphanTask.id);
+    expect(claimWithCurrentRuntime(store, dirRuntime.id)?.id).not.toBe(orphanTask.id);
     // Once the daemon registers (same deterministic id), the task dispatches there.
     const lateRuntime = store.registerRuntime({
       id: daemonRuntimeId("daemon-gone", "codex"),
@@ -585,7 +586,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
       provider: "codex",
       daemonId: "daemon-gone",
     });
-    expect(store.claimTask(lateRuntime.id)?.id).toBe(orphanTask.id);
+    expect(claimWithCurrentRuntime(store, lateRuntime.id)?.id).toBe(orphanTask.id);
   });
 
   it("frees resume-unsafe retries to the pool while resume-safe retries stay pinned", () => {
@@ -595,7 +596,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
 
     const offlineIssue = createResponsibleTestIssue(store, { title: "offline retry", workspaceId: "local" });
     const offlineTask = store.createTask({ agentId: agent.id, issueId: offlineIssue.id, prompt: "fails offline" });
-    expect(store.claimTask(runtime.id)?.id).toBe(offlineTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(offlineTask.id);
     store.startTask(offlineTask.id);
     store.failTask(offlineTask.id, { error: "runtime went away", failureReason: "runtime_offline" });
     const offlineRetry = store.listTasks().find((task) => task.parentTaskId === offlineTask.id)!;
@@ -604,7 +605,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const unsafeIssue = createResponsibleTestIssue(store, { title: "unsafe retry", workspaceId: "local" });
     // Priority beats the queued offline retry in the claim ordering.
     const unsafeTask = store.createTask({ agentId: agent.id, issueId: unsafeIssue.id, prompt: "fails unsafely", priority: 100 });
-    expect(store.claimTask(runtime.id)?.id).toBe(unsafeTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(unsafeTask.id);
     store.startTask(unsafeTask.id);
     store.failTask(unsafeTask.id, { error: "stalled", failureReason: "codex_semantic_inactivity" });
     const unsafeRetry = store.listTasks().find((task) => task.parentTaskId === unsafeTask.id)!;

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 /**
@@ -93,7 +94,7 @@ describe("MUL-338 Claude gateway models without reasoning metadata", () => {
       const supporting = runtimes.filter(runtime => store.runtimeSupportsAgentModel(runtime, agent));
       expect(supporting.length).toBe(routable ? 3 : 0);
       const task = store.createTask({ agentId: agent.id, prompt: "run" });
-      expect(store.claimTask(runtimes[0].id)?.id).toBe(routable ? task.id : undefined);
+      expect(claimWithCurrentRuntime(store, runtimes[0].id)?.id).toBe(routable ? task.id : undefined);
     });
   }
 
@@ -152,7 +153,7 @@ describe("MUL-338 Claude gateway models without reasoning metadata", () => {
     expect(store.getAgent(agent.id)?.thinkingLevel ?? "").toBe("");
     // The Agent stays schedulable either way — the level never gated routing.
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(store.listRuntimes()[0].id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, store.listRuntimes()[0].id)?.id).toBe(task.id);
   });
 
   it("heals the stale level even when the edit resends the saved selection verbatim", async () => {
@@ -194,7 +195,7 @@ describe("MUL-338 does not weaken the Codex catalog contract (#220)", () => {
     const agent = store.createAgent({ name: "codex reasoner", provider: "codex", model: "gpt-model", thinkingLevel: "high" });
     expect(store.runtimeSupportsAgentModel(runtime, agent)).toBe(false);
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
   });
 
@@ -248,7 +249,7 @@ describe("MUL-338 does not weaken the Codex catalog contract (#220)", () => {
     });
     const agent = store.createAgent({ name: "codex agent", provider: "codex", model: "gpt-5", thinkingLevel: "max" });
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
 
     // A load failure is not "no levels"; the Runtime genuinely cannot honour the model.
     store.updateRuntimeModels(runtime.id, [{ id: "gpt-5", label: "GPT-5", provider: "openai", default: true,
@@ -256,7 +257,7 @@ describe("MUL-338 does not weaken the Codex catalog contract (#220)", () => {
     }]);
     const blocked = store.createTask({ agentId: agent.id, prompt: "run again" });
     expect(store.runtimeSupportsAgentModel(store.getRuntime(runtime.id)!, agent)).toBe(false);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(blocked.id)?.status).toBe("queued");
   });
 

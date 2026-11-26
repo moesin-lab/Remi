@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from 'bun:test';
@@ -43,7 +44,7 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     const runtime=store.registerRuntime({name:'test',provider:'codex',maxConcurrency:4});
     const issue=createResponsibleTestIssue(store, {title:'Recovery',assigneeType:'agent',assigneeId:agent.id});
     const task=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'input'});
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);store.startTask(task.id);
     db.run("UPDATE multiremi_issues SET status='in_review' WHERE id=?",[issue.id]);
     const seq=db.query('SELECT seq FROM multiremi_turns WHERE id=?').get(task.id).seq;
     expect(store.recoverOrphans(runtime.id)).toEqual({orphaned:1,retried:1});
@@ -91,14 +92,14 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
       expect(turns).toEqual([{ execution_scope: '', status: 'pending' }]);
     }
     for (let i = 0; i < 2; i++) {
-      const task = store.claimTask(runtime.id)!;
+      const task = claimWithCurrentRuntime(store, runtime.id)!;
       expect([first.taskId, second.taskId]).toContain(task.id);
       store.startTask(task.id);
       store.completeTask(task.id, { output: `answer ${i}` });
     }
     expect(store.getAutopilotRun(first.id)?.status).toBe('completed');
     expect(store.getAutopilotRun(second.id)?.status).toBe('completed');
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     for (const run of [first, second]) expect(Number(db.query('SELECT COUNT(*) AS n FROM multiremi_turns WHERE session_id=?').get(run.chatSessionId).n)).toBe(1);
   });
   it('completes create_issue automation without re-ringing its own timer input', () => {
@@ -112,7 +113,7 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
       { id: run.taskId, wake_source: 'platform_to_owner' },
     ]);
     store.updateIssue(run.issueId!, { status: 'in_progress' });
-    expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(run.taskId!);
     store.startTask(run.taskId!);
     store.completeTask(run.taskId!, { output: 'fixed' });
     expect(store.getAutopilotRun(run.id)?.status).toBe('completed');
@@ -123,14 +124,14 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     ]);
     expect(Number(db.query("SELECT COUNT(*) AS n FROM multiremi_conversation_log WHERE session_id=? AND message_kind='reply' AND kind='message'")
       .get(store.getTask(run.taskId!)!.issueSessionId!).n)).toBe(1);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
   });
   it('publishes one completion reply and derives the card and automation outcome from it',()=>{
     const {store,db}=fixture();const agent=store.createAgent({name:'Worker',provider:'codex'});
     const runtime=store.registerRuntime({name:'test',provider:'codex'});
     const chat=store.createChatSession({agentId:agent.id,creatorId:'local'});
     const sent=store.sendChatMessage(chat.id,{body:'question'});
-    expect(store.claimTask(runtime.id)?.id).toBe(sent.task.id);store.startTask(sent.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sent.task.id);store.startTask(sent.task.id);
     store.completeTask(sent.task.id,{output:'chat answer'});
     expect(store.listChatMessages(chat.id).filter(m=>m.role==='assistant').map(m=>m.body)).toEqual(['chat answer']);
     const card=store.findTurnEntry(sent.task.id)!;expect(card.metadata.final_reply_md).toBe('chat answer');
@@ -138,7 +139,7 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     expect(card.visibility).toBe('shown');
     expect(db.query("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM multiremi_conversation_log WHERE session_id=? AND sender_type='agent' AND kind='message'").get(chat.id).n).toBe(1);
     const auto=createResponsibleTestAutopilot(store, {title:'Completion',assigneeType:'agent',assigneeId:agent.id,executionMode:'run_only',description:'input'});
-    const run=store.runAutopilot(auto.id);expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);store.startTask(run.taskId!);
+    const run=store.runAutopilot(auto.id);expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(run.taskId!);store.startTask(run.taskId!);
     store.completeTask(run.taskId!,{output:'auto answer'});
     expect(store.getAutopilotRun(run.id)?.status).toBe('completed');
     expect(store.findTurnEntry(run.taskId!)?.metadata.final_entry_id).toBeTruthy();
@@ -151,7 +152,7 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     store.subscribeConversationLog({onEntry:(_session,entry)=>{frames.push(entry);}});
     const first=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'input'});
     expect(frames.find(f=>f.kind==='turn')?.metadata.current_attempt_id).toBe(first.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);store.startTask(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);store.startTask(first.id);
     store.recoverOrphans(runtime.id);
     const current=db.query('SELECT current_attempt_id FROM multiremi_turns WHERE id=?').get(first.id).current_attempt_id;
     const fields={trace:{event_count:7,head:7,closed:true as const,tool_call_count:2,type_histogram:[{type:'tool_use',tool:'Read',count:2}]},model:{provider:'codex',model:'new-model'},final_reply_md:null,context_usage:null,worked_ms:null,process_item_count:null};

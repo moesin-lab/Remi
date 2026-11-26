@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { CommandRegistry } from "../../../apps/remi/cli/core/command-registry.js";
 import { unifiedCommandSpecs } from "../../../apps/remi/cli/commands/unified.js";
 import { createResponsibleTestIssue } from './helpers.js';
@@ -77,9 +78,9 @@ it("structural offer failures ring the delegator with byte diagnostics and deriv
   await withStore("sqlite", async store => {
     const f = fixture(store);
     const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
-    expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+    expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
     store.startTask(f.leaderTask.id); store.completeTask(f.leaderTask.id, { output: "Dispatched." });
-    expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+    expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
     store.failTask(childTask.id, { failureReason: "offer_too_large", error: "offer_too_large: bytes=1201234; parts=repos:1200001,agent:25" });
     const envelope = reportEnvelope(store, f.leaderSession.id, childTask.id);
     expect(envelope.body_md).toContain("Status: failed");
@@ -111,9 +112,9 @@ for (const backend of backendsInScope(import.meta.path, ["sqlite", "postgres"] a
       const headers = { Authorization: `Bearer ${token.token}` };
       const app = createMultiremiApp({ store, authToken: "test-root" });
       const get = (path: string, h = headers) => app.request(path, { headers: h });
-      expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+      expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
       store.startTask(f.leaderTask.id);
-      expect(store.claimTask(f.workerRuntime.id)?.id).toBe(child.id);
+      expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(child.id);
       store.startTask(child.id);
       const comment = (body: string, parentId?: string) => store.createIssueComment(f.child.id, {
         authorType: "agent", authorId: f.worker.id, taskId: child.id, issueSessionId: child.issueSessionId, body, parentId,
@@ -170,9 +171,9 @@ for (const backend of backendsInScope(import.meta.path, ["sqlite", "postgres"] a
       it(`MUL-61 rejects ${scenario} through both result read endpoints`, async () => withStore(backend, async store => {
         const f = fixture(store);
         const child = await dispatch(store, f.leaderTask, f.child, f.worker.id);
-        expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+        expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
         store.startTask(f.leaderTask.id);
-        expect(store.claimTask(f.workerRuntime.id)?.id).toBe(child.id);
+        expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(child.id);
         store.startTask(child.id);
         const result = store.createIssueComment(f.child.id, {
           authorType: "agent", authorId: f.worker.id, taskId: child.id,
@@ -260,11 +261,11 @@ for (const backend of backendsInScope(import.meta.path, ["sqlite", "postgres"] a
           const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
           expect(childTask.delegatedFromIssueSessionId).toBe(f.leaderSession.id);
           expect(childTask.issueSessionId).not.toBe(f.leaderSession.id);
-          expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+          expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
           store.buildTaskSessionProjection(f.leaderTask.id);
           store.startTask(f.leaderTask.id);
           store.completeTask(f.leaderTask.id, { output: "Dispatched." });
-          expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+          expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
           store.buildTaskSessionProjection(childTask.id);
           store.startTask(childTask.id);
           const comment = withComment
@@ -300,10 +301,10 @@ for (const backend of backendsInScope(import.meta.path, ["sqlite", "postgres"] a
 // guarantees directly on canonical reports and pending turns.
 async function startDelegatedChild(store: MultiremiStore, f: ReturnType<typeof fixture>): Promise<MultiremiTask> {
   const child = await dispatch(store, f.leaderTask, f.child, f.worker.id);
-  expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+  expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
   store.buildTaskSessionProjection(f.leaderTask.id); store.startTask(f.leaderTask.id);
   store.completeTask(f.leaderTask.id, {output:"Dispatched."});
-  expect(store.claimTask(f.workerRuntime.id)?.id).toBe(child.id);
+  expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(child.id);
   store.buildTaskSessionProjection(child.id); store.startTask(child.id);
   return child;
 }
@@ -343,9 +344,9 @@ for (const backend of backendsInScope(import.meta.path, ["sqlite", "postgres"] a
       const report=reportEnvelope(store,f.leaderSession.id,child.id);
       const returnId=store.getTask(child.id)!.delegationReturnTaskId!;
       const returned=store.getTurn(returnId)!;
-      const first=store.claimTask(f.leaderRuntime.id)!;
+      const first=claimWithCurrentRuntime(store, f.leaderRuntime.id)!;
       if(first.id!==returned.current_attempt_id){store.startTask(first.id);store.completeTask(first.id,{output:"Parent status reviewed"});}
-      const offered=first.id===returned.current_attempt_id?first:store.claimTask(f.leaderRuntime.id)!;
+      const offered=first.id===returned.current_attempt_id?first:claimWithCurrentRuntime(store, f.leaderRuntime.id)!;
       expect(offered.id).toBe(returned.current_attempt_id!);
       const projection=store.buildTaskSessionProjection(returned.current_attempt_id!);
       expect(JSON.stringify(projection)).toContain(report.id);

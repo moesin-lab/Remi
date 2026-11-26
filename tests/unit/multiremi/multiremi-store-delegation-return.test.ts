@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
@@ -87,7 +88,7 @@ function createDelegationFixture(owner: "chat" | "issue" = "chat"): DelegationFi
     agentId: leader.id,
     prompt: "Lead the implementation.",
   });
-  expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+  expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id);
   store.buildTaskSessionProjection(leaderTask.id);
   store.startTask(leaderTask.id);
 
@@ -125,7 +126,7 @@ function createDelegationFixture(owner: "chat" | "issue" = "chat"): DelegationFi
     sessionId: "leader_session_1",
     workDir: "/tmp/delegation-leader",
   });
-  expect(store.claimTask(qaRuntime.id)?.id).toBe(childTask.id);
+  expect(claimWithCurrentRuntime(store, qaRuntime.id)?.id).toBe(childTask.id);
   store.buildTaskSessionProjection(childTask.id);
   store.startTask(childTask.id);
 
@@ -229,7 +230,7 @@ function createFanoutFixture(feishu = false, owner: "chat" | "issue" = "chat"): 
     agentId: leader.id,
     prompt: "Lead the fanout.",
   });
-  expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+  expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id);
   store.buildTaskSessionProjection(leaderTask.id);
   store.startTask(leaderTask.id);
   for (const [agent, assignment] of [[first, "First"], [second, "Second"]] as const) {
@@ -258,7 +259,7 @@ function createFanoutFixture(feishu = false, owner: "chat" | "issue" = "chat"): 
   const firstTask = childTasks.find((task) => task.agentId === first.id)!;
   const secondTask = childTasks.find((task) => task.agentId === second.id)!;
   store.completeTask(leaderTask.id, { output: "Delegated both assignments." });
-  expect(store.claimTask(firstRuntime.id)?.id).toBe(firstTask.id);
+  expect(claimWithCurrentRuntime(store, firstRuntime.id)?.id).toBe(firstTask.id);
   store.buildTaskSessionProjection(firstTask.id);
   store.startTask(firstTask.id);
   return {
@@ -305,7 +306,7 @@ describe("task-level agent delegation return", () => {
     expect(returned.chatSessionId).toBe(f.childTask.chatSessionId);
     expect(f.store.listIssueComments(f.issue.id).some(comment => comment.body.includes(output))).toBe(false);
     expect(JSON.stringify(f.store.listIssueActivity(f.issue.id))).not.toContain(output);
-    expect(f.store.claimTask(f.leaderRuntime.id)?.id).toBe(returned.id);
+    expect(claimWithCurrentRuntime(f.store, f.leaderRuntime.id)?.id).toBe(returned.id);
     expect(f.store.buildTaskSessionProjection(returned.id)?.jsonl).toContain(output);
     f.store.startTask(returned.id);
     f.store.completeTask(returned.id, { output: "PRIVATE_DELEGATION_REVIEW_BODY" });
@@ -347,7 +348,7 @@ describe("task-level agent delegation return", () => {
         expect(f.store.getIssueComment(id!)?.body).toBe(commented ? "结论评论" : output);
         if (authored) expect(id).toBe(authored.id);
         expect(f.store.getIssue(f.issue.id)?.status).not.toBe("blocked");
-        expect(f.store.claimTask(f.leaderRuntime.id)?.id).toBe(returned.id);
+        expect(claimWithCurrentRuntime(f.store, f.leaderRuntime.id)?.id).toBe(returned.id);
       } finally { resetMultiremiTestEnv(); }
     });
   }
@@ -388,7 +389,7 @@ describe("task-level agent delegation return", () => {
     expect(firstEntry.body_md).toContain("first result");
     expect(firstReturn.prompt).toBe(firstEntry.body_md);
     expect(fixture.store.getTurn(firstReturn.id)?.trigger_message_id).toBe(firstEntry.id);
-    expect(fixture.store.claimTask(fixture.leaderRuntime.id)?.id).toBe(firstReturnId);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.leaderRuntime.id)?.id).toBe(firstReturnId);
     fixture.store.buildTaskSessionProjection(firstReturnId);
     fixture.store.startTask(firstReturnId);
 
@@ -402,7 +403,7 @@ describe("task-level agent delegation return", () => {
       parentTaskId: firstReturnId,
     });
     fixture.store.completeTask(firstReturnId, { output: "Continue the same delegation." });
-    expect(fixture.store.claimTask(fixture.qaRuntime.id)?.id).toBe(continued.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.qaRuntime.id)?.id).toBe(continued.id);
     fixture.store.buildTaskSessionProjection(continued.id);
     fixture.store.startTask(continued.id);
     fixture.store.completeTask(continued.id, { output: "second result", sessionId: "qa_session_1" });
@@ -608,7 +609,7 @@ describe("task-level agent delegation return", () => {
     const issue = createResponsibleTestIssue(store, { title: "Follow-up delegation", assigneeType: "squad", assigneeId: squad.id });
     const leaderTask = store.createTask({ agentId: leader.id, issueId: issue.id, prompt: "Lead." });
 
-    expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+    expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id);
     store.startTask(leaderTask.id);
 
     store.createIssueComment(issue.id, {
@@ -621,7 +622,7 @@ describe("task-level agent delegation return", () => {
     const runtime = store.registerRuntime({ name: "QA running lane", provider: "claude" });
     store.updateAgent(qa.id, { runtimeId: runtime.id });
     store.completeTask(leaderTask.id, { output: "Dispatched." });
-    expect(store.claimTask(runtime.id)?.id).toBe(firstQaTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(firstQaTask.id);
     store.startTask(firstQaTask.id);
 
     store.createIssueComment(issue.id, {
@@ -686,7 +687,7 @@ describe("task-level agent delegation return", () => {
       delegatedByAgentId: fixture.leader.id,
       parentTaskId: fixture.leaderTask.id,
     });
-    expect(fixture.store.claimTask(secondRuntime.id)?.id).toBe(secondTask.id);
+    expect(claimWithCurrentRuntime(fixture.store, secondRuntime.id)?.id).toBe(secondTask.id);
     fixture.store.buildTaskSessionProjection(secondTask.id);
     fixture.store.startTask(secondTask.id);
     fixture.store.completeTask(secondTask.id, {
@@ -715,7 +716,7 @@ describe("task-level agent delegation return", () => {
       sessionId: "qa_claimed_first",
     });
     const firstReturn = delegationTasks(fixture).find((task) => task.agentId === fixture.leader.id)!;
-    expect(fixture.store.claimTask(fixture.leaderRuntime.id)?.id).toBe(firstReturn.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.leaderRuntime.id)?.id).toBe(firstReturn.id);
     fixture.store.startTask(firstReturn.id);
     const secondRuntime = fixture.store.registerRuntime({
       id: "rt_claimed_delegate",
@@ -738,7 +739,7 @@ describe("task-level agent delegation return", () => {
       delegatedByAgentId: fixture.leader.id,
       parentTaskId: fixture.leaderTask.id,
     });
-    expect(fixture.store.claimTask(secondRuntime.id)?.id).toBe(secondTask.id);
+    expect(claimWithCurrentRuntime(fixture.store, secondRuntime.id)?.id).toBe(secondTask.id);
     fixture.store.startTask(secondTask.id);
     fixture.store.completeTask(secondTask.id, {
       output: "Report after the frozen leader prompt.",
@@ -810,7 +811,7 @@ describe("task-level agent delegation return", () => {
       output: "First aggregated report.",
       sessionId: "fanout_first_aggregated",
     });
-    expect(fixture.store.claimTask(fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
     fixture.store.buildTaskSessionProjection(fixture.secondTask.id);
     fixture.store.startTask(fixture.secondTask.id);
     fixture.store.completeTask(fixture.secondTask.id, {
@@ -858,12 +859,12 @@ describe("task-level agent delegation return", () => {
   it("prepares one Feishu round push after a fanout is drained and reviewed", () => {
     const fixture = createFanoutFixture(true, "issue");
     fixture.store.completeTask(fixture.firstTask.id, { output: "First Feishu fanout report." });
-    expect(fixture.store.claimTask(fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
     fixture.store.buildTaskSessionProjection(fixture.secondTask.id);
     fixture.store.startTask(fixture.secondTask.id);
     fixture.store.completeTask(fixture.secondTask.id, { output: "Second Feishu fanout report." });
     const leaderReturn = leaderReturnTasks(fixture)[0]!;
-    expect(fixture.store.claimTask(fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
     fixture.store.buildTaskSessionProjection(leaderReturn.id);
     fixture.store.startTask(leaderReturn.id);
     fixture.store.completeTask(leaderReturn.id, { output: "Reviewed the entire Feishu fanout." });
@@ -879,12 +880,12 @@ describe("task-level agent delegation return", () => {
     );
     fixture.store.completeTask(fixture.firstTask.id, { output: "Deferred Feishu chain report." });
     expect(leaderReturnTasks(fixture)).toHaveLength(1);
-    expect(fixture.store.claimTask(fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
     fixture.store.buildTaskSessionProjection(fixture.secondTask.id);
     fixture.store.startTask(fixture.secondTask.id);
     fixture.store.completeTask(fixture.secondTask.id, { output: "No-lineage chain endpoint complete." });
     const leaderReturn = leaderReturnTasks(fixture)[0]!;
-    expect(fixture.store.claimTask(fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
     fixture.store.buildTaskSessionProjection(leaderReturn.id);
     fixture.store.startTask(leaderReturn.id);
     fixture.store.completeTask(leaderReturn.id, { output: "Reviewed the deferred Feishu chain." });
@@ -895,13 +896,13 @@ describe("task-level agent delegation return", () => {
   it("keeps a Topic Chat-owned fanout private after the return is reviewed", () => {
     const fixture = createFanoutFixture(true);
     fixture.store.completeTask(fixture.firstTask.id, { output: "PRIVATE_TOPIC_FIRST_REPORT" });
-    expect(fixture.store.claimTask(fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.secondRuntime.id)?.id).toBe(fixture.secondTask.id);
     fixture.store.buildTaskSessionProjection(fixture.secondTask.id);
     fixture.store.startTask(fixture.secondTask.id);
     fixture.store.completeTask(fixture.secondTask.id, { output: "PRIVATE_TOPIC_SECOND_REPORT" });
     const leaderReturn = leaderReturnTasks(fixture)[0]!;
     expect(leaderReturn.chatSessionId).toBe(fixture.chatSessionId);
-    expect(fixture.store.claimTask(fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
     fixture.store.buildTaskSessionProjection(leaderReturn.id);
     fixture.store.startTask(leaderReturn.id);
     fixture.store.completeTask(leaderReturn.id, { output: "PRIVATE_TOPIC_REVIEW" });
@@ -944,7 +945,7 @@ describe("task-level agent delegation return", () => {
     expect(fixture.store.getMessage(completed.reply_message_id!)?.body_md).toBe("QA passed; verified the permission boundary.");
     expect(fixture.store.getIssue(fixture.issue.id)?.status).toBe("todo");
 
-    expect(fixture.store.claimTask(fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.leaderRuntime.id)?.id).toBe(leaderReturn.id);
     const projection = fixture.store.buildTaskSessionProjection(leaderReturn.id)!;
     expect(projection.jsonl).toContain(`\"task_id\":\"${fixture.childTask.id}\"`);
     fixture.store.startTask(leaderReturn.id);
@@ -1029,7 +1030,7 @@ describe("task-level agent delegation return", () => {
     const firstReturn = wakeup.task!;
     // Start the return before the child finishes; the terminal report becomes
     // running input and stays unread until the successor can consume it.
-    expect(fixture.store.claimTask(fixture.leaderRuntime.id)?.id).toBe(firstReturn.id);
+    expect(claimWithCurrentRuntime(fixture.store, fixture.leaderRuntime.id)?.id).toBe(firstReturn.id);
     fixture.store.startTask(firstReturn.id);
     expect(fixture.store.getTask(firstReturn.id)?.status).toBe("running");
 
@@ -1071,7 +1072,7 @@ describe("task-level agent delegation return", () => {
         delegationId: fixture.childTask.delegationId,
         delegatedByAgentId: fixture.leader.id,
       });
-      expect(fixture.store.claimTask(fixture.qaRuntime.id)?.id).toBe(attempt.id);
+      expect(claimWithCurrentRuntime(fixture.store, fixture.qaRuntime.id)?.id).toBe(attempt.id);
       fixture.store.buildTaskSessionProjection(attempt.id);
       fixture.store.startTask(attempt.id);
     }

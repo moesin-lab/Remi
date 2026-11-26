@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from 'bun:test';
@@ -12,7 +13,7 @@ pendingTurnBackendTests('MUL-506 provider input boundaries', fixture => {
         f.store.registerRuntime({ id: 'rt_input', daemonId: 'daemon_input', name: 'Input fixture', provider: 'codex', workspaceId: 'local' });
         const message = { session_id: session.id, sender: { type: 'member' as const, id: 'mem_local_local' }, to: { type: 'agent' as const, ref: agent.id }, message_kind: 'request' as const, wake_requested: 'now' as const, body_md: body };
         const sent = f.store.sendMessage(message);
-        const attempt = f.store.claimTask('rt_input')!;
+        const attempt = claimWithCurrentRuntime(f.store, 'rt_input')!;
         f.store.startTask(attempt.id);
         const bridge = f.store.getDaemonTurnBridge(), scope = { workspaceId: 'local', runtimeId: 'rt_input', daemonId: 'daemon_input' };
         const offer = bridge.offerInput(f.store.getTaskWithAgent(attempt.id)!);
@@ -26,7 +27,7 @@ pendingTurnBackendTests('MUL-506 provider input boundaries', fixture => {
         const cursor = f.store.getSessionAgentLane(f.session.id, f.agent.id)!.cursorSeq;
         f.store.cancelTurn(f.sent.turn_id!);
         const retried = f.store.retryTurn(f.sent.turn_id!, true);
-        expect(f.store.claimTask('rt_input')?.id).toBe(retried.current_attempt_id!);
+        expect(claimWithCurrentRuntime(f.store, 'rt_input')?.id).toBe(retried.current_attempt_id!);
         f.store.startTask(retried.current_attempt_id!);
         const input = f.bridge.offerInput(f.store.getTaskWithAgent(retried.current_attempt_id!)!);
         expect(input.input_from_seq).toBe(0);
@@ -49,7 +50,7 @@ pendingTurnBackendTests('MUL-506 provider input boundaries', fixture => {
         const offered = f.bridge.offerInput(f.store.getTaskWithAgent(f.attempt.id)!);
         expect(f.bridge.rpc('turn.input', f.receipt(f.attempt.id, offered), f.scope).ok).toBe(true);
         const retried = f.store.retryTurn(f.sent.turn_id!, true);
-        expect(f.store.claimTask('rt_input')?.id).toBe(retried.current_attempt_id!);
+        expect(claimWithCurrentRuntime(f.store, 'rt_input')?.id).toBe(retried.current_attempt_id!);
         const input = f.bridge.offerInput(f.store.getTaskWithAgent(retried.current_attempt_id!)!);
         expect(input.input_from_seq).toBe(0);
         expect(input.input_messages.map(m => m.id)).toEqual([f.sent.message.id, second.message.id]);
@@ -66,7 +67,7 @@ pendingTurnBackendTests('MUL-506 provider input boundaries', fixture => {
         expect(f.store.getIssue(f.issue.id)?.updatedAt).toBe(before.updatedAt);
         const later = f.store.sendMessage({ ...f.message, body_md: 'later instructions' });
         expect(later.turn_id).toBe(f.sent.turn_id!);
-        expect(f.store.claimTask('rt_input')?.id).toBe(retried.current_attempt_id!);
+        expect(claimWithCurrentRuntime(f.store, 'rt_input')?.id).toBe(retried.current_attempt_id!);
         f.store.startTask(retried.current_attempt_id!);
         const input = f.bridge.offerInput(f.store.getTaskWithAgent(retried.current_attempt_id!)!);
         expect(input.input_from_seq).toBe(f.offer.input_to_seq);
@@ -80,12 +81,12 @@ pendingTurnBackendTests('MUL-506 provider input boundaries', fixture => {
         const session = f.store.getOrCreateDefaultIssueSession(issue.id);
         f.store.registerRuntime({ id: 'rt_old', daemonId: 'daemon_old', name: 'Old wake runtime', provider: 'codex', workspaceId: 'local' });
         const message = { session_id: session.id, sender: { type: 'member' as const, id: 'mem_local_local' }, to: { type: 'agent' as const, ref: agent.id }, message_kind: 'request' as const, wake_requested: 'now' as const, body_md: 'covered work' };
-        const sent = f.store.sendMessage(message), first = f.store.claimTask('rt_old')!;
+        const sent = f.store.sendMessage(message), first = claimWithCurrentRuntime(f.store, 'rt_old')!;
         f.store.startTask(first.id);
         f.store.completeTask(first.id, { output: 'work completed' });
         const obsolete = f.store.sendMessage({ ...message, id: sent.message.id });
         expect(obsolete.turn_id).not.toBe(sent.turn_id!);
-        expect(f.store.claimTask('rt_old')).toBeNull();
+        expect(claimWithCurrentRuntime(f.store, 'rt_old')).toBeNull();
         expect(f.store.getTurn(obsolete.turn_id!)?.status).toBe('cancelled');
         expect(f.store.getTurn(sent.turn_id!)?.status).toBe('completed');
         expect(f.store.listTurns({ workspace_id: 'local', session_id: session.id }).filter(t => t.status === 'cancelled')).toHaveLength(1);

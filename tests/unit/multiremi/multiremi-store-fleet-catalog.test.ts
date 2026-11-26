@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 // The fleet catalog the UI reads: which engines/models an any-provider runtime
@@ -932,15 +933,15 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     }
     const agent = store.createAgent({ name: "Default effort", provider: "claude", executionGroupId: "mixed", thinkingLevel: "high" });
     const first = store.createTask({ agentId: agent.id, prompt: "modern" });
-    expect(store.claimTask(modern.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, modern.id)?.id).toBe(first.id);
     store.cancelTask(first.id);
     const second = store.createTask({ agentId: agent.id, prompt: "legacy" });
-    expect(store.claimTask(legacy.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, legacy.id)?.id).toBe(second.id);
     store.cancelTask(second.id);
     store.updateAgent(agent.id, { thinkingLevel: "max" });
     const third = store.createTask({ agentId: agent.id, prompt: "modern only" });
-    expect(store.claimTask(legacy.id)).toBeNull();
-    expect(store.claimTask(modern.id)?.id).toBe(third.id);
+    expect(claimWithCurrentRuntime(store, legacy.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, modern.id)?.id).toBe(third.id);
   });
 
   it("claims runtime tasks atomically across sqlite connections", () => {
@@ -957,8 +958,8 @@ describe("Multiremi store — fleet engine and model catalog", () => {
       const task = storeA.createTask({ agentId: agent.id, prompt: "claim exactly once" });
       const otherTask = storeA.createTask({ agentId: otherAgent.id, prompt: "wait for runtime capacity" });
 
-      const first = storeA.claimTask(runtime.id);
-      const second = storeB.claimTask(runtime.id);
+      const first = claimWithCurrentRuntime(storeA, runtime.id);
+      const second = claimWithCurrentRuntime(storeB, runtime.id);
       const claimedIds = [first?.id, second?.id].filter(Boolean);
       expect(claimedIds).toEqual([task.id]);
       expect(storeA.getTask(task.id)?.status).toBe("dispatched");

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 /**
  * PR 6 server tests: a Chat lane whose first attempt completed on a runtime
  * with provider session `sess-1` (so the Chat's lineage is that runtime and
@@ -52,7 +53,7 @@ export function backgroundWorld(store: MultiremiStore, options: { creatorId?: st
 /** Send a Chat message and start its attempt on the runtime. */
 export function runAttempt(store: MultiremiStore, runtimeId: string, chatId: string, body: string) {
   const task = store.sendChatMessage(chatId, { body }).task;
-  expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id);
   store.startTask(task.id);
   return task;
 }

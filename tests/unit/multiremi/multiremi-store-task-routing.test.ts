@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { createRoutingMatrixDatabase } from "../../helpers/routing-matrix-database.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
@@ -39,7 +40,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const unrestricted = store.createProject({ title: "Unrestricted" });
     const unrestrictedIssue = createResponsibleTestIssue(store, { title: "Ordinary work", projectId: unrestricted.id });
     const unrestrictedTask = store.createTask({ agentId: agent.id, issueId: unrestrictedIssue.id, prompt: "ordinary" });
-    expect(store.claimTask(personal.id)?.id).toBe(unrestrictedTask.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(unrestrictedTask.id);
     store.startTask(unrestrictedTask.id);
     store.completeTask(unrestrictedTask.id, { output: "done" });
 
@@ -47,8 +48,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.createProjectDevice(bound.id, { daemonId: "device-personal", createdBy: "local" });
     const boundIssue = createResponsibleTestIssue(store, { title: "Independent work", projectId: bound.id });
     const boundTask = store.createTask({ agentId: agent.id, issueId: boundIssue.id, prompt: "independent" });
-    expect(store.claimTask(devbox.id)).toBeNull();
-    expect(store.claimTask(personal.id)?.id).toBe(boundTask.id);
+    expect(claimWithCurrentRuntime(store, devbox.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(boundTask.id);
     store.startTask(boundTask.id);
     store.completeTask(boundTask.id, { output: "done" });
 
@@ -58,14 +59,14 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       issueId: unrestrictedIssue.id,
       prompt: "ordinary after dedicated",
     });
-    expect(store.claimTask(personal.id)).toBeNull();
-    expect(store.claimTask(devbox.id)?.id).toBe(ordinaryAfterDedicated.id);
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(ordinaryAfterDedicated.id);
     store.startTask(ordinaryAfterDedicated.id);
     store.completeTask(ordinaryAfterDedicated.id, { output: "done" });
 
     const exclusive = store.createTask({ agentId: agent.id, issueId: boundIssue.id, prompt: "exclusive" });
-    expect(store.claimTask(devbox.id)).toBeNull();
-    expect(store.claimTask(personal.id)?.id).toBe(exclusive.id);
+    expect(claimWithCurrentRuntime(store, devbox.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(exclusive.id);
   });
 
   it("rejects projectless tasks and unidentified runtimes on constrained devices", () => {
@@ -93,15 +94,15 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.updateDaemonDedicated("local", "device-dedicated", true, "local");
 
     const projectless = store.createTask({ agentId: agent.id, prompt: "chat-like" });
-    expect(store.claimTask(dedicated.id)).toBeNull();
-    expect(store.claimTask(fallback.id)?.id).toBe(projectless.id);
+    expect(claimWithCurrentRuntime(store, dedicated.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, fallback.id)?.id).toBe(projectless.id);
     store.startTask(projectless.id);
     store.completeTask(projectless.id, { output: "done" });
 
     const issue = createResponsibleTestIssue(store, { title: "Bound issue", projectId: project.id });
     const constrained = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "bound" });
-    expect(store.claimTask(unidentified.id)).toBeNull();
-    expect(store.claimTask(dedicated.id)?.id).toBe(constrained.id);
+    expect(claimWithCurrentRuntime(store, unidentified.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, dedicated.id)?.id).toBe(constrained.id);
   });
 
   for (const ownerDedicated of [false, true]) {
@@ -126,8 +127,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
         expect(verdicts).toHaveLength(2);
         expect(verdicts.find((v) => v.runtimeId === owner.id)).toMatchObject({ placementOk: true, routingOk: true });
         expect(verdicts.find((v) => v.runtimeId === other.id)).toMatchObject({ placementOk: false, routingOk: !otherDedicated });
-        expect(store.claimTask(other.id)).toBeNull();
-        expect(store.claimTask(owner.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, owner.id)?.id).toBe(task.id);
       });
     }
   }
@@ -144,30 +145,30 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const workspace = store.runtimeWorkspaces.create(runtime.id, { name: "Chat files", root_path: "/local/chat" });
     const chat = store.createChatSession({ agentId: agent.id, runtime_workspace_id: workspace.id });
     const first = store.sendChatMessage(chat.id, { body: "first" }).task;
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_workspace_chat", workDir: "/local/chat" });
     const second = store.sendChatMessage(chat.id, { body: "queued before dedicated" }).task;
     expect(second).toMatchObject({ runtimeId: runtime.id, sessionId: "sess_workspace_chat", workDir: "/local/chat" });
     store.updateDaemonDedicated("local", runtime.daemonId!, true, "local");
 
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     expect(store.getTask(second.id)).toMatchObject({ runtimeId: runtime.id, sessionId: "sess_workspace_chat", workDir: "/local/chat" });
-    expect(store.claimTask(runtime.id)).toMatchObject({ id: second.id, sessionId: "sess_workspace_chat" });
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: second.id, sessionId: "sess_workspace_chat" });
     store.startTask(second.id);
     store.completeTask(second.id, { output: "ok", sessionId: "sess_workspace_chat", workDir: "/local/chat" });
 
     const third = store.sendChatMessage(chat.id, { body: "created while dedicated" }).task;
     expect(third).toMatchObject({ runtimeId: runtime.id, sessionId: "sess_workspace_chat", workDir: "/local/chat" });
-    expect(store.claimTask(runtime.id)?.sessionId).toBe("sess_workspace_chat");
+    expect(claimWithCurrentRuntime(store, runtime.id)?.sessionId).toBe("sess_workspace_chat");
     store.startTask(third.id);
     store.completeTask(third.id, { output: "ok", sessionId: "sess_workspace_chat", workDir: "/local/chat" });
 
     db!.run("UPDATE multiremi_chat_sessions SET session_id = NULL WHERE id = ?", [chat.id]);
     const reset = store.sendChatMessage(chat.id, { body: "retain files after provider reset" }).task;
     expect(reset).toMatchObject({ runtimeId: runtime.id, sessionId: null, workDir: "/local/chat" });
-    expect(store.claimTask(other.id)).toBeNull();
-    expect(store.claimTask(runtime.id)).toMatchObject({ id: reset.id, workDir: "/local/chat" });
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: reset.id, workDir: "/local/chat" });
   });
 
   it("keeps an explicit-workspace Issue lane when its owning device becomes dedicated", () => {
@@ -180,13 +181,13 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const issue = createResponsibleTestIssue(store, { title: "Local Issue", runtimeWorkspaceId: workspace.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const first = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_workspace_issue" });
     const lane = store.getSessionAgentLane(session.id, agent.id)!;
     const second = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "second" });
     store.updateDaemonDedicated("local", runtime.daemonId!, true, "local");
-    expect(store.claimTask(runtime.id)).toMatchObject({ id: second.id, sessionId: "sess_workspace_issue" });
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: second.id, sessionId: "sess_workspace_issue" });
     store.startTask(second.id);
     store.completeTask(second.id, { output: "ok", sessionId: "sess_workspace_issue" });
 
@@ -195,7 +196,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({
       runtimeId: runtime.id, providerSessionId: "sess_workspace_issue", generation: lane.generation,
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(third.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(third.id);
   });
 
   // MUL-449: device routing must gate EVERY task. `holds_workspace` may stay
@@ -229,7 +230,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       prompt: "bound without workspace",
     });
     expect(store.getTask(boundTask.id)?.holdsWorkspace).toBe(false);
-    expect(store.claimTask(personal.id)?.id).toBe(boundTask.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(boundTask.id);
     store.startTask(boundTask.id);
     store.completeTask(boundTask.id, { output: "done" });
 
@@ -245,15 +246,15 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       prompt: "foreign without workspace",
     });
     expect(store.getTask(foreignTask.id)?.holdsWorkspace).toBe(false);
-    expect(store.claimTask(personal.id)).toBeNull();
-    expect(store.claimTask(devbox.id)?.id).toBe(foreignTask.id);
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(foreignTask.id);
     store.startTask(foreignTask.id);
     store.completeTask(foreignTask.id, { output: "done" });
 
     // A Project-less task has no binding, so a dedicated device is not allowed.
     const projectless = store.createTask({ agentId: agent.id, prompt: "chat-like" });
-    expect(store.claimTask(personal.id)).toBeNull();
-    expect(store.claimTask(devbox.id)?.id).toBe(projectless.id);
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(projectless.id);
   });
 
   it("keeps unbound devices working for tasks without an Issue workspace", () => {
@@ -281,12 +282,12 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       issueSessionId: unboundSide.id,
       prompt: "unbound without workspace",
     });
-    expect(store.claimTask(pooled.id)?.id).toBe(unboundTask.id);
+    expect(claimWithCurrentRuntime(store, pooled.id)?.id).toBe(unboundTask.id);
     store.startTask(unboundTask.id);
     store.completeTask(unboundTask.id, { output: "done" });
 
     const projectless = store.createTask({ agentId: agent.id, prompt: "chat-like" });
-    expect(store.claimTask(pooled.id)?.id).toBe(projectless.id);
+    expect(claimWithCurrentRuntime(store, pooled.id)?.id).toBe(projectless.id);
     store.startTask(projectless.id);
     store.completeTask(projectless.id, { output: "done" });
 
@@ -303,8 +304,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.getTask(elsewhereTask.id)?.holdsWorkspace).toBe(false);
     // Intentional change in MUL-449: a task bound to a Project that names
     // another device no longer bypasses that binding by not holding a lease.
-    expect(store.claimTask(pooled.id)).toBeNull();
-    expect(store.claimTask(other.id)?.id).toBe(elsewhereTask.id);
+    expect(claimWithCurrentRuntime(store, pooled.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)?.id).toBe(elsewhereTask.id);
   });
 
   it("routes the claim and the recheck identically across the device matrix", () => {
@@ -365,7 +366,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
           // the workspace, and it can never reach a dedicated device.
           expect(store.getTask(task.id)?.holdsWorkspace).toBe(issue ? holdsWorkspace : true);
           const expected = runtime.eligibleFor.has(project.label);
-          const claimed = store.claimTask(runtime.runtime.id);
+          const claimed = claimWithCurrentRuntime(store, runtime.runtime.id);
           // Claim and the dispatch-recovery recheck must agree on every cell.
           if (expected) {
             expect(claimed?.id).toBe(task.id);
@@ -373,7 +374,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
             // that guards dispatch recovery, not just the SQL claim predicate:
             // a stale dispatch on the same machine is handed back, never pooled.
             runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET status = 'dispatched', dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
-            expect(store.claimTask(runtime.runtime.id)?.id).toBe(task.id);
+            expect(claimWithCurrentRuntime(store, runtime.runtime.id)?.id).toBe(task.id);
             store.startTask(task.id);
             store.completeTask(task.id, { output: "done" });
           } else {
@@ -382,7 +383,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
             // a stale dispatch on the same rejected runtime re-pools instead of
             // being handed back.
             runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET status = 'dispatched', runtime_id = ?, dispatched_at = ? WHERE id = ?", [runtime.runtime.id, "2000-01-01T00:00:00.000Z", task.id]);
-            expect(store.claimTask(runtime.runtime.id)).toBeNull();
+            expect(claimWithCurrentRuntime(store, runtime.runtime.id)).toBeNull();
             expect(store.getTask(task.id)).toMatchObject({ status: "queued", runtimeId: null });
             store.cancelTask(task.id);
           }
@@ -414,7 +415,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id, workspaceId: "local" });
 
     const first = store.sendChatMessage(chat.id, { body: "first" }).task;
-    expect(store.claimTask(allowed.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, allowed.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_allowed_chat" });
     expect(store.getChatSession(chat.id)?.sessionRuntimeId).toBe(allowed.id);
@@ -423,8 +424,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     // The dedicated device is still bound to this Project, so the resume is
     // kept: the routing guard must not over-reject and strand the turn.
     expect(second).toMatchObject({ runtimeId: allowed.id, sessionId: "sess_allowed_chat" });
-    expect(store.claimTask(other.id)).toBeNull();
-    expect(store.claimTask(allowed.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, allowed.id)?.id).toBe(second.id);
   });
 
   it("clears a queued chat pin when the Project moves to another device before the claim", () => {
@@ -449,7 +450,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id, workspaceId: "local" });
 
     const first = store.sendChatMessage(chat.id, { body: "first" }).task;
-    expect(store.claimTask(personal.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_requeued_chat" });
 
@@ -464,9 +465,9 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     // The queued-affinity refresh must drop the now-rejected pin; otherwise the
     // turn stays parked on a device that can never claim it. The provider
     // session belongs to that machine, so it is abandoned with the pin.
-    expect(store.claimTask(personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
     expect(store.getTask(second.id)).toMatchObject({ runtimeId: null, sessionId: null });
-    expect(store.claimTask(devbox.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(second.id);
   });
 
   // MUL-449 QA follow-up: device routing must gate Issue lane inheritance too.
@@ -519,7 +520,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.reportIssueWorkspace({
       issueId: issue.id, runtimeId: codex.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });
-    expect(store.claimTask(codex.id)?.id).toBe(built.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(built.id);
     store.startTask(built.id);
     store.completeTask(built.id, { output: "ok", sessionId: "sess_sib_codex" });
 
@@ -527,7 +528,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const claudeTurn = store.createTask({
       agentId: claudeAgent.id, issueId: issue.id, issueSessionId: session.id, prompt: "claude turn",
     });
-    expect(store.claimTask(claude.id)?.id).toBe(claudeTurn.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(claudeTurn.id);
     store.startTask(claudeTurn.id);
     store.completeTask(claudeTurn.id, { output: "ok", sessionId: "sess_sib_claude" });
     expect(store.getSessionAgentLane(session.id, claudeAgent.id)).toMatchObject({
@@ -543,7 +544,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       runtimeId: claude.id, sessionId: "sess_sib_claude",
     });
     // Any claim runs the refresh first; it must not treat this pin as a conflict.
-    expect(store.claimTask(codex.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, codex.id)).toBeNull();
     expect(store.getSessionAgentLane(session.id, claudeAgent.id)).toMatchObject({
       runtimeId: claude.id, providerSessionId: "sess_sib_claude",
     });
@@ -552,7 +553,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
         WHERE issue_id = ? AND type = 'session_agent_lane_reset'
           AND data LIKE '%issue_workspace_elsewhere%'`,
     ).get(issue.id)).toEqual({ count: 0 });
-    expect(store.claimTask(claude.id)?.id).toBe(followUp.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(followUp.id);
   });
 
   it("lets a discussion turn keep its lane while the Issue workspace lives elsewhere", () => {
@@ -574,7 +575,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_disc" });
     store.reportIssueWorkspace({
@@ -585,7 +586,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "second",
     });
     expect(second).toMatchObject({ holdsWorkspace: false, runtimeId: a.id, sessionId: "sess_disc" });
-    expect(store.claimTask(a.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(second.id);
   });
 
   it("names the Issue workspace machine, not the stale pin, when only A is allowed", () => {
@@ -593,7 +594,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    store.claimTask(a.id);
+    claimWithCurrentRuntime(store, a.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_wsconf_onlyA" });
     store.reportIssueWorkspace({
@@ -610,14 +611,14 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.getTask(second.id)?.waitReason).toContain("B");
     expect(store.getTask(second.id)?.waitReason).toContain("Issue 工作区");
     expect(store.getTask(second.id)?.waitReason).not.toContain("钉在 A");
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
 
     // Restoring the binding clears the reason and lets B take the turn.
     store.createProjectDevice(issue.projectId!, { daemonId: "dev-wsconf-b" });
     expect(store.refreshQueuedCapabilityWaitReasons(now + 300_000).updated).toBe(1);
     expect(store.getTask(second.id)?.waitReason).toBeNull();
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("lets the workspace machine claim when only B is allowed", () => {
@@ -628,7 +629,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.reportIssueWorkspace({
       issueId: issue.id, runtimeId: b.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });
-    expect(store.claimTask(b.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_wsconf_onlyB" });
     const second = store.createTask({
@@ -638,8 +639,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - 200_000).toISOString(), second.id]);
     expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 0, alerted: 0 });
     expect(store.getTask(second.id)?.waitReason).toBeNull();
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("starts the lane over, without a machine constraint, when the Issue workspace was reclaimed", () => {
@@ -650,7 +651,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.reportIssueWorkspace({
       issueId: issue.id, runtimeId: a.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_wsconf_cleaned" });
     store.reportSubjectReclaimed(a.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false });
@@ -666,7 +667,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - 200_000).toISOString(), second.id]);
     expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 0, alerted: 0 });
     expect(store.getTask(second.id)?.waitReason).toBeNull();
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("does not inherit a lane that sits off the machine holding the Issue workspace", () => {
@@ -678,7 +679,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.reportIssueWorkspace({
       issueId: issue.id, runtimeId: a.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_wsconf" });
     expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({ runtimeId: a.id });
@@ -697,8 +698,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({
       runtimeId: null, providerSessionId: null,
     });
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("re-pools a queued turn whose pin conflicts with the live Issue workspace", () => {
@@ -709,7 +710,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.reportIssueWorkspace({
       issueId: issue.id, runtimeId: a.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_wsconf_q" });
 
@@ -723,9 +724,9 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       issueId: issue.id, runtimeId: b.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });
 
-    expect(store.claimTask(a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
     expect(store.getTask(second.id)).toMatchObject({ runtimeId: null, sessionId: null, status: "queued" });
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("does not strand a workspace-backed turn when A and B are both allowed", () => {
@@ -733,7 +734,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    store.claimTask(a.id);
+    claimWithCurrentRuntime(store, a.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_wsconf_both" });
     store.reportIssueWorkspace({
@@ -749,8 +750,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - 200_000).toISOString(), second.id]);
     expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 0, alerted: 0 });
     expect(store.getTask(second.id)?.waitReason).toBeNull();
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   // MUL-449 ruling 2: the claim predicate and the wait-reason observer must be
@@ -772,7 +773,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       return original(sql);
     };
     try {
-      store.claimTask(runtime.id);
+      claimWithCurrentRuntime(store, runtime.id);
     } finally {
       (db as unknown as { query: (sql: string) => unknown }).query = original;
     }
@@ -828,7 +829,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const claimable = verdicts.filter((verdict) => verdict.placementOk && verdict.routingOk);
     // No machine satisfies both, so nothing may claim and the observer must say so.
     expect(claimable).toEqual([]);
-    for (const verdict of verdicts) expect(store.claimTask(verdict.runtimeId)).toBeNull();
+    for (const verdict of verdicts) expect(claimWithCurrentRuntime(store, verdict.runtimeId)).toBeNull();
     const now = Date.now();
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - 200_000).toISOString(), task.id]);
     expect(store.refreshQueuedCapabilityWaitReasons(now).updated).toBe(1);
@@ -859,7 +860,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - 200_000).toISOString(), task.id]);
     expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 0, alerted: 0 });
     expect(store.getTask(task.id)?.waitReason).toBeNull();
-    expect(store.claimTask(sibling.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, sibling.id)?.id).toBe(task.id);
   });
 
   // ───────────────────────────────────────────────────────────────────────
@@ -1118,7 +1119,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
      * Runtime that cannot take the task — and leave the row queued.
      */
     function settle(fixture: Fixture): void {
-      fixture.store.claimTask("rt_inv_settler");
+      claimWithCurrentRuntime(fixture.store, "rt_inv_settler");
     }
 
     /**
@@ -1127,7 +1128,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
      */
     function probeWinner(fixture: Fixture, probed: string[]): string | null {
       for (const runtimeId of runtimeIds(fixture)) {
-        const claimed = fixture.store.claimTask(runtimeId);
+        const claimed = claimWithCurrentRuntime(fixture.store, runtimeId);
         if (claimed?.id === fixture.taskId) {
           if (!probed.includes(runtimeId)) {
             throw new Error(`[${fixture.label}] claim won on ${runtimeId} outside probe ${JSON.stringify(probed)}`);
@@ -1143,7 +1144,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       let accepted = false;
       try {
         matrixDb.transaction(() => {
-          accepted = fixture.store.claimTask(runtimeId)?.id === fixture.taskId;
+          accepted = claimWithCurrentRuntime(fixture.store, runtimeId)?.id === fixture.taskId;
           throw new Error("__rollback__");
         })();
       } catch (error) {
@@ -1320,7 +1321,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_lane_reset" });
     expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({
@@ -1337,8 +1338,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({
       runtimeId: null, providerSessionId: null,
     });
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("resets a lane a previously-claiming dedicated device no longer qualifies for", () => {
@@ -1358,7 +1359,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const seeded = store.createTask({
       agentId: agent.id, issueId: p1Issue.id, issueSessionId: p1Session.id, prompt: "first",
     });
-    expect(store.claimTask(personal.id)?.id).toBe(seeded.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(seeded.id);
     store.startTask(seeded.id);
     store.completeTask(seeded.id, { output: "ok", sessionId: "sess_polluted" });
 
@@ -1380,8 +1381,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       agentId: agent.id, issueId: p2Issue.id, issueSessionId: p2Session.id, prompt: "next",
     });
     expect(store.getTask(next.id)).toMatchObject({ runtimeId: null, sessionId: null, status: "queued" });
-    expect(store.claimTask(personal.id)).toBeNull();
-    expect(store.claimTask(pooled.id)?.id).toBe(next.id);
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, pooled.id)?.id).toBe(next.id);
   });
 
   it("re-pools a queued Issue turn whose lane the Project now refuses", () => {
@@ -1401,7 +1402,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_queued_lane" });
 
@@ -1417,9 +1418,9 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
 
     // The claim-time refresh re-pools it before the candidate scan, so the
     // rejected machine cannot park it forever.
-    expect(store.claimTask(a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
     expect(store.getTask(second.id)).toMatchObject({ runtimeId: null, sessionId: null, status: "queued" });
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("re-pools a stale Issue lane on B when its Agent is bound to allowed A", () => {
@@ -1439,8 +1440,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
        WHERE session_id = ? AND reader_id = ?`,
       [b.id, "sess_stale", session.id, agent.id],
     );
-    expect(store.claimTask(b.id)).toBeNull();
-    expect(store.claimTask(a.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(task.id);
     expect(store.getTask(task.id)).toMatchObject({ runtimeId: a.id, status: "dispatched" });
   });
 
@@ -1461,7 +1462,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    expect(store.claimTask(allowed.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, allowed.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_queued_kept" });
     const laneBefore = store.getSessionAgentLane(session.id, agent.id)!;
@@ -1471,14 +1472,14 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
 
     // Another machine's claim runs the refresh first; it must not disturb a
     // lane whose routing is still valid, so the pin, session and generation stay.
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     expect(store.getTask(second.id)).toMatchObject({
       runtimeId: allowed.id, sessionId: "sess_queued_kept", status: "queued",
     });
     expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({
       runtimeId: allowed.id, providerSessionId: "sess_queued_kept", generation: laneBefore.generation,
     });
-    expect(store.claimTask(allowed.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, allowed.id)?.id).toBe(second.id);
   });
 
   // MUL-449 QA round 2, blocker 1: a Project holding a local_directory does
@@ -1507,7 +1508,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     });
     // A discussion task never inherits the Project directory.
     expect(first).toMatchObject({ holdsWorkspace: false, runtimeId: null });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_dir_disc" });
 
@@ -1519,9 +1520,9 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.deleteProjectDevice(project.id, "dev-dir-disc-a");
     store.createProjectDevice(project.id, { daemonId: "dev-dir-disc-b" });
 
-    expect(store.claimTask(a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
     expect(store.getTask(second.id)).toMatchObject({ runtimeId: null, sessionId: null, status: "queued" });
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   it("does not treat a discussion turn as a directory pin in the base retirement path", () => {
@@ -1573,14 +1574,14 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const task = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "hold",
     });
-    expect(store.claimTask(devbox.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(task.id);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET status = 'queued', runtime_id = ? WHERE id = ?", [devbox.id, task.id]);
 
     store.deleteProjectDevice(project.id, "dev-ws-a");
     store.createProjectDevice(project.id, { daemonId: "dev-ws-b" });
     // The workspace lives on the devbox, so re-pooling would run it elsewhere
     // without the data. It keeps queuing instead of being silently stranded.
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     expect(store.getTask(task.id)).toMatchObject({ runtimeId: devbox.id, status: "queued" });
   });
 
@@ -1602,7 +1603,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    expect(store.claimTask(personal.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_lane_kept" });
 
@@ -1613,8 +1614,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.getTask(second.id)).toMatchObject({
       runtimeId: personal.id, sessionId: "sess_lane_kept",
     });
-    expect(store.claimTask(other.id)).toBeNull();
-    expect(store.claimTask(personal.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(second.id);
   });
 
   it("does not inherit a lane from a Project-less session on a dedicated device", () => {
@@ -1640,8 +1641,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "project-less",
     });
     expect(store.getTask(task.id)).toMatchObject({ runtimeId: null, sessionId: null, status: "queued" });
-    expect(store.claimTask(personal.id)).toBeNull();
-    expect(store.claimTask(pooled.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, pooled.id)?.id).toBe(task.id);
   });
 
   it("re-pools a chat turn instead of pinning it to a device the Project rejects", () => {
@@ -1680,7 +1681,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({
       agentId: agent.id, chatSessionId: chat.id, issueId: issue.id, holdsWorkspace: false, prompt: "first report",
     });
-    expect(store.claimTask(personal.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_pinned_chat" });
     expect(store.getChatSession(chat.id)?.sessionRuntimeId).toBe(personal.id);
@@ -1697,8 +1698,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     // Without the device-routing guard the turn stays pinned to the rejected
     // device and queues forever: neither runtime can claim it.
     expect(store.getTask(second.id)).toMatchObject({ runtimeId: null, sessionId: null, status: "queued" });
-    expect(store.claimTask(personal.id)).toBeNull();
-    expect(store.claimTask(devbox.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(second.id);
   });
 
   it("treats a missing daemon profile as non-dedicated", () => {
@@ -1716,7 +1717,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Default admission agent", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, prompt: "unrestricted" });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   });
 
   it("re-pools a stale dispatch when the project becomes bound to another device", () => {
@@ -1738,13 +1739,13 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const issue = createResponsibleTestIssue(store, { title: "Move after dispatch", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "move" });
 
-    expect(store.claimTask(devbox.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(task.id);
     store.createProjectDevice(project.id, { daemonId: "device-stale-personal" });
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
 
-    expect(store.claimTask(devbox.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, devbox.id)).toBeNull();
     expect(store.getTask(task.id)).toMatchObject({ status: "queued", runtimeId: null });
-    expect(store.claimTask(personal.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(task.id);
   });
 
   it("re-pools a stale dispatch when its device becomes dedicated to other projects", () => {
@@ -1768,13 +1769,13 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.createProjectDevice(allowedProject.id, { daemonId: "device-stale-dedicated" });
     const task = store.createTask({ agentId: agent.id, issueId: ordinaryIssue.id, prompt: "fallback" });
 
-    expect(store.claimTask(personal.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, personal.id)?.id).toBe(task.id);
     store.updateDaemonDedicated("local", "device-stale-dedicated", true, "local");
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
 
-    expect(store.claimTask(personal.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, personal.id)).toBeNull();
     expect(store.getTask(task.id)).toMatchObject({ status: "queued", runtimeId: null });
-    expect(store.claimTask(devbox.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(task.id);
   });
 
   it("runs one Issue across different agents and runtimes concurrently", () => {
@@ -1787,8 +1788,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const first = store.createTask({ agentId: codexAgent.id, issueId: issue.id, prompt: "first" });
     const second = store.createTask({ agentId: claudeAgent.id, issueId: issue.id, prompt: "second" });
 
-    expect(store.claimTask(codex.id)?.id).toBe(first.id);
-    expect(store.claimTask(claude.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(second.id);
 
     store.startTask(first.id);
     store.completeTask(first.id, { output: "done" });
@@ -1811,8 +1812,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "continue" });
 
-    expect(store.claimTask(otherRuntime.id)).toBeNull();
-    expect(store.claimTask(firstRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, otherRuntime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, firstRuntime.id)?.id).toBe(task.id);
   });
 
   it("MUL-467 never creates an orphaned workspace on deletion and releases its task after explicit abandonment", () => {
@@ -1828,12 +1829,12 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.deleteRuntimeWithArchivedAgentCleanup(source.id).status).toBe("active_issue_workspaces");
     expect(store.getIssueWorkspace(issue.id)).toMatchObject({ status: "dirty", runtimeId: source.id });
     expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.claimTask(target.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, target.id)).toBeNull();
     expect(store.deleteRuntimeWithArchivedAgentCleanup(source.id, { abandonIssueWorkspaces: true })).toEqual({
       status: "deleted", issueWorkspacesAbandoned: 1,
     });
     expect(db!.query("SELECT issue_id FROM multiremi_issue_workspaces WHERE status != 'cleaned' AND runtime_id IS NULL").all()).toEqual([]);
-    expect(store.claimTask(target.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, target.id)?.id).toBe(task.id);
   });
 
   it("MUL-467 gives historical orphaned workspaces a concrete recovery command and restores claiming", () => {
@@ -1846,11 +1847,11 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       branchName: `agent/${issue.key}`, status: "ready" });
     db!.run("UPDATE multiremi_issue_workspaces SET runtime_id = NULL, status = 'runtime_offline' WHERE issue_id = ?", [issue.id]);
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "resume" });
-    expect(store.claimTask(target.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, target.id)).toBeNull();
     store.refreshQueuedCapabilityWaitReasons(Date.now() + 120_000);
     expect(store.getTask(task.id)?.waitReason).toContain(`remi issue workspace abandon ${issue.id} --yes`);
     expect(store.abandonIssueWorkspace(issue.id, "local").status).toBe("abandoned");
-    expect(store.claimTask(target.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, target.id)?.id).toBe(task.id);
   });
 
   it("lets another provider on the same daemon continue a persistent Issue workspace", () => {
@@ -1885,8 +1886,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "continue with Codex" });
 
-    expect(store.claimTask(otherCodex.id)).toBeNull();
-    expect(store.claimTask(codex.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, otherCodex.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(task.id);
 
     store.reportIssueWorkspace({
       issueId: issue.id,
@@ -1957,10 +1958,10 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const ordinaryTask = store.createTask({ agentId: agent.id, prompt: "ordinary work" });
 
     // Socket admission enforces the contract floor; metadata is descriptive.
-    expect(store.claimTask(legacyRuntime.id)?.id).toBe(issueTask.id);
+    expect(claimWithCurrentRuntime(store, legacyRuntime.id)?.id).toBe(issueTask.id);
     store.startTask(issueTask.id);
     store.completeTask(issueTask.id, { output: "done" });
-    expect(store.claimTask(currentRuntime.id)?.id).toBe(ordinaryTask.id);
+    expect(claimWithCurrentRuntime(store, currentRuntime.id)?.id).toBe(ordinaryTask.id);
   });
 
   it("claims queued tasks by runtime provider and completes them", () => {
@@ -1972,7 +1973,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.createTask({ agentId: other.id, issueId: issue.id, prompt: "Should not claim" });
     const runtime = store.registerRuntime({ name: "local-codex", provider: "codex", workspaceId: "local" });
 
-    const claimed = store.claimTask(runtime.id);
+    const claimed = claimWithCurrentRuntime(store, runtime.id);
     expect(claimed?.id).toBe(codexTask.id);
     expect(claimed?.status).toBe("dispatched");
     expect(claimed?.agent?.provider).toBe("codex");
@@ -2024,8 +2025,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
 
     expect(boundAgent.runtimeId).toBe(secondRuntime.id);
     expect(task.runtimeId).toBe(secondRuntime.id);
-    expect(store.claimTask(firstRuntime.id)).toBeNull();
-    expect(store.claimTask(secondRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, firstRuntime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, secondRuntime.id)?.id).toBe(task.id);
   });
 
   it("claims unbound agents' tasks from any provider-matching runtime and stamps the claimer", () => {
@@ -2038,19 +2039,19 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const task = store.createTask({ agentId: agent.id, prompt: "run anywhere" });
     expect(task.runtimeId).toBeNull();
 
-    expect(store.claimTask(claude.id)).toBeNull();
-    expect(store.claimTask(codexA.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, claude.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, codexA.id)?.id).toBe(task.id);
     expect(store.getTask(task.id)?.runtimeId).toBe(codexA.id);
 
     const secondAgent = store.createAgent({ name: "Pool Codex 2", provider: "codex" });
     const secondTask = store.createTask({ agentId: secondAgent.id, prompt: "second machine" });
-    expect(store.claimTask(codexB.id)?.id).toBe(secondTask.id);
+    expect(claimWithCurrentRuntime(store, codexB.id)?.id).toBe(secondTask.id);
     expect(store.getTask(secondTask.id)?.runtimeId).toBe(codexB.id);
 
     const anyRuntime = store.registerRuntime({ id: "rt_pool_any", name: "pool any", provider: "any" });
     const thirdAgent = store.createAgent({ name: "Pool Codex 3", provider: "codex" });
     const thirdTask = store.createTask({ agentId: thirdAgent.id, prompt: "any provider" });
-    expect(store.claimTask(anyRuntime.id)?.id).toBe(thirdTask.id);
+    expect(claimWithCurrentRuntime(store, anyRuntime.id)?.id).toBe(thirdTask.id);
   });
 
   it("shares historical private Runtimes across Agent owners within the workspace", () => {
@@ -2075,7 +2076,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const issueA = createResponsibleTestIssue(store, { title: "alice a", workspaceId: "local" });
     const task = store.createTask({ agentId: aliceAgent.id, issueId: issueA.id, prompt: "alice work", workspaceId: "local" });
 
-    expect(store.claimTask(bobPrivate.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, bobPrivate.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "done" });
 
@@ -2088,15 +2089,15 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       workspaceId: "local",
       runtimeId: bobPrivate.id,
     });
-    expect(store.claimTask(bobPublic.id)).toBeNull();
-    expect(store.claimTask(bobPrivate.id)?.id).toBe(pinned.id);
+    expect(claimWithCurrentRuntime(store, bobPublic.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, bobPrivate.id)?.id).toBe(pinned.id);
     store.startTask(pinned.id);
     store.completeTask(pinned.id, { output: "done" });
 
     // Bob's own agents still flow to his private machine.
     const bobAgent = store.createAgent({ name: "Bob codex", provider: "codex", workspaceId: "local", ownerId: "bob" });
     const bobTask = store.createTask({ agentId: bobAgent.id, prompt: "bob work", workspaceId: "local" });
-    expect(store.claimTask(bobPrivate.id)?.id).toBe(bobTask.id);
+    expect(claimWithCurrentRuntime(store, bobPrivate.id)?.id).toBe(bobTask.id);
   });
 
   it("pairs an owner-null historical private Runtime with all workspace Agents", () => {
@@ -2108,14 +2109,14 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const localAgent = store.createAgent({ name: "Local codex", provider: "codex" });
     expect(localAgent.ownerId).toBe("local");
     const localTask = store.createTask({ agentId: localAgent.id, prompt: "local work" });
-    expect(store.claimTask(localRuntime.id)?.id).toBe(localTask.id);
+    expect(claimWithCurrentRuntime(store, localRuntime.id)?.id).toBe(localTask.id);
     store.startTask(localTask.id);
     store.completeTask(localTask.id, { output: "done" });
 
     // Historical human ownership does not divide the workspace execution fleet.
     const aliceAgent = store.createAgent({ name: "Alice codex", provider: "codex", ownerId: "alice" });
     const aliceTask = store.createTask({ agentId: aliceAgent.id, prompt: "alice work" });
-    expect(store.claimTask(localRuntime.id)?.id).toBe(aliceTask.id);
+    expect(claimWithCurrentRuntime(store, localRuntime.id)?.id).toBe(aliceTask.id);
   });
 
   it("re-pools and abandons the session when the chat runtime can no longer run the agent", () => {
@@ -2125,7 +2126,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Repool", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(codexA.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codexA.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_repool", workDir: "/tmp/repool" });
 
@@ -2137,7 +2138,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(followUp.runtimeId).toBeNull();
     expect(followUp.sessionId).toBeNull();
     expect(followUp.workDir).toBeNull();
-    expect(store.claimTask(codexB.id)?.id).toBe(followUp.id);
+    expect(claimWithCurrentRuntime(store, codexB.id)?.id).toBe(followUp.id);
   });
 
   it("truly abandons the provider session on a resume-unsafe chat retry", () => {
@@ -2147,12 +2148,12 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Unsafe", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(codexA.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codexA.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_unsafe", workDir: "/tmp/unsafe" });
 
     const second = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "again" });
-    expect(store.claimTask(codexA.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, codexA.id)?.id).toBe(second.id);
     store.startTask(second.id);
     // Resume-unsafe failure → retry must drop the session and re-pool, not
     // resume the failed session on codexA.
@@ -2162,7 +2163,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(retry.sessionId).toBeNull();
     expect(retry.workDir).toBeNull();
     // Any codex machine can pick it up (fresh session), including a different one.
-    expect(store.claimTask(codexB.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, codexB.id)?.id).toBe(retry.id);
   });
 
   it("atomically clears stale Chat lineage before creating one cold retry", () => {
@@ -2171,12 +2172,12 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Stale Chat", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "stale" });
     const first = store.sendChatMessage(session.id, { body: "first turn" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id);
     store.startTask(first.task.id);
     store.completeTask(first.task.id, { output: "first answer", sessionId: "sess_dead", workDir: "/tmp/dead" });
 
     const second = store.sendChatMessage(session.id, { body: "resume me" });
-    expect(store.claimTask(runtime.id)?.id).toBe(second.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.task.id);
     store.startTask(second.task.id);
     store.failTask(second.task.id, {
       error: "Stale provider session: no conversation found",
@@ -2218,11 +2219,11 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     ].entries()) {
       const session = store.createChatSession({ agentId: agent.id, title: failureReason });
       const first = store.sendChatMessage(session.id, { body: `warm ${index}` });
-      expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id);
       store.startTask(first.task.id);
       store.completeTask(first.task.id, { output: "warm", sessionId: `sess_keep_${index}`, workDir: `/tmp/keep-${index}` });
       const failed = store.sendChatMessage(session.id, { body: "try once" });
-      expect(store.claimTask(runtime.id)?.id).toBe(failed.task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(failed.task.id);
       store.startTask(failed.task.id);
       store.failTask(failed.task.id, { error: failureReason, failureReason });
       expect(store.listTasks().filter((task) => task.parentTaskId === failed.task.id)).toHaveLength(0);
@@ -2239,7 +2240,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Stale Limit", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "limit" });
     const warm = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "warm" });
-    expect(store.claimTask(runtime.id)?.id).toBe(warm.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(warm.id);
     store.startTask(warm.id);
     store.completeTask(warm.id, { output: "warm", sessionId: "sess_limit", workDir: "/tmp/limit" });
     const terminal = store.createTask({
@@ -2248,7 +2249,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       prompt: "last try",
       maxAttempts: 1,
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(terminal.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(terminal.id);
     store.startTask(terminal.id);
     store.failTask(terminal.id, {
       error: "Stale provider session: no conversation found",
@@ -2272,7 +2273,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     // The task is forced into the agent's workspace, not the caller-supplied one.
     expect(task.workspaceId).toBe("wsA");
     const attackerRuntime = store.registerRuntime({ id: "rt_attacker", name: "attacker", provider: "codex", workspaceId: "wsB", visibility: "public" });
-    expect(store.claimTask(attackerRuntime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, attackerRuntime.id)).toBeNull();
   });
 
   it("re-pools queued tasks pinned to a runtime when it is deleted or turned private", () => {
@@ -2282,7 +2283,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Drift", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(codexA.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codexA.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_drift", workDir: "/tmp/drift" });
     // Follow-up is pinned to codexA by session affinity while codexA is alive.
@@ -2294,7 +2295,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const repooled = store.getTask(followUp.id)!;
     expect(repooled.runtimeId).toBeNull();
     expect(repooled.sessionId).toBeNull();
-    expect(store.claimTask(codexB.id)?.id).toBe(followUp.id);
+    expect(claimWithCurrentRuntime(store, codexB.id)?.id).toBe(followUp.id);
   });
 
   it("preserves queued Chat placement when its Runtime historical visibility changes", () => {
@@ -2304,7 +2305,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Flip", provider: "codex", ownerId: "alice" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(shared.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, shared.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_flip", workDir: "/tmp/flip" });
     const followUp = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "again" });
@@ -2313,8 +2314,8 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     // Historical visibility does not invalidate the provider session's machine.
     store.updateRuntime(shared.id, { visibility: "private" });
     expect(store.getTask(followUp.id)?.runtimeId).toBe(shared.id);
-    expect(store.claimTask(codexOther.id)).toBeNull();
-    expect(store.claimTask(shared.id)).toMatchObject({ id: followUp.id, sessionId: "sess_flip", workDir: "/tmp/flip" });
+    expect(claimWithCurrentRuntime(store, codexOther.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, shared.id)).toMatchObject({ id: followUp.id, sessionId: "sess_flip", workDir: "/tmp/flip" });
   });
 
   it("keeps a NULL-workspace runtime from claiming other workspaces' tasks", () => {
@@ -2325,11 +2326,11 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(looseRuntime.workspaceId).toBeNull();
     const otherAgent = store.createAgent({ name: "Other ws", provider: "codex", workspaceId: "wsX" });
     store.createTask({ agentId: otherAgent.id, prompt: "in wsX" });
-    expect(store.claimTask(looseRuntime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, looseRuntime.id)).toBeNull();
     // A local-workspace task it can claim.
     const localAgent = store.createAgent({ name: "Local ws", provider: "codex" });
     const localTask = store.createTask({ agentId: localAgent.id, prompt: "in local" });
-    expect(store.claimTask(looseRuntime.id)?.id).toBe(localTask.id);
+    expect(claimWithCurrentRuntime(store, looseRuntime.id)?.id).toBe(localTask.id);
   });
 
   it("forces a task into its agent's workspace and rejects cross-workspace issue links", () => {
@@ -2371,7 +2372,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Dropper", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(codex.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "codex-session", workDir: "/tmp/codex" });
 
@@ -2388,7 +2389,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(next.runtimeId).toBeNull();
     expect(next.sessionId).toBeNull();
     expect(next.workDir).toBeNull();
-    expect(store.claimTask(claude.id)?.id).toBe(next.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(next.id);
   });
 
   it("promotes session metadata atomically — a sessionless task can't mislabel the old session's engine", () => {
@@ -2398,7 +2399,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Atomic", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(codex.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "codex-session", workDir: "/tmp/codex" });
     expect(store.getChatSession(session.id)?.sessionProvider).toBe("codex");
@@ -2409,7 +2410,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.updateAgent(agent.id, { provider: "claude" });
     const noSess = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "no session" });
     // (this claude task re-pools; the codex session is not resumable for claude)
-    expect(store.claimTask(claude.id)?.id).toBe(noSess.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(noSess.id);
     store.startTask(noSess.id);
     store.completeTask(noSess.id, { output: "done" }); // no sessionId
     const meta = store.getChatSession(session.id)!;
@@ -2425,7 +2426,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "FailClosed", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "i", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
-    expect(store.claimTask(codex.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(task.id);
     store.startTask(task.id);
     // Simulate a pre-snapshot in-flight task (rolling upgrade): clear provider.
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET provider = NULL WHERE id = ?", [task.id]);
@@ -2443,7 +2444,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const task = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
     // Claim snapshots the execution engine (codex) onto the task.
-    const claimed = store.claimTask(anyRuntime.id)!;
+    const claimed = claimWithCurrentRuntime(store, anyRuntime.id)!;
     expect(claimed.provider).toBe("codex");
     store.startTask(task.id);
     // Agent switches to claude WHILE the task runs, then it completes.
@@ -2473,7 +2474,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "Merger", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const task = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(oldRuntime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, oldRuntime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "ok", sessionId: "sess_merge", workDir: "/tmp/merge" });
     expect(store.getChatSession(session.id)?.sessionRuntimeId).toBe(oldRuntime.id);
@@ -2551,7 +2552,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     expect(store.getChatSession(session.id)?.sessionRuntimeId).toBeNull();
     const task = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "ok", sessionId: "sess_meta", workDir: "/tmp/meta" });
     const promoted = store.getChatSession(session.id)!;
@@ -2567,7 +2568,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const agent = store.createAgent({ name: "AnySwitcher", provider: "codex" });
     const session = store.createChatSession({ agentId: agent.id, title: "s" });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi" });
-    expect(store.claimTask(anyRuntime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, anyRuntime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "codex-session", workDir: "/tmp/codex" });
     // The session records the engine that produced it (codex), so a same-engine
@@ -2583,6 +2584,6 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(afterSwitch.sessionId).toBeNull();
     // Unpinned → any claude machine can take it (starting a fresh session).
     expect(afterSwitch.runtimeId).toBeNull();
-    expect(store.claimTask(claude.id)).not.toBeNull();
+    expect(claimWithCurrentRuntime(store, claude.id)).not.toBeNull();
   });
 });

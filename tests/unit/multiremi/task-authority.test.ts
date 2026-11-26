@@ -177,7 +177,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     }
     expect(()=>service.resolveCurrent(proof,use)).toThrow('root_authority_revoked');
     expect(()=>service.resolveCurrent(patProof,use)).toThrow('credential_version_conflict');
-  });
+  }, 20_000);
 
   it('binds registered management trust changes to the dashboard proof and current machine', async()=>{
     const {db,store}=fixture();

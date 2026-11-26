@@ -119,7 +119,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({ agent }, before ? 200 : 201);
   });
   app.get("/api/multiremi/agents/:id", (c) => {
-    const loaded = loadAgentForCurrentUser(c, store, c.req.param("id"));
+    const loaded = loadAgentForCurrentUser(c, store, c.req.param("id"), true);
     if (loaded instanceof Response) return loaded;
     return c.json({ agent: loaded.agent });
   });
@@ -260,7 +260,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
     }, 201);
   });
   app.get("/api/agents/:id", (c) => {
-    const loaded = loadAgentForCurrentUser(c, store, c.req.param("id"));
+    const loaded = loadAgentForCurrentUser(c, store, c.req.param("id"), true);
     if (loaded instanceof Response) return loaded;
     return c.json(agentCompatibilityResponse(store, loaded.agent, c));
   });

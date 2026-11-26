@@ -1,3 +1,4 @@
+import { requestHasRootRead } from './root-access.js';
 import { executionModelPolicyReason } from "@multiremi/contracts/execution-endpoint.js";
 import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
 import { executionEndpointGroupCatalog, blockExecutionGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
@@ -1161,15 +1162,15 @@ export function loadAgentForCurrentUser(
   c: Context,
   store: MultiremiStore,
   agentId: string,
+  allowRootRead = false,
 ): { agent: MultiremiAgent } | Response {
   const agent = store.getAgent(agentId);
   if (!agent) return c.json({ error: "agent not found" }, 404);
   const denied = denyCurrentUserWorkspaceAccess(c, store, agent.workspaceId);
+  if ((!denied && canCurrentUserAccessAgent(c, store, agent))
+    || (allowRootRead && store.hasWorkspace(agent.workspaceId) && requestHasRootRead(c, store, 'agent.read', 'agent', agent.id))) return { agent };
   if (denied) return denied;
-  if (!canCurrentUserAccessAgent(c, store, agent)) {
-    return c.json({ error: "you do not have access to this agent" }, 403);
-  }
-  return { agent };
+  return c.json({ error: "you do not have access to this agent" }, 403);
 }
 
 export function mergeAgentEnv(current: Record<string, string>, input: Record<string, string>): Record<string, string> {

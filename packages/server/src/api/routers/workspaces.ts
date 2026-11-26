@@ -1,3 +1,5 @@
+import { requestHasRootRead } from '../helpers/root-access.js';
+import { rootError } from './root.js';
 import { STORAGE_SETTINGS_DEFAULTS, storageThresholdErrors, validateStorageSettingsPatch } from "@multiremi/contracts/storage.js";
 import { MultiremiApiError } from "../helpers.js";
 import { validateCoAuthoredByName, validateCoAuthoredByEmail } from "@multiremi/contracts/co-authored-by";
@@ -205,9 +207,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/workspaces/:id", (c) => {
     const workspaceId = c.req.param("id");
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
-    if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (denied && !requestHasRootRead(c, store, 'workspace.read', 'workspace', workspace.id)) return denied;
     return c.json(workspaceResponse(workspace));
   });
   app.get("/api/workspaces/:id/runtime-provisions", (c) => {
@@ -511,43 +513,38 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       return c.json({ error: message }, 400);
     }
   });
-  app.put("/api/workspaces/:id", async (c) => {
-    const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"))
-      ?? requireWorkspaceAdmin(c, store, c.req.param("id"));
-    if (denied) return denied;
-    const body = sanitizeWorkspaceSettingsInput(
-      await readJson<Partial<CreateWorkspaceInput>>(c),
-    );
+  app.on(["PUT", "PATCH"], "/api/workspaces/:id", async (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId) ?? requireWorkspaceAdmin(c, store, workspaceId);
+    const proof = denied && store.hasWorkspace(workspaceId) ? c.get('multiremiRootProof')?.() : null;
+    if (denied && !proof) return denied;
+    const body = sanitizeWorkspaceSettingsInput(await readJson<Partial<CreateWorkspaceInput>>(c));
     if (hasOwn(body, "settings")) {
-      if(body.settings && hasOwn(body.settings,'issueTopics')) {
-        const humanDenied=requireHumanWorkspaceAdmin(c,store,c.req.param('id'));if(humanDenied)return humanDenied;
+      if (denied) return denied;
+      if (body.settings && hasOwn(body.settings, 'issueTopics')) {
+        const humanDenied = requireHumanWorkspaceAdmin(c, store, workspaceId);
+        if (humanDenied) return humanDenied;
       }
-      const adminDenied = requireWorkspaceAdmin(c, store, c.req.param("id"));
+      const adminDenied = requireWorkspaceAdmin(c, store, workspaceId);
       if (adminDenied) return adminDenied;
     }
     if (hasOwn(body, "repos")) {
       return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
     }
-    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
-  });
-  app.patch("/api/workspaces/:id", async (c) => {
-    const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"))
-      ?? requireWorkspaceAdmin(c, store, c.req.param("id"));
-    if (denied) return denied;
-    const body = sanitizeWorkspaceSettingsInput(
-      await readJson<Partial<CreateWorkspaceInput>>(c),
-    );
-    if (hasOwn(body, "settings")) {
-      if(body.settings && hasOwn(body.settings,'issueTopics')) {
-        const humanDenied=requireHumanWorkspaceAdmin(c,store,c.req.param('id'));if(humanDenied)return humanDenied;
-      }
-      const adminDenied = requireWorkspaceAdmin(c, store, c.req.param("id"));
-      if (adminDenied) return adminDenied;
+    if (!proof) return c.json(workspaceResponse(store.updateWorkspace(workspaceId, body)));
+    const use = { action: 'workspace.update', actualTarget: { type: 'workspace', id: workspaceId }, use: 'write' };
+    try {
+      const plan = store.rootManagement.plan(proof, use);
+      const updated = store.withAuthorizedMutation(proof, use, { ...plan, workspaceIds: [workspaceId] }, (tx, actor) => {
+        store.rootManagement.requireMutationActor(tx, actor, use);
+        return store.updateWorkspace(workspaceId, body);
+      });
+      return c.json(workspaceResponse(updated));
+    } catch (error) {
+      const response = rootError(c, error);
+      if (response) return response;
+      throw error;
     }
-    if (hasOwn(body, "repos")) {
-      return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
-    }
-    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
   });
   app.get("/api/workspaces/:id/repos", async (c) => {
     const workspaceId = c.req.param("id");

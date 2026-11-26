@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { createLogger } from "../../logger";
 import { getCurrentWsId } from "../../platform/workspace-storage";
+import { deliveryTargetsOptions } from "../../autopilots/queries";
 import { chatKeys } from "../../chat/queries";
 import { chatWorkSessionKeys } from "../../chat/work-sessions";
 import { issueKeys } from "../../issues/queries";
@@ -87,6 +88,12 @@ export function applyChatDoneToCache(
  * owns message content and its realtime subscription.
  */
 export function createChatHandlers({ qc }: SyncContext): SyncModule {
+  const socketWorkspaceId = getCurrentWsId();
+  const refreshTargets = (payload: { workspace_id?: string }) => {
+    const id = payload.workspace_id ?? socketWorkspaceId ?? getCurrentWsId();
+    if (id) void qc.resetQueries(deliveryTargetsOptions(id));
+    return id === getCurrentWsId();
+  };
   const invalidateIssueDecisionSurfaces = () => {
     const wsId = getCurrentWsId();
     if (!wsId) return;
@@ -397,11 +404,13 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       "chat:session_updated": (p) => {
         const payload = p as {
           chat_session_id: string;
+          workspace_id?: string;
           title?: string;
           updated_at?: string;
           status?: ChatSession["status"];
           pinned?: boolean;
         };
+        if (!refreshTargets(payload)) return;
         chatWsLogger.info("chat:session_updated (global)", {
           chat_session_id: payload.chat_session_id,
           titleLength: payload.title?.length,
@@ -428,7 +437,8 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
 
       // A confirmed hard delete removes cached history and the selected draft.
       "chat:session_deleted": (p) => {
-        const payload = p as { chat_session_id: string };
+        const payload = p as { chat_session_id: string; workspace_id?: string };
+        if (!refreshTargets(payload)) return;
         chatWsLogger.info("chat:session_deleted (global)", payload);
         const id = getCurrentWsId();
         if (id) {

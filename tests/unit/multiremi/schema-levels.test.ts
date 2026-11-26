@@ -32,12 +32,12 @@ describe('schema compatibility protocol', () => {
     const database = db();
     expect(readSchemaLevels(database)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(database);
-    expect(readSchemaLevels(database)).toEqual({ expandLevel: 5, contractLevel: 0 });
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: 6, contractLevel: 0 });
     runMigrations(database);
-    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(5);
-    database.exec('UPDATE multiremi_schema_meta SET expand_level=6, contract_level=6');
+    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(6);
+    database.exec('UPDATE multiremi_schema_meta SET expand_level=7, contract_level=7');
     const before = database.query('SELECT total_changes() AS count').get();
-    expect(() => runMigrations(database)).toThrow('contract_level=6 exceeds code maxLevel=5');
+    expect(() => runMigrations(database)).toThrow('contract_level=7 exceeds code maxLevel=6');
     expect(database.query('SELECT total_changes() AS count').get()).toEqual(before);
   });
   it('requires maintenance for populated pre-protocol databases and never replays enrolled history', () => {
@@ -64,11 +64,11 @@ describe('schema compatibility protocol', () => {
     database.exec("DELETE FROM multiremi_schema_steps WHERE level>=2");
     database.exec("UPDATE multiremi_schema_meta SET expand_level=1");
     runStartupMigrations(database);
-    expect(readSchemaLevels(database)).toEqual({ expandLevel: 5, contractLevel: 0 });
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: 6, contractLevel: 0 });
     expect(database.query("SELECT name FROM sqlite_master WHERE name='multiremi_live_terms'").get()).not.toBeNull();
     expect(database.query("SELECT id FROM multiremi_schema_steps WHERE level=2").get().id).toBe('20261118_live_term_fence');
   });
-  it('upgrades existing bot rows and accepts old writers after level 4', () => {
+  it('upgrades existing bot rows and accepts old writers after level 5', () => {
     verifyFeishuWakeWordUpgrade(db());
   }, 30_000);
   it('upgrades level 2 planned restart schema atomically and preserves old drains', () => {

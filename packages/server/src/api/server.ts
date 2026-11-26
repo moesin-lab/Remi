@@ -37,6 +37,7 @@ import { registerCloudRuntimeRoutes } from "./routers/cloud-runtime.js";
 import { registerCloudBillingRoutes } from "./routers/cloud-billing.js";
 import { registerMeRoutes } from "./routers/me.js";
 import { registerWorkspaceRoutes } from "./routers/workspaces.js";
+import { registerSystemPromptRoutes } from "./routers/system-prompts.js";
 import { registerScmRoutes } from "./routers/scm.js";
 import { registerFeishuCompatRoutes } from "./routers/feishu-compat.js";
 import { registerMessagingRoutes } from "./routers/messaging.js";
@@ -963,6 +964,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   });
   registerMeRoutes(app, deps);
   registerWorkspaceRoutes(app, deps);
+  registerSystemPromptRoutes(app, deps);
   registerScmRoutes(app, deps);
   registerMessagingRoutes(app, deps);
   registerFeishuCompatRoutes(app, deps);

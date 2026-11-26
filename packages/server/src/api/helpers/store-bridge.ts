@@ -199,7 +199,11 @@ export function publishAgentLifecycleEvent(
   store: MultiremiStore,
   type: "agent:created" | "agent:status" | "agent:archived" | "agent:restored",
   agent: MultiremiAgent,
+  previousWorkspaceId?: string,
 ): void {
+  if (previousWorkspaceId && previousWorkspaceId !== agent.workspaceId) {
+    publishWorkspaceEvent(c, store, "autopilot:delivery_targets_changed", previousWorkspaceId, { workspace_id: previousWorkspaceId });
+  }
   publishWorkspaceEvent(c, store, type, agent.workspaceId, {
     agent: agentBroadcastCompatibilityResponse(store, agent),
   });

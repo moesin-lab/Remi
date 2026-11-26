@@ -1,6 +1,11 @@
+import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
+import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
+import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
+import { fitTaskOfferToBudget } from "@multiremi/api/daemon-protocol/offer-budget.js";
 import { currentBackgroundTerm, withBackgroundTerm, StaleLiveTermError } from "@shared/db/live-term.js";
 import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { createResponsibleTestIssue } from './helpers.js';
+import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
 import { DAEMON_OFFER_SWEEP_MS, DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
@@ -8,6 +13,10 @@ import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.
 import { DAEMON_MIN_CLI_VERSION, DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiTaskWithAgent } from "@multiremi/contracts/types.js";
 import { createLocalStore, resetMultiremiTestEnv, db } from "./helpers.js";
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 
 const layers: DaemonProtocolLayer[] = [];
 afterEach(async () => {
@@ -40,14 +49,20 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return sendStatus ?? text.length; }, close() {} },
     { accessToken: null, masterToken: true });
   const send = (t: string, p: unknown, fields: Record<string, unknown> = {}) => session.handleMessage(JSON.stringify({ v: 2, t, p, ...fields }));
-  const hello = async () => {
-    await send("hello", { protocol: 2, daemon_id: "dmn_offer", cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer"],
+  const hello = async (caps = ["offer"]) => {
+    await send("hello", { protocol: 2, daemon_id: "dmn_offer", cli_version: DAEMON_MIN_CLI_VERSION, caps,
       runtimes: runtimeIds.map(runtime_id => ({ runtime_id, provider: "claude", max_concurrency: 1, active_task_ids: [] })) });
+    if (caps.includes('prompt.policy.adopt.v1')) for (const rt of runtimeIds) await send('runtime.ready',{active_task_ids:[]},{rt});
     await layer.drain();
   };
   const task = (index = 0, prompt = "no-op") => store.createTask({ agentId: agentIds[index]!, prompt, maxAttempts: 1 });
   const offered = () => frames.filter(frame => frame.t === "task.offer");
   const accept = async (frame = offered().at(-1)!) => {
+    if (frame.p.offer_generation) {
+      await send('task.offer_adopt',{workspace_id:'local',daemon_id:'dmn_offer',runtime_id:frame.rt,attempt_id:frame.p.attempt_id,offer_generation:frame.p.offer_generation,
+        receipt_id:`receipt-${frame.seq}`,content_hash:store.getAttemptSystemPrompt(frame.p.attempt_id)!.contentHash},
+        {rt:frame.rt,id:`adopt-${frame.seq}`});
+    }
     await send("res", { ok: true }, { re: String(frame.seq), ack: frame.seq });
     await layer.drain();
   };
@@ -56,6 +71,67 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  it('recovers an adopted dispatch only for the exited executor receipt, with a new attempt for retry', async () => {
+    const h = fixture();
+    const agentId = h.agentIds[0]!;
+    const issue = createResponsibleTestIssue(h.store,{title:'Lost executor',assigneeType:'agent',assigneeId:agentId});
+    const task = h.store.createTask({agentId,issueId:issue.id,prompt:'crash before provider start',maxAttempts:2});
+    await h.hello(['offer','prompt.policy.adopt.v1']);
+    const offer = h.offered()[0]!;
+    await h.accept(offer);
+    const proof = {workspace_id:'local',daemon_id:'dmn_offer',runtime_id:offer.rt,attempt_id:task.id,offer_generation:offer.p.offer_generation,
+      receipt_id:`receipt-${offer.seq}`,content_hash:h.store.getAttemptSystemPrompt(task.id)!.contentHash};
+    const ready = async (receipt:typeof proof,active:string[]) => {
+      await h.send('runtime.ready',{active_task_ids:active,exited_launches:[receipt]},{rt:offer.rt});
+      await h.layer.drain();
+    };
+    await ready({...proof,receipt_id:'unrelated'},[]);
+    await ready(proof,[task.id]);
+    expect(h.store.getTask(task.id)?.status).toBe('dispatched');
+    await ready(proof,[]);
+    expect(h.store.getTask(task.id)?.failureReason).toBe('runtime_recovery');
+    const attempts = h.store.listTurnAttempts(offer.p.turn_id);
+    expect(attempts).toHaveLength(2);
+    await ready(proof,[]);
+    expect(h.store.listTurnAttempts(offer.p.turn_id)).toHaveLength(2);
+  });
+  it('fences a superseded term, rolls back adoption and races two SQLite writers', async () => {
+    const h = fixture(undefined,1,undefined,false,false);
+    const task = h.task();
+    const rt = h.runtimeIds[0]!;
+    const generation = crypto.randomUUID();
+    h.store.claimTask(rt,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:generation});
+    h.store.recordTaskOffered(task.id,rt,undefined,generation);
+    const identity = {attempt_id:task.id,runtime_id:rt,workspace_id:'local',daemon_id:'dmn_offer',receipt_id:crypto.randomUUID(),offer_generation:generation,content_hash:h.store.getAttemptSystemPrompt(task.id)!.contentHash};
+    const term = h.store.activateBackgroundTerm('A',()=>{});
+    h.store.activateBackgroundTerm('B',()=>{});
+    expect(()=>withBackgroundTerm(term,()=>h.store.systemPromptsRepo().adoptOffer(identity))).toThrow(StaleLiveTermError);
+    expect(()=>db!.transaction(()=>{ expect(h.store.systemPromptsRepo().adoptOffer(identity)).toBe(true); throw new Error('rollback'); })()).toThrow('rollback');
+    expect(h.store.systemPromptsRepo().offerStatus(identity)).toBe('proposed');
+    expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
+    const directory = mkdtempSync(join(tmpdir(),'mul3-sqlite-race-'));
+    const file = join(directory,'race.db');
+    try {
+      db!.exec('CREATE TABLE system_prompt_test_barrier(batch TEXT, participant TEXT, PRIMARY KEY(batch,participant))');
+      writeFileSync(file,db!.serialize());
+      const workers = ['adopt','revoke'].map((operation,participant) => Bun.spawn([process.execPath,new URL('../../fixtures/system-prompt-pg-worker.ts',import.meta.url).pathname],{
+        stdout:'pipe',stderr:'pipe',env:{...process.env,SYSTEM_PROMPT_TEST_SQLITE_FILE:file,
+          SYSTEM_PROMPT_TEST_JOB:JSON.stringify({operation,participant:String(participant),batch:'race',workspaceId:'local',identity})}}));
+      try {
+        const results = await Promise.all(workers.map(async worker => {
+          const [out,err,exit] = await Promise.all([new Response(worker.stdout).text(),new Response(worker.stderr).text(),worker.exited]);
+          expect({exit,err}).toEqual({exit:0,err:''});
+          return JSON.parse(out.slice(out.indexOf('SYSTEM_PROMPT_TEST_RESULT:')+'SYSTEM_PROMPT_TEST_RESULT:'.length)).status;
+        }));
+        expect([...results].sort()).toEqual([200,409]);
+        const verify = openSqliteDatabase(file,{readonly:true});
+        try {
+          const row = verify.query('SELECT binding_json FROM multiremi_attempt_system_prompts WHERE task_id=?').get(task.id) as {binding_json:string};
+          expect(JSON.parse(row.binding_json).dispatch.state).toBe(results[0] === 200 ? 'adopted' : 'revoked');
+        } finally {verify.close();}
+      } finally { for (const worker of workers) if (worker.exitCode === null) worker.kill(); }
+    } finally {rmSync(directory,{force:true,recursive:true});}
+  },30_000);
   for (const fenced of [false, true]) {
     for (const accepted of [false, true]) {
       it(`persists an ${accepted ? "accepted" : "explicitly rejected"} offer with ${fenced ? "an active" : "no"} term`, async () => {
@@ -126,7 +202,7 @@ describe("A-3 task offers", () => {
     expect(losses).toBe(1);
   });
 
-  it("fences offered_at if takeover happens inside the transport send", async () => {
+  it("persists send intent before takeover inside the transport send", async () => {
     const h = fixture(undefined, 1, undefined, false, false);
     const task = h.task();
     let losses = 0;
@@ -140,9 +216,9 @@ describe("A-3 task offers", () => {
     });
     try {
       await h.hello();
-      // The send precedes takeover, but its SQL continuation must not commit.
       expect(h.offered()).toHaveLength(1);
-      expect(h.store.getTask(task.id)?.offeredAt).toBeNull();
+      expect(h.store.getTask(task.id)?.offeredAt).toBeString();
+      expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
       expect(losses).toBe(1);
     } finally { send.mockRestore(); }
   });
@@ -348,7 +424,7 @@ describe("A-3 task offers", () => {
   }
 
   it("does not clear a timed-out offer cooldown on changed heartbeat", async () => {
-    const h = fixture(); const task = h.task(); await h.hello();
+    const h = fixture(); const task = h.task(); await h.hello(['offer','prompt.policy.adopt.v1']);
     await h.send("hb", { active_task_count: 1 }); await h.layer.drain();
     h.clock.advance(DAEMON_OFFER_TIMEOUT_MS); await h.layer.drain();
     expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", acceptedAt: null });
@@ -361,7 +437,7 @@ describe("A-3 task offers", () => {
   });
 
   it("keeps disconnect cooldown through a new hello and changed heartbeat", async () => {
-    const h = fixture(); const task = h.task(); await h.hello();
+    const h = fixture(); const task = h.task(); await h.hello(['offer','prompt.policy.adopt.v1']);
     h.session.handleSocketClose();
     expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", acceptedAt: null });
     expect(h.store.getTask(task.id)?.offeredAt).toBeString();
@@ -546,7 +622,7 @@ describe("A-3 task offers", () => {
   });
 
   it("requeues an unanswered offer at 30s and cools that runtime for another 30s", async () => {
-    const h = fixture(); const task = h.task(); await h.hello();
+    const h = fixture(); const task = h.task(); await h.hello(['offer','prompt.policy.adopt.v1']);
     h.clock.advance(29_999); expect(h.store.getTask(task.id)?.status).toBe("dispatched");
     h.clock.advance(1); expect(h.store.getTask(task.id)?.status).toBe("queued");
     h.offers.kick(h.runtimeIds[0]); await h.layer.drain(); expect(h.offered()).toHaveLength(1);
@@ -566,18 +642,18 @@ describe("A-3 task offers", () => {
   });
 
   it("disconnect requeues unaccepted work, but preserves accepted work and drops its lease", async () => {
-    const h = fixture(); const task = h.task(); await h.hello(); h.session.handleSocketClose();
+    const h = fixture(); const task = h.task(); await h.hello(['offer','prompt.policy.adopt.v1']); h.session.handleSocketClose();
     expect(h.store.getTask(task.id)?.status).toBe("queued");
     expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
   });
 
-  it("holds a dispatched lease after accept, and keeps 90s recovery as the final fallback", async () => {
+  it("does not reissue a legacy dispatch after disconnect and loss of its process-local lease", async () => {
     const h = fixture(); const task = h.task(); await h.hello(); await h.accept();
     db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
     expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
     h.session.handleSocketClose();
     expect(h.store.getTask(task.id)?.status).toBe("dispatched");
-    expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
+    expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
   });
 
   it("folds a >1MiB request without failing the task", async () => {
@@ -633,8 +709,8 @@ describe("A-3 task offers", () => {
     expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
     expect(h.store.getTask(task.id)).toMatchObject({ status: "dispatched", executionFingerprint: stale });
     h.session.handleSocketClose();
-    expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
-    expect(h.store.getTask(task.id)?.executionFingerprint).not.toBe(stale);
+    expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
+    expect(h.store.getTask(task.id)?.executionFingerprint).toBe(stale);
   });
 
   it("does not claim on ordinary ack/drain without a blocked offer, and enqueue still offers immediately", async () => {
@@ -685,5 +761,223 @@ describe("A-3 task offers", () => {
     const h = fixture(); await h.hello(); const task = h.task();
     await h.send("runtime.ready", { active_task_ids: [] }, { rt: "rt_foreign" }); await h.layer.drain();
     expect(h.store.getTask(task.id)?.status).toBe("queued");
+  });
+});
+
+
+describe("System Prompt policy claim and offer", () => {
+  const actor = { type: "human" as const, operatorId: "local", userId: "local", displayName: "Tester" };
+  const edit = (store: ReturnType<typeof createLocalStore>, common: string, requestId: string) =>
+    store.editSystemPrompt("local", { expectedRevision: store.getSystemPrompt("local").document.revision,
+      requestId, content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common } }, actor);
+
+  it("permits baseline defaults on old daemons, but leaves custom policy queued with a diagnostic before claim", async () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    edit(h.store, "CUSTOM POLICY", "custom");
+    h.offers.start();
+    await h.hello();
+    expect(h.offered()).toHaveLength(0);
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: "daemon_capability_required:prompt.policy.adopt.v1" });
+    expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+    const claim = h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true });
+    expect(claim?.id).toBe(task.id);
+    expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "custom", legacyCompatible: false,
+      content: expect.objectContaining({ common: "CUSTOM POLICY" }) });
+  });
+
+  it("preserves device waits, diagnoses only eligible tasks, and clears its own wait on reset even while retry is deferred", () => {
+    const h = fixture(undefined, 2, undefined, false, false);
+    const device = h.task(0);
+    const other = h.task(1);
+    edit(h.store, "CUSTOM", "policy");
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET wait_reason = ? WHERE id = ?", ["等待项目设备：review", device.id]);
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyCapableRuntimeIds: [h.runtimeIds[1]!] })).toBeNull();
+    expect(h.store.getTask(device.id)?.waitReason).toBe("等待项目设备：review");
+    expect(h.store.getTask(other.id)?.waitReason).toBeNull();
+    expect(h.store.claimTask(h.runtimeIds[1]!)).toBeNull();
+    expect(h.store.getTask(other.id)?.waitReason).toBe("daemon_capability_required:prompt.policy.adopt.v1");
+    mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET next_retry_at = ? WHERE id = ?", ["2099-01-01T00:00:00Z", other.id]);
+    h.store.resetSystemPrompt("local", { expectedRevision: 2, requestId: "reset" }, actor);
+    expect(h.store.claimTask(h.runtimeIds[1]!,{policyProtocol:'legacy'})).toBeNull();
+    expect(h.store.getTask(other.id)).toMatchObject({ status: "queued", waitReason: null });
+    expect(h.store.getTask(device.id)?.waitReason).toBe("等待项目设备：review");
+  });
+
+  it("leaves a shared queue free of capability warnings when another eligible runtime supports policy", () => {
+    const h = fixture(undefined, 2, undefined, false, false);
+    const agent = h.store.createAgent({ name: "shared", provider: "claude", workspaceId: "local" });
+    const task = h.store.createTask({ agentId: agent.id, prompt: "shared" });
+    edit(h.store, "CUSTOM", "edit");
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyCapableRuntimeIds: [h.runtimeIds[1]!] })).toBeNull();
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: null });
+    expect(h.store.claimTask(h.runtimeIds[1]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+  });
+
+  it("diagnoses 65 independent lanes in bounded pages, including tied keys and a finite first round", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const runtime = h.runtimeIds[0]!;
+    const ids = Array.from({ length: 65 }, (_, index) => {
+      const agent = h.store.createAgent({ name: `page-${index}`, provider: "claude", runtimeId: runtime, workspaceId: "local" });
+      const task = h.store.createTask({ agentId: agent.id, prompt: "page", priority: index });
+      db!.run("UPDATE multiremi_turn_attempts SET created_at=? WHERE id=?", ["2020-01-01T00:00:00.000Z", task.id]);
+      return task.id;
+    });
+    edit(h.store, "CUSTOM", "bounded");
+    const marked = () => ids.filter(id => h.store.getTask(id)?.waitReason?.startsWith("daemon_capability_required:prompt.policy")).length;
+    expect(h.store.claimTask(runtime)).toBeNull();
+    expect(marked()).toBe(32);
+    const later = h.task();
+    expect(h.store.claimTask(runtime)).toBeNull();
+    expect(marked()).toBe(64);
+    expect(h.store.claimTask(runtime)).toBeNull();
+    expect(marked()).toBe(65);
+    expect(h.store.getTask(later.id)?.waitReason).toBeNull();
+    mutateExecutionFixture(db!,"UPDATE multiremi_turn_execution_records SET next_retry_at=? WHERE workspace_id=? AND status='queued'",['2099-01-01T00:00:00Z','local']);
+    h.store.resetSystemPrompt('local',{expectedRevision:2,requestId:'bounded-reset'},actor);
+    expect(marked()).toBe(65);
+    for (const remaining of [33,1,0]) {
+      expect(h.store.claimTask(runtime,{policyProtocol:'legacy'})).toBeNull();
+      expect(marked()).toBe(remaining);
+    }
+    mutateExecutionFixture(db!,"UPDATE multiremi_turn_execution_records SET next_retry_at=NULL WHERE workspace_id=? AND status='queued'",['local']);
+    expect(h.store.claimTask(runtime, { supportsPromptPolicy: true })?.id).toBe(ids.at(-1)!);
+  });
+
+  it("rebinds after transport timeout and ignores the previous sequence's late receipt", async () => {
+    const h = fixture();
+    const task = h.task();
+    await h.hello(["offer", "prompt.policy.adopt.v1"]);
+    const first = h.offered()[0]!;
+    expect(h.store.getTask(task.id)?.offeredAt).toBeString();
+    edit(h.store, "timeout rebind", "new");
+    h.clock.advance(DAEMON_OFFER_TIMEOUT_MS); await h.layer.drain();
+    h.clock.advance(DAEMON_OFFER_COOLDOWN_MS); await h.layer.drain();
+    expect(h.offered()).toHaveLength(2);
+    expect(h.store.getAttemptSystemPrompt(task.id)?.content.common).toBe("timeout rebind");
+    await h.accept(first);
+    expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
+    await h.accept();
+    expect(h.store.getTask(task.id)?.acceptedAt).toBeString();
+  });
+
+  it("freezes atomically at claim, rebinds the same rejected offer id, and preserves accepted/running snapshots", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    const first = h.store.claimTask(h.runtimeIds[0]!)!;
+    const baseline = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(baseline).toMatchObject({ mode: "default", legacyCompatible: true, versionId: null });
+    edit(h.store, "AFTER CLAIM", "edit1");
+    expect(daemonTaskClaimResponse(h.store, first).system_prompt_policy).toEqual(baseline);
+    expect(h.store.requeueTaskOffer(task.id, h.runtimeIds[0]!, "rejected")).toBe(true);
+    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+    const rebound = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(rebound.content.common).toBe("AFTER CLAIM");
+    h.store.recordTaskOffered(task.id, h.runtimeIds[0]!);
+    h.store.acceptTaskOffer(task.id, h.runtimeIds[0]!);
+    h.store.startTask(task.id);
+    edit(h.store, "AFTER START", "edit2");
+    expect(h.store.getAttemptSystemPrompt(task.id)).toEqual(rebound);
+    expect(daemonTaskClaimResponse(h.store, h.store.getTaskWithAgent(task.id)!).system_prompt_policy).toEqual(rebound);
+  });
+
+  it.each(["stale", "unknown", "rejected"] as const)("rebinds a sent preaccept dispatch after %s and fences late responses", outcome => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    const runtime = h.runtimeIds[0]!;
+    h.store.claimTask(runtime, { policyProtocol: 'adopt', supportsPromptPolicy:true, offerGeneration: "first" });
+    expect(h.store.recordTaskOffered(task.id, runtime, outcome === 'stale' ? '2000-01-01T00:00:00.000Z' : undefined, "first")).toBe(true);
+    expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
+    const first = h.store.getAttemptSystemPrompt(task.id)!;
+    edit(h.store, "STALE RECLAIM POLICY", "stale-edit");
+    if (outcome === "stale") h.store.recoverOrphans(runtime, []);
+    else expect(h.store.requeueTaskOffer(task.id, runtime, outcome, "first")).toBe(true);
+    expect(h.store.claimTask(runtime, { policyProtocol:'adopt', supportsPromptPolicy: true, offerGeneration: "second" })?.id).toBe(task.id);
+    expect(h.store.recordTaskOffered(task.id, runtime, undefined, "second")).toBe(true);
+    expect(h.store.acceptTaskOffer(task.id, runtime, undefined, "first")).toBe(false);
+    expect(h.store.requeueTaskOffer(task.id, runtime, "unknown", "first")).toBe(false);
+    const rebound = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(rebound.content.common).toBe("STALE RECLAIM POLICY");
+    expect(rebound).not.toEqual(first);
+    expect(rebound.legacyCompatible).toBe(false);
+    const identity = {workspace_id:'local',daemon_id:'dmn_offer',runtime_id:runtime,attempt_id:task.id,offer_generation:'second',content_hash:rebound.contentHash,receipt_id:'local-receipt'};
+    expect(h.store.systemPromptsRepo().adoptOffer({...identity,offer_generation:'first'})).toBe(false);
+    expect(h.store.systemPromptsRepo().adoptOffer(identity)).toBe(true);
+    expect(h.store.systemPromptsRepo().adoptOffer(identity)).toBe(true);
+    expect(h.store.systemPromptsRepo().adoptOffer({...identity,receipt_id:'replacement-receipt'})).toBe(false);
+    expect(h.store.requeueTaskOffer(task.id,runtime,'unknown','second')).toBe(false);
+    edit(h.store, "AFTER RECEIPT", "accepted");
+    h.store.releaseTaskOfferLease(task.id);
+    db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
+    expect(h.store.claimTask(runtime, { supportsPromptPolicy: true })).toBeNull();
+    expect(h.store.getAttemptSystemPrompt(task.id)).toEqual(rebound);
+    h.store.resetSystemPrompt("local", { expectedRevision: 3, requestId: "reset" }, actor);
+    db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
+    expect(h.store.claimTask(runtime)).toBeNull();
+    expect(h.store.getAttemptSystemPrompt(task.id)).toEqual(rebound);
+  });
+
+  it("rolls back both the claim and its binding if binding persistence fails", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    const repo = h.store.systemPromptsRepo();
+    const bind = repo.bindAttemptSystemPrompt.bind(repo);
+    const probe = spyOn(repo, "bindAttemptSystemPrompt").mockImplementation((...args) => {
+      bind(...args);
+      throw new Error("injected post-bind failure");
+    });
+    try {
+      expect(() => h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })).toThrow("injected post-bind failure");
+      expect(h.store.getTask(task.id)?.status).toBe("queued");
+      expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+    } finally { probe.mockRestore(); }
+    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+  });
+
+  it("keeps reset-to-baseline compatible with old daemons", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    h.store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "baseline-reset" }, actor);
+    expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
+    expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "default", legacyCompatible: true,
+      defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision });
+  });
+
+  for (const reset of [false, true]) {
+    it(`requires policy capability after server default upgrades for ${reset ? "reset" : "never-customized"} workspaces`, () => {
+      const h = fixture(undefined, 1, undefined, false, false);
+      const task = h.task();
+      if (reset) h.store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "reset" }, actor);
+      const repo = h.store.systemPromptsRepo();
+      // Dependency-injected catalog simulates a later server release without changing the frozen legacy baseline.
+      const catalog = { ...CURRENT_SYSTEM_PROMPT_DEFAULT, revision: "future-server-default",
+        content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common: "NEW SERVER DEFAULT" } };
+      const probe = spyOn(repo as any, "catalog").mockReturnValue(catalog);
+      try {
+        expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
+        expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: "daemon_capability_required:prompt.policy.adopt.v1" });
+        expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+        expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "default", defaultRevision: catalog.revision,
+          content: catalog.content, legacyCompatible: false });
+      } finally { probe.mockRestore(); }
+    });
+  }
+
+  it("preserves the entire frozen subtree through ordinary and emergency offer compression", () => {
+    const content = { common: "😀".repeat(7_000), code_delivery: "", chat_delivery: "", issue_delivery: "", finishing: "" };
+    const binding = { format: 1, workspaceId: "local", documentId: "doc", versionId: "version", versionNumber: 2,
+      mode: "custom", defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision, legacyCompatible: false,
+      content, contentHash: hashSystemPromptContent(content) };
+    const payload = { turn_id: "turn", system_prompt_policy: binding, agent: { id: "agent", instructions: "x".repeat(1_200_000) } };
+    const fitted = fitTaskOfferToBudget(payload, "runtime", 16 * 1024);
+    expect(fitted.response.system_prompt_policy).toEqual(binding);
+    expect(fitted.report.steps).toContain("strings");
+    // Protected content itself can exceed a soft budget; it must never be corrupted to meet one.
+    expect(fitted.report.bytes).toBeGreaterThan(16 * 1024);
+    const emergency = { turn_id: "turn", system_prompt_policy: binding,
+      execution_connection: { id: "conn", token: "t".repeat(1_100_000) } };
+    const result = fitTaskOfferToBudget(emergency, "runtime", 16 * 1024);
+    expect(result.report.steps).toContain("protected_strings");
+    expect(result.response.system_prompt_policy).toEqual(binding);
   });
 });

@@ -44,11 +44,20 @@ export type AutopilotCompatibilityUpdateInput = {
   issue_creation_restricted?: boolean;
 };
 
+export function autopilotWarnings(autopilot: MultiremiAutopilot): Array<{ code: string; message: string }> {
+  return autopilot.executionMode === "run_only" && autopilot.deliveryChatSessionId == null
+    ? [{
+      code: "autopilot_delivery_unbound",
+      message: "Reports are saved only in the internal Chat. Open the Autopilot details to configure delivery.",
+    }]
+    : [];
+}
+
 export function autopilotResponse(
   autopilot: MultiremiAutopilot,
   options: { redactPolicy?: boolean } = {},
 ): Record<string, unknown> {
-  const response: Record<string, unknown> = { ...autopilot };
+  const response: Record<string, unknown> = { ...autopilot, warnings: autopilotWarnings(autopilot) };
   if (options.redactPolicy) {
     delete response.issueCreationRestricted;
     delete response.issue_creation_restricted;
@@ -77,6 +86,7 @@ export function autopilotCompatibilityResponse(
     session_policy: autopilot.sessionPolicy,
     workspace_policy: autopilot.workspacePolicy,
     delivery_chat_session_id: autopilot.deliveryChatSessionId ?? null,
+    warnings: autopilotWarnings(autopilot),
     issue_title_template: autopilot.issueTitleTemplate,
     created_by_type: autopilot.createdByType,
     created_by_id: autopilot.createdById,

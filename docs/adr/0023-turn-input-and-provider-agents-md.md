@@ -23,7 +23,7 @@
 2. **指令文件。** daemon 在每次启动 provider 之前写会话 provider home 里的 `AGENTS.md`：Claude 是 `CLAUDE_CONFIG_DIR`，Codex 是 `CODEX_HOME`，Antigravity 是 `GEMINI_HOME`；Grok 使用 Remi 私有 provider home，不替换原生 `GROK_HOME`。
    - Claude 只读配置目录里的 `CLAUDE.md`，单独放 `AGENTS.md` 会被忽略，因此再写一个只有 `@AGENTS.md` 的 `CLAUDE.md`。Antigravity server 不读这个文件，由 adapter 在新建、加载、续接会话时把它追加到系统提示词。Grok adapter 在 `initialize._meta.rules` 中合并已有系统提示词与该 `AGENTS.md`，不依赖 Grok 原生发现 Remi 私有 Home。
    - 只写 daemon 自己的 provider home，从不写用户的工作目录或本地项目目录。文件先写临时文件再改名替换，内容没变就不写。第一行是 Remi 的标记注释；内容为空时只删除带这个标记的文件，不碰别人的文件；遇到软链接或硬链接一律拒绝写入。
-   - 全文上限 48 KiB：Runtime 工作区本地上下文仍限 24 KiB，Remi 的部分最多 32 KiB。超出时先截短用户自己写的部分（Agent instructions、工作区提示词、Issue 描述、Project 说明等），每段截短处写明读取全文的命令。
+   - 全文上限 48 KiB：Runtime 工作区本地上下文仍限 24 KiB，Remi 的部分最多 32 KiB。超出时先截短用户自己写的部分（System Prompt 槽位、Agent instructions、工作区提示词、Issue 描述、Project 说明等），每段截短处写明读取全文的命令；必要时缩至仅保留回读指针。若受保护协议自身仍超预算，显式失败，禁止静默截断协议尾部。
    - 实测（claude-agent-acp 0.91.0 / Claude Code 2.1.301，codex-acp 2.2.2 / codex 0.163.0）：Claude 在一个进程内固定使用启动时读到的指令，在新进程续接时读到修改。Remi 每轮新开进程续接，所以下一轮就能看到。Codex 每轮都重新读 `$CODEX_HOME/AGENTS.md`，同一进程内和续接后都会读。PR 6 驻留的进程不重读，因此驻留接手的启动指纹包含这份文件的哈希，文件变了就换新进程。
 
 3. **`AGENTS.md` 的内容**，按以下顺序：
@@ -31,7 +31,7 @@
    - **(b) Remi 的说明**，即原 bootstrap 提示词里所有固定内容：
      - 身份和输入方式，包括标签与未读说明的含义。
      - `remi` CLI：`remi context`、`remi message list <会话>`，以及 Chat 的项目、仓库检出说明。
-     - 交付契约：有代码工作时加代码交付契约；附件交付契约 Chat 用 Chat 版，Issue 用 Issue 版。它们原是工作区提示词的默认值，现在是 Remi 的规则。
+     - 交付约定按[工作区系统默认行为](../dev/system-prompts.md)分为五个可编辑文字槽位和受保护协议。有代码工作时渲染 code_delivery，Chat/Issue 分别渲染对应交付槽位；默认内容由服务端目录解析，随 claim 冻结。合并授权、附件语法/安全/回执等协议继续由 daemon 生成，不重复覆盖可编辑句子。旧 workspace appendix 仍独立追加，不冻结默认升级。
      - 工作区提示词、工作区背景、会话所有者（Chat 的创建人，否则是 Runtime 的所有者；offer 新增 `session_owner_name` 和 `session_owner_profile_description`）、Runtime 工作区、自动化。
      - Issue 会话加入：Issue 标题、描述、附件和元数据；回复评论的配方（模板，评论 id 由每轮输入给出）；结果分享；历史目录；后续 Issue；执行与升级规则；共享工作区与小队协作。绑定 Issue 的飞书话题、旁支会话（继承范围的读取命令和边界）、只读快照各加对应的段落。
      - Project、知识与仓库的警告，可用仓库。

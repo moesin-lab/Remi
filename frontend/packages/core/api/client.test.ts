@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { EMPTY_AUTOPILOT } from "./schemas/autopilots";
 import { ApiClient, ApiError } from "./client";
 import { toSafeErrorDetails } from "./http";
 import { messageFixture, turnFixture } from "./unified.fixture";
@@ -133,9 +134,62 @@ describe("ApiClient", () => {
     }
   });
 
+  it("requires the server to confirm explicit delivery changes and preserves omission", async () => {
+    const response = (fields: object) => new Response(JSON.stringify({ ...EMPTY_AUTOPILOT, ...fields }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({})).mockResolvedValueOnce(response({ delivery_chat_session_id: "chat-1" }))
+      .mockResolvedValueOnce(response({ delivery_chat_session_id: null })).mockResolvedValueOnce(response({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+    await client.updateAutopilot("ap", { title: "Keep target" });
+    await client.updateAutopilot("ap", { delivery_chat_session_id: "chat-1" });
+    await client.updateAutopilot("ap", { delivery_chat_session_id: null });
+    await expect(client.updateAutopilot("ap", { delivery_chat_session_id: null })).rejects.toThrow(/contract/);
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body))).toEqual([
+      { title: "Keep target" }, { delivery_chat_session_id: "chat-1" }, { delivery_chat_session_id: null }, { delivery_chat_session_id: null },
+    ]);
+  });
+
+  it.each([
+    [{ ...EMPTY_AUTOPILOT, id: "aut_one" }, "aut_one"],
+    [{ ...EMPTY_AUTOPILOT, id: "aut_one", delivery_chat_session_id: "other" }, "aut_one"],
+    [{ id: "aut_one" }, "aut_one"],
+    [{ ...EMPTY_AUTOPILOT }, null],
+    [{ id: "../other" }, null],
+    [null, null],
+  ])("retains the recoverable ID after an accepted create with an invalid echo", async (body, autopilotId) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body ? JSON.stringify(body) : "", { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+    await expect(client.createAutopilot({ title: "Report", assignee_id: "agent", execution_mode: "run_only", delivery_chat_session_id: "target" }))
+      .rejects.toMatchObject({ autopilotId });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["headers", "body", "server error", "forbidden"])("distinguishes uncertain create from rejection at %s", async outcome => {
+    const create = vi.fn(async () => {
+      if (outcome === "headers") throw new TypeError("Connection lost");
+      if (outcome === "body") return new Response(new ReadableStream({ start(controller) { controller.error(new Error("Disconnected")); } }), { status: 201 });
+      return Response.json({ error: "Request failed" }, { status: outcome === "forbidden" ? 403 : 502 });
+    });
+    vi.stubGlobal("fetch", create);
+    const result = new ApiClient("https://api.example.test").createAutopilot({ title: "Report", assignee_id: "agent", execution_mode: "run_only" });
+    await expect(result).rejects.toMatchObject(outcome === "forbidden" ? { status: 403 } : { autopilotId: null, outcome: "unknown" });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches workspace-scoped delivery targets and rejects a malformed list", async () => {
+    const target = { id: "chat", title: "Daily", channel: "feishu" };
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ targets: [target] })).mockResolvedValueOnce(Response.json({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+    expect(await client.listAutopilotDeliveryTargets("ws/a")).toEqual({ targets: [target] });
+    expect(fetchMock.mock.calls[0]?.[0]).toContain("/api/autopilot-delivery-targets?workspace_id=ws%2Fa");
+    await expect(client.listAutopilotDeliveryTargets("ws/a")).rejects.toThrow(/contract/);
+  });
+
   it("uses the expected HTTP contract for autopilot endpoints", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
-      new Response(JSON.stringify({ autopilots: [], runs: [], total: 0 }), {
+      new Response(JSON.stringify({ ...EMPTY_AUTOPILOT, id: "ap-1", autopilot: EMPTY_AUTOPILOT, triggers: [], autopilots: [], runs: [], total: 0 }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),

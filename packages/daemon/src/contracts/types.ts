@@ -24,6 +24,7 @@ import type {
   MultiremiSkillImportSource,
   RunAutopilotInput,
 } from "@multiremi/contracts/types.js";
+import type { SystemPromptPolicyBinding } from "@multiremi/contracts/system-prompt-policy.js";
 import type { AgentPluginSnapshot } from "../agent-runtime/agent-plugins/types.js";
 
 // --- Task shape (prompts/ephemeral.ts, skills/ephemeral.ts) ----------------
@@ -372,6 +373,8 @@ export interface AgentTask {
   workspaceContext?: string | null;
   workspace_context?: string | null;
   /** ADR 0023: the workspace's own prompt (custom text only); absent from servers before it. */
+  systemPromptPolicy?: SystemPromptPolicyBinding | null;
+  system_prompt_policy?: SystemPromptPolicyBinding | null;
   workspacePrompt?: string | null;
   workspace_prompt?: string | null;
   /** Older servers: the former two prompts, the bootstrap one led by Remi's then default. */

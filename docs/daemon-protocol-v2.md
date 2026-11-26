@@ -63,6 +63,20 @@ offer 输入与会话投影的范围记录都为 complete 时什么也不加；�
 会话里不变的内容（Agent 定义、Remi 规则、工作区、项目、Issue 等）由 daemon 写进 provider home 的 `AGENTS.md`，不进每轮输入。
 旧 daemon 仍按范围记录拼接自己的提示词。
 
+工作区系统默认行为通过 `system_prompt_policy` 下发，格式及字段见
+[共享契约](../packages/contracts/src/system-prompt-policy.ts)。服务端在 claim 同一事务冻结版本、默认 revision、
+完整五槽快照与内容哈希；offer 准备阶段不重读最新配置。未 accept 的 rescind/requeue/stale reclaim 可以重绑，
+running 尝试保持原快照。`prompt.policy.adopt.v1` 单独协商。daemon 校验完整五槽与内容哈希，在本地 outbox 数据库登记收据，通过 `task.offer_adopt` 取得同一代次、哈希及收据的授权，再以条件更新消费启动权。`task.offer_status` 用于只读对账。裸成功回执只说明传输结果。
+
+连接存活而采用 RPC 超时时，daemon 对同一收据串行退避重试，间隔从 500ms 增至最多 5s。每次先查询该身份的状态，再申请原授权。断开连接取消等待，下一次 ready 从本地 prepared 收据恢复。服务端首次领取时验证该 attempt 没有既往绑定、发送、启动或领取留下的 trace 记录，才在该代 offer 上标记 `exclusive_delivery`。其他物理 lane 的坏 journal 允许这样的首次投递；既有隔离成员及来源不明的旧报告继续保全。
+
+启动权与执行者 PID 在同一个本地事务登记。冷启动可对已退出进程的收据逐一对账。daemon 保留仍有未确认上报、隔离或 planned restart 的分区。对已采用、原进程已退出的执行，`runtime.ready.exited_launches` 携带准确收据，服务端在 workspace 生命周期锁内重核归属、活跃状态与 handoff，按原重试规则结束该 attempt。PID 仍在使用或进程状态无法验证时继续保留。
+当 mode 为 custom，或当前服务端默认不等于首版 `LEGACY_BASELINE_DEFAULT_REVISION` 时，claim 前必须具备此能力，
+否则等待并提供升级诊断。仅 default 且默认仍等价于基线时允许旧 daemon 兼容执行；reset 不绕过未来默认升级的能力门禁。
+整个 `system_prompt_policy` 属于执行绑定，预算降级不得删除或截短其字符串。
+
+切换 server 或 daemon 版本前须检查仍在途的 planned restart。可验证原策略时，由原兼容的执行者完成任务并排空可靠上报。旧 journal 缺少原采用收据，单独升级 server 无法补证。出现历史 A/B 不一致时应保留两端证据。新 checkpoint 在双方同时协商 `turn.restart` 与 `prompt.policy.adopt.v1`、只读对账匹配后使用 `turn.restart.resume_bound`。原 offer 代次和收据沿用，数字 restart generation 仍标识此次续接。旧 server 对 suspended 有原生孤儿保护，requested 或 resuming 仍可能独立过期。
+
 长正文带完整展开指针；范围命令为 `remi message list <session> --from X --to Y`，语义为 `X < seq ≤ Y`，
 调用 `GET /api/sessions/:id/messages`。旧 CLI log 命令只返回退役提示；浏览器 `/log` 窗口继续只读展示。
 服务端范围分页保留长正文条内偏移，CLI 自动跟随全部游标并拼回完整正文，不切开代理对。
@@ -1411,3 +1425,7 @@ checkpoint/report 应答后，删除本地 handoff journal、trace identity 和�
 临时失败及 `resume_fenced` 使用 1、2、4 秒递增至最多 60 秒的退避，最多 24 次且总时限
 30 分钟。预算和下一次时间在 RPC 前写入本地 SQLite，daemon 重启不重置预算。
 预算耗尽时停止续接并保留 journal 供诊断；不会把该记录当作执行授权。
+
+损坏的旧 journal 可能只剩 handoff 标识。共享 outbox 在启动恢复前枚举同一 server、workspace、daemon 的 provider 库，记录每个 handoff 的候选分区、已有行和旧库来源。多个 handoff 可同时保留同一分区。报告使用原上行序号等待对应 `res`。跨分区成功回执只确认本批行，隔离期间的迟到回执另存为投递证据。压缩、终态替换和启动时的未读输入恢复均保留隔离原件。
+
+采用协议连接在对应 runtime 首次心跳确认注册后发送 `runtime.ready`。在双向协商 `turn.restart` 和 `prompt.policy.adopt.v1` 后，daemon 可通过只读 `task.offer_status` 核对 handoff 归属。查询同时读取 workspace 现有 attempt 的最大创建时间。首次观察的上界持久化后，服务端创建时间严格超过该上界的独立 attempt 可运行。另一物理来源的首次投递也可凭服务端 `exclusive_delivery` 证明放行。legacy welcome 下仍校验 workspace 和 runtime，在本地持久登记一次启动权，只有既有上界或明确的首次投递能证明独立时才启动。旧服务端缺少两种证据时继续隔离。历史导入不携带本地 producer 的身份。映射到具体 attempt 只缩小隔离范围；恢复执行仍需原 journal 收据及 `resume_bound` 授权。

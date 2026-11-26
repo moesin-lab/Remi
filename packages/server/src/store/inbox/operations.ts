@@ -348,7 +348,8 @@ export class InboxOperations {
     const owned=attempt?this.ctx.db.query('SELECT id FROM multiremi_turn_attempts WHERE id=? AND turn_id=?').get(attempt,turn.id):null;
     const sent=owned?this.ctx.db.query('SELECT prompt,instructions FROM multiremi_task_prompts WHERE task_id=?').get(attempt) as {prompt:string;instructions:string|null}|null:null;
     return {from_seq:from,to_seq:to,messages,legacy_prompt:turn.legacy_prompt,
-      sent_attempt_id:sent?attempt!:null,sent_prompt:sent?.prompt??null,instructions:sent?.instructions||null};}
+      sent_attempt_id:sent?attempt!:null,sent_prompt:sent?.prompt??null,instructions:sent?.instructions||null,
+      system_prompt_policy:owned&&attempt?this.ctx.systemPrompts().getAttemptSystemPrompt(attempt):null};}
   /** `byMember`: a member's stop pauses the Chat follow-up queue (ADR 0020). */
   cancelTurn(id:string,opts:{byMember?:boolean}={}):MultiremiTurn {
     return this.transaction(events=>{const turn=this.getTurn(id);if(!turn?.current_attempt_id)throw new Error('Turn not found');

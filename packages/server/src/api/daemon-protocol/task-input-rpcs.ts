@@ -7,6 +7,8 @@ import type { DaemonProtocolSession } from "./session.js";
 import { daemonAgentPluginDesiredResponse } from "../wire/agent-plugins.js";
 import type { DaemonTurnBridge, DaemonTurnRpc } from "./turn-bridge.js";
 import { fitRestartResumeToBudget } from "./offer-budget.js";
+import { samePolicyOffer, type SystemPromptPolicyBinding } from '@multiremi/contracts/system-prompt-policy.js';
+import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
 
 const denied = (code = "invalid_report") => ({ ok: false, code, retryable: false });
 
@@ -64,7 +66,7 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
       }
     });
   }
-  layer.registerRpcHandler("turn.restart.resume", async (frame, session) => {
+  for (const method of ['turn.restart.resume','turn.restart.resume_bound']) layer.registerRpcHandler(method, async (frame, session) => {
     if (!await authorized(frame, session)) return denied("authority_revoked");
     const p = frame.payload;
     if (typeof p.attempt_id !== "string" || typeof p.handoff_id !== "string"
@@ -72,6 +74,8 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
     const task = store.getTaskWithAgent(p.attempt_id);
     if (!task || task.runtimeId !== frame.rt) return denied("authority_revoked");
     const scope = { runtimeId: frame.rt!, daemonId: session.daemonId, workspaceId: task.workspaceId };
+    const bound = method === 'turn.restart.resume_bound';
+    if (bound && (!session.supportsPromptPolicy || !session.supportsPlannedRestart)) return denied('restart_policy_mismatch');
     try {
       if (store.plannedRestarts().reconcileTerminal(task.id, scope, p.handoff_id)) return denied("restart_terminal");
       const handoff = store.plannedRestarts().get(task.id);
@@ -87,6 +91,13 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
         const questions = (checkpoint.question_ids ?? []).map(id => store.getMessage(id)).filter(Boolean);
         reply = fitRestartResumeToBudget({ ...offer, ...turns.offerInput(task) }, questions, generation, frame.rt!);
         if (!reply) throw new PlannedRestartError("capacity");
+        if (bound) {
+          const proof = checkpoint.policy_receipt;
+          const fitted = reply.task;
+          const policy = fitted?.system_prompt_policy as SystemPromptPolicyBinding | undefined;
+          if (!proof || fitted.attempt_id !== proof.attempt_id || fitted.turn_id !== proof.turn_id || !policy || policy.workspaceId !== proof.workspace_id
+            || policy.contentHash !== proof.content_hash || hashSystemPromptContent(policy.content) !== proof.content_hash) throw new PlannedRestartError('restart_policy_mismatch');
+        }
       };
       const receipt = store.plannedRestarts().resume(task.id, p.handoff_id, p.consumer_id, scope, (generation, checkpoint) => {
         // Check the complete, current package under the CAS locks. A capacity
@@ -94,12 +105,21 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
         delivery(generation, checkpoint);
         store.reportTaskUsageSnapshot(task.id, { version: 2, runId: p.consumer_id as string,
           revision: 0, complete: false, units: [] }, scope);
-      });
+      }, bound ? current => {
+        const proof = current.checkpoint?.policy_receipt;
+        const policy = offer.system_prompt_policy as SystemPromptPolicyBinding | undefined;
+        if (!proof || !samePolicyOffer(proof,p) || proof.handoff_id !== current.handoff_id || proof.turn_id !== current.turn_id
+          || proof.prior_restart_generation !== p.generation || proof.attempt_id !== task.id || proof.workspace_id !== scope.workspaceId
+          || proof.runtime_id !== scope.runtimeId || proof.daemon_id !== scope.daemonId || !policy || policy.workspaceId !== proof.workspace_id
+          || policy.contentHash !== proof.content_hash || hashSystemPromptContent(policy.content) !== proof.content_hash
+          || store.systemPromptsRepo().offerStatus(proof) !== 'adopted') throw new PlannedRestartError('restart_policy_mismatch');
+        if (['resuming','running'].includes(current.state) && current.consumer_id === p.consumer_id) delivery(current.generation,current.checkpoint!);
+      } : undefined);
       if (!store.isTaskUsageExecutionAuthorized(task.id, p.consumer_id, frame.rt!)) return denied("stale_execution");
       // The idempotent path does not execute authorize. Rebuild current inputs
       // and questions as they can change while a committed reply is lost.
       if (!reply) delivery(receipt.generation, receipt.checkpoint!);
-      return reply;
+      return bound ? { ...(reply as Record<string,unknown> | null), policy_receipt:receipt.checkpoint!.policy_receipt } : reply;
     } catch (error) {
       // Completion can win while asynchronous offer preparation is in flight.
       if (store.plannedRestarts().reconcileTerminal(task.id, scope, p.handoff_id)) return denied("restart_terminal");

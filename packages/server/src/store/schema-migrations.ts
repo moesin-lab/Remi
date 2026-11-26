@@ -1,3 +1,4 @@
+import { ensureSystemPrompts } from "./system-prompt-schema.js";
 import { ensureDaemonDrainIdentity, ensurePlannedRestarts } from "./planned-restart-schema.js";
 import { LIVE_TERM_SCHEMA } from './live-term-fence.js';
 import type { SchemaMigration } from './schema-migration-runner.js';
@@ -17,11 +18,15 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { ensureDaemonDrainIdentity(db); ensurePlannedRestarts(db); },
 }, {
-  id: '20261124_feishu_bot_wake_words', phase: 'expand', level: 4,
+  id: '20261124_system_prompt_policy', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { ensureSystemPrompts(db); },
+}, {
+  id: '20261124_feishu_bot_wake_words', phase: 'expand', level: 5,
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { db.exec("ALTER TABLE multiremi_feishu_bot_configs ADD COLUMN wake_words_json TEXT NOT NULL DEFAULT '[]'"); },
 }, {
-  id: '20261125_feishu_command_results', phase: 'expand', level: 5,
+  id: '20261125_feishu_command_results', phase: 'expand', level: 6,
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { db.exec(`CREATE TABLE multiremi_feishu_command_results (
     workspace_id TEXT NOT NULL, domain TEXT NOT NULL, app_id TEXT NOT NULL, external_message_id TEXT NOT NULL,

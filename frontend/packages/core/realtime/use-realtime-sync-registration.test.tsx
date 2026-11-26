@@ -50,6 +50,7 @@ const EXPECTED_EVENTS: readonly string[] = [
   "subscriber:removed",
   "workspace:updated",
   "workspace:deleted",
+  "member:updated",
   "member:removed",
   "member:added",
   "invitation:created",

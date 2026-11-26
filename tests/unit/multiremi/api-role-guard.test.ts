@@ -59,7 +59,13 @@ function captureConsoleLog<T>(run: () => Promise<T> | T): Promise<{ lines: strin
 
 const GOLDEN_PATH = join(import.meta.dir, "../../../scripts/api-routes.golden.json");
 const GOLDEN = JSON.parse(readFileSync(GOLDEN_PATH, "utf8")) as { routes: string[] };
+const DELIVERY_TARGETS_ROUTE = "GET /api/autopilot-delivery-targets";
 const UI_USAGE_ROUTES = ["GET /api/usage/report", "GET /api/usage/prices", "POST /api/usage/prices", "PATCH /api/usage/prices/:id"];
+const UI_SYSTEM_PROMPT_ROUTES = [
+  'GET /api/workspaces/:id/system-prompt', 'PUT /api/workspaces/:id/system-prompt',
+  'GET /api/workspaces/:id/system-prompt/versions', 'GET /api/workspaces/:id/system-prompt/versions/:versionId',
+  'POST /api/workspaces/:id/system-prompt/preview', 'POST /api/workspaces/:id/system-prompt/reset', 'POST /api/workspaces/:id/system-prompt/restore',
+];
 const UI_BOT_ROUTES = ["GET /api/workspaces/:id/feishu-bots", "POST /api/workspaces/:id/feishu-bots"];
 const FEISHU_DAEMON_COMMAND_ROUTES = [
   "POST /api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender",
@@ -418,7 +424,7 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     expect(misdirected).not.toContain("GET /api/sessions/:sessionId/log/entry");
     expect(statuses.has("GET /api/projects/:id/activity")).toBe(true);
     expect(statuses.get("GET /api/projects/:id/activity")).not.toBe(421);
-    for (const route of [...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES]) {
+    for (const route of [DELIVERY_TARGETS_ROUTE, ...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES, ...UI_SYSTEM_PROMPT_ROUTES]) {
       expect(statuses.has(route)).toBe(true);
       expect(statuses.get(route), `${route} belongs to the browser/CLI process`).not.toBe(421);
     }
@@ -430,7 +436,7 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     expect(misdirected, routeCountHint("ui")).toHaveLength(51);
     // daemon/ws and trace/ws are tested as real upgrades below.
     expect(misdirected.length + 2, routeCountHint("ui")).toBe(53);
-  });
+  }, 60_000);
 
   it("refuses paths outside runtime's daemon, health, peer and trace routes", async () => {
     const statuses = await sweep("runtime");
@@ -444,7 +450,7 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     // Responsibility, delivery, Question,
     // Chat follow-up queue (ADR 0020), background-task (PR 6) and slash-command
     // (ADR 0025) user operations belong to UI; runtime owns daemon/health/peer/trace
-    // routes. It refuses 779 HTTP routes and two browser upgrades.
+    // routes. The seven system-prompt routes also belong to UI.
     // The independent literal oracle checks every route above.
     const mintRoute = "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards";
     expect(statuses.has(mintRoute)).toBe(true);
@@ -456,13 +462,13 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
-    for (const route of [...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES]) {
+    for (const route of [DELIVERY_TARGETS_ROUTE, ...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES, ...UI_SYSTEM_PROMPT_ROUTES]) {
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
     expect(statuses.get("GET /api/projects/:id/activity")).toBe(421);
-    expect(refused, routeCountHint("runtime")).toBe(779);
-    expect(refused + 2, routeCountHint("runtime")).toBe(781);
+    expect(refused, routeCountHint("runtime")).toBe(787);
+    expect(refused + 2, routeCountHint("runtime")).toBe(789);
     // ADR 0025: the Chat menu's catalogue is a UI read.
     expect(statuses.get("GET /api/chat/slash-commands")).toBe(421);
   });

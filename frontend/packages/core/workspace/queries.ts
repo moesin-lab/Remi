@@ -19,6 +19,10 @@ export const workspaceKeys = {
   skills: (wsId: string) => ["workspaces", wsId, "skills"] as const,
   assigneeFrequency: (wsId: string) => ["workspaces", wsId, "assignee-frequency"] as const,
   botMenu: (wsId: string, botId = "default") => ["workspaces", wsId, "bot-menu", botId] as const,
+  systemPrompt: (wsId: string) => ["workspaces", wsId, "system-prompt"] as const,
+  systemPromptVersions: (wsId: string) => ["workspaces", wsId, "system-prompt", "versions"] as const,
+  systemPromptVersion: (wsId: string, versionId: string) =>
+    ["workspaces", wsId, "system-prompt", "versions", versionId] as const,
 };
 
 export function workspaceListOptions() {
@@ -172,5 +176,21 @@ export function magpieServiceOptions(wsId: string) {
   return queryOptions({
     queryKey: [...workspaceKeys.all(wsId), "services", "magpie"],
     queryFn: () => api.getMagpieService(wsId),
+  });
+}
+
+export function workspaceSystemPromptOptions(wsId: string) {
+  return queryOptions({
+    queryKey: workspaceKeys.systemPrompt(wsId),
+    queryFn: () => api.getWorkspaceSystemPrompt(wsId),
+    enabled: Boolean(wsId),
+  });
+}
+
+export function workspaceSystemPromptVersionOptions(wsId: string, versionId: string | null) {
+  return queryOptions({
+    queryKey: workspaceKeys.systemPromptVersion(wsId, versionId ?? ""),
+    queryFn: () => api.getWorkspaceSystemPromptVersion(wsId, versionId!),
+    enabled: Boolean(wsId && versionId),
   });
 }

@@ -114,7 +114,9 @@ export function taskTokenHardDenyCategory(request: Request): TaskTokenHardDenyCa
     return "workspace_lifecycle";
   }
   if ((/^\/api\/agents\/[^/]+\/(?:role|supervisor)$/.test(path) && method === "PUT")
-    || (/^\/api\/workspaces\/[^/]+\/organizer$/.test(path) && method === "PUT")) {
+    || (/^\/api\/workspaces\/[^/]+\/organizer$/.test(path) && method === "PUT")
+    || (/^\/api\/workspaces\/[^/]+\/system-prompt$/.test(path) && method === "PUT")
+    || (/^\/api\/workspaces\/[^/]+\/system-prompt\/(?:reset|restore)$/.test(path) && method === "POST")) {
     return "privilege_configuration";
   }
   if (path === "/api/cloud-billing" || path.startsWith("/api/cloud-billing/")) return "billing";

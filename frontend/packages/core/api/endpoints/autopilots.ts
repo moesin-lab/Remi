@@ -1,5 +1,6 @@
 import type {
   Autopilot,
+  AutopilotDeliveryTarget,
   AutopilotRun,
   AutopilotTrigger,
   CreateAutopilotRequest,
@@ -12,16 +13,15 @@ import type {
   UpdateAutopilotTriggerRequest,
   WebhookDelivery,
 } from "../../types";
-import type { HttpClient } from "../http";
-import { parseWithFallback } from "../schema";
+import { ApiError, type HttpClient } from "../http";
+import { ApiContractError, parseStrictResponse, parseWithFallback } from "../schema";
 import {
   AutopilotRunSchema,
   AutopilotSchema,
   AutopilotTriggerSchema,
-  EMPTY_AUTOPILOT,
+  DeliveryTargetsSchema,
   EMPTY_AUTOPILOT_RUN,
   EMPTY_AUTOPILOT_TRIGGER,
-  EMPTY_GET_AUTOPILOT_RESPONSE,
   EMPTY_LIST_AUTOPILOT_RUNS_RESPONSE,
   EMPTY_LIST_AUTOPILOTS_RESPONSE,
   EMPTY_LIST_WEBHOOK_DELIVERIES_RESPONSE,
@@ -32,6 +32,18 @@ import {
   ListWebhookDeliveriesResponseSchema,
   WebhookDeliveryResponseSchema,
 } from "../schemas/autopilots";
+
+export class UnconfirmedAutopilotCreateError extends ApiContractError {
+  constructor(readonly autopilotId: string | null, readonly outcome: "accepted" | "unknown" = "accepted") {
+    super("POST /api/autopilots");
+  }
+}
+
+function parseSavedAutopilot(raw: unknown, target: string | null | undefined, endpoint: string): Autopilot {
+  const saved = parseStrictResponse<Autopilot>(raw, AutopilotSchema, { endpoint });
+  if (target !== undefined && saved.delivery_chat_session_id !== target) throw new ApiContractError(endpoint);
+  return saved;
+}
 
 export class AutopilotsEndpoints {
   constructor(readonly http: HttpClient) {}
@@ -48,36 +60,35 @@ export class AutopilotsEndpoints {
 
   async getAutopilot(id: string): Promise<GetAutopilotResponse> {
     const raw = await this.http.fetch<unknown>(`/api/autopilots/${id}`);
-    return parseWithFallback(
-      raw,
-      GetAutopilotResponseSchema,
-      { ...EMPTY_GET_AUTOPILOT_RESPONSE, autopilot: { ...EMPTY_AUTOPILOT, id } },
-      { endpoint: "GET /api/autopilots/:id" },
-    );
+    return parseStrictResponse(raw, GetAutopilotResponseSchema, { endpoint: "GET /api/autopilots/:id" });
+  }
+
+  async listAutopilotDeliveryTargets(workspaceId: string): Promise<{ targets: AutopilotDeliveryTarget[] }> {
+    const search = new URLSearchParams({ workspace_id: workspaceId });
+    const raw = await this.http.fetch<unknown>(`/api/autopilot-delivery-targets?${search}`);
+    return parseStrictResponse(raw, DeliveryTargetsSchema, { endpoint: "GET /api/autopilot-delivery-targets" });
   }
 
   async createAutopilot(data: CreateAutopilotRequest): Promise<Autopilot> {
-    const raw = await this.http.fetch<unknown>("/api/autopilots", {
+    const response = await this.http.fetchRaw("/api/autopilots", {
+      extraHeaders: { "Content-Type": "application/json" },
       method: "POST",
       body: JSON.stringify(data),
+    }).catch((error: unknown) => {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) throw error;
+      throw new UnconfirmedAutopilotCreateError(null, "unknown");
     });
-    return parseWithFallback(
-      raw,
-      AutopilotSchema,
-      {
-        ...EMPTY_AUTOPILOT,
-        title: data.title,
-        description: data.description ?? null,
-        project_id: data.project_id ?? null,
-        assignee_type: data.assignee_type ?? "agent",
-        assignee_id: data.assignee_id,
-        execution_mode: data.execution_mode,
-        session_policy: data.session_policy ?? "new",
-        workspace_policy: data.workspace_policy ?? "reuse_issue",
-        issue_title_template: data.issue_title_template ?? null,
-      },
-      { endpoint: "POST /api/autopilots" },
-    );
+    const raw: unknown = await response.json().catch(() => {
+      throw new UnconfirmedAutopilotCreateError(null, "unknown");
+    });
+    const id = raw && typeof raw === "object" && "id" in raw && typeof raw.id === "string" && /^[\w-]+$/.test(raw.id) ? raw.id : null;
+    if (!id) throw new UnconfirmedAutopilotCreateError(null);
+    try {
+      return parseSavedAutopilot(raw, data.delivery_chat_session_id, "POST /api/autopilots");
+    } catch (error) {
+      if (error instanceof ApiContractError) throw new UnconfirmedAutopilotCreateError(id);
+      throw error;
+    }
   }
 
   async updateAutopilot(id: string, data: UpdateAutopilotRequest): Promise<Autopilot> {
@@ -85,9 +96,7 @@ export class AutopilotsEndpoints {
       method: "PATCH",
       body: JSON.stringify(data),
     });
-    return parseWithFallback(raw, AutopilotSchema, { ...EMPTY_AUTOPILOT, id }, {
-      endpoint: "PATCH /api/autopilots/:id",
-    });
+    return parseSavedAutopilot(raw, data.delivery_chat_session_id, "PATCH /api/autopilots/:id");
   }
 
   async deleteAutopilot(id: string): Promise<void> {

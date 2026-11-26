@@ -61,6 +61,8 @@ export function rootBusinessPayloadDigest(payload: Readonly<Record<string, unkno
   return `sha256:${createHash('sha256').update(frozenPayload(payload)).digest('hex')}`;
 }
 
+const preparedDeliveries = new WeakSet<PreparedRootDelivery>();
+
 export class PreparedRootDelivery {
   private constructor(readonly tuple: RootDeliveryTuple, readonly businessJson: string, readonly envelope: string,
     readonly envelopeDigest: string, readonly tokenHash: string, readonly tokenPrefix: string) { Object.freeze(this); }
@@ -71,8 +73,10 @@ export class PreparedRootDelivery {
     if (`sha256:${createHash('sha256').update(business).digest('hex')}` !== tuple.business_payload_digest) throw new Error('receipt_conflict');
     const raw = `mat_${randomBytes(20).toString('hex')}`;
     const sealed = await sealRootDelivery(tuple, raw, key);
-    return new PreparedRootDelivery(tuple, business, sealed.envelope, sealed.envelope_digest,
+    const candidate = new PreparedRootDelivery(tuple, business, sealed.envelope, sealed.envelope_digest,
       createHash('sha256').update(raw).digest('hex'), raw.slice(0, 12));
+    preparedDeliveries.add(candidate);
+    return candidate;
   }
 }
 
@@ -206,9 +210,11 @@ export class RootReceiptStore {
   activate(tx: SecurityTx, candidate: PreparedRootDelivery, lease: Lease,
     issueAndActivateRun: (tx: SecurityTx, candidate: PreparedRootDelivery) => IssuedCredential, expectedLeaseVersion = 0): RootDeliveryEnvelopePayload {
     const { tuple } = candidate;
-    const businessJson = frozenPayload(JSON.parse(candidate.businessJson));
-    if (`sha256:${createHash('sha256').update(businessJson).digest('hex')}` !== tuple.business_payload_digest) throw new Error('receipt_conflict');
     return withSecurityTarget(this.db, tx, `receipt:${tuple.receipt_id}`, () => {
+      const businessJson = frozenPayload(JSON.parse(candidate.businessJson));
+      if (!preparedDeliveries.has(candidate) || `sha256:${createHash('sha256').update(businessJson).digest('hex')}` !== tuple.business_payload_digest) {
+        throw new Error('receipt_conflict');
+      }
       if (this.db.query(`SELECT 1 FROM multiremi_delivery_receipts WHERE receipt_id=? OR (attempt_id=? AND run_generation=?)`)
         .get(tuple.receipt_id, tuple.attempt_id, tuple.run_generation)) throw new Error('receipt_conflict');
       if (!(Date.parse(lease.start_deadline) > Date.now()) || !lease.lease_id || !lease.fence_term ||

@@ -7,7 +7,7 @@ import type { CreateTaskInput, TaskUsageEntry } from "@multiremi/contracts/types
 import { notifyTurnChanged } from "./turn-execution-records.js";
 import { parseJson, toJson } from "./helpers.js";
 import { turnUsageProjection } from "./usage-projection.js";
-import { insertTurnAttempt } from './attempt-admission.js';
+import { insertTurnAttempt, reservedAttemptId } from './attempt-admission.js';
 
 const replacementColumns = {
   runtimeId: 'runtime_id', provider: 'provider', sessionId: 'session_id', workDir: 'work_dir',
@@ -42,7 +42,7 @@ export function createReplacementAttemptWithinTransaction(db: SqlDatabase, turnI
   const previous=db.query("SELECT * FROM multiremi_turn_attempts WHERE id=? AND turn_id=?").get(turn.current_attempt_id,turnId);
   if (!previous) throw new Error(`Current attempt not found for turn: ${turnId}`);
   if (turn.status==="completed" || (turn.status==="cancelled" && !input.allowCancelledTurn)) throw new Error("A completed or cancelled turn cannot be retried");
-  const id=input.id ?? createId("tsk");
+  const id=input.id ?? reservedAttemptId(db) ?? createId("tsk");
   const now=input.now ?? nowIso();
   const attemptNo=Number(db.query("SELECT COALESCE(MAX(attempt_no),0)+1 AS next_no FROM multiremi_turn_attempts WHERE turn_id=?").get(turnId).next_no);
   db.run(`UPDATE multiremi_turn_attempts SET status=?,failure_reason=?,ended_at=COALESCE(ended_at,?),updated_at=? WHERE id=?`,

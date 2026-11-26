@@ -13,9 +13,7 @@ import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { PreparedRootDelivery, RootReceiptStore, rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
-import { createReplacementAttemptWithinTransaction } from '@multiremi/store/turn-attempts.js';
-import { withAttemptAdmission } from '@multiremi/store/attempt-admission.js';
-import type { InputManifest } from '@multiremi/store/root-authority-contract.js';
+import { createAdmittedTask, retryAdmittedTurn } from '@multiremi/store/attempt-admission.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
 import { prepareRunInstallation, acknowledgeRunEnvironment } from '@multiremi/worker/root-run-installation.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
@@ -251,9 +249,10 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const {db,store}=fixture();
     const {service,passwordProof,created,signing}=await bootstrap(db);
     const api = rootClient(store, signing);
-    const agent=store.createAgent({name:'admitted',provider:'codex'});
+    const runtime=store.registerRuntime({id:'rt_auth',name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
+    const agent=store.createAgent({name:'admitted',provider:'codex',runtimeId:runtime.id});
     const issue=fixture().createIssue({title:'admission',assigneeType:'agent',assigneeId:agent.id});
-    const previous=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'previous'});
+    const previous=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'previous',runtimeId:runtime.id});
     const turnId=db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(previous.id).turn_id;
     const target={turnId,previousAttemptId:previous.id,attemptId:'tsk_admitted'};
     const execution={attemptId:target.attemptId,runtimeId:'rt_auth',daemonId:'daemon',incarnation:'inc',configEpoch:1,executionDigest:hash('execution'),
@@ -276,7 +275,6 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     nodes('machine','machine_registration','daemon','daemon',[]);
     nodes('runtime-trust','runtime_trust','runtime',execution.runtimeId,['machine',parent]);
     nodes('provider','provider_trust','agent',agent.id,['runtime-trust','grant-agent']);
-    store.registerRuntime({id:execution.runtimeId,name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
     const signingKeys=generateKeyPairSync('ed25519');
     const signer=signingKeys.publicKey.export({type:'spki',format:'pem'});
     const recipientKeys=generateKeyPairSync('rsa',{modulusLength:3072});
@@ -288,17 +286,15 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       tx=>beginMachineChallenge(db,tx,'machine-token','rt_auth','root.runtime-trust.grant','rt_auth'));
     db.query('UPDATE multiremi_machine_challenges SET consumed_at_ms=1 WHERE challenge_id=?').run(challenge.id);
     db.query(`INSERT INTO multiremi_runtime_trusts VALUES('trust','rt_auth',1,'inc',?,'runtime-trust','{}',NULL)`).run(challenge.id);
+    const inputs={manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
+      entries:[],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
+    const directProof=await store.rootManagement.verifyIndependentPassword('usr_auth','test-dashboard-password');
+    const retry=()=>retryAdmittedTurn(store,turnId,previous.id,directProof,execution,()=>({execution,inputs}));
+    expect(retry).toThrow('authority_revision_conflict');
     db.query("UPDATE multiremi_turn_attempts SET status='lost' WHERE id=?").run(previous.id);
-    const plan=service.planAttemptAdmission(passwordProof,target,execution);
-    let manifest!:InputManifest;
-    withAttemptAdmission(db,undefined,plan,{attemptId:target.attemptId,kernel:service,resolveInvocation(tx){
-      const invocation=service.verifyDirectRetryInvocation(tx,passwordProof,target);
-      const actor=service.authorizeWrite(tx,passwordProof,{action:'attempt.inputs.approve',use:'write',actualTarget:{type:'attempt',id:target.attemptId}});
-      manifest=service.approveAttemptInputs(tx,actor,invocation,execution,{manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
-        entries:[],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}});
-      return {subject:{type:'agent',id:agent.id},invocation};
-    },resolveExecution(){return {execution,manifest};}},()=>createReplacementAttemptWithinTransaction(db,turnId,{id:target.attemptId,
-      previousStatus:'lost',reason:'trusted retry',execution:{runtimeId:'rt_auth'}}));
+    db.query("UPDATE multiremi_turns SET status='failed' WHERE id=?").run(turnId);
+    expect(retry().current_attempt_id).toBe(target.attemptId);
+    const manifest=JSON.parse(db.query('SELECT manifest_json FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(target.attemptId).manifest_json);
 
     const task=store.getTask(target.attemptId)!;
     await expect(store.createTaskAccessToken(task,'local')).rejects.toThrow('root_authority_revoked');
@@ -321,7 +317,13 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>withSecurityWrite(db,'1',offerPlan,tx=>service.issue(tx,candidate))).toThrow('credential_version_conflict');
     const receipts=new RootReceiptStore(db,service);
     expect(()=>receipts.commitFirstOffer(candidate,offerLease)).toThrow('stale_execution');
-    db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(task.id);
+    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'test-offer'})?.id).toBe(task.id);
+    const initialIssue=fixture().createIssue({title:'direct creation',assigneeType:'agent',assigneeId:agent.id});
+    const initialSession=store.getOrCreateDefaultIssueSession(initialIssue.id);
+    const initialExecution={...execution,attemptId:'tsk_initial'};
+    const createdTask=createAdmittedTask(store,{agentId:agent.id,issueId:initialIssue.id,issueSessionId:initialSession.id,runtimeId:runtime.id,prompt:'direct'},
+      directProof,initialExecution,()=>({execution:initialExecution,inputs:{...inputs,manifest:{id:'initial_manifest',version:1}}}));
+    expect(db.query('SELECT eligibility FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(createdTask.id)?.eligibility).toBe('root');
     const wrongRecipient=await PreparedRootDelivery.prepare({...tuple,recipient_key_id:'retired'},business,enc);
     expect(()=>receipts.commitFirstOffer(wrongRecipient,offerLease)).toThrow();
     expect(db.query('SELECT run_id FROM multiremi_usage_runs WHERE task_id=?').get(task.id)).toBeNull();
@@ -459,6 +461,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>start('different')).toThrow('stale_execution');
     expect(start('birth')).toBe('replayed');
     expect(Number(db.query('SELECT COUNT(*) AS total FROM multiremi_usage_runs WHERE task_id=?').get(task.id).total)).toBe(1);
+    const plan=receipts.planRecovery(tuple.receipt_id);
     expect(()=>withSecurityWrite(db,'1',plan,tx=>writeCurrentTaskLease(db,tx,1,lease))).toThrow('authority_revision_conflict');
     expect(withSecurityWrite(db,'1',plan,tx=>readCurrentTaskLease(db,tx,target.attemptId)?.state)).toBe('running');
     expect(()=>withSecurityWrite(db,undefined,plan,tx=>readCurrentTaskLease(db,tx,target.attemptId))).toThrow('security_tx_invalid');

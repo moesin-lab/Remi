@@ -1649,9 +1649,11 @@ export class TasksRepo {
       try { return this.createTaskWithinTransaction(input, childStatusChanges, deferredEvents, options); }
       catch(error){if(!(error as any)?.message_result)throw error;unscheduled=error;return null;}
     })();
-    if(unscheduled){this.ctx.emitCommitEvents(deferredEvents);throw unscheduled;}
-    this.runChildStatusChanges(childStatusChanges);
-    this.ctx.emitCommitEvents(deferredEvents);
+    if(unscheduled){afterCommit(this.ctx.db,()=>this.ctx.emitCommitEvents(deferredEvents));throw unscheduled;}
+    afterCommit(this.ctx.db,()=>{
+      this.runChildStatusChanges(childStatusChanges);
+      this.ctx.emitCommitEvents(deferredEvents);
+    });
     return task!;
   }
 

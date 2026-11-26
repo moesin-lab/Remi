@@ -1,3 +1,9 @@
+import { createMultiremiApp, startMultiremiServer } from '@multiremi/api.js';
+import { createHub } from '@multiremi/api/hub/hub-core.js';
+import { createLocalHubTransport } from '@multiremi/api/hub/hub-transport.js';
+import { authenticateBrowserWebSocket, nextWebSocketMessage } from './helpers.js';
+import { deltaTraceEvent } from '../../helpers/turn-trace.js';
+import type { MultiremiStore } from '@multiremi/store/store.js';
 import { expect, it } from 'bun:test';
 import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
@@ -14,6 +20,26 @@ import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease } f
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 const hash = (input:string) => createHash('sha256').update(input).digest('hex');
+
+function rootClient(store: MultiremiStore, signing: { domainId: string; keyEpoch: string; secret: string }) {
+  const master = 'isolated-master-token';
+  const { request } = createMultiremiApp({ store, authToken: master });
+  return async (path: string, token = master, body?: object, method = body ? 'POST' : 'GET') => {
+    const env = { JWT_SECRET: signing.secret, MULTIREMI_JWT_SIGNING_DOMAIN: signing.domainId, MULTIREMI_JWT_KEY_EPOCH: signing.keyEpoch };
+    const prior = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    try {
+      return await request(path, { method, headers: {
+        authorization: 'Bearer ' + token, ...(body && { 'content-type': 'application/json' }),
+      }, ...(body && { body: JSON.stringify(body) }) });
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  };
+}
 
 async function bootstrap(db:SqlDatabase) {
     const service = new RootManagement(db);
@@ -43,6 +69,20 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const compact=service.issueIndependentDashboardSession(passwordProof,(Math.floor(Date.now()/1000)+300)*1000,
       (tx,source,claims)=>new JwtMaterials(db).issue(tx,source,claims,signing));
     const proof=service.registeredCredentials.verifyJwt(compact,signing);
+    const api = rootClient(store, signing);
+    const context = await api('/api/root/context', compact);
+    expect(context.status).toBe(200);
+    expect(await context.json()).toMatchObject({ effective_root: true, transport_identity: 'human', authenticated_subject: { type: 'user', id: input.userId } });
+    expect((await api('/api/root/grants')).status).toBe(403);
+    for (const role of ['normal', 'maintainer', 'supervisor'] as const) {
+      const agent = store.createAgent({ name: 'Legacy ' + role, provider: 'codex', role });
+      const task = store.createTask({ agentId: agent.id, prompt: 'ordinary task' });
+      const token = await store.createTaskAccessToken(task, 'local');
+      expect(store.getAgent(agent.id)?.role).toBe(role);
+      expect((await api('/api/workspaces/local', token.token)).status).toBe(200);
+      expect((await api('/api/root/grants', token.token)).status).toBe(403);
+    }
+    expect(await (await api('/api/root/context')).json()).toMatchObject({ effective_root: false, transport_identity: 'master', authenticated_subject: null });
     const use={use:'write',action:'issue.update',actualTarget:{type:'issue',id:'isolated'}};
     expect(service.resolveCurrent(proof,{...use,use:'read'})).toMatchObject({effectiveRoot:true,scope:'system',subject:{id:input.userId,type:'user'}});
     const plan=service.plan(proof,use);
@@ -76,23 +116,57 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     db.run("INSERT INTO multiremi_password_authority_versions SELECT 'usr_second',1,verifier_digest,'password2','identity2' FROM multiremi_password_authority_versions WHERE user_id='usr_auth'");
     const recipient=await service.verifyIndependentPassword(subject.id,'test-dashboard-password');
     const createUse={action:'root.grant.create',use:'management',actualTarget:subject};
-    for (const credential of [proof,patProof]) {
+    const rejected = await api('/api/root/grants', compact, { subject: { type: 'agent', id: 'agt_fixture' } });
+    expect(await rejected.json()).toMatchObject({ error: { code: 'root_required' } });
+    for (const [credential, bearer] of [[proof, compact], [patProof, 'fixture-pat']] as const) {
       const origin=service.resolveCurrent(credential,createUse).credentialOrigin!;
       const createPlan=service.plan(credential,createUse);
       const request={subject,expected_revision:createPlan.expectedRevision,idempotency_key:origin.credential.id,reason:'delegate'};
-      const result=withSecurityWrite(db,undefined,createPlan,tx=>service.grant(tx,service.authorizeWrite(tx,credential,createUse),request));
+      const granted = await api('/api/root/grants', bearer, request);
+      expect(granted.status).toBe(200);
+      const result = await granted.json();
+      expect(await (await api('/api/root/grants?status=active&subject_id=' + subject.id, bearer)).json()).toMatchObject({ grants: [{ id: result.grant.id, effective: true }] });
       expect(result.grant).toMatchObject({origin_family_id:registered.family_id,issuer:{type:'user',id:'usr_auth'}});
       expect(db.query('SELECT proof_node_id FROM multiremi_root_management_events WHERE revision_after=?').get(result.security_revision)?.proof_node_id).toBe(origin.node.nodeId);
       expect(service.resolveCurrent(recipient,use).effectiveRoot).toBe(true);
       const revokeUse={action:'root.grant.revoke',use:'management',actualTarget:{type:'grant',id:result.grant.id}};
-      withSecurityWrite(db,undefined,service.plan(credential,revokeUse),tx=>service.revokeGrant(tx,service.authorizeWrite(tx,credential,revokeUse),result.grant.id,
-        {expected_revision:result.security_revision,idempotency_key:'revoke',reason:'withdraw'}));
+      const revoked = await api('/api/root/grants/' + result.grant.id + '/revoke', bearer,
+        { expected_revision: result.security_revision, idempotency_key: 'revoke', reason: 'withdraw' });
+      expect(revoked.status).toBe(200);
+      expect(await (await api('/api/root/audit?limit=1&action=' + revokeUse.action, bearer)).json()).toMatchObject({ entries: [{ credential_id: origin.credential.id, target_id: result.grant.id }] });
       expect(service.resolveCurrent(recipient,use).effectiveRoot).toBe(false);
     }
     const familyUse={action:'root.credential-family.revoke',use:'management',actualTarget:{type:'credential_family',id:registered.family_id}};
     const familyPlan=service.plan(proof,familyUse);
-    withSecurityWrite(db,undefined,familyPlan,tx=>service.revokeFamily(tx,service.authorizeWrite(tx,proof,familyUse),registered.family_id,
-      {expected_revision:familyPlan.expectedRevision,idempotency_key:'family',reason:'withdraw',reason_code:'operator_security_revoke'}));
+    const other = store.createWorkspace({ id: 'ws_socket_root', name: 'Socket workspace', slug: 'root-socket' });
+    const privateAgent = store.createAgent({ name: 'Socket target', provider: 'codex', workspaceId: other.id, visibility: 'private' });
+    const task = store.createTask({ agentId: privateAgent.id, workspaceId: other.id, prompt: 'socket check' });
+    const hub = createHub({ transport: createLocalHubTransport(), scheduleFlush: () => {} });
+    const server = startMultiremiServer({ store, scheduler: null, port: 0, hostname: '127.0.0.1', authToken: 'isolated-master-token', liveHub: hub });
+    const socket = new WebSocket('ws://127.0.0.1:' + server.port + '/api/trace/ws?workspace_id=local');
+    try {
+      await authenticateBrowserWebSocket(socket, 'fixture-pat');
+      const ack = nextWebSocketMessage(socket);
+      socket.send(JSON.stringify({ type: 'stream.subscribe', payload: { stream: 'trace', id: task.id, from_seq: 0 } }));
+      expect(await ack).toMatchObject({ type: 'stream.ack', payload: { id: task.id } });
+      const data = nextWebSocketMessage(socket);
+      hub.append(task.id, [deltaTraceEvent(1, 'visible before revocation')]);
+      hub.flushNow();
+      expect(await data).toMatchObject({ type: 'stream.data', payload: { id: task.id } });
+      const revokedFamily = await api('/api/root/credential-families/' + registered.family_id + '/revoke', compact,
+        { expected_revision: familyPlan.expectedRevision, idempotency_key: 'family', reason: 'withdraw', reason_code: 'operator_security_revoke' });
+      expect(revokedFamily.status).toBe(200);
+      expect((await api('/api/root/grants', compact)).status).toBe(401);
+      expect((await api('/api/root/grants', 'fixture-pat')).status).toBe(401);
+      const rejected = nextWebSocketMessage(socket);
+      hub.append(task.id, [deltaTraceEvent(2, 'must not leave the server')]);
+      hub.flushNow();
+      expect(await rejected).toMatchObject({ type: 'stream.error', payload: { id: task.id, code: 'forbidden' } });
+    } finally {
+      socket.close();
+      server.stop(true);
+      hub.shutdown();
+    }
     expect(()=>service.resolveCurrent(proof,use)).toThrow('root_authority_revoked');
     expect(()=>service.resolveCurrent(patProof,use)).toThrow('credential_version_conflict');
   });
@@ -115,16 +189,23 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const challenge=withSecurityWrite(db,undefined,{...plan,domainTargets:[...plan.domainTargets,'machine:rt_management'].sort()},
       tx=>beginMachineChallenge(db,tx,'machine-token','rt_management',grantUse.action,'rt_management'));
     db.query('UPDATE multiremi_machine_challenges SET consumed_at_ms=1,proof_digest=? WHERE challenge_id=?').run('verified',challenge.id);
-    const grant=(response:string)=>withSecurityWrite(db,undefined,plan,tx=>service.grantRuntimeTrust(tx,service.authorizeWrite(tx,proof,grantUse),{
+    const api = rootClient(store, signing);
+    const grant = (response: string) => api('/api/root/runtime-trust', compact, {
       runtime_id:'rt_management',daemon_id:'daemon',incarnation:'inc',recipient_key_id:'key',
       recipient_key_fingerprint:`sha256:${createHash('sha256').update(recipient.export({type:'spki',format:'der'})).digest('hex')}`,
-      reason:'trust',expected_revision:plan.expectedRevision,idempotency_key:'grant',challenge_id:challenge.id,challenge_response:response}));
-    expect(()=>grant('wrong')).toThrow('root_authority_revoked');
-    const result=grant('verified');
+      reason:'trust',expected_revision:plan.expectedRevision,idempotency_key:'grant',challenge_id:challenge.id,challenge_response:response});
+    expect((await grant('wrong')).status).toBe(401);
+    const granted = await grant('verified');
+    expect(granted.status).toBe(200);
+    const result = await granted.json();
+    expect(await (await api('/api/root/runtime-trust/rt_management', compact)).json()).toMatchObject({ active_trust: { id: result.trust.id, effective: true } });
+    expect(await (await api('/api/root/runtime-trust?runtime_id=rt_management', compact)).json()).toMatchObject({ trusts: [{ id: result.trust.id, effective: true }] });
     expect(result.trust.issuer).toEqual({type:'user',id:'usr_auth'});
     const revokeUse={action:'root.runtime-trust.revoke',use:'management',actualTarget:{type:'runtime_trust',id:result.trust.id}};
-    const revoked=withSecurityWrite(db,undefined,service.plan(proof,revokeUse),tx=>service.revokeRuntimeTrust(tx,service.authorizeWrite(tx,proof,revokeUse),
-      result.trust.id,{reason:'retire',expected_revision:result.security_revision,idempotency_key:'revoke',reason_code:'operator_security_revoke'}));
+    const response = await api('/api/root/runtime-trust/' + result.trust.id + '/revoke', compact,
+      { reason:'retire',expected_revision:result.security_revision,idempotency_key:'revoke',reason_code:'operator_security_revoke' });
+    expect(response.status).toBe(200);
+    const revoked = await response.json();
     expect(revoked.trust.status).toBe('revoked');
     const origin=service.resolveCurrent(proof,revokeUse).credentialOrigin!;
     expect(db.query('SELECT proof_node_id FROM multiremi_root_management_events WHERE action IN (?,?)').all(grantUse.action,revokeUse.action))
@@ -133,7 +214,8 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
 
   it('consumes one admission on the real replacement insert and fences delayed lease updates', async()=>{
     const {db,store}=fixture();
-    const {service,passwordProof,created}=await bootstrap(db);
+    const {service,passwordProof,created,signing}=await bootstrap(db);
+    const api = rootClient(store, signing);
     const agent=store.createAgent({name:'admitted',provider:'codex'});
     const issue=fixture().createIssue({title:'admission',assigneeType:'agent',assigneeId:agent.id});
     const previous=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'previous'});
@@ -218,18 +300,26 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     db.query("UPDATE multiremi_turn_attempts SET status='running' WHERE id=?").run(task.id);
     db.query("UPDATE multiremi_delivery_receipts SET run_state='running',ack_state='confirmed',execution_locator_json='{}',start_deadline='2000-01-01T00:00:00Z' WHERE receipt_id=?").run(tuple.receipt_id);
     expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(true);
+    const other = store.createWorkspace({ id: 'ws_root_read', name: 'Isolated workspace', slug: 'root-read' });
+    const privateAgent = store.createAgent({ name: 'Private Agent', provider: 'codex', workspaceId: other.id, visibility: 'private' });
+    expect((await api('/api/workspaces/' + other.id, token.token)).status).toBe(200);
+    expect((await api('/api/agents/' + privateAgent.id, token.token)).status).toBe(200);
+    expect((await api('/api/workspaces/' + other.id, token.token, { name: 'Renamed workspace' }, 'PATCH')).status).toBe(200);
+    expect(store.getWorkspace(other.id)?.name).toBe('Renamed workspace');
     db.run("UPDATE multiremi_current_task_leases SET expires_at_ms=1 WHERE attempt_id='tsk_admitted'");
     expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(false);
     const revokeUse={action:'root.grant.revoke',use:'management',actualTarget:{type:'grant',id:'grant-agent'}};
-    const revoke=()=>{
-      const revokePlan=service.plan(taskProof,revokeUse);
-      return withSecurityWrite(db,revokePlan.fenceTerm,revokePlan,tx=>service.revokeGrant(tx,service.authorizeWrite(tx,taskProof,revokeUse),'grant-agent',
-        {expected_revision:revokePlan.expectedRevision,idempotency_key:'task-revoke',reason:'retire'}));
-    };
-    expect(revoke).toThrow('root_required');
+    const revoke = () => api('/api/root/grants/grant-agent/revoke', token.token, {
+      expected_revision: service.plan(taskProof, revokeUse).expectedRevision, idempotency_key: 'task-revoke', reason: 'retire',
+    });
+    expect((await revoke()).status).toBe(403);
+    expect((await api('/api/workspaces/' + other.id, token.token, { name: 'Expired credential write' }, 'PATCH')).status).toBe(403);
+    expect(store.getWorkspace(other.id)?.name).toBe('Renamed workspace');
     expect(db.query("SELECT revoked_at_ms FROM multiremi_root_grants WHERE grant_id='grant-agent'").get().revoked_at_ms).toBeNull();
     db.query('UPDATE multiremi_current_task_leases SET expires_at_ms=? WHERE attempt_id=?').run(lease.expiresAtMs,task.id);
-    const revoked=revoke();
+    const response = await revoke();
+    expect(response.status).toBe(200);
+    const revoked = await response.json();
     expect(db.query('SELECT proof_node_id,actor_grant_id FROM multiremi_root_management_events WHERE revision_after=? AND action=?').get(revoked.security_revision,revokeUse.action))
       .toMatchObject({proof_node_id:'task-material',actor_grant_id:'grant-agent'});
   });

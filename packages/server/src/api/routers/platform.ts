@@ -1,3 +1,4 @@
+import { requestHasRootRead } from '../helpers/root-access.js';
 import { readCurrentDaemonBuild } from "../../releases/current-daemon-build.js";
 import { isPlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import type { Context, Hono } from "hono";
@@ -48,13 +49,13 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
 
   app.get("/api/multiremi/platform/config", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    if (requester instanceof Response && !requestHasRootRead(c, store, 'platform.config.read', 'platform', 'local')) return requester;
     return c.json({ degradations: deps.startupDegradations });
   });
 
   app.get("/api/multiremi/platform/status", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    if (requester instanceof Response && !requestHasRootRead(c, store, 'platform.status.read', 'platform', 'local')) return requester;
     const state = store.getPlatformState();
     const heartbeatAge = state.updaterHeartbeatAt
       ? Date.now() - new Date(state.updaterHeartbeatAt).getTime()
@@ -84,7 +85,7 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
 
   app.get("/api/multiremi/platform/operations", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    if (requester instanceof Response && !requestHasRootRead(c, store, 'platform.operations.read', 'platform', 'local')) return requester;
     return c.json({ operations: store.listPlatformOperations(Number(c.req.query("limit") ?? 20)) });
   });
 

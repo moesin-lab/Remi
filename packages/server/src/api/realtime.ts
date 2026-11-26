@@ -4,6 +4,8 @@
 // WebSocket upgrade wiring itself stays in api/server.ts.
 import { hasJwtWorkspaceAccess, verifyJwtToken } from "./helpers.js";
 import { jwtDigestIsCurrent } from './helpers/jwt.js';
+import { registeredRootProof, type RegisteredProof } from './helpers/root-access.js';
+import { SecurityAbort } from '@multiremi/store/security-write.js';
 import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
 import type {
   BrowserUserWebSocketRegistry,
@@ -47,7 +49,7 @@ export function createJwtBrowserClientGuard(store: MultiremiStore): (client: Mul
 }
 
 export function registerBrowserWebSocketClient(registry: BrowserWebSocketRegistry, client: MultiremiWebSocketClient): void {
-  if (client.data.kind !== "browser" || !client.data.authenticated) return;
+  if (client.data.kind !== "browser" || !client.data.authenticated || client.data.accessToken?.type === "task") return;
   let clients = registry.get(client.data.workspaceId);
   if (!clients) {
     clients = new Set();
@@ -57,7 +59,7 @@ export function registerBrowserWebSocketClient(registry: BrowserWebSocketRegistr
 }
 
 export function registerBrowserUserWebSocketClient(registry: BrowserUserWebSocketRegistry, client: MultiremiWebSocketClient): void {
-  if (client.data.kind !== "browser" || !client.data.authenticated || !client.data.userId) return;
+  if (client.data.kind !== "browser" || !client.data.authenticated || !client.data.userId || client.data.accessToken?.type === "task") return;
   let clients = registry.get(client.data.userId);
   if (!clients) {
     clients = new Set();
@@ -414,13 +416,25 @@ export function resolveBrowserWebSocketWorkspaceId(
   return { workspaceId: workspace.id };
 }
 
+type BrowserCredential = { userId: string; accessToken: MultiremiAccessToken | null; jwtDigest?: string; rootProof?: RegisteredProof };
+
+export function browserRootRead(store: MultiremiStore, proof: RegisteredProof | undefined, type: string, id: string): boolean {
+  if (!proof) return false;
+  try {
+    return store.rootManagement.resolveCurrent(proof, { action: 'stream.read', actualTarget: { type, id }, use: 'read' }).effectiveRoot;
+  } catch (error) {
+    if (error instanceof SecurityAbort && (error.code === 'root_authority_revoked' || error.code === 'credential_version_conflict')) return false;
+    throw error;
+  }
+}
+
 export async function authorizeBrowserWebSocketUpgrade(
   req: Request,
   store: MultiremiStore,
   authToken: string,
   workspaceId: string,
 ): Promise<
-  | { authenticated: boolean; userId: string | null; accessToken: MultiremiAccessToken | null; jwtDigest?: string }
+  | { authenticated: boolean; userId: string | null; accessToken: MultiremiAccessToken | null; jwtDigest?: string; rootProof?: RegisteredProof }
   | { response: Response }
 > {
   const token = bearerToken(req);
@@ -432,7 +446,7 @@ export async function authorizeBrowserWebSocketUpgrade(
   if ("error" in authorized) {
     return { response: Response.json({ error: authorized.error }, { status: authorized.status }) };
   }
-  return { authenticated: true, userId: authorized.userId, accessToken: authorized.accessToken, jwtDigest: authorized.jwtDigest };
+  return { authenticated: true, ...authorized };
 }
 
 export async function authorizeBrowserWebSocketAuthFrame(
@@ -440,7 +454,7 @@ export async function authorizeBrowserWebSocketAuthFrame(
   store: MultiremiStore,
   authToken: string,
   workspaceId: string,
-): Promise<{ userId: string; accessToken: MultiremiAccessToken | null; jwtDigest?: string } | { error: string }> {
+): Promise<BrowserCredential | { error: string }> {
   const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, any> : {};
   const token = cleanString(payload.token);
   if (event.type !== "auth" || !token) return { error: "expected auth message as first frame" };
@@ -455,14 +469,22 @@ export async function authorizeBrowserWebSocketToken(
   authToken: string,
   workspaceId: string,
 ): Promise<
-  | { userId: string; accessToken: MultiremiAccessToken | null; jwtDigest?: string }
+  | BrowserCredential
   | { error: string; status: 401 | 403 | 503 }
 > {
   if (authToken && token === authToken) return { userId: "local", accessToken: null };
   const accessToken = await store.verifyAccessToken(token);
   if (accessToken) {
     if (accessToken.type === "daemon") return { error: "forbidden for daemon token", status: 403 };
-    if (accessToken.type === "task") return { error: "forbidden for task token", status: 403 };
+    if (accessToken.type === 'task') {
+      try {
+        const proof = registeredRootProof(store, token, false);
+        if (browserRootRead(store, proof ?? undefined, 'workspace', workspaceId)) {
+          return { userId: accessToken.userId, accessToken, rootProof: proof ?? undefined };
+        }
+      } catch { return { error: 'authentication state unavailable', status: 503 }; }
+      return { error: 'forbidden for task token', status: 403 };
+    }
     const userId = accessToken.userId || "local";
     // Human login accounts share existing workspaces. Legacy local PATs keep
     // their explicit workspace binding unless they represent a login session.
@@ -470,7 +492,9 @@ export async function authorizeBrowserWebSocketToken(
       || userId === "local" && accessToken.purpose !== "session" && accessToken.workspaceId !== workspaceId) {
       return { error: "workspace not available to this credential", status: 403 };
     }
-    return { userId: "local", accessToken };
+    try {
+      return { userId: 'local', accessToken, rootProof: registeredRootProof(store, token, false) ?? undefined };
+    } catch { return { error: 'authentication state unavailable', status: 503 }; }
   }
   let jwt;
   try { jwt = verifyJwtToken(token, store); } catch (error) {
@@ -481,7 +505,9 @@ export async function authorizeBrowserWebSocketToken(
   if (!hasJwtWorkspaceAccess(store, jwt.userId, workspaceId)) {
     return { error: "not a member of this workspace", status: 403 };
   }
-  return { userId: "local", accessToken: null, jwtDigest: jwt.jwtDigest };
+  try {
+    return { userId: 'local', accessToken: null, jwtDigest: jwt.jwtDigest, rootProof: registeredRootProof(store, token, true) ?? undefined };
+  } catch { return { error: 'authentication state unavailable', status: 503 }; }
 }
 
 

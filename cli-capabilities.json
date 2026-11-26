@@ -13076,6 +13076,21 @@
     "GET /api/remi/releases/latest/version": {
       "command": "platform.release.version"
     },
+    "GET /api/root/audit": {
+      "command": "root.audit.list"
+    },
+    "GET /api/root/context": {
+      "command": "root.context"
+    },
+    "GET /api/root/grants": {
+      "command": "root.grant.list"
+    },
+    "GET /api/root/runtime-trust": {
+      "command": "root.runtime-trust.list"
+    },
+    "GET /api/root/runtime-trust/:runtimeId": {
+      "command": "root.runtime-trust.get"
+    },
     "GET /api/runtime-workspaces": {
       "command": "runtime.workspace.list"
     },
@@ -14436,6 +14451,21 @@
     },
     "POST /api/projects/:id/restore": {
       "command": "project.restore"
+    },
+    "POST /api/root/credential-families/:familyId/revoke": {
+      "command": "root.credential-family.revoke"
+    },
+    "POST /api/root/grants": {
+      "command": "root.grant.create"
+    },
+    "POST /api/root/grants/:id/revoke": {
+      "command": "root.grant.revoke"
+    },
+    "POST /api/root/runtime-trust": {
+      "command": "root.runtime-trust.grant"
+    },
+    "POST /api/root/runtime-trust/:id/revoke": {
+      "command": "root.runtime-trust.revoke"
     },
     "POST /api/runtimes/:id/archive-agents-and-delete": {
       "command": "runtime.archive-agents-and-delete"

@@ -37,6 +37,8 @@ import { registerDaemonRoutes } from "./routers/daemon.js";
 import { registerStorageRoutes } from "./routers/storage.js";
 import { registerCloudRuntimeRoutes } from "./routers/cloud-runtime.js";
 import { registerCloudBillingRoutes } from "./routers/cloud-billing.js";
+import { bindRootProof } from "./helpers/root-access.js";
+import { registerRootRoutes, rootError } from "./routers/root.js";
 import { registerMeRoutes } from "./routers/me.js";
 import { registerWorkspaceRoutes } from "./routers/workspaces.js";
 import { registerSystemPromptRoutes } from "./routers/system-prompts.js";
@@ -201,6 +203,7 @@ import {
 import {
   authorizeBrowserWebSocketAuthFrame,
   authorizeBrowserWebSocketUpgrade,
+  browserRootRead,
   isWebSocketUpgrade,
   parseDaemonWebSocketMessage,
   registerBrowserUserWebSocketClient,
@@ -214,6 +217,7 @@ import type {
   BrowserWebSocketRegistry,
   MultiremiRealtimeState,
   MultiremiWebSocketData,
+  MultiremiWebSocketClient,
   WebhookRateLimitConfig,
 } from "./helpers.js";
 import { broadcastBrowserResync, createBrowserStreamHandler } from "@multiremi/api/hub/browser-stream.js";
@@ -679,6 +683,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         token = getCookie(c, AUTH_COOKIE_NAME) ?? "";
       }
       if (token === authToken) {
+        c.set("multiremiMasterRootTransport", true);
         await next();
         return;
       }
@@ -687,6 +692,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         const jwt = verifyJwtToken(token, store);
         if (!jwt) return c.json({ error: "unauthorized" }, 401);
         c.set("multiremiAuth", buildRequestAuth(null, jwt.userId));
+        bindRootProof(c, store, token, true);
         await next();
         return;
       }
@@ -694,6 +700,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         return c.json({ error: "forbidden for daemon token" }, 403);
       }
       if (accessToken.type === "daemon") c.set("multiremiVerifiedDaemonWorkspaceId", accessToken.workspaceId);
+      else bindRootProof(c, store, token, false);
       if (accessToken.type === "task") {
         const denyCategory = taskTokenHardDenyCategory(c.req.raw);
         if (denyCategory) {
@@ -743,6 +750,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
           return c.json({ error: "forbidden for daemon token" }, 403);
         }
         if (accessToken.type === "daemon") c.set("multiremiVerifiedDaemonWorkspaceId", accessToken.workspaceId);
+        else bindRootProof(c, store, rawToken, false);
         if (accessToken.type === "task") {
           const denyCategory = taskTokenHardDenyCategory(c.req.raw);
           if (denyCategory) {
@@ -771,6 +779,10 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
+    if (c.req.path.startsWith("/api/root/")) {
+      const response = rootError(c, err);
+      if (response) return response;
+    }
     if (err instanceof JwtMaterialUnavailable) return c.json({ error: 'authentication state unavailable' }, 503);
     if (err instanceof ExecutionModelPolicyError) return c.json({ error: err.message, code: err.code, field: err.field }, 400);
     if (isDatabaseConnectionError(err)) {
@@ -967,6 +979,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     }, 201);
   });
   registerMeRoutes(app, deps);
+  registerRootRoutes(app, store);
   registerWorkspaceRoutes(app, deps);
   registerSystemPromptRoutes(app, deps);
   registerScmRoutes(app, deps);
@@ -1281,13 +1294,17 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     ?? (readPool
       ? createPostgresStreamAuthReader(readPool)
       : createStreamAuthReader(store, { role: effectiveApiRole }));
+  const hasStreamRootAccess = (client: MultiremiWebSocketClient, stream: 'log' | 'trace', id: string) =>
+    client.data.kind === 'browser' && browserRootRead(store, client.data.rootProof, stream === 'log' ? 'session' : 'task', id);
   const browserStreams: BrowserStreamHandler = createBrowserStreamHandler({
+    hasRootAccess: hasStreamRootAccess,
     hub: liveHub,
     auth: streamAuth,
     endpoint: "log",
     projectLogFrames: createBrowserLogProjection(store, readPool),
   });
   const traceStreams: BrowserStreamHandler = createBrowserStreamHandler({
+    hasRootAccess: hasStreamRootAccess,
     hub: liveHub,
     auth: streamAuth,
     endpoint: "trace",
@@ -1524,6 +1541,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
               userId: authorization.userId,
               accessToken: authorization.accessToken,
               jwtDigest: authorization.jwtDigest,
+              rootProof: authorization.rootProof,
               streamEndpoint: "trace" as const,
             },
           });
@@ -1546,6 +1564,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
               userId: authorization.userId,
               accessToken: authorization.accessToken,
               jwtDigest: authorization.jwtDigest,
+              rootProof: authorization.rootProof,
               streamEndpoint: "log" as const,
             },
           });
@@ -1604,6 +1623,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
             ws.data.userId = authorization.userId;
             ws.data.accessToken = authorization.accessToken;
             ws.data.jwtDigest = authorization.jwtDigest;
+            ws.data.rootProof = authorization.rootProof;
             registerBrowserWebSocketClient(browserWebSockets, jwtBrowserClient(ws));
             registerBrowserUserWebSocketClient(browserUserWebSockets, jwtBrowserClient(ws));
             jwtBrowserClient(ws).sendText(JSON.stringify({ type: "auth_ack" }));

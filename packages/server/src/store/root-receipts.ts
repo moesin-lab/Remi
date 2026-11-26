@@ -11,6 +11,7 @@ import { readCurrentTaskLease, writeCurrentTaskLease } from './task-authority.js
 import { RootManagement } from './root-management.js';
 import { beginMachineChallenge, bindMachineConnection, releaseMachineConnection, requireCurrentMachine, verifyConnectionChallenge, verifyMachineChallenge, type MachineConnection } from './machine-proof.js';
 import { withSecurityTarget, type SecurityTx } from './security-write.js';
+import { prepareMachineConnection, attachMachineConnection, sessionMachineConnection } from './machine-proof.js';
 
 type Lease = { start_deadline: string; lease_id: string; fence_term: string };
 type Machine = Parameters<ReceiptService['resolveReceiptStatus']>[0];
@@ -90,6 +91,13 @@ export class RootReceiptStore {
   }
 
   bindConnection(owner: object, bearer: string) { return bindMachineConnection(this.db,owner,bearer); }
+
+  prepareConnection(bearer: string) { return prepareMachineConnection(this.db, bearer); }
+  attachConnection(session: object, connection: MachineConnection) { attachMachineConnection(this.db, connection, session); }
+
+  challengeSession(tx: SecurityTx, session: object, runtimeId: string, action: Parameters<CheckReceipt>[3], receiptId: string) {
+    return this.challenge(tx, sessionMachineConnection(session), runtimeId, action, receiptId);
+  }
 
   releaseConnection(owner: object) { releaseMachineConnection(owner); }
 

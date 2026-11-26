@@ -220,6 +220,7 @@ export const DAEMON_UPLINK_RPC_FRAMES = [
   "gc.subject_reclaimed",
   "lane.background_wake",
   "delivery.receipt.status",
+  "delivery.receipt.challenge",
   "delivery.receipt.replay",
   "delivery.receipt.install_ack",
 ] as const;

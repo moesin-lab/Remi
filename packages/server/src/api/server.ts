@@ -1498,8 +1498,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
         if (server.upgrade(req, { data: {
           connectedAt: new Date().toISOString(),
           kind: "daemon-protocol",
-          accessToken: resolved.identity.accessToken,
-          masterToken: resolved.identity.masterToken,
+          ...resolved.identity,
           session: null,
         } })) return undefined;
         return Response.json({ error: "websocket upgrade failed" }, { status: 400 });
@@ -1574,10 +1573,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
           // A v2 session answers every frame itself; nothing is sent here,
           // because the daemon speaks first and one greeting must not race
           // another.
-          ws.data.session = daemonProtocol.openSession(sessionSocket(ws), {
-            accessToken: ws.data.accessToken,
-            masterToken: ws.data.masterToken,
-          });
+          ws.data.session = daemonProtocol.openSession(sessionSocket(ws), ws.data);
           return;
         }
         if (ws.data.authenticated) {

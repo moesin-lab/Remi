@@ -25,6 +25,22 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
       masterToken: session.ownerAccessToken === null }, session.daemonId, frame.rt);
     return runtime.ok;
   };
+  layer.registerRpcHandler('delivery.receipt.challenge', async (frame, session) => {
+    const { action, attempt_id, consumer_id, receipt_id, handoff_id } = frame.payload;
+    if (session.ownerAccessToken?.type !== 'daemon' || !frame.rt || !await authorized(frame, session)) return denied('authority_revoked');
+    if ((action !== 'status' && action !== 'replay' && action !== 'install_ack' && action !== 'start') ||
+        !text(attempt_id) || !text(consumer_id) || (receipt_id != null && !text(receipt_id)) || (handoff_id != null && !text(handoff_id))) return denied();
+    try {
+      const receipts = store.rootReceipts;
+      const id = receipts.findReceipt({attempt_id, handoff_id, receipt_id}, frame.rt, consumer_id);
+      if (!id) return denied('authority_revoked');
+      const plan = receipts.planRecovery(id);
+      const challenge = store.withSecurityWrite(plan.fenceTerm, plan, tx => receipts.challengeSession(tx, session, frame.rt!, action, id));
+      return {ok: true, challenge};
+    } catch {
+      return denied('authority_revoked');
+    }
+  });
   for (const action of ['status','replay','install_ack'] as const) {
     layer.registerRpcHandler(`delivery.receipt.${action}`,async(frame,session)=>{
       const payload=frame.payload;

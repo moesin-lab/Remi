@@ -76,6 +76,7 @@ function runtimeCapabilityOptions(capabilities: DaemonRuntimeCapabilities | unde
 
 /** How a v2 connection's identity is established before `hello` is read. */
 export interface DaemonProtocolIdentity {
+  machineConnection?: import('../../store/machine-proof.js').MachineConnection;
   accessToken: MultiremiAccessToken | null;
   /** True when the connection presented the deployment master credential. */
   masterToken: boolean;
@@ -192,10 +193,12 @@ export class DaemonProtocolLayer {
       onAck: ack => { for (const hooks of this.sessionHooks) hooks.ack?.(session, ack); },
       onDrain: () => { for (const hooks of this.sessionHooks) hooks.drain?.(session); },
       onClose: () => {
+        if (identity.machineConnection) this.store.rootReceipts.releaseConnection(session);
         for (const hooks of this.sessionHooks) hooks.close?.(session);
         for (const listener of this.closeListeners) listener(session);
       },
     });
+    if (identity.machineConnection) this.store.rootReceipts.attachConnection(session, identity.machineConnection);
     return session;
   }
 
@@ -253,7 +256,8 @@ export class DaemonProtocolLayer {
           ),
         };
       }
-      return { identity: { accessToken, masterToken: false } };
+      const machineConnection = this.store.rootReceipts.prepareConnection(token);
+      return { identity: { accessToken, masterToken: false, ...(machineConnection && { machineConnection }) } };
     }
     if (authToken && !masterToken) {
       return { response: Response.json({ error: "unauthorized" }, { status: 401 }) };

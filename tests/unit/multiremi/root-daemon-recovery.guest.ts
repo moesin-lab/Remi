@@ -40,7 +40,7 @@ pendingTurnBackendTests('multi-UID root consumer with one authority database', (
       }
       return {child,exited,next};
     }
-    const server = startMultiremiServer({store,port:0,hostname:'127.0.0.1',authToken:'isolated-master',backgroundJobs:true,daemonWelcomeCaps:['root.delivery','prompt.policy.adopt.v1']});
+    const server = startMultiremiServer({store,port:0,hostname:'127.0.0.1',authToken:'isolated-master',backgroundJobs:true});
     const origin = `http://127.0.0.1:${server.port}`;
     const modelServer = createServer();
     const modelConnected = once(modelServer,'connection').then(([socket]) => ({socket,replies:createInterface({input:socket})[Symbol.asyncIterator]()}));

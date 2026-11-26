@@ -171,7 +171,7 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
         expect(store.claimTask(runtime.id,{supportsPromptPolicy:true,policyProtocol:'adopt',rootMachineCredentialId:credential})).toBeNull();
       }
       expect(store.getTask(attemptId)?.status).toBe('queued');
-      const server=startMultiremiServer({store,port:0,hostname:'127.0.0.1',authToken:'test-master',backgroundJobs:true,daemonWelcomeCaps:['root.delivery','prompt.policy.adopt.v1']});
+      const server=startMultiremiServer({store,port:0,hostname:'127.0.0.1',authToken:'test-master',backgroundJobs:true});
       const receive=async(resume=false)=>{
         const offered=Promise.withResolvers<Record<string,unknown>>();
         const client=new DaemonProtocolClient({serverUrl:`http://127.0.0.1:${server.port}`,token:'test-daemon',daemonId:'worker',cliVersion:DAEMON_MIN_CLI_VERSION,

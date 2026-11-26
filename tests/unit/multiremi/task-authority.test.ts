@@ -1,7 +1,8 @@
 import { expect, it } from 'bun:test';
-import { createHash, createPublicKey, generateKeyPairSync, privateDecrypt, sign } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
+import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
-import { beginMachineChallenge, machineSignaturePayload } from '@multiremi/store/machine-proof.js';
+import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
 import { startMultiremiServer } from '@multiremi/api/server.js';
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
@@ -192,11 +193,11 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       const challenge=store.withSecurityWrite('1',recoveryPlan,tx=>repo.challenge(tx,connection,tuple.runtime_id,action,tuple.receipt_id));
       return signChallenge(challenge);
     }
+    const machineKeys = new RootMachineKeys(local, recipientKeys.privateKey, signingKeys.privateKey);
+    expect(tuple.recipient_key_fingerprint).toBe(machineKeys.publicBinding().recipient_key_fingerprint);
     function signChallenge(challenge: ReturnType<typeof repo.challenge>) {
-      const nonce=privateDecrypt({key:recipientKeys.privateKey,oaepHash:'sha256'},Buffer.from(challenge.encryptedNonce,'base64url')).toString('base64url');
-      const signed_at=new Date().toISOString();
-      const signature=sign(null,machineSignaturePayload(challenge,nonce,signed_at),signingKeys.privateKey).toString('base64url');
-      return {id:challenge.id,proof:{...local,nonce,signed_at,signature}};
+      expect(()=>machineKeys.answerChallenge({...challenge,targetId:'wrong-target'})).toThrow();
+      return {id:challenge.id,proof:machineKeys.answerChallenge(challenge)};
     }
     function authenticate(action:Parameters<typeof repo.challenge>[3]) {
       const signed=signedChallenge(action);

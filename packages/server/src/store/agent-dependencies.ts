@@ -5,6 +5,7 @@ import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connecti
 import { readWorkspacePromptSettings } from '../prompts/workspace-settings.js';
 import { grantAncestryIsCurrent } from './authority-provenance.js';
 import type { StoreContext } from './context.js';
+import type { SqlDatabase } from './db/postgres.js';
 import { getExecutionGroup, getGroupExecutionProfile } from './execution-groups.js';
 import { recordedMachineBindingIsCurrent } from './machine-proof.js';
 import { WorkspacesRepo } from './repos/workspaces-repo.js';
@@ -27,6 +28,24 @@ function snapshotVersion(digest: string): number {
   return Number.parseInt(digest.slice(7, 15), 16) >>> 1;
 }
 
+export function planFrozenAgentDependencies(db: SqlDatabase, grantId: string, generation: number, agentId: string) {
+  const frozen = db.query(`SELECT d.agent_id,d.grant_generation,d.trust_versions_json,a.workspace_id
+    FROM multiremi_agent_grant_dependencies d LEFT JOIN multiremi_agents a ON a.id=d.agent_id WHERE d.grant_id=?`).get(grantId);
+  if (!frozen) return {workspaceIds:[],domainTargets:[]};
+  if (frozen.agent_id !== agentId || Number(frozen.grant_generation) !== generation || !frozen.workspace_id) throw new SecurityAbort('root_authority_revoked');
+  const trusts = JSON.parse(frozen.trust_versions_json);
+  if (!Array.isArray(trusts) || !trusts.length) throw new SecurityAbort('root_runtime_untrusted');
+  const lookup = db.query('SELECT runtime_id FROM multiremi_runtime_trusts WHERE trust_id=? AND generation=?');
+  const targets = new Set([`management:agent:${agentId}`]);
+  for (const trust of trusts) {
+    if (!trust || typeof trust.id !== 'string' || !Number.isSafeInteger(trust.version)) throw new SecurityAbort('root_runtime_untrusted');
+    const runtime = lookup.get(trust.id,trust.version);
+    if (!runtime?.runtime_id) throw new SecurityAbort('root_runtime_untrusted');
+    targets.add(`management:runtime:${runtime.runtime_id}`);
+  }
+  return {workspaceIds:[String(frozen.workspace_id)],domainTargets:[...targets].sort()};
+}
+
 export class AgentDependencies {
   constructor(private readonly ctx: StoreContext) {}
 
@@ -47,8 +66,12 @@ export class AgentDependencies {
       if (!Number.isSafeInteger(configEpoch) || configEpoch < 0) reject();
 
       const refs = new Map<string, AgentDependencyRef>();
+      const versions = new Map<string, number>();
       function add(kind: string, id: string, use: string, digest: string, version = snapshotVersion(digest)) {
         if (!id || !/^sha256:[a-f0-9]{64}$/.test(digest) || !Number.isSafeInteger(version) || version < 0) reject();
+        const resource = JSON.stringify([kind,id]);
+        if (versions.has(resource) && versions.get(resource) !== version) reject();
+        versions.set(resource,version);
         const key = JSON.stringify([kind,id,use]);
         const prior = refs.get(key);
         if (prior && (prior.digest !== digest || prior.version !== version)) reject();

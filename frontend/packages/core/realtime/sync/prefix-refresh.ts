@@ -287,6 +287,7 @@ const SPECIFIC_EVENTS = new Set([
   "chat:session_updated", "chat:queue_updated",
   // A running-subagent count only patches the Chat pending list (PR 5); it is
   // no task lifecycle change, so the task lists stay as they are.
+  "task:progress",
   "task:subagents",
   // A Chat's background tasks (PR 6) patch their own list and the session count.
   "chat:background_tasks",

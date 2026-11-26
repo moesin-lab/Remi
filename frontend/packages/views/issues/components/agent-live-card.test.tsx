@@ -21,6 +21,7 @@ const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 // across re-renders (otherwise every render would stack a duplicate
 // handler and one event would fan out into many reconcile calls).
 type EventHandler = (payload: unknown) => void;
+const renderTranscript = vi.hoisted(() => vi.fn());
 const wsHandlers = vi.hoisted(() => new Map<string, Set<EventHandler>>());
 const wsReconnectCallbacks = vi.hoisted(() => new Set<() => void>());
 
@@ -67,7 +68,10 @@ vi.mock("../../common/task-transcript", async () => {
   );
   return {
     ...actual,
-    TranscriptButton: () => <button data-testid="transcript-button">transcript</button>,
+    TranscriptButton: () => {
+      renderTranscript();
+      return <button data-testid="transcript-button">transcript</button>;
+    },
   };
 });
 
@@ -161,6 +165,22 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("AgentLiveCard reconcile race", () => {
+  it("ignores unrelated tasks and preserves rows on an identical reconcile", async () => {
+    const task = makeTask("task-1");
+    mockApi.getActiveTasksForIssue.mockImplementation(async () => ({ tasks: [{ ...task }] }));
+    const reconciled = vi.fn();
+    renderCard("issue-1", undefined, [task], true, reconciled);
+    await waitFor(() => expect(reconciled).toHaveBeenCalledTimes(1));
+    renderTranscript.mockClear();
+    act(() => {
+      for (const issue_id of [undefined, "", "issue-2"]) fireEvent("task:running", { issue_id });
+    });
+    expect(mockApi.getActiveTasksForIssue).toHaveBeenCalledTimes(1);
+    act(() => fireEvent("task:running", { issue_id: "issue-1" }));
+    await waitFor(() => expect(reconciled).toHaveBeenCalledTimes(2));
+    expect(renderTranscript).not.toHaveBeenCalled();
+  });
+
   it("shows cached tasks and suppresses mount/reconnect/event reads until reveal", async () => {
     const task = makeTask("task-1", { issue_session_id: "session-1" });
     mockApi.getActiveTasksForIssue.mockResolvedValue({ tasks: [task] });

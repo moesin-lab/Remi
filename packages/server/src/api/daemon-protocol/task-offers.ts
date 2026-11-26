@@ -10,6 +10,7 @@ import type { RepositoryWikiServiceContract } from "@multiremi/repository-wiki/s
 import { canonicalRepositoryRemote, resolveTaskRepositoryWikiRepositories } from "@multiremi/repository-wiki/task-scope.js";
 import { invalidateRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { daemonTaskClaimResponse, cleanString } from "../wire/index.js";
+import { isIndependentChatOffer } from "../wire/tasks.js";
 import { systemClock, type DaemonProtocolClock, type DaemonProtocolTimer } from "./clock.js";
 import type { DaemonProtocolLayer } from "./index.js";
 import { DaemonProtocolSession } from "./session.js";
@@ -48,6 +49,8 @@ export async function prepareTaskOffer(store: MultiremiStore, task: MultiremiTas
   }
   const hydrated = await hydrateClaimKnowledge(task, project, repository, 5_000,
     undefined, supportsWikiFetch);
+  if (store.systemPromptsRepo().dispatchPolicy(task.id)?.historicalChat &&
+    (hydrated.repos.length || hydrated.repositoryWikiContexts?.length || hydrated.project || hydrated.chatAutoCheckoutRepos?.length)) return null;
   invalidateRequestReadCache();
   const current = store.getTaskIdentity(task.id);
   const allowed = expectedStatus === "resumable" ? ["running", "awaiting_human"] : ["dispatched"];
@@ -396,8 +399,17 @@ export class DaemonTaskOffers {
         return;
       }
       if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id, generation); return; }
+      const dispatch = store.systemPromptsRepo().dispatchPolicy(task.id);
+      if (dispatch?.historicalChat) {
+        const chat = task.chatSessionId && store.getChatSession(task.chatSessionId);
+        if (!chat || chat.workspaceId !== task.workspaceId || chat.agentId !== task.agentId || chat.projectId || chat.runtimeWorkspaceId || chat.origin
+          || payload.chat_session_id !== chat.id || store.getFeishuIssueIdForChatSession(chat.id) || !isIndependentChatOffer(payload)) {
+          this.rescind(runtimeId, pump, task.id, generation);
+          return;
+        }
+      }
       if (session.supportsPromptPolicy) payload.offer_generation = generation;
-      if (store.systemPromptsRepo().dispatchPolicy(task.id)?.exclusiveDelivery) payload.exclusive_delivery = true;
+      if (dispatch?.exclusiveDelivery) payload.exclusive_delivery = true;
       const budgeted = fitTaskOfferToBudget(payload, runtimeId, undefined, session.supportsWikiFetch);
       console.info(JSON.stringify({ event: "daemon_offer_budget", task_id: task.id, runtime_id: runtimeId, ...budgeted.report }));
       let report = budgeted.report;

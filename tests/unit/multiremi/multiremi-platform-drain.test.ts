@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Platform drain (MUL-74): persistent maintenance state, lease TTL recovery,
@@ -77,7 +78,7 @@ describe("platform maintenance store", () => {
     store.heartbeatRuntime(runtime.id);
     const agent = store.createAgent({ name: "Drain Bot", provider: "claude", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "x" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
 
     store.beginPlatformDrain({ operationId: "pop_gate" });

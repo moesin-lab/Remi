@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // MUL-74 outbox invariants: per-task seq ordering across an API outage,
 // durable restart recovery, permanent-error blocking, droppable-kind
 // tolerance, and safe compaction of overwritten rows at the soft size cap.
@@ -237,7 +238,7 @@ describe("MultiremiTaskReportOutbox", () => {
     const runtime = store.registerRuntime({ name: "long-charge", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "long-charge", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "Long billed turn", workspaceId: "local" });
-    store.claimTask(runtime.id); store.startTask(task.id);
+    claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
     store.setUsagePrice("local", { provider: "claude", model: "opus", connection_id: null, requested_model_alias: false,
       currency: "USD", input_per_million: 2, output_per_million: 0, cache_read_per_million: 0, cache_write_per_million: 0,
       unsplit_per_million: null, source: "configured", source_url: null, effective_from: "2026-01-01T00:00:00Z", effective_to: null });
@@ -301,7 +302,7 @@ describe("MultiremiTaskReportOutbox", () => {
     const runtime = store.registerRuntime({ name: "long-usage", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "long-usage", provider: "claude", runtimeId: runtime.id, workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, prompt: "Long task", workspaceId: "local" });
-    store.claimTask(runtime.id); store.startTask(task.id);
+    claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
     const path = tempPath();
     const first = track(new MultiremiTaskReportOutbox({ path, canSend: () => false, deliver: async () => {} }));
     const units = Array.from({ length: 3500 }, (_, i) => ({ ...actualUnit({ unitId: `request-${i}`, provider: "claude", model: i % 2 ? "opus" : "haiku",

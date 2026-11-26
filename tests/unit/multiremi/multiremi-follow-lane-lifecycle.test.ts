@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -68,7 +69,7 @@ describe("follow lane Runtime lifecycle", () => {
     expect(store.getSessionAgentLane(side.id, agent.id, "delegation:surviving")).toEqual(unaffected);
 
     const task = store.createSessionTask(side.id, { agentId: agent.id, prompt: "Recover the parent context" });
-    expect(store.claimTask(survivor.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, survivor.id)?.id).toBe(task.id);
     const projection = store.buildTaskSessionProjection(task.id)!;
     expect(projection.mode).toBe("bootstrap");
     expect(projection.inheritedSessionProjection).toMatchObject({ mode: "bootstrap", fromSeq: 0, toSeq: 3 });

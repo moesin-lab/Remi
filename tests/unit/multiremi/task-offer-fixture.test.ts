@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, expect, it, spyOn } from "bun:test";
 import { reconcileRuntimeReady } from "../../fixtures/task-offer.js";
 import { createLocalStore, createResponsibleTestIssue, resetMultiremiTestEnv } from "./helpers.js";
@@ -11,7 +12,7 @@ it("runtime.ready fixture recovers every orphan without claiming either retry", 
     const agent = store.createAgent({ name, provider: "claude" });
     const issue = createResponsibleTestIssue(store, { title: name, assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: name });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     return task;
   });
   store.startTask(parents[0]!.id);

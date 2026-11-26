@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { describe, expect, it } from "bun:test";
 import { conversationLogPgAdminUrl as pgAdminUrl, withConversationLogStore as withStore, useMigratedConversationLogStores } from "./fixtures/conversation-log-store.js";
@@ -47,7 +48,7 @@ describe("MUL-427 ruling (e): agentCommentedSince query equivalence", () => {
           if (name === "automatic reply") {
             const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Automatic reply case" });
             taskId = task.id;
-            expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+            expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
             store.startTask(task.id);
             store.completeTask(task.id, { output: "Automatic final reply" });
             commentId = store.listIssueComments(issue.id).find((comment) => comment.taskId === task.id)!.id;
@@ -100,7 +101,7 @@ describe("MUL-427 ruling (e): agentCommentedSince query equivalence", () => {
         const issue = createResponsibleTestIssue(store, { title: "One reply per round", workspaceId: "local" });
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Respond" });
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         store.startTask(task.id);
         const comment = store.createIssueComment(issue.id, { authorType: "agent", authorId: agent.id,
           taskId: task.id, body: "Already posted this round" });
@@ -124,7 +125,7 @@ describe("MUL-427 ruling (e): agentCommentedSince query equivalence", () => {
         const issue = createResponsibleTestIssue(store, { title: "Deleted comment does not count", workspaceId: "local" });
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Reply after deletion" });
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         store.startTask(task.id);
         const comment = store.createIssueComment(issue.id, { authorType: "agent", authorId: agent.id,
           taskId: task.id, body: "Deleted before the task completed" });

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { FeishuInboundRecovery, recoverFeishuHistory, feishuHistoryEvent, feishuRecoveryPath } from "@connectors/feishu/inbound-recovery.js";
 import { processFeishuMessageEvent } from "@connectors/feishu/receive.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -6,13 +7,14 @@ import { join } from "node:path";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { mutateExecutionFixture, sentTask } from "./unified-test-paths.js";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { createHash } from "node:crypto";
 import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { seedLegacyChatIssueClassificationFixture } from "./chat-issue-migration-fixture.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
 import { useTaskSessionInput } from "@multiremi/api/daemon-protocol/offer-budget.js";
+import { wakeDaemonWorkspaceEvent } from "@multiremi/api/daemon-protocol/workspace-wakeups.js";
 import { buildTaskPromptArtifact } from "@multiremi/prompt.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import type { MultiremiDaemon } from "@multiremi/daemon.js";
@@ -143,7 +145,7 @@ describe("Feishu bot standard Task bridge", () => {
       externalMessageId: "om_secondary", chatId: "oc_secondary", threadId: "omt_secondary",
       senderUnionId: "on_owner", deliveryMode: "native_cot_v1", text: "Start the background work",
     });
-    expect(store.claimTask("rt_secondary")?.id).toBe(inbound.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_secondary")?.id).toBe(inbound.taskId);
     store.startTask(inbound.taskId);
     store.completeTask(inbound.taskId, { output: "Background task started", sessionId: "provider_secondary" });
     for (const delivery of store.claimFeishuBotOutbounds("local", "rt_secondary")) {
@@ -180,7 +182,7 @@ describe("Feishu bot standard Task bridge", () => {
       externalMessageId: "om_handover", senderUnionId: "on_owner", deliveryMode: "native_cot_v1",
       text: "Keep answering while the connector moves",
     });
-    expect(store.claimTask("rt_bot")?.id).toBe(inbound.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(inbound.taskId);
     store.startTask(inbound.taskId);
     const started = new Date();
     const at = (seconds: number) => new Date(started.getTime() + seconds * 1_000);
@@ -242,7 +244,7 @@ describe("Feishu bot standard Task bridge", () => {
           });
           const previous = previousTurn === "none" ? null : submit("om_before");
           if (previousTurn === "completed") {
-            expect(store.claimTask("rt_bot")?.id).toBe(previous!.taskId);
+            expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(previous!.taskId);
             store.startTask(previous!.taskId);
             store.completeTask(previous!.taskId, { output: "Previous answer", sessionId: "sess_previous" });
             const reply = store.claimFeishuBotOutbound("local", "rt_bot", undefined, true, true)!;
@@ -259,8 +261,8 @@ describe("Feishu bot standard Task bridge", () => {
           const next = submit("om_after");
           if (previous) expect(next.chatSessionId).toBe(previous.chatSessionId);
           if (previousTurn === "queued") expect(next.taskId).toBe(previous!.taskId);
-          expect(store.claimTask("rt_bot")).toBeNull();
-          const claimed = store.claimTask("rt_executor");
+          expect(claimWithCurrentRuntime(store, "rt_bot")).toBeNull();
+          const claimed = claimWithCurrentRuntime(store, "rt_executor");
           expect(claimed?.id).toBe(next.taskId);
           expect(claimed?.sessionId).toBeNull();
           expect(claimed?.agent?.provider).toBe(to);
@@ -275,7 +277,7 @@ describe("Feishu bot standard Task bridge", () => {
             claimToken: reply.claimToken, status: "sent", externalMessageId: "om_new_reply",
           })).toBe(true);
           const followup = submit("om_followup");
-          expect(store.claimTask("rt_executor")).toMatchObject({
+          expect(claimWithCurrentRuntime(store, "rt_executor")).toMatchObject({
             id: followup.taskId, sessionId: "sess_new_provider",
           });
         });
@@ -370,7 +372,7 @@ describe("Feishu bot standard Task bridge", () => {
       expect(topic).toMatchObject({ runtimeId: null, workDir: null });
       store.cancelTask(topic.id);
       // Claim refresh must not restore the shared topic's affinity either.
-      const claimed = store.claimTask("rt_bot")!;
+      const claimed = claimWithCurrentRuntime(store, "rt_bot")!;
       expect(claimed.id).toBe(task.id);
       expect(claimed.workDir).toBeNull();
       const claimedWire = daemonTaskClaimResponse(store, claimed);
@@ -524,8 +526,8 @@ describe("Feishu bot standard Task bridge", () => {
       agentId: agent.id,
       prompt: "Complete the assigned work.",
     });
-    expect(store.claimTask("rt_bot")).toBeNull();
-    expect(store.claimTask("rt_issue_workspace")?.id).toBe(leaderTask.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")).toBeNull();
+    expect(claimWithCurrentRuntime(store, "rt_issue_workspace")?.id).toBe(leaderTask.id);
     store.startTask(leaderTask.id);
 
     // The reply/retry scenario below expects a specific executor. Express that
@@ -552,7 +554,7 @@ describe("Feishu bot standard Task bridge", () => {
       claimToken: streamClaim.claimToken, status: "streaming", externalMessageId: "om_live_card",
     })).toBe(true);
     expect(store.getTaskWithAgent(roundTask.id)?.repos).toEqual([]);
-    expect(store.claimTask("rt_bot")?.id).toBe(roundTask.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(roundTask.id);
     const wire = daemonTaskClaimResponse(store, store.getTaskWithAgent(roundTask.id)!);
     expect((wire.bound_issue_log as { content_jsonl: string } | undefined)?.content_jsonl)
       .toBe("");
@@ -583,7 +585,7 @@ describe("Feishu bot standard Task bridge", () => {
       claimToken: recovered.claimToken, status: "failed", error: "retry test delivery",
     }, new Date(leaseTime.getTime() - 60_000))).toBe(true);
     expect(retryTask).toMatchObject({ status: "queued", chatSessionId: inbound.chatSessionId });
-    expect(store.claimTask("rt_bot")?.id).toBe(retryTask.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(retryTask.id);
     const retryWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(retryTask.id)!);
     expect((retryWire.bound_issue_log as { content_jsonl: string } | undefined)?.content_jsonl)
       .toBe("");
@@ -642,7 +644,7 @@ describe("Feishu bot standard Task bridge", () => {
       agentId: agent.id,
       prompt: "This round will fail.",
     });
-    expect(store.claimTask("rt_issue_workspace")?.id).toBe(failedLeader.id);
+    expect(claimWithCurrentRuntime(store, "rt_issue_workspace")?.id).toBe(failedLeader.id);
     store.startTask(failedLeader.id);
     const countBeforeFailure = store.listTasks().length;
     store.failTask(failedLeader.id, {
@@ -691,14 +693,14 @@ describe("Feishu bot standard Task bridge", () => {
     expect(store.listPendingTaskSteerMessages(inbound.taskId)).toEqual([]);
     store.cancelTask(leaderTask.id);
 
-    expect(store.claimTask("rt_bot")?.id).toBe(inbound.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(inbound.taskId);
     store.startTask(inbound.taskId);
     store.failTask(inbound.taskId, {
       error: "temporary inbound task timeout",
       failureReason: "timeout",
     });
     const retry = store.listTasks().find((task) => task.parentTaskId === inbound.taskId)!;
-    expect(store.claimTask("rt_bot")?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(retry.id);
     daemonTaskClaimResponse(store, store.getTaskWithAgent(retry.id)!);
     store.startTask(retry.id);
     store.completeTask(retry.id, { output: "The steered round is complete." });
@@ -721,7 +723,7 @@ describe("Feishu bot standard Task bridge", () => {
       externalMessageId: "om_new", replyToMessageId: "om_new", chatId: "oc_new", threadId: "omt_new",
       text: "Ordinary user question",
     });
-    expect(store.claimTask("rt_bot")?.id).toBe(inbound.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(inbound.taskId);
     store.startTask(inbound.taskId);
     const issue = createResponsibleTestIssue(store, { title: "New Issue binding", workspaceId: "local" });
     bindFeishuTopicFixture(store, db!, inbound.chatSessionId, issue.id);
@@ -770,7 +772,7 @@ describe("Feishu bot standard Task bridge", () => {
       agentId: agent.id,
       prompt: "Delegate and review the work.",
     });
-    expect(store.claimTask("rt_bot")?.id).toBe(leaderTask.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(leaderTask.id);
     store.startTask(leaderTask.id);
     store.createIssueComment(issue.id, {
       authorType: "agent",
@@ -786,7 +788,7 @@ describe("Feishu bot standard Task bridge", () => {
 
     store.completeTask(leaderTask.id, { output: "Delegated; waiting for implementation." });
     expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
-    expect(store.claimTask("rt_bot")?.id).toBe(teammateTask.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(teammateTask.id);
     store.startTask(teammateTask.id);
     store.completeTask(teammateTask.id, { output: "Implementation complete." });
     expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
@@ -794,7 +796,7 @@ describe("Feishu bot standard Task bridge", () => {
     const leaderReturn = store.listTasksForIssue(issue.id).find((task) =>
       task.id === store.getTask(teammateTask.id)?.delegationReturnTaskId
     )!;
-    expect(store.claimTask("rt_bot")?.id).toBe(leaderReturn.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(leaderReturn.id);
     store.startTask(leaderReturn.id);
     store.completeTask(leaderReturn.id, { output: "Reviewed the implementation; this round is complete." });
 
@@ -825,7 +827,7 @@ describe("Feishu bot standard Task bridge", () => {
       senderUnionId: "on_owner",
       text: "first Feishu request",
     });
-    const firstTask = store.claimTask("rt_bot")!;
+    const firstTask = claimWithCurrentRuntime(store, "rt_bot")!;
     expect(firstTask.id).toBe(firstSubmission.taskId);
     const firstWire = daemonTaskClaimResponse(store, firstTask);
     useTaskSessionInput(store, firstTask, firstWire);
@@ -861,7 +863,7 @@ describe("Feishu bot standard Task bridge", () => {
       senderUnionId: "on_owner",
       text: "second Feishu request",
     });
-    const secondTask = store.claimTask("rt_bot")!;
+    const secondTask = claimWithCurrentRuntime(store, "rt_bot")!;
     expect(secondTask.id).toBe(secondSubmission.taskId);
     expect(secondTask.holdsWorkspace).toBe(false);
     expect(store.getTaskWithAgent(secondTask.id)?.repos).toEqual([]);
@@ -979,7 +981,7 @@ describe("Feishu bot standard Task bridge", () => {
       text,
     });
     const first = submit("om_kick_1", "first message");
-    expect(store.claimTask("rt_bot")?.id).toBe(first.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(first.taskId);
     store.startTask(first.taskId);
     const storeDb = (store as unknown as { db: SqlDatabase }).db;
     const kicks: Array<{ payload: Record<string, unknown>; inTransaction: boolean }> = [];
@@ -988,7 +990,7 @@ describe("Feishu bot standard Task bridge", () => {
     });
     try {
       expect(submit("om_kick_2", "add this while running")).toMatchObject({ steered: true, duplicate: false });
-      expect(kicks).toEqual([{ payload: { runtime_id: "rt_bot", task_id: first.taskId }, inTransaction: false }]);
+      expect(kicks).toEqual([{ payload: { runtime_id: "rt_bot", task_id: first.taskId, runtime_only: true }, inTransaction: false }]);
       expect(submit("om_kick_2", "redelivered payload")).toMatchObject({ duplicate: true });
       expect(kicks).toHaveLength(1);
       expect(() => storeDb.transaction(() => {
@@ -1001,6 +1003,21 @@ describe("Feishu bot standard Task bridge", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it("wakes only the task runtime for marked input and the workspace for unmarked input", () => {
+    const downlinks = { kick: mock(), kickWorkspace: mock() };
+    type WakeOptions = Parameters<typeof wakeDaemonWorkspaceEvent>[1];
+    const routes: Pick<WakeOptions["downlinks"], "kick" | "kickWorkspace"> = downlinks;
+    const options = { downlinks: routes as WakeOptions["downlinks"], offers: {} as WakeOptions["offers"], runtimeWorkspace: () => "local" };
+    const event = { type: "daemon:task_input", workspaceId: "local", payload: { runtime_id: "rt_bot", task_id: "tsk_steer" } };
+    wakeDaemonWorkspaceEvent({ ...event, payload: { ...event.payload, runtime_only: true } }, options);
+    expect(downlinks.kick.mock.calls).toEqual([["rt_bot", "pending"]]);
+    expect(downlinks.kickWorkspace).not.toHaveBeenCalled();
+
+    wakeDaemonWorkspaceEvent(event, options);
+    expect(downlinks.kick).toHaveBeenCalledTimes(1);
+    expect(downlinks.kickWorkspace.mock.calls).toEqual([["local", expect.any(Function), "pending"]]);
   });
 
   it("rejects an unknown sender in allowlist mode and checks Issue creation dynamically once approved", () => {
@@ -1204,7 +1221,7 @@ describe("Feishu bot standard Task bridge", () => {
       agentId: agent.id,
       prompt: "Complete the routed round.",
     });
-    expect(store.claimTask("rt_issue_workspace")?.id).toBe(leaderTask.id);
+    expect(claimWithCurrentRuntime(store, "rt_issue_workspace")?.id).toBe(leaderTask.id);
     store.startTask(leaderTask.id);
     store.completeTask(leaderTask.id, { output: "Round complete." });
 
@@ -1263,7 +1280,7 @@ describe("Feishu bot standard Task bridge", () => {
       externalMessageId: "om_1",
       text: "show status",
     });
-    expect(store.claimTask("rt_bot")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(submitted.taskId);
     store.startTask(submitted.taskId);
     store.reportTaskUsage(submitted.taskId, [{
       provider: "codex",

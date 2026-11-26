@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -207,16 +208,16 @@ describe("side Session snapshots", () => {
     const issue = createResponsibleTestIssue(store, { title: "Independent Session execution" });
     const parent = store.getOrCreateDefaultIssueSession(issue.id);
     const main = store.createSessionTask(parent.id, { agentId: agent.id, prompt: "Work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(main.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(main.id);
     store.startTask(main.id);
     const side = store.createIssueSession(issue.id, { parentSessionId: parent.id });
     const discussion = store.createSessionTask(side.id, { agentId: agent.id, prompt: "Discuss" });
     const next = store.createSessionTask(parent.id, { agentId: agent.id, prompt: "Next main turn" });
-    expect(store.claimTask(runtime.id)?.id).toBe(discussion.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(discussion.id);
     store.startTask(discussion.id);
     expect(store.getTask(main.id)?.status).toBe("running");
     expect(store.getTask(discussion.id)?.status).toBe("running");
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(next.id).toBe(main.id);
     expect(store.listTasksForIssue(issue.id).filter(task => task.agentId === agent.id)).toHaveLength(2);
   });

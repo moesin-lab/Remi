@@ -1,3 +1,4 @@
+import { fixtureOfferReceipt } from './task-offer.js';
 import type { MultiremiStore } from "@multiremi/store.js";
 
 /** Manually claimed fixtures consume the same inline input that a daemon receives. */
@@ -7,7 +8,7 @@ export function readOfferedTurnInput(store: MultiremiStore, attemptId: string): 
   const bridge = store.getDaemonTurnBridge();
   const offer = bridge.offerInput(task);
   const result = bridge.rpc("turn.input", {
-    turn_id: offer.turn_id, attempt_id: offer.attempt_id, input_to_seq: offer.input_to_seq,
+    ...fixtureOfferReceipt(store, attemptId), turn_id: offer.turn_id, attempt_id: offer.attempt_id, input_to_seq: offer.input_to_seq,
     message_ids: offer.input_messages.map(message => message.id),
   }, { runtimeId: task.runtimeId, workspaceId: task.workspaceId,
     daemonId: store.getRuntime(task.runtimeId)!.daemonId! });

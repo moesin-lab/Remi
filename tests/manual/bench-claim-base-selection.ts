@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 /** MUL-163: isolated real-PG plans; creates/drops its own database, never uses production data.
  * MULTIREMI_TEST_POSTGRES_URL=postgres://... bun tests/manual/bench-claim-base-selection.ts
  */
@@ -38,7 +39,7 @@ try {
   }) as typeof db.query;
   // Capture the actual production query/arguments while rolling back its effects.
   const rollback = new Error("benchmark rollback");
-  try { db.transaction(() => { store!.claimTask(runtime.id); throw rollback; })(); }
+  try { db.transaction(() => { claimWithCurrentRuntime(store!, runtime.id); throw rollback; })(); }
   catch (error) { if (error !== rollback) throw error; }
   finally { db.query = query; }
   if (!selectedSql) throw new Error("claim selection not captured");

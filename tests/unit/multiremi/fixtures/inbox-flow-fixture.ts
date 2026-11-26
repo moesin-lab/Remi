@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from '../helpers.js';
 import type { MultiremiStore } from "@multiremi/store.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
@@ -44,7 +45,7 @@ export function inboxFlowFixture(store: MultiremiStore, scenario: InboxFlowScena
     const runtime = store.registerRuntime({ name: "E4 question host", provider: "codex", daemonId: "e4-question-host" });
     store.updateAgent(agent.id, { runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, issueId: target.id, issueSessionId: session.id, prompt: "Choose a direction" });
-    if (store.claimTask(runtime.id)?.id !== task.id) throw new Error("E4 source execution was not claimed");
+    if (claimWithCurrentRuntime(store, runtime.id)?.id !== task.id) throw new Error("E4 source execution was not claimed");
     store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const bridge = store.getDaemonTurnBridge();

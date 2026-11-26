@@ -1,3 +1,4 @@
+import { removeScmSchema } from "./scm-schema-upgrade.js";
 import { expect } from 'bun:test';
 import type { SqlDatabase } from '../../packages/server/src/store/db/postgres.js';
 import { runMigrations, runStartupMigrations } from '../../packages/server/src/store/migrations.js';
@@ -8,6 +9,8 @@ import { SCHEMA_MIGRATIONS } from '../../packages/server/src/store/schema-migrat
 /** Reproduce an enrolled pre-#128 database, including an in-flight old drain. */
 export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
   const restoreLevel2 = () => {
+    removeScmSchema(db);
+    db.exec("DROP TABLE multiremi_attempt_system_prompts; DROP TABLE multiremi_system_prompt_versions; DROP TABLE multiremi_system_prompt_documents");
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
       DROP TABLE multiremi_security_state;

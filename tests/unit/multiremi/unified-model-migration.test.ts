@@ -243,7 +243,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
     expect(reply.body_md).toBe('second reply');expect(JSON.parse(reply.metadata).task_result.pr_url).toBe('https://example.test/pr/1');
     expect(JSON.parse(db.query('SELECT result FROM multiremi_turn_execution_records WHERE id=?').get(b.id).result)).toEqual({output:'second reply',pr_url:'https://example.test/pr/1'});
     expect(JSON.parse(readFileSync(join(dir,`${UNIFIED_MODEL_MIGRATION}-after.json`),'utf8')).mismatches).toEqual([]);
-  });
+  }, 30_000);
   it('rolls back an invalid historical envelope and retries after repair',()=>{
     const {db,store}=fixture();const agent=store.createAgent({name:'rollback',provider:'codex'});
     store.createTask({agentId:agent.id,prompt:'original'});

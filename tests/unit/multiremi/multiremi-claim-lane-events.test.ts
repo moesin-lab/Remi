@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createHistoricalTestIssue, createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { StoreContext } from "@multiremi/store/context.js";
@@ -50,7 +51,7 @@ describe("MUL-482 transaction ownership and retry boundaries", () => {
             ctx.db.transaction(() => {
               ctx.lockWorkspaceRuntimeLifecycle("local");
               ctx.db.run("UPDATE multiremi_issues SET title = ? WHERE id = ?", ["Owner marker", issue.id]);
-              try { store.claimTask(runtime.id); } catch (error) { caught = error; }
+              try { claimWithCurrentRuntime(store, runtime.id); } catch (error) { caught = error; }
               expect(caught).toBe(stale);
               expect(attempts).toBe(1);
               expect(transactionSpy).toHaveBeenCalledTimes(1);
@@ -206,7 +207,7 @@ describe("MUL-482 transaction ownership and retry boundaries", () => {
         });
         const transactionSpy = spyOn(db, "transaction");
         try {
-          expect(store.claimTask(runtime.id)?.id).toBe(textTask.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(textTask.id);
           expect(transactionSpy).toHaveBeenCalledTimes(2);
           expect(store.getTask(binaryTask.id)).toEqual(beforeBinary);
           expect(dispatches).toEqual([{ id: textTask.id, inTransaction: false }]);
@@ -245,7 +246,7 @@ describe("stale Issue lane claim events on SQLite", () => {
       }
     });
     try {
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     } finally {
       unsubscribe();
     }
@@ -267,7 +268,7 @@ describe("stale Issue lane claim events on SQLite", () => {
       if (input.type === "session_agent_lane_reset") throw new Error("claim rollback injection");
     };
     try {
-      expect(() => store.claimTask(runtime.id)).toThrow("claim rollback injection");
+      expect(() => claimWithCurrentRuntime(store, runtime.id)).toThrow("claim rollback injection");
     } finally {
       StoreContext.prototype.appendIssueActivity = original;
       unsubscribe();

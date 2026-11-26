@@ -1,6 +1,6 @@
 import { assertSchemaBeforeExpand, readSchemaLevels, SCHEMA_COMPATIBILITY } from "./schema-levels.js";
 import { runSchemaExpands } from "./schema-migration-runner.js";
-import { SCHEMA_MIGRATIONS } from "./schema-migrations.js";
+import { assertHistoricalScmUpgrade, SCHEMA_MIGRATIONS } from "./schema-migrations.js";
 import { PACKAGE_VERSION as SCHEMA_RELEASE } from "@shared/package-version.js";
 import { ensureDaemonDrainIdentity, ensurePlannedRestarts } from "./planned-restart-schema.js";
 import { migrateExecutionEndpoints } from "./execution-endpoint-migration.js";
@@ -86,6 +86,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
   // migration cannot strand it.
   const migrate = () => withModernSqliteAlterTable(db, resolveSqlDialect(db, options.dialect), () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
     assertSchemaBeforeExpand(db);
+    if (readSchemaLevels(db).expandLevel >= 1) assertHistoricalScmUpgrade(db);
     // Enrollment certifies the frozen historical chain completed. Reopening
     // an enrolled database must never replay rebuilds or historical backfills.
     if (!options.historicalMaintenance && readSchemaLevels(db).expandLevel >= 1) {

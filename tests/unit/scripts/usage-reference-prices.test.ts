@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { PostgresSyncDatabase } from "../../../packages/server/src/store/db/postgres.js";
 import { ensureUsageAccountingSchema } from "../../../packages/server/src/store/usage-accounting.js";
@@ -171,7 +172,7 @@ describe("pinned public gateway reference prices", () => {
     const runtime = store.registerRuntime({ name: "reference-test", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "reference-test", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, prompt: "dummy", workspaceId: "local", maxAttempts: 1 });
-    store.claimTask(runtime.id); store.startTask(task.id);
+    claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
     const unit = { unitId: "current", revision: 1, provider: "claude", model: "deepseek-chat", modelSource: "provider_reported" as const, connectionId: "test-gateway", scope: "request" as const, source: "provider_request" as const, accuracy: "exact" as const,
       inputTokens: 1000000, outputTokens: 1000000, cacheReadTokens: 0, cacheWriteTokens: 0, actualUnsplitTokens: 0, reportedTotalTokens: 2000000, contextTokens: null, contextWindow: null, costAmount: null, costCurrency: null, occurredAt: from };
     store.reportTaskUsageSnapshot(task.id, { version: 2, runId: "test", revision: 1, complete: true, units: [unit, { ...unit, unitId: "historical", occurredAt: "2026-01-01T00:00:00.000Z" }] });

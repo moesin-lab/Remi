@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, sentTask } from "./unified-test-paths.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
@@ -343,7 +344,7 @@ async function verifyChatProjectionAndAccess(store: MultiremiStore): Promise<voi
   const assistantLine = coldEvents.find((line) => line.type === "session_event" && line.seq === extraEntries[1]!.seq);
   expect(assistantLine?.body_folded).toBe(true);
   expect(assistantLine?.expand).toBe(`remi message get ${extraEntries[1]!.id}`);
-  expect(store.claimTask(runtime.id)?.id).toBe(firstTaskId);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(firstTaskId);
   store.startTask(firstTaskId);
   store.completeTask(firstTaskId, { output: "Read", workDir: "/tmp/mul485-chat" });
   const next = await app.request(`/api/sessions/${chatId}/messages`, {

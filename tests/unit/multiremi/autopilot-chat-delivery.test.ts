@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
 import { migratedStoreBackend, type MigratedStore } from "../../helpers/migrated-store-backends.js";
@@ -8,19 +9,22 @@ for (const backend of ["sqlite", "postgres"] as const) {
   const suite = backend === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL ? describe.skip : describe;
   suite(`Autopilot authorized Chat delivery (${backend})`, () => {
     const factory = migratedStoreBackend(backend, { prefix: "mul11_delivery", fixture: "autopilot-chat-delivery" });
-    factory.install();
     let f: MigratedStore;
     let previousJobs: string | undefined;
     let previousKey: string | undefined;
-    beforeEach(async () => {
+    beforeAll(() => {
       previousJobs = process.env.MULTIREMI_BACKGROUND_JOBS;
       previousKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
       process.env.MULTIREMI_BACKGROUND_JOBS = "1";
       process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString("base64");
+    });
+    factory.install();
+    beforeEach(async () => {
+      process.env.MULTIREMI_BACKGROUND_JOBS = "1";
       f = await factory.open();
     });
-    afterEach(async () => {
-      await f?.close();
+    afterEach(async () => { await f?.close(); });
+    afterAll(() => {
       if (previousJobs === undefined) delete process.env.MULTIREMI_BACKGROUND_JOBS; else process.env.MULTIREMI_BACKGROUND_JOBS = previousJobs;
       if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY; else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
     });
@@ -68,7 +72,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const run = s.store.getAutopilotRun(scheduled.id)!;
       expect(run.source).toBe("schedule");
       expect(run.chatSessionId).not.toBe(s.target.id);
-      expect(s.store.claimTask(s.runtime.id)!.id).toBe(run.taskId!);
+      expect(claimWithCurrentRuntime(s.store, s.runtime.id)!.id).toBe(run.taskId!);
       s.store.startTask(run.taskId!);
       s.store.completeTask(run.taskId!, { output: "项目 A：已完成接口回归。" });
       expect(() => s.store.completeTask(run.taskId!, { output: "项目 A：已完成接口回归。" })).toThrow("terminal");
@@ -106,12 +110,12 @@ for (const backend of ["sqlite", "postgres"] as const) {
     it("preserves unconfigured automations and reports failures even after quiet was requested", async () => {
       const s = await setup();
       const quiet = s.store.runAutopilot(s.autopilot.id);
-      s.store.claimTask(s.runtime.id); s.store.startTask(quiet.taskId!);
+      claimWithCurrentRuntime(s.store, s.runtime.id); s.store.startTask(quiet.taskId!);
       s.store.markAutopilotRunQuiet(s.store.getTurnForAttempt(quiet.taskId!)!.id);
       s.store.completeTask(quiet.taskId!, { output: "No changes." });
       expect(s.store.listChatMessages(s.target.id)).toHaveLength(0);
       const failed = s.store.runAutopilot(s.autopilot.id);
-      s.store.claimTask(s.runtime.id); s.store.startTask(failed.taskId!);
+      claimWithCurrentRuntime(s.store, s.runtime.id); s.store.startTask(failed.taskId!);
       s.store.markAutopilotRunQuiet(s.store.getTurnForAttempt(failed.taskId!)!.id);
       s.store.failTask(failed.taskId!, { error: "Inspection failed" });
       expect(s.store.listChatMessages(s.target.id)).toHaveLength(1);
@@ -119,7 +123,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const unconfigured = s.store.createAutopilot({ title: "Legacy", executionMode: "run_only", assigneeId: s.agent.id });
       expect(unconfigured.deliveryChatSessionId).toBeNull();
       const old = s.store.runAutopilot(unconfigured.id);
-      s.store.claimTask(s.runtime.id); s.store.startTask(old.taskId!);
+      claimWithCurrentRuntime(s.store, s.runtime.id); s.store.startTask(old.taskId!);
       s.store.completeTask(old.taskId!, { output: "Legacy result" });
       expect(s.store.getMessage(`msg_autopilot_delivery_${old.id}`)).toBeNull();
       expect(s.store.listChatMessages(s.target.id)).toHaveLength(1);
@@ -142,14 +146,14 @@ for (const backend of ["sqlite", "postgres"] as const) {
     it("skips archived targets with an audit message, and honors target revocation before completion", async () => {
       const s = await setup();
       const run = s.store.runAutopilot(s.autopilot.id);
-      s.store.claimTask(s.runtime.id); s.store.startTask(run.taskId!);
+      claimWithCurrentRuntime(s.store, s.runtime.id); s.store.startTask(run.taskId!);
       s.store.updateChatSession(s.target.id, { status: "archived" });
       s.store.completeTask(run.taskId!, { output: "private result" });
       expect(s.store.listChatMessages(s.target.id)).toHaveLength(0);
       expect(s.store.getMessage(`msg_autopilot_delivery_${run.id}`)!.metadata.delivery_status).toBe("skipped");
       s.store.updateChatSession(s.target.id, { status: "active" });
       const next = s.store.runAutopilot(s.autopilot.id);
-      s.store.claimTask(s.runtime.id); s.store.startTask(next.taskId!);
+      claimWithCurrentRuntime(s.store, s.runtime.id); s.store.startTask(next.taskId!);
       const clear = await s.app.request(`/api/autopilots/${s.autopilot.id}`, { method: "PATCH", headers: s.headers,
         body: JSON.stringify({ delivery_chat_session_id: null }) });
       expect(clear.status).toBe(200);
@@ -169,7 +173,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       process.env.MULTIREMI_BACKGROUND_JOBS = jobs;
       const run = s.store.runAutopilot(s.autopilot.id, { source: "schedule" });
       // The automation and the target bot deliberately have different agents.
-      s.store.claimTask(s.runtime.id); s.store.startTask(run.taskId!);
+      claimWithCurrentRuntime(s.store, s.runtime.id); s.store.startTask(run.taskId!);
       const output = outcome === "short" ? "定期巡检：所有项目进展已更新。" : "巡😀".repeat(20_000);
       if (outcome === "failed") s.store.failTask(run.taskId!, { error: output });
       else s.store.completeTask(run.taskId!, { output });

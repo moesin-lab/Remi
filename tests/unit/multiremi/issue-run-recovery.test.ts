@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiStore } from "@multiremi/store.js";
@@ -20,7 +21,7 @@ async function fixture(store: MultiremiStore, privateChat = false, options: { pu
   const previous = store.createTask({ agentId: original.id, issueId: issue.id, issueSessionId: session?.id, runtimeId: runtime?.id,
     prompt: "Original detailed instructions", maxAttempts: 1, assignmentAuthorType: "member", assignmentAuthorId: member.id, issueCreationRestricted: true });
   if (options.failed) {
-    expect(store.claimTask(runtime!.id)?.id).toBe(previous.id);
+    expect(claimWithCurrentRuntime(store, runtime!.id)?.id).toBe(previous.id);
     store.startTask(previous.id);
     store.failTask(previous.id, { error: "Original provider failure", failureReason: "provider_error" });
   } else {

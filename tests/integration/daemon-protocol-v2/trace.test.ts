@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { readOfferedTurnInput, turnCompletion } from "../../fixtures/turn-report.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
@@ -37,7 +38,7 @@ const trace = (h: DaemonProtocolHarness) => (h.daemon as any).ensureTrace() as D
 function task(h: DaemonProtocolHarness) {
   const agent = h.store.createAgent({ name: "Trace fixture", provider: "claude" });
   const task = h.store.createTask({ agentId: agent.id, prompt: "trace" });
-  expect(h.store.claimTask(rt(h))?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(h.store, rt(h))?.id).toBe(task.id);
   readOfferedTurnInput(h.store, task.id);
   return task;
 }
@@ -144,7 +145,7 @@ describe("memory trace over the real protocol", () => {
           workspaceId: "local", daemonId: "dmn_fixture" });
         const agent = h.store.createAgent({ name: providers[i]!, provider: providers[i]! });
         const t = h.store.createTask({ agentId: agent.id, prompt: "legacy" });
-        expect(h.store.claimTask(runtimes[i]!)?.id).toBe(t.id);
+        expect(claimWithCurrentRuntime(h.store, runtimes[i]!)?.id).toBe(t.id);
         readOfferedTurnInput(h.store, t.id);
         h.store.startTask(t.id); tasks.push(t.id);
         const old = new MultiremiTaskReportOutbox({ path: join(h.root, `${providers[i]}-outbox.db`),

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 /**
  * MUL-432 segment 2 item 5: the live `turn` card takes the round-card fields
@@ -130,7 +131,7 @@ async function withWorld(backend: (typeof backends)[number], body: (world: World
 function runIssueTask(world: World, title: string, agentId = world.agentId, runtimeId = world.runtimeId) {
   const issue = createResponsibleTestIssue(world.store, { title, workspaceId: "local" });
   const task = world.store.createTask({ agentId, workspaceId: "local", issueId: issue.id, prompt: title });
-  expect(world.store.claimTask(runtimeId)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(world.store, runtimeId)?.id).toBe(task.id);
   world.store.startTask(task.id);
   return task;
 }
@@ -258,7 +259,7 @@ for (const backend of backends) {
       await withWorld(backend, async (world) => {
         const chat = world.store.createChatSession({ agentId: world.agentId, workspaceId: "local", creatorId: "local" });
         const sent = world.store.sendChatMessage(chat.id, { content: "hello" });
-        expect(world.store.claimTask(world.runtimeId)?.id).toBe(sent.task.id);
+        expect(claimWithCurrentRuntime(world.store, world.runtimeId)?.id).toBe(sent.task.id);
         world.store.startTask(sent.task.id);
         const before = card(world, sent.task.id);
         expect(before.visibility).toBe("hidden");
@@ -312,7 +313,7 @@ for (const backend of backends) {
           const frames: HubFrame[] = [];
           hub.subscribeWithSink(`log:${chat.id}` as HubStreamKey, 1, { getBufferedAmount: () => 0, send: (batch) => { frames.push(...batch); } });
           const sent = world.store.sendChatMessage(chat.id, { content: "hello" });
-          expect(world.store.claimTask(world.runtimeId)?.id).toBe(sent.task.id);
+          expect(claimWithCurrentRuntime(world.store, world.runtimeId)?.id).toBe(sent.task.id);
           world.store.startTask(sent.task.id);
           flush();
           const running = card(world, sent.task.id);
@@ -353,7 +354,7 @@ for (const backend of backends) {
         const task = world.store.createTask({ agentId: world.agentId, workspaceId: "local", prompt: "One-shot" });
         const before = card(world, task.id);
         expect(before.session_id).toStartWith("auto_");
-        expect(world.store.claimTask(world.runtimeId)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(world.store, world.runtimeId)?.id).toBe(task.id);
         world.store.startTask(task.id);
         const seam = watchSeam(world);
         try {

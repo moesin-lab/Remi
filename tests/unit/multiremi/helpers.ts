@@ -1,3 +1,4 @@
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 /**
  * Shared scaffolding for tests/unit/multiremi/*.test.ts.
  *
@@ -57,6 +58,12 @@ export function createStore(): MultiremiStore {
   return createSnapshotStore();
 }
 
+export function linkProjectedTestChangeRequest(store: MultiremiStore, issueId: string, connectionId: string, repositoryId: string, number: number) {
+  const projection = store.prepareScmChangeRequestBinding(store.getIssue(issueId)!.workspaceId, issueId, connectionId, repositoryId, number).changeRequest;
+  if (!projection) throw new Error(`Missing projected change request #${number}`);
+  store.linkScmChangeRequestToIssue(issueId, projection.id);
+}
+
 /** Cold migration from an empty database, for migration, empty-schema, seed-clock
  * or startup-side-effect cases that must observe the first migration run. */
 export function createFreshStore(): MultiremiStore {
@@ -71,6 +78,7 @@ const sqliteSnapshots = createSqliteStoreSnapshotFactory();
 /** Ordinary business tests only; retains an independent handle and new Store. */
 export function createSnapshotStore(): MultiremiStore {
   const fixture = sqliteSnapshots.create();
+  classifyScmLinks(fixture.db);
   db = fixture.db;
   return fixture.store;
 }

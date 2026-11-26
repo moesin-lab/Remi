@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
 import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
@@ -123,7 +124,7 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
   it("detaches native waits only after task cancellation commits and retains the pending business question", () => {
     const { workspaceId, agent, runtime } = freshAgent();
     const task = store.createTask({ agentId: agent.id, workspaceId, runtimeId: runtime.id, prompt: "Wait" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const request = nativeQuestion(task.id);
     const sourceTurn = store.getTurnForAttempt(task.id)!;
     const sourceAttempt = store.listTurnAttempts(sourceTurn.id).find(item => item.id === task.id)!;
@@ -213,7 +214,7 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
 
   it("commits a Feishu steer in one transaction and preserves message linkage", async () => {
     const { workspaceId, runtime, first, input } = feishuFixture();
-    expect(store.claimTask(runtime.id)?.id).toBe(first.taskId);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.taskId);
     store.startTask(first.taskId);
     const inputEvents: Array<{ inTransaction: boolean; taskId: unknown }> = [];
     const unsubscribe = store.onWorkspaceEvent(event => {
@@ -424,7 +425,7 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
     const issue = createResponsibleTestIssue(store, { title: "Steer lock order", workspaceId });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Steer me" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const locks: string[] = [];
     const events: Array<{ type: string; inTransaction: boolean }> = [];
@@ -477,7 +478,7 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
     const issue = createResponsibleTestIssue(store, { title: "Terminal request", workspaceId });
     const makePending = () => {
       const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId, prompt: "Work" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
       const request = nativeQuestion(task.id);
       return { task, request };
     };

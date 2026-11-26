@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -40,7 +41,7 @@ describe("Multiremi API — JIT Git credentials", () => {
     expect(store.getTaskWithAgent(task.id)?.repos).toEqual(expect.arrayContaining([
       expect.objectContaining({ url: repositoryUrl }),
     ]));
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const credential = await store.createTaskAccessToken(store.getTask(task.id)!, "local");
     const app = createMultiremiApp({ store, authToken: "root-secret" });
@@ -103,7 +104,7 @@ describe("Multiremi API — JIT Git credentials", () => {
     const issue = createResponsibleTestIssue(store, { title: "Use private repo", workspaceId: "local", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "push" });
     const runtime = store.registerRuntime({ id: "rt_git", name: "codex", provider: "codex" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const taskCredential = await store.createTaskAccessToken(store.getTask(task.id)!, "local");
     const pat = await store.createAccessToken({

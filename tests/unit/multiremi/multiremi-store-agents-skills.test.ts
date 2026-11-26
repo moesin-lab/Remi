@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // Agent lifecycle from the scheduling surfaces plus workspace skill attachment
 // and squad membership.
 import { afterEach, describe, expect, it } from "bun:test";
@@ -20,7 +21,7 @@ describe("Multiremi store — agents, workspace skills, and members", () => {
     expect(() => store.createTask({ agentId: agent.id, prompt: "After archive" })).toThrow("Agent is archived");
 
     const runtime = store.registerRuntime({ name: "codex-runtime", provider: "codex" });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
 
     const defaultAgent = store.ensureDefaultAgent("codex");
     store.archiveAgent(defaultAgent.id);
@@ -84,7 +85,7 @@ describe("Multiremi store — agents, workspace skills, and members", () => {
 
     const task = store.createTask({ agentId: agent.id, prompt: "Review this" });
     const runtime = store.registerRuntime({ name: "local", provider: "claude" });
-    const claimed = store.claimTask(runtime.id);
+    const claimed = claimWithCurrentRuntime(store, runtime.id);
     expect(claimed?.id).toBe(task.id);
     expect(claimed?.agent?.skills[0].name).toBe("Review Helper");
     expect(claimed?.agent?.skills[0].files?.[0].path).toBe("templates/check.md");

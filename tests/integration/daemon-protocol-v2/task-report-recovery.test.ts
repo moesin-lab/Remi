@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { turnCompletion } from "../../fixtures/turn-report.js";
@@ -110,7 +111,7 @@ for (const nativeRunId of ["historical-evidence-v2", "current"]) test(`late depr
     const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id;
     const agent = h.store.createAgent({ name: "late legacy", provider: "claude", runtimeId });
     const task = h.store.createTask({ agentId: agent.id, prompt: "synthetic overlap", maxAttempts: 1 });
-    expect(h.store.claimTask(runtimeId)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(h.store, runtimeId)?.id).toBe(task.id);
     const original = nativeRunId === "current" ? [] : [{ provider: "claude", model: "configured", totalTokens: 70 }];
     runTurnExecutionMutation(h.db, "UPDATE multiremi_turn_execution_records SET usage=? WHERE id=?", [JSON.stringify(original), task.id]);
     migrateLegacyUsage(h.db);
@@ -150,7 +151,7 @@ test("invalid usage and execution payloads cannot strand independently authorize
     const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id;
     const agent = h.store.createAgent({ name: "validation accounting owner", provider: "claude", runtimeId });
     const task = h.store.createTask({ agentId: agent.id, prompt: "manual protocol validation", maxAttempts: 1 });
-    expect(h.store.claimTask(runtimeId)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(h.store, runtimeId)?.id).toBe(task.id);
     await expect(h.client.event({ t: "task.start", rt: runtimeId, seq: 910_000, p: { task_id: task.id, usage_run_id: "accepted" } })).resolves.toMatchObject({ execution_authorized: true });
     outbox = new MultiremiTaskReportOutbox({ path: join(h.root, "invalid-accounting.db"), canSend: () => h.client.connectionState() === "connected",
       deliver: record => h.client.event({ ...outboxRecordFrame(record), seq: 910_000 + record.seq }) });
@@ -183,7 +184,7 @@ test("rejected obsolete progress cannot strand independently authorized late usa
     const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id;
     const agent = h.store.createAgent({ name: "late accounting owner", provider: "claude", runtimeId });
     const task = h.store.createTask({ agentId: agent.id, prompt: "manual protocol run", maxAttempts: 1 });
-    expect(h.store.claimTask(runtimeId)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(h.store, runtimeId)?.id).toBe(task.id);
     await expect(h.client.event({ t: "task.start", rt: runtimeId, seq: 900_000,
       p: { task_id: task.id, usage_run_id: "accepted-original" } })).resolves.toMatchObject({ execution_authorized: true });
     const replacement = h.store.registerRuntime({ name: "replacement accounting owner", provider: "claude", workspaceId: "local", daemonId: "other-device" });
@@ -434,7 +435,7 @@ test("duplicate completion does not repeat delegation wakeups, comments or count
     const parent = createResponsibleTestIssue(h.store, { title: "Delegation parent", status: "in_progress", assigneeType: "agent", assigneeId: leader.id });
     const child = createResponsibleTestIssue(h.store, { title: "Delegation child", parentIssueId: parent.id, status: "in_progress", assigneeType: "agent", assigneeId: worker.id });
     const source = h.store.createTask({ agentId: leader.id, issueId: parent.id, prompt: "Coordinate child" });
-    expect(h.store.claimTask(leaderRuntime.id)?.id).toBe(source.id);
+    expect(claimWithCurrentRuntime(h.store, leaderRuntime.id)?.id).toBe(source.id);
     h.store.startTask(source.id);
     h.store.completeTask(source.id, { output: "Await child result" });
     const task = h.store.createTask({ agentId: worker.id, issueId: child.id, prompt: "Inert delegated work",
@@ -516,7 +517,7 @@ for (const replacement of ["cancelled", "assigned elsewhere"] as const) {
         // Use a genuine new claim on the other runtime to test that reports
         // from the old runtime cannot adopt or complete somebody else's task.
         const elsewhere = h.store.createTask({ agentId: agent.id, prompt: "Other runtime owns this turn" });
-        expect(h.store.claimTask(other.id)?.id).toBe(elsewhere.id);
+        expect(claimWithCurrentRuntime(h.store, other.id)?.id).toBe(elsewhere.id);
         expect(h.store.getTask(elsewhere.id)?.runtimeId).toBe(other.id);
         reportTaskId = elsewhere.id;
       }

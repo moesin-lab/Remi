@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -92,7 +93,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         }, [], createCommitEventQueue()))()[0]!;
         expect(initial.action).toBe("created");
         const runtime = store.registerRuntime({ id: "relay-crash", name: "relay-crash", provider: "codex" });
-        expect(store.claimTask(runtime.id)?.id).toBe(initial.task!.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(initial.task!.id);
         store.startTask(initial.task!.id);
         await killAt(phase, issue.id);
         const system = db.query("SELECT id FROM multiremi_conversation_log WHERE session_id = ? AND kind = 'message' AND body_md = ?")

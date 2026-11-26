@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 /**
@@ -239,7 +240,7 @@ describe("MUL-338 gateway reasoning declarations: the read model", () => {
     // And it is still routable: an Agent on the retired id is not stranded.
     const agent = store.createAgent({ name: "retired", provider: "claude", model: "retired-alias", thinkingLevel: "low" });
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(runtimes[0].id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtimes[0].id)?.id).toBe(task.id);
   });
 
   it("does not lose the declaration when the gateway is probed again", async () => {
@@ -343,7 +344,7 @@ describe("MUL-338 gateway reasoning declarations: routing", () => {
       const agent = agentWith(store, "deepseek-v4-flash", level);
       expect(runtimes.filter(runtime => store.runtimeSupportsAgentModel(runtime, agent)).length).toBe(3);
       const task = store.createTask({ agentId: agent.id, prompt: "run" });
-      expect(store.claimTask(runtimes[0].id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtimes[0].id)?.id).toBe(task.id);
     }
 
     // A level outside the declaration is still refused — the declaration says what
@@ -353,7 +354,7 @@ describe("MUL-338 gateway reasoning declarations: routing", () => {
     const outside = agentWith(store, "deepseek-v4-flash", "medium");
     expect(runtimes.filter(runtime => store.runtimeSupportsAgentModel(runtime, outside)).length).toBe(0);
     const blocked = store.createTask({ agentId: outside.id, prompt: "run" });
-    expect(store.claimTask(runtimes[0].id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtimes[0].id)).toBeNull();
     expect(store.getTask(blocked.id)?.status).toBe("queued");
   });
 
@@ -374,7 +375,7 @@ describe("MUL-338 gateway reasoning declarations: routing", () => {
     const agent = agentWith(store, "deepseek-v4-flash", "high");
     expect(runtimes.filter(runtime => store.runtimeSupportsAgentModel(runtime, agent)).length).toBe(3);
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(runtimes[0].id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtimes[0].id)?.id).toBe(task.id);
     expect(store.refreshQueuedCapabilityWaitReasons(Date.now() + 5 * 60_000).updated).toBe(0);
   });
 
@@ -396,7 +397,7 @@ describe("MUL-338 gateway reasoning declarations: routing", () => {
       expect(runtimes.filter(runtime => store.runtimeSupportsAgentModel(runtime, agent)).length, `${model}/${thinkingLevel || "none"}`)
         .toBe(routable ? 3 : 0);
       const task = store.createTask({ agentId: agent.id, prompt: "run" });
-      expect(store.claimTask(runtimes[0].id)?.id, `${model}/${thinkingLevel || "none"}`).toBe(routable ? task.id : undefined);
+      expect(claimWithCurrentRuntime(store, runtimes[0].id)?.id, `${model}/${thinkingLevel || "none"}`).toBe(routable ? task.id : undefined);
     }
   });
 
@@ -464,7 +465,7 @@ describe("MUL-338 gateway reasoning declarations: a source in its own right", ()
     const agent = claimable(store, "future-alias");
     expect(store.runtimeSupportsAgentModel(runtime, agent)).toBe(true);
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
 
     // A level outside the declaration is refused, as any other undeclared level is.
     const off = store.createAgent({ name: "Future medium", provider: "claude", model: "future-alias", thinkingLevel: "medium" });
@@ -488,7 +489,7 @@ describe("MUL-338 gateway reasoning declarations: a source in its own right", ()
     expect(levelsOf(listed?.thinking)).toEqual(["low", "high"]);
     const agent = claimable(store, "future-alias");
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(runtimes[0].id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtimes[0].id)?.id).toBe(task.id);
     // Listing a declaration does not invent the models the failed probe could not
     // fetch: the row exists because it was declared, and says so.
     expect(row(await listing(app), "future-alias")?.effective?.source).toBe("manual");
@@ -636,7 +637,7 @@ describe("MUL-338 gateway reasoning declarations: the write side", () => {
     // any other, and it may not be silently kept.
     expect(store.getAgent(agent.id)?.thinkingLevel ?? "").toBe("");
     const task = store.createTask({ agentId: agent.id, prompt: "run" });
-    expect(store.claimTask(store.listRuntimes()[0].id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, store.listRuntimes()[0].id)?.id).toBe(task.id);
   });
 
   it("still rejects a level the caller names while changing the selection", async () => {

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { CONVERSATION_LOG_BACKFILL_MIGRATION } from "@multiremi/store/conversation-log-backfill.js";
 import { expect } from "bun:test";
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
@@ -332,7 +333,7 @@ export function assertCancelledLegacyWakesCannotRun(db: SqlDatabase, store = new
   const next = store.createTask({ agentId: "agt_chat_migration", workspaceId: "local", chatSessionId: chatId,
     prompt: "A new private question", runtimeId: runtime.id });
   expect(JSON.stringify(store.buildTaskSessionProjection(next.id))).not.toContain("PRIVATE_ISSUE_WAKE_SENTINEL");
-  expect(store.claimTask(runtime.id)?.id).toBe(next.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(next.id);
 }
 
 export function assertLegacyChatWakeRollback(db: SqlDatabase, migrate = bootstrapPreUnifiedSchema): void {

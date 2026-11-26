@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
 import { expect, it, setSystemTime, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -15,7 +16,7 @@ pendingTurnBackendTests("MUL-508 C1/C2", (fixture) => {
     const session = f.store.getOrCreateDefaultIssueSession(issue.id);
     const sent = f.store.sendMessage({ session_id: session.id, sender: { type: "member", id: "mem_local_local" },
       to: { type: "agent", ref: agent.id }, message_kind: "request", wake_requested: "now", body_md: "Finish intake" });
-    const attempt = f.store.claimTask(runtime.id)!;
+    const attempt = claimWithCurrentRuntime(f.store, runtime.id)!;
     expect(f.store.getTurnForAttempt(attempt.id)?.id).toBe(sent.turn_id);
     f.store.startTask(attempt.id);
     const bridge = f.store.getDaemonTurnBridge();
@@ -85,7 +86,7 @@ pendingTurnBackendTests("MUL-508 C1/C2", (fixture) => {
     expect(turn.current_attempt_id).not.toBe(f.attempt.id);
     expect(f.store.listTurnAttempts(turn.id)).toHaveLength(2);
     expect(f.store.getIssue(f.issue.id)).toEqual(before);
-    const replacement = f.store.claimTask(f.runtime.id)!;
+    const replacement = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(replacement.id).toBe(turn.current_attempt_id!);
     f.store.startTask(replacement.id);
     expect(f.bridge.complete(f.completion(replacement.id), f.scope).ok).toBe(true);
@@ -102,7 +103,7 @@ pendingTurnBackendTests("MUL-508 C1/C2", (fixture) => {
     expect(f.bridge.complete(f.completion(), f.scope).ok).toBe(true);
     expect(f.store.getIssue(f.issue.id)?.status).toBe("todo");
     expect(f.store.getIssue(f.issue.id)?.completedAt).toBeNull();
-    const task = f.store.claimTask(f.runtime.id)!;
+    const task = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(f.store.getTurnForAttempt(task.id)?.id).toBe(sibling.turn_id);
     f.store.startTask(task.id);
     expect(f.bridge.complete(f.completion(task.id), f.scope).ok).toBe(true);
@@ -124,7 +125,7 @@ pendingTurnBackendTests("MUL-508 C1/C2", (fixture) => {
     const f = intake();
     const secondAgent = f.store.createAgent({ name: "Later worker", provider: "codex", runtimeId: f.runtime.id });
     const second = f.store.createTask({ agentId: secondAgent.id, issueId: f.issue.id, prompt: "Check generated work", holdsWorkspace: false });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(second.id);
     f.store.startTask(second.id);
     f.store.completeTask(second.id, { output: "Check completed" });
     expect(f.store.getIssue(f.issue.id)?.status).toBe("in_progress");

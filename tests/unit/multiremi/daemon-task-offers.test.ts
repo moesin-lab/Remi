@@ -1,5 +1,7 @@
+import { useHistoricalCatalog } from "../../helpers/historical-prompt-catalog.js";
+import { bindFeishuTopicFixture } from './feishu-topic-fixture.js';
 import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
-import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
+import { CURRENT_SYSTEM_PROMPT_DEFAULT, LEGACY_BASELINE_DEFAULT_REVISION, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
 import { fitTaskOfferToBudget } from "@multiremi/api/daemon-protocol/offer-budget.js";
 import { currentBackgroundTerm, withBackgroundTerm, StaleLiveTermError } from "@shared/db/live-term.js";
@@ -49,10 +51,10 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return sendStatus ?? text.length; }, close() {} },
     { accessToken: null, masterToken: true });
   const send = (t: string, p: unknown, fields: Record<string, unknown> = {}) => session.handleMessage(JSON.stringify({ v: 2, t, p, ...fields }));
-  const hello = async (caps = ["offer"]) => {
+  const hello = async (caps = ["offer", "prompt.policy.adopt.v1"], activeTaskIds: string[] = []) => {
     await send("hello", { protocol: 2, daemon_id: "dmn_offer", cli_version: DAEMON_MIN_CLI_VERSION, caps,
       runtimes: runtimeIds.map(runtime_id => ({ runtime_id, provider: "claude", max_concurrency: 1, active_task_ids: [] })) });
-    if (caps.includes('prompt.policy.adopt.v1')) for (const rt of runtimeIds) await send('runtime.ready',{active_task_ids:[]},{rt});
+    if (caps.includes('prompt.policy.adopt.v1')) for (const rt of runtimeIds) await send('runtime.ready',{active_task_ids:activeTaskIds},{rt});
     await layer.drain();
   };
   const task = (index = 0, prompt = "no-op") => store.createTask({ agentId: agentIds[index]!, prompt, maxAttempts: 1 });
@@ -142,7 +144,8 @@ describe("A-3 task offers", () => {
         await h.hello();
         const offer = h.offered()[0]!;
         expect(offer.p.attempt_id).toBe(task.id);
-        await h.send("res", accepted ? { ok: true } : { ok: false, code: "binary_skill_files_unsupported" },
+        if (accepted) await h.accept(offer);
+        else await h.send("res", { ok: false, code: "binary_skill_files_unsupported" },
           { re: String(offer.seq), ack: offer.seq });
         await h.layer.drain();
         const persisted = h.store.getTask(task.id)!;
@@ -444,8 +447,9 @@ describe("A-3 task offers", () => {
     const reconnected = h.layer.openSession({ send: text => { h.frames.push(JSON.parse(text)); return text.length; }, close() {} },
       { accessToken: null, masterToken: true });
     await reconnected.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2,
-      daemon_id: "dmn_offer", cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer"],
+      daemon_id: "dmn_offer", cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer", "prompt.policy.adopt.v1"],
       runtimes: [{ runtime_id: h.runtimeIds[0], provider: "claude", max_concurrency: 1, active_task_ids: [] }] } }));
+    await reconnected.handleMessage(JSON.stringify({ v: 2, t: "runtime.ready", rt: h.runtimeIds[0], p: { active_task_ids: [] } }));
     await reconnected.handleMessage(JSON.stringify({ v: 2, t: "hb", p: { active_task_count: 0 } }));
     await h.layer.drain();
     h.clock.advance(DAEMON_OFFER_COOLDOWN_MS - 1); await h.layer.drain();
@@ -648,7 +652,7 @@ describe("A-3 task offers", () => {
   });
 
   it("does not reissue a legacy dispatch after disconnect and loss of its process-local lease", async () => {
-    const h = fixture(); const task = h.task(); await h.hello(); await h.accept();
+    const h = fixture(); useHistoricalCatalog(h.store); const task = h.task(); await h.hello(["offer"]); await h.accept();
     db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
     expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
     h.session.handleSocketClose();
@@ -749,9 +753,9 @@ describe("A-3 task offers", () => {
 
   it("runtime.ready cancels terminal active tasks, recovers missing running tasks and preserves active ones", async () => {
     const h = fixture(); const terminal = h.task(); const missing = h.task(); const active = h.task();
-    h.store.claimTask(h.runtimeIds[0]!); h.store.startTask(terminal.id); h.store.completeTask(terminal.id, { output: "done" });
+    h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true }); h.store.startTask(terminal.id); h.store.completeTask(terminal.id, { output: "done" });
     db!.run("UPDATE multiremi_turn_attempts SET status = 'running', runtime_id = ? WHERE id IN (?, ?)", [h.runtimeIds[0]!, missing.id, active.id]);
-    await h.hello(); await h.send("runtime.ready", { active_task_ids: [terminal.id, active.id] }, { rt: h.runtimeIds[0] }); await h.layer.drain();
+    await h.hello(undefined, [terminal.id, active.id]);
     expect(h.frames.filter(frame => frame.t === "task.cancelled")).toHaveLength(1);
     expect(h.store.getTask(missing.id)?.status).toBe("failed");
     expect(h.store.getTask(active.id)?.status).toBe("running");
@@ -776,7 +780,7 @@ describe("System Prompt policy claim and offer", () => {
     const task = h.task();
     edit(h.store, "CUSTOM POLICY", "custom");
     h.offers.start();
-    await h.hello();
+    await h.hello(["offer"]);
     expect(h.offered()).toHaveLength(0);
     expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: "daemon_capability_required:prompt.policy.adopt.v1" });
     expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
@@ -788,6 +792,7 @@ describe("System Prompt policy claim and offer", () => {
 
   it("preserves device waits, diagnoses only eligible tasks, and clears its own wait on reset even while retry is deferred", () => {
     const h = fixture(undefined, 2, undefined, false, false);
+    useHistoricalCatalog(h.store);
     const device = h.task(0);
     const other = h.task(1);
     edit(h.store, "CUSTOM", "policy");
@@ -817,6 +822,7 @@ describe("System Prompt policy claim and offer", () => {
   it("diagnoses 65 independent lanes in bounded pages, including tied keys and a finite first round", () => {
     const h = fixture(undefined, 1, undefined, false, false);
     const runtime = h.runtimeIds[0]!;
+    useHistoricalCatalog(h.store);
     const ids = Array.from({ length: 65 }, (_, index) => {
       const agent = h.store.createAgent({ name: `page-${index}`, provider: "claude", runtimeId: runtime, workspaceId: "local" });
       const task = h.store.createTask({ agentId: agent.id, prompt: "page", priority: index });
@@ -864,9 +870,9 @@ describe("System Prompt policy claim and offer", () => {
   it("freezes atomically at claim, rebinds the same rejected offer id, and preserves accepted/running snapshots", () => {
     const h = fixture(undefined, 1, undefined, false, false);
     const task = h.task();
-    const first = h.store.claimTask(h.runtimeIds[0]!)!;
+    const first = h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })!;
     const baseline = h.store.getAttemptSystemPrompt(task.id)!;
-    expect(baseline).toMatchObject({ mode: "default", legacyCompatible: true, versionId: null });
+    expect(baseline).toMatchObject({ mode: "default", legacyCompatible: false, versionId: null });
     edit(h.store, "AFTER CLAIM", "edit1");
     expect(daemonTaskClaimResponse(h.store, first).system_prompt_policy).toEqual(baseline);
     expect(h.store.requeueTaskOffer(task.id, h.runtimeIds[0]!, "rejected")).toBe(true);
@@ -934,13 +940,97 @@ describe("System Prompt policy claim and offer", () => {
     expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
   });
 
+  it('keeps project, runtime workspace and Feishu Issue Chats queued for a capable runtime', () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const agentId = h.agentIds[0]!;
+    const project = h.store.createProject({ title: 'Bound project' });
+    const projectChat = h.store.createChatSession({ agentId, projectId: project.id });
+    const directory = h.store.runtimeWorkspaces.create(h.runtimeIds[0]!, { name: 'Local', root_path: '/home/user/project' });
+    const local = h.store.createChatSession({ agentId, runtimeWorkspaceId: directory.id });
+    const topic = h.store.createChatSession({ agentId });
+    const issue = createResponsibleTestIssue(h.store, { title: 'Topic destination', assigneeType: 'agent', assigneeId: agentId });
+    bindFeishuTopicFixture(h.store, db!, topic.id, issue.id);
+    const tasks = [projectChat, local, topic].map(chat => h.store.sendChatMessage(chat.id, { body: 'hello' }).task);
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyProtocol: 'legacy', supportsPromptPolicy: false })).toBeNull();
+    for (const task of tasks) {
+      expect(h.store.getTask(task.id)?.status).toBe('queued');
+      expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+    }
+  });
+
+  it('keeps even an exact default copy in custom mode behind the capability gate', () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    edit(h.store, DEFAULT_SYSTEM_PROMPT_CONTENT.common, 'custom-default-copy');
+    const chat = h.store.createChatSession({ agentId: h.agentIds[0]! });
+    const task = h.store.sendChatMessage(chat.id, { body: 'plain' }).task;
+    expect(h.store.getSystemPrompt('local').document.mode).toBe('custom');
+    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: false, policyProtocol: 'legacy' })).toBeNull();
+    expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+  });
+
+  it('withdraws a prepared offer with late Wiki context and does not claim it again on legacy', async () => {
+    let preparations = 0;
+    const h = fixture(async task => {
+      preparations++;
+      return { kind: 'chat', chat_session_id: task.chatSessionId, repository_wiki_contexts: [{ repository: {} }] };
+    });
+    const chat = h.store.createChatSession({ agentId: h.agentIds[0]! });
+    const task = h.store.sendChatMessage(chat.id, { body: 'plain before preparation' }).task;
+    await h.hello(['offer']);
+    h.clock.advance(DAEMON_OFFER_COOLDOWN_MS + 1);
+    await h.layer.drain();
+    expect(preparations).toBe(1);
+    expect(h.offered()).toHaveLength(0);
+    expect(h.store.getTask(task.id)).toMatchObject({ status: 'queued', offeredAt: null, waitReason: 'daemon_capability_required:prompt.policy.adopt.v1' });
+  });
+
+  it('keeps the current snapshot and adopted ownership when an independent Chat reconnects on legacy', async () => {
+    const h = fixture();
+    const chat = h.store.createChatSession({ agentId: h.agentIds[0]! });
+    const task = h.store.sendChatMessage(chat.id, { body: 'modern' }).task;
+    await h.hello();
+    await h.accept();
+    const dispatch = h.store.systemPromptsRepo().dispatchPolicy(task.id);
+    expect(dispatch).toMatchObject({ state: 'adopted', protocol: 'adopt' });
+    h.layer.closeAll();
+    await h.layer.drain();
+    expect(h.store.claimTask(h.runtimeIds[0]!, { policyProtocol: 'legacy', supportsPromptPolicy: false })).toBeNull();
+    expect(h.store.systemPromptsRepo().dispatchPolicy(task.id)).toEqual(dispatch);
+    expect(h.store.getAttemptSystemPrompt(task.id)?.contentHash).toBe(CURRENT_SYSTEM_PROMPT_DEFAULT.revision);
+  });
+
   it("keeps reset-to-baseline compatible with old daemons", () => {
     const h = fixture(undefined, 1, undefined, false, false);
     const task = h.task();
+    useHistoricalCatalog(h.store);
     h.store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "baseline-reset" }, actor);
     expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
     expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "default", legacyCompatible: true,
-      defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision });
+      defaultRevision: LEGACY_BASELINE_DEFAULT_REVISION });
+  });
+
+  for (const reset of [false, true]) it(`freezes the historical snapshot only for a fresh negotiated plain Chat (reset=${reset})`, () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const agentId = h.agentIds[0]!;
+    const runtime = h.runtimeIds[0]!;
+    if (reset) h.store.resetSystemPrompt('local', { expectedRevision: 0, requestId: 'reset-chat' }, actor);
+    const issue = createResponsibleTestIssue(h.store, { title: 'code', assigneeType: 'agent', assigneeId: agentId });
+    const code = h.store.createTask({ agentId, issueId: issue.id, prompt: 'code', priority: 100 });
+    const chat = h.store.createChatSession({ agentId });
+    const plain = h.store.sendChatMessage(chat.id, { body: 'ordinary' }).task;
+    const options = { policyProtocol: 'legacy' as const, supportsPromptPolicy: false };
+    expect(h.store.claimTask(runtime)).toBeNull();
+    expect(h.store.claimTask(runtime, options)?.id).toBe(plain.id);
+    expect(h.store.getSystemPrompt('local').currentDefault.revision).toBe(CURRENT_SYSTEM_PROMPT_DEFAULT.revision);
+    const binding = h.store.getAttemptSystemPrompt(plain.id)!;
+    expect(binding).toMatchObject({ legacyCompatible: true, mode: 'default', defaultRevision: LEGACY_BASELINE_DEFAULT_REVISION,
+      contentHash: LEGACY_BASELINE_DEFAULT_REVISION });
+    expect(hashSystemPromptContent(binding.content)).toBe(binding.contentHash);
+    expect(h.store.getTask(code.id)?.waitReason).toBe('daemon_capability_required:prompt.policy.adopt.v1');
+    expect(h.store.requeueTaskOffer(plain.id, runtime, 'rejected')).toBe(true);
+    expect(h.store.claimTask(runtime, options)).toBeNull();
+    expect(h.store.claimTask(runtime, { supportsPromptPolicy: true, policyProtocol: 'adopt' })?.id).toBe(code.id);
+    expect(h.store.getAttemptSystemPrompt(code.id)?.contentHash).toBe(CURRENT_SYSTEM_PROMPT_DEFAULT.contentHash);
   });
 
   for (const reset of [false, true]) {
@@ -948,18 +1038,13 @@ describe("System Prompt policy claim and offer", () => {
       const h = fixture(undefined, 1, undefined, false, false);
       const task = h.task();
       if (reset) h.store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "reset" }, actor);
-      const repo = h.store.systemPromptsRepo();
-      // Dependency-injected catalog simulates a later server release without changing the frozen legacy baseline.
-      const catalog = { ...CURRENT_SYSTEM_PROMPT_DEFAULT, revision: "future-server-default",
-        content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common: "NEW SERVER DEFAULT" } };
-      const probe = spyOn(repo as any, "catalog").mockReturnValue(catalog);
-      try {
-        expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
-        expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: "daemon_capability_required:prompt.policy.adopt.v1" });
-        expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
-        expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "default", defaultRevision: catalog.revision,
-          content: catalog.content, legacyCompatible: false });
-      } finally { probe.mockRestore(); }
+      for (const options of [undefined, { supportsPromptPolicy: false }]) {
+        expect(h.store.claimTask(h.runtimeIds[0]!, options)).toBeNull();
+        expect(h.store.getTask(task.id)).toMatchObject({ status: 'queued', waitReason: 'daemon_capability_required:prompt.policy.adopt.v1' });
+        expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+      }
+      expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+      expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: 'default', defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision, legacyCompatible: false });
     });
   }
 

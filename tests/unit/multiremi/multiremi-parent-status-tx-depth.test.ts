@@ -1,3 +1,5 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
+import { linkProjectedTestChangeRequest } from "./helpers.js";
 import { createResponsibleTestIssue, createHistoricalTestIssue, seedHistoricalIssueFacts, acceptTestIssueDelivery, testWorkspaceMember } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
 import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
@@ -123,8 +125,8 @@ export function setupDepthStore() {
 }
 
 export function runTask(store: Store, runtimeId: string, taskId: string) {
-  let claimed = store.claimTask(runtimeId);
-  while (claimed && claimed.id !== taskId) claimed = store.claimTask(runtimeId);
+  let claimed = claimWithCurrentRuntime(store, runtimeId);
+  while (claimed && claimed.id !== taskId) claimed = claimWithCurrentRuntime(store, runtimeId);
   if (!claimed) throw new Error(`Could not claim task ${taskId}`);
   return store.startTask(taskId);
 }
@@ -323,8 +325,8 @@ describe("MUL-400 S1 transaction depth — task terminal paths", () => {
     expect(counter.max, "createTask").toBe(1);
     expect(store.getIssue(child.id)?.status).toBe("todo");
 
-    let claimed = store.claimTask(runtime.id);
-    while (claimed && claimed.id !== task.id) claimed = store.claimTask(runtime.id);
+    let claimed = claimWithCurrentRuntime(store, runtime.id);
+    while (claimed && claimed.id !== task.id) claimed = claimWithCurrentRuntime(store, runtime.id);
     counter.reset();
     store.startTask(task.id);
     expect(counter.max, "startTask").toBe(1);
@@ -554,7 +556,7 @@ describe("MUL-400 S1 transaction depth — SCM merge completion", () => {
     });
   }
 
-  function projectChangeRequest(store: Store, connectionId: string, title: string) {
+  function projectChangeRequest(store: Store, connectionId: string, issueId: string, title: string) {
     store.advanceScmEntitySnapshot({
       connectionId,
       repositoryId: "repo_widgets",
@@ -571,6 +573,7 @@ describe("MUL-400 S1 transaction depth — SCM merge completion", () => {
         url: "https://github.com/acme/widgets/pull/42",
       },
     });
+    linkProjectedTestChangeRequest(store, issueId, connectionId, "repo_widgets", 42);
   }
 
   function recordMerge(store: Store, connectionId: string, logicalKey: string) {
@@ -594,7 +597,7 @@ describe("MUL-400 S1 transaction depth — SCM merge completion", () => {
     const parent = createResponsibleTestIssue(store, { assigneeType:'agent',assigneeId:store.createAgent({name:'Explicit execution fixture',provider:'codex'}).id, title: "SCM held parent", workspaceId: "local" });
     store.updateIssue(parent.id, { status: "in_progress" });
     createResponsibleTestIssue(store, { assigneeType:'agent',assigneeId:store.createAgent({name:'Explicit execution fixture',provider:'codex'}).id, title: "Running child", parentIssueId: parent.id, status: "in_progress" });
-    projectChangeRequest(store, connection.id, `${parent.key}: deliver one slice`);
+    projectChangeRequest(store, connection.id, parent.id, `${parent.key}: deliver one slice`);
 
     const counter = wrapStore(store);
     counter.reset();
@@ -623,7 +626,7 @@ describe("MUL-400 S1 transaction depth — SCM merge completion", () => {
     const { store, agent } = setupDepthStore();
     const connection = seedScm(store);
     const parent = finishedParent(store, agent.id, "SCM atomic parent");
-    projectChangeRequest(store, connection.id, `${parent.key} atomic delivery`);
+    projectChangeRequest(store, connection.id, parent.id, `${parent.key} atomic delivery`);
 
     const events: string[] = [];
     const unsubscribe = store.onWorkspaceEvent((event) => {
@@ -679,7 +682,7 @@ describe("MUL-400 S1 transaction depth — SCM merge completion", () => {
     const { store, agent } = setupDepthStore();
     const connection = seedScm(store);
     const parent = finishedParent(store, agent.id, "SCM event parent");
-    projectChangeRequest(store, connection.id, `${parent.key} event delivery`);
+    projectChangeRequest(store, connection.id, parent.id, `${parent.key} event delivery`);
     const events: Array<{ action: string; inTransaction: boolean }> = [];
     const unsubscribe = store.onWorkspaceEvent((event) => {
       if (event.type !== "activity:created") return;
@@ -701,7 +704,7 @@ describe("MUL-400 S1 transaction depth — SCM merge completion", () => {
     const { store, agent } = setupDepthStore();
     const connection = seedScm(store);
     const parent = finishedParent(store, agent.id, "SCM done parent");
-    projectChangeRequest(store, connection.id, `${parent.key} final delivery`);
+    projectChangeRequest(store, connection.id, parent.id, `${parent.key} final delivery`);
 
     const counter = wrapStore(store);
     counter.reset();
@@ -923,6 +926,7 @@ describe("MUL-400 S1 — the replay walks the whole ancestor chain", () => {
         url: "https://github.com/acme/widgets/pull/77",
       },
     });
+    linkProjectedTestChangeRequest(store, chain.child.id, connection.id, "repo_widgets", 77);
     const counter = wrapStore(store);
     counter.reset();
     store.recordScmCanonicalEvent({

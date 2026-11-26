@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
@@ -40,7 +41,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         const member = change === "historical member is archived" ? store.createWorkspaceMember({ name: "Earlier operator" }) : null;
         if (member) store.updateAutopilot(id, { deliveryChatSessionId: targetId, deliveryAuthorizedBy: member.id });
         const run = store.runAutopilot(id);
-        expect(store.claimTask(bot.runtimeId)?.id).toBe(run.taskId!);
+        expect(claimWithCurrentRuntime(store, bot.runtimeId)?.id).toBe(run.taskId!);
         store.startTask(run.taskId!);
         if (member) {
           store.archiveWorkspaceMember(member.id);
@@ -70,7 +71,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const autopilot = store.createAutopilot({ title: "Report", assigneeId: reporter.id, executionMode: "run_only",
         deliveryChatSessionId: target.id, deliveryAuthorizedBy: store.getWorkspaceOperator("local")!.id });
       const run = store.runAutopilot(autopilot.id);
-      expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(run.taskId!);
       store.startTask(run.taskId!);
       const url = new URL(process.env.MULTIREMI_TEST_POSTGRES_URL!);
       url.pathname = String(db.query("SELECT current_database() AS name").get()!.name);

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { issueMessagesPath, requestMessageBody, taskRequestPath, turnApiPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -194,7 +195,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
       prompt: "Implement the projection.",
     });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(firstTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(firstTask.id);
     const firstProjection = store.buildTaskSessionProjection(firstTask.id)!;
     expect(firstProjection.mode).toBe("bootstrap");
     expect(firstProjection.jsonl).toContain('"perspective":"external_agent"');
@@ -271,13 +272,13 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const agent=store.createAgent({name:"Merge",provider:"claude"}),issue=createResponsibleTestIssue(store, {title:"Merge"});
     const session=store.getOrCreateDefaultIssueSession(issue.id);
     const first=store.createSessionTask(session.id,{agentId:agent.id,prompt:"First"});
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);store.buildTaskSessionProjection(first.id);store.startTask(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);store.buildTaskSessionProjection(first.id);store.startTask(first.id);
     const merged=store.createSessionTask(session.id,{agentId:agent.id,prompt:"Second"});
     expect(merged.id).toBe(first.id);
     store.completeTask(first.id,{output:"Combined",sessionId:"acp_promoted",workDir:"/tmp/merged"});
     const next=store.createSessionTask(session.id,{agentId:agent.id,prompt:"Third"});
     expect(next.id).not.toBe(first.id);
-    expect(store.claimTask(runtime.id)).toMatchObject({id:next.id,sessionId:"acp_promoted",workDir:"/tmp/merged"});
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({id:next.id,sessionId:"acp_promoted",workDir:"/tmp/merged"});
     expect(store.buildTaskSessionProjection(next.id)?.mode).toBe("delta");
   });
 
@@ -293,7 +294,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const issue = createResponsibleTestIssue(store, { title: "Frozen lane", workspaceId: "local" });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const created = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Run once" });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.issueSessionGeneration).toBe(1);
 
     store.resetSessionAgentLane(session.id, agent.id);
@@ -328,13 +329,13 @@ describe("Issue sessions and per-agent projection lanes", () => {
     store.createIssueComment(issue.id, { issueSessionId: session.id, body: "Canonical context" });
 
     const first = store.createSessionTask(session.id, { agentId: agent.id, prompt: "First turn" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "First answer", sessionId: "dead_acp_session" });
 
     const stale = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Resume turn" });
     expect(stale.sessionId).toBe("dead_acp_session");
-    expect(store.claimTask(runtime.id)?.id).toBe(stale.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(stale.id);
     store.startTask(stale.id);
     store.failTask(stale.id, {
       error: "Stale provider session: no conversation found",
@@ -371,7 +372,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const session = store.getOrCreateDefaultIssueSession(issue.id);
 
     const seed = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Seed provider state" });
-    expect(store.claimTask(runtime.id)?.id).toBe(seed.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(seed.id);
     store.startTask(seed.id);
     store.buildTaskSessionProjection(seed.id);
     store.completeTask(seed.id, { output: "Seeded", sessionId: "dead_context_session" });
@@ -384,7 +385,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
       maxAttempts: 3,
     });
     expect(first.sessionId).toBe("dead_context_session");
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.failTask(first.id, {
       error: "Prompt is too long: context length exceeded",
@@ -404,7 +405,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
       cursorSeq: 0,
     });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
     store.startTask(second.id);
     store.failTask(second.id, {
       error: "Prompt is too long: context length exceeded",
@@ -419,7 +420,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
       runtimeId: null,
     });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(third.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(third.id);
     store.startTask(third.id);
     store.failTask(third.id, {
       error: "Prompt is too long: context length exceeded",
@@ -483,7 +484,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const session = store.getOrCreateDefaultIssueSession(issue.id);
 
     const first = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Warm the lane" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.buildTaskSessionProjection(first.id);
     store.completeTask(first.id, { output: "Warm result", sessionId: "acp_cancel_lane" });
@@ -497,7 +498,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     store.appendSessionEvent(session.id, { authorType: "member", authorId: null, kind: "message", body: "mid-flight two" });
 
     const cancelled = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Gets stopped" });
-    expect(store.claimTask(runtime.id)?.id).toBe(cancelled.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(cancelled.id);
     store.startTask(cancelled.id);
     expect(store.buildTaskSessionProjection(cancelled.id)?.mode).toBe("delta");
     expect(store.cancelTask(cancelled.id).status).toBe("cancelled");
@@ -533,18 +534,18 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const session = store.getOrCreateDefaultIssueSession(issue.id);
 
     const first = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Warm the lane" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "Warm result", sessionId: "acp_failed_lane" });
     expect(store.getSessionAgentLane(session.id, agent.id)?.providerSessionId).toBe("acp_failed_lane");
 
     const doomed = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Fails terminally" });
-    expect(store.claimTask(runtime.id)?.id).toBe(doomed.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(doomed.id);
     store.startTask(doomed.id);
     // "boom" classifies outside AUTO_RETRY_FAILURE_REASONS, so this is terminal.
     store.failTask(doomed.id, { error: "boom" });
     expect(store.getTask(doomed.id)?.status).toBe("failed");
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
 
     expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({
       providerSessionId: null,
@@ -564,7 +565,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const issue = createResponsibleTestIssue(store, { title: "Provider switch", workspaceId: "local" });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const first = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Claude turn" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "Claude result", sessionId: "claude_acp_lane" });
     expect(store.getSessionAgentLane(session.id, agent.id)?.providerSessionId).toBe("claude_acp_lane");

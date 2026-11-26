@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,7 +33,7 @@ function nativeQuestion(source = agent, choose = false) {
   const runtime = store.registerRuntime({ name: 'Unified Q fixture', provider: 'codex', daemonId: 'unified-q-fixture', maxConcurrency: 8 });
   store.updateAgent(source.id, { runtimeId: runtime.id });
   const task = store.createTask({ agentId: source.id, issueId: issue.id, issueSessionId: session.id, prompt: 'Original work' });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   const turn = store.getTurnForAttempt(task.id)!;
   const scope = { runtimeId: runtime.id, daemonId: 'unified-q-fixture', workspaceId: 'local' };
   const created = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id,
@@ -309,7 +310,7 @@ it("lets the addressed agent answer a decision once through its authenticated me
   const { question } = nativeQuestion(other, true);
   const pending = store.listTasksForIssue(issue.id).find(task => task.agentId === agent.id && task.status === 'queued')!;
   const runtimeId = store.getTask(question.source_attempt_id!)!.runtimeId!;
-  expect(store.claimTask(runtimeId)?.id).toBe(pending.id); store.startTask(pending.id);
+  expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(pending.id); store.startTask(pending.id);
   const turn = store.getTurnForAttempt(pending.id)!;
   app = createMultiremiApp({ store, authToken: "master" });
   const token = await store.createAccessToken({ name: "agent", type: "task", taskId: turn.current_attempt_id!, agentId: agent.id, userId: "local", workspaceId: "local" });

@@ -1,3 +1,4 @@
+import { wireOfferAdopt } from "../fixtures/wire-offer-adopt.js";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 import { MIGRATION_ADVISORY_LOCK_KEY } from "../../packages/server/src/store/advisory-locks.js";
@@ -11,7 +12,7 @@ if (!configured) console.info("[MUL-463] SKIP: MULTIREMI_TEST_POSTGRES_URL is no
 
 interface Seed { agentId: string; issueId: string; browserToken: string }
 interface Queue { agentId: string; runtimeIds: [string, string] }
-interface Frame { type?: string; payload?: any; t?: string; p?: any; seq?: number; rt?: string }
+interface Frame { type?: string; payload?: any; t?: string; p?: any; seq?: number; rt?: string; re?: string }
 interface TaskState { id: string; status: string; runtimeId: string }
 interface PeerHealth { enabled: boolean; sent: number; dropped: number; failed: number; queued: number; inflight: number }
 const BunSocket = WebSocket as unknown as { new(url: string, options?: Bun.WebSocketOptions): WebSocket };
@@ -72,16 +73,20 @@ describe.skipIf(!configured)("MUL-463 two-process PostgreSQL integration", () =>
     sockets.add(collector);
     await collector.open();
     collector.socket.send(JSON.stringify({ v: 2, t: "hello", p: {
-      protocol: 2, cli_version: DAEMON_MIN_CLI_VERSION,
+      protocol: 2, cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer", "prompt.policy.adopt.v1"],
       daemon_id: runtimeId.replace(/^rt_/, "daemon_"),
       runtimes: [{ runtime_id: runtimeId, provider: "codex", max_concurrency: 2, active_task_ids: [] }],
     } }));
     expect((await collector.wait("welcome"))?.t).toBe("welcome");
+    collector.socket.send(JSON.stringify({ v: 2, t: "runtime.ready", rt: runtimeId, p: { active_task_ids: [] } }));
     return collector;
   }
 
-  function acceptOffer(socket: SocketFrames, offer: Frame): void {
+  async function acceptOffer(socket: SocketFrames, offer: Frame): Promise<void> {
     expect(offer.seq).toBeNumber();
+    const adopt = wireOfferAdopt(offer, offer.rt!.replace(/^rt_/, "daemon_"));
+    socket.socket.send(JSON.stringify(adopt));
+    expect((await socket.wait("res", frame => frame.re === adopt.id))?.p).toMatchObject({ ok: true, state: "adopted" });
     socket.socket.send(JSON.stringify({ v: 2, t: "res", re: String(offer.seq), p: { ok: true } }));
     socket.socket.send(JSON.stringify({ v: 2, t: "ack", ack: offer.seq, p: {} }));
   }
@@ -170,7 +175,7 @@ describe.skipIf(!configured)("MUL-463 two-process PostgreSQL integration", () =>
       expect(offer).toMatchObject({ rt: queue.runtimeIds[0], p: { attempt_id: id } });
       expect(offer!.p.turn_id).toBeString();
       expect(offer!.p).not.toHaveProperty("id");
-      acceptOffer(socket, offer!);
+      await acceptOffer(socket, offer!);
       expect(await pair[1].call<TaskState>("task", { id })).toEqual({ id, status: "dispatched", runtimeId: queue.runtimeIds[0] });
       await pair[0].call("complete", { id });
     } finally { socket.close(); }
@@ -189,7 +194,7 @@ describe.skipIf(!configured)("MUL-463 two-process PostgreSQL integration", () =>
           .map(frame => ({ socket, runtimeId: queue.runtimeIds[index], frame })));
         expect(offered).toHaveLength(1);
         const owner = offered[0]!.runtimeId;
-        acceptOffer(offered[0]!.socket, offered[0]!.frame);
+        await acceptOffer(offered[0]!.socket, offered[0]!.frame);
         expect(await pair[1].call<TaskState>("task", { id })).toEqual({ id, status: "dispatched", runtimeId: owner });
         delivered.push(id);
         await pair[0].call("complete", { id });

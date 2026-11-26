@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { normalizeDaemonTurnOffer } from "@multiremi/worker/daemon-offers.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -32,11 +33,11 @@ describe("binary Skill daemon claim compatibility", () => {
     const dispatches: string[] = [];
     store.onTaskEvent(({ type, task }) => { if (type === "task:dispatch") dispatches.push(task.id); });
 
-    expect(() => store.claimTask(runtime.id)).toThrow(BinarySkillFilesUnsupportedError);
+    expect(() => claimWithCurrentRuntime(store, runtime.id)).toThrow(BinarySkillFilesUnsupportedError);
     expect(store.getTask(task.id)).toEqual(task);
     expect(dispatches).toEqual([]);
 
-    const claimed = store.claimTask(runtime.id, { supportsBinarySkillFiles: true });
+    const claimed = claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true });
     expect(claimed?.id).toBe(task.id);
     expect(claimed?.agent?.skills[0]?.files?.[0]).toMatchObject(png);
     expect(dispatches).toEqual([task.id]);
@@ -44,7 +45,7 @@ describe("binary Skill daemon claim compatibility", () => {
 
   it("also checks legacy inline skills", () => {
     const { store, runtime, task } = createFixture("claude", true);
-    expect(() => store.claimTask(runtime.id, { supportsBinarySkillFiles: false })).toThrow(BinarySkillFilesUnsupportedError);
+    expect(() => claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: false })).toThrow(BinarySkillFilesUnsupportedError);
     expect(store.getTask(task.id)?.status).toBe("queued");
   });
 
@@ -58,7 +59,7 @@ describe("binary Skill daemon claim compatibility", () => {
     const dispatches: string[] = [];
     store.onTaskEvent(({ type, task }) => { if (type === "task:dispatch") dispatches.push(task.id); });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(textTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(textTask.id);
     expect(store.getTask(task.id)).toEqual(task);
     expect(store.getTask(secondBinary.id)).toEqual(secondBinary);
     expect(dispatches).toEqual([textTask.id]);
@@ -66,18 +67,18 @@ describe("binary Skill daemon claim compatibility", () => {
 
   it("preserves a stale binary dispatch lease while allowing a later text task", () => {
     const { store, runtime, task } = createFixture();
-    store.claimTask(runtime.id, { supportsBinarySkillFiles: true });
+    claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true });
     const oldDispatchTime = "2000-01-01T00:00:00.000Z";
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", [oldDispatchTime, task.id]);
     const stale = store.getTask(task.id);
-    expect(() => store.claimTask(runtime.id)).toThrow(BinarySkillFilesUnsupportedError);
+    expect(() => claimWithCurrentRuntime(store, runtime.id)).toThrow(BinarySkillFilesUnsupportedError);
     expect(store.getTask(task.id)).toEqual(stale);
 
     const textAgent = store.createAgent({ name: "Text agent", provider: "claude" });
     const textTask = store.createTask({ agentId: textAgent.id, prompt: "Use text" });
-    expect(store.claimTask(runtime.id)?.id).toBe(textTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(textTask.id);
     expect(store.getTask(task.id)).toEqual(stale);
-    expect(store.claimTask(runtime.id, { supportsBinarySkillFiles: true })?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true })?.id).toBe(task.id);
     expect(store.getTask(task.id)?.dispatchedAt).not.toBe(oldDispatchTime);
   });
 

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { configureRepositoryWikiAutomation, createStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -29,7 +30,7 @@ function fixture() {
       payload: { repository_wiki_repository_id: "repo_outcome" },
     });
     const task = store.getTask(run.taskId!)!;
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const credential = await store.createTaskAccessToken(task, "local");
     const headers = { ...rootHeaders, Authorization: `Bearer ${credential.token}` };

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -53,7 +54,7 @@ describe("Chat task destination invariant", () => {
         const hydrated = f.store.getTaskWithAgent(f.task.id)!;
         drift(f);
         expect(() => daemonTaskClaimResponse(f.store, hydrated)).toThrow("destination no longer matches");
-        expect(f.store.claimTask(f.runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
         expect(f.store.getTask(f.task.id)?.status).toBe("cancelled");
         expect(f.store.listChatMessages(f.chat.id)).toEqual(f.messages);
         expect(f.store.getChatSession(f.chat.id)?.sessionId).toBeNull();
@@ -61,7 +62,7 @@ describe("Chat task destination invariant", () => {
       for (const terminal of ["complete", "fail"] as const) {
         it(`rejects late ${terminal} for ${kind} wake ${name} before any Chat write`, () => {
           const f = setup(kind);
-          const claimed = f.store.claimTask(f.runtime.id)!;
+          const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
           expect(claimed.id).toBe(f.task.id);
           drift(f);
           expect(() => terminal === "complete"
@@ -76,15 +77,15 @@ describe("Chat task destination invariant", () => {
     }
     it(`does not re-claim a dispatched ${kind} wake after A to B`, () => {
       const f = setup(kind);
-      expect(f.store.claimTask(f.runtime.id)?.id).toBe(f.task.id);
+      expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(f.task.id);
       drifts["A to B"](f);
       mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [f.task.id]);
-      expect(f.store.claimTask(f.runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
       expect(f.store.getTask(f.task.id)?.status).toBe("cancelled");
     });
     it(`keeps a matching ${kind} wake executable and its result in its original topic`, () => {
       const f = setup(kind);
-      const claimed = f.store.claimTask(f.runtime.id)!;
+      const claimed = claimWithCurrentRuntime(f.store, f.runtime.id)!;
       expect(claimed.id).toBe(f.task.id);
       expect(daemonTaskClaimResponse(f.store, claimed).issue).toMatchObject({ id: f.first.id });
       f.store.completeTask(f.task.id, { output: "Current Issue report" });
@@ -104,12 +105,12 @@ describe("Chat task destination invariant", () => {
     const old = f.store.getTaskWithAgent(f.task.id)!;
     drifts["A to B"](f);
     expect(() => daemonTaskClaimResponse(f.store, old)).toThrow("destination no longer matches");
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
   });
 
   it.each(["round", "human", "user"] as const)("rejects a cached %s claim after the live task Issue changes", (kind) => {
     const f = setup(kind);
-    const cached = f.store.claimTask(f.runtime.id)!;
+    const cached = claimWithCurrentRuntime(f.store, f.runtime.id)!;
     expect(cached.issueId).toBe(f.first.id);
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET issue_id = ? WHERE id = ?", [f.second.id, f.task.id]);
     expect(f.store.getTask(f.task.id)?.issueId).toBe(f.second.id);
@@ -132,13 +133,13 @@ describe("Chat task destination invariant", () => {
     expect(detached.issueId).toBeNull();
     expect(f.store.getTask(f.task.id)?.issueId).toBe(f.first.id);
     expect(daemonTaskClaimResponse(f.store, detached).issue).toBeUndefined();
-    expect(f.store.claimTask(f.runtime.id)?.issueId).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.issueId).toBeNull();
   });
   it("retargets human-request provenance on every automatic retry before any later unbind", () => {
     const f = setup("human");
     let currentId = f.task.id;
     for (let attempt = 2; attempt <= 3; attempt++) {
-      expect(f.store.claimTask(f.runtime.id)?.id).toBe(currentId);
+      expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(currentId);
       f.store.failTask(currentId, { error: "temporary timeout", failureReason: "timeout" });
       const retry = f.store.listTasks().find((task) => task.parentTaskId === currentId)!;
       expect(retry.attempt).toBe(attempt);
@@ -148,19 +149,19 @@ describe("Chat task destination invariant", () => {
     }
     drifts["NULL binding Issue"](f);
     expect(() => f.store.getTaskWithAgent(currentId)).toThrow("destination no longer matches");
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
     expect(f.store.getTask(currentId)?.status).toBe("cancelled");
   });
 
   it("follows historical human retry ancestry across two generations even after queued prompt edits", () => {
     const f = setup("human");
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(f.task.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(f.task.id);
     f.store.failTask(f.task.id, { error: "temporary timeout", failureReason: "timeout" });
     const firstRetry = f.store.listTasks().find((task) => task.parentTaskId === f.task.id)!;
     // Reproduce the old version's missing retarget: only the ancestor has a
     // human-request marker, while both retries inherit its generated prompt.
     db!.run("UPDATE multiremi_feishu_bot_human_request_pushes SET wake_task_id = ? WHERE id = 'push_destination'", [f.task.id]);
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(firstRetry.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(firstRetry.id);
     f.store.failTask(firstRetry.id, { error: "second timeout", failureReason: "timeout" });
     const secondRetry = f.store.listTasks().find((task) => task.parentTaskId === firstRetry.id)!;
     expect(db!.query("SELECT id FROM multiremi_feishu_bot_human_request_pushes WHERE wake_task_id = ?").get(secondRetry.id)).toBeNull();
@@ -168,7 +169,7 @@ describe("Chat task destination invariant", () => {
     const cached = f.store.getTaskWithAgent(secondRetry.id)!;
     drifts["NULL binding Issue"](f);
     expect(() => daemonTaskClaimResponse(f.store, cached)).toThrow("destination no longer matches");
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
     expect(f.store.getTask(secondRetry.id)?.status).toBe("cancelled");
     expect(f.store.listChatMessages(f.chat.id)).toEqual(f.messages);
   });
@@ -179,7 +180,7 @@ describe("Chat task destination invariant", () => {
     drifts["NULL binding Issue"](f);
     const user = f.store.sendChatMessage(f.chat.id, { content: "Independent private question", parentTaskId: f.task.id }).task;
     expect(user.attempt).toBe(1);
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(user.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(user.id);
     const wire = daemonTaskClaimResponse(f.store, f.store.getTaskWithAgent(user.id)!);
     expect(wire.issue).toBeUndefined();
     expect(wire.prompt).toBe("Independent private question");

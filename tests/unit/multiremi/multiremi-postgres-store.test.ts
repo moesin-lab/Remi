@@ -1,3 +1,6 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
+import { linkProjectedTestChangeRequest } from "./helpers.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { acceptTestIssueDelivery, seedHistoricalIssueFacts, testWorkspaceMember } from './helpers.js';
@@ -350,6 +353,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
         return db.query(sql).get(...params) as Record<string, unknown> | null;
       },
     });
+    classifyScmLinks(db);
     store.ensureLocalWorkspace();
   });
 
@@ -368,7 +372,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     store.reportIssueWorkspace({ issueId: issue.id, runtimeId: runtime.id,
       rootPath: `/tmp/${issue.key}`, branchName: `agent/${issue.key}`, status: "ready" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "trace" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(store.getTaskTrace(task.id)).toMatchObject({ location: "daemon", runtimeId: runtime.id });
     expect(pointerQueryCount).toBeGreaterThan(0);
 
@@ -379,12 +383,12 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(await reader.readEvents(task.id)).toMatchObject({ state: "ok", source: "daemon", head: 1, events: [{ seq: 1 }] });
 
     const empty = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "empty" });
-    expect(store.claimTask(runtime.id)?.id).toBe(empty.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(empty.id);
     store.startTask(empty.id);
     store.completeTask(empty.id, { output: "done", traceEventCount: 0 });
     expect(store.getTaskTrace(empty.id)?.location).toBe("none");
     const lost = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "lost" });
-    expect(store.claimTask(runtime.id)?.id).toBe(lost.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(lost.id);
     store.markTaskTraceLost(lost.id);
     expect(store.getTaskTrace(lost.id)).toMatchObject({ location: "lost", runtimeId: runtime.id });
     expect(await new TraceReader({ store, daemon: new InMemoryDaemonTraceReader(() => trace) }).readTurn(lost.id))
@@ -455,7 +459,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(store.listTasksForIssue(issue.id).map((row) => row.id)).toEqual([task.id]);
     expect(store.listIssueActivity(issue.id).filter((row) =>
       row.type === "dependency_auto_started" || row.type === "dependency_auto_start_skipped")).toEqual([]);
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     expect(store.getIssue(issue.id)?.status).toBe("in_progress");
   });
@@ -762,7 +766,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       store.refreshQueuedCapabilityWaitReasons(alertAt + 180_000);
       expect(store.getTask(task.id)?.waitReason).toContain("claude-opus-5");
       store.updateRuntimeModels(runtime.id, healthy);
-      expect(store.claimTask(runtime.id)).toMatchObject({ id: task.id, status: "dispatched", waitReason: null });
+      expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: task.id, status: "dispatched", waitReason: null });
       expect(store.startTask(task.id)).toMatchObject({ status: "running", waitReason: null });
       store.completeTask(task.id, { output: "Capability recovered" });
     } finally {
@@ -806,7 +810,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     });
     const sent = store.sendChatMessage(chat.id, { body: "Build the PostgreSQL projection." });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(sent.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sent.task.id);
     expect(() => store.buildTaskSessionProjection(sent.task.id)).not.toThrow();
     expect(store.listChatMessages(chat.id).map((message) => message.body)).toEqual([
       "Build the PostgreSQL projection.",
@@ -1036,7 +1040,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       agentId: leader.id,
       prompt: "Lead the PG delegation test.",
     });
-    expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+    expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id);
     store.buildTaskSessionProjection(leaderTask.id);
     store.startTask(leaderTask.id);
     store.createIssueComment(issue.id, {
@@ -1047,7 +1051,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     });
     const childTask = store.listTasksForIssue(issue.id).find((task) => task.agentId === qa.id)!;
     store.completeTask(leaderTask.id, { output: "Delegated to QA." });
-    expect(store.claimTask(qaRuntime.id)?.id).toBe(childTask.id);
+    expect(claimWithCurrentRuntime(store, qaRuntime.id)?.id).toBe(childTask.id);
     store.buildTaskSessionProjection(childTask.id);
     store.startTask(childTask.id);
     const report = store.createIssueComment(issue.id, {
@@ -1301,7 +1305,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     // workspace lock. Claiming must consume the frozen snapshot without
     // attempting to open a nested transaction on Postgres.
     const task = store.createTask({ agentId: agent.id, prompt: "Use the PG Plugin" });
-    const claimed = store.claimTask(runtime.id);
+    const claimed = claimWithCurrentRuntime(store, runtime.id);
     expect(claimed).toMatchObject({ id: task.id, pluginSnapshot: [{ pluginId: plugin.id }] });
   });
 
@@ -1551,6 +1555,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       payload: { title: "Projection without a numeric identifier", state: "open" },
     }).applied).toBe(true);
 
+    linkProjectedTestChangeRequest(store, issue.id, connection.id, repositoryId, 42);
     const projected = store.listScmChangeRequestsForIssue(issue.id)!;
     expect(projected).toEqual([
       expect.objectContaining({
@@ -1642,9 +1647,10 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       sessionId: main.id,
       targetAgentId: agent.id,
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const prompt = "# Bootstrap Prompt\n\n## Current Request\nUse the main context";
     const recordedPrompt = store.recordTaskPrompt(task.id, {
+      systemPromptPolicy: store.getAttemptSystemPrompt(task.id) ?? undefined,
       mode: "bootstrap",
       prompt,
       sha256: createHash("sha256").update(prompt).digest("hex"),
@@ -1789,12 +1795,12 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const task = store.createTask({ agentId: agent.id, prompt: "go", workspaceId: ws });
     expect(task.status).toBe("queued");
 
-    const claimed = store.claimTask(runtime.id);
+    const claimed = claimWithCurrentRuntime(store, runtime.id);
     expect(claimed?.id).toBe(task.id);
     expect(claimed?.status).toBe("dispatched");
     expect(claimed?.agent?.id).toBe(agent.id);
     // Nothing left queued → second claim yields null.
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
   });
 
   it("skips identical task-message retries but persists changed seqs on Postgres", () => {
@@ -1911,11 +1917,11 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const second = store.sendChatMessage(chat.id, { content: "second" });
     expect(store.getPendingChatTask(chat.id)?.id).toBe(first.task.id);
     expect(second.task.id).toBe(first.task.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id);
     expect(JSON.stringify(store.buildTaskSessionProjection(first.task.id))).toContain("second");
     const inputSeqs = store.listMessages(chat.id).filter(message => message.sender_type === "member").map(message => message.seq);
     store.recordSessionAgentInlineRead(chat.id, agent.id, inputSeqs, Math.max(...inputSeqs), true, first.task.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.startTask(first.task.id);
     store.completeTask(first.task.id, { output: "answer", sessionId: "pg-chat-session", workDir: "/tmp/pg-chat-queue" });
     expect(store.listChatMessages(chat.id).map((message) => message.body)).toEqual(["first", "second", "answer"]);
@@ -1931,7 +1937,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     })).toThrow("invalid cursor");
     expect(store.getChatSession(chat.id)?.lastMessage?.content).toBe("answer");
     const nextMessage = store.sendChatMessage(chat.id, {content:"third"});
-    expect(store.claimTask(runtime.id)?.sessionId).toBe("pg-chat-session");
+    expect(claimWithCurrentRuntime(store, runtime.id)?.sessionId).toBe("pg-chat-session");
     expect(store.buildTaskSessionProjection(nextMessage.task.id)?.mode).toBe("delta");
     store.updateChatSession(chat.id, { pinned: true, status: "archived" });
     expect(store.getChatSession(chat.id)?.pinned).toBe(true);
@@ -1948,8 +1954,8 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     // Unbound task: claude can't claim it, codex can, and the claim stamps it.
     const task = store.createTask({ agentId: agent.id, prompt: "pooled", workspaceId: ws });
     expect(task.runtimeId).toBeNull();
-    expect(store.claimTask(claude.id)).toBeNull();
-    expect(store.claimTask(codex.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, claude.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(task.id);
     expect(store.getTask(task.id)?.runtimeId).toBe(codex.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "done" });
@@ -1958,7 +1964,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const session = store.createChatSession({ agentId: agent.id, title: "pg chat", workspaceId: ws });
     const first = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "hi", workspaceId: ws });
     expect(first.runtimeId).toBeNull();
-    expect(store.claimTask(codex.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, codex.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "done", sessionId: "sess_pg_chat", workDir: "/tmp/pg-chat" });
     const followUp = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "again", workspaceId: ws });
@@ -1991,8 +1997,8 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     });
     const ownedIssue = createResponsibleTestIssue(store, { title: "pg owned", workspaceId: ws });
     const ownedTask = store.createTask({ agentId: agent.id, issueId: ownedIssue.id, prompt: "owned", workspaceId: ws });
-    expect(store.claimTask(privateRt.id)?.id).toBe(ownedTask.id);
-    expect(store.claimTask(publicRt.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, privateRt.id)?.id).toBe(ownedTask.id);
+    expect(claimWithCurrentRuntime(store, publicRt.id)).toBeNull();
   });
 
   it("serializes Runtime-affine project, token, and Issue workspace writes with daemon retirement", async () => {
@@ -2233,12 +2239,12 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const agent = store.createAgent({ name: "Grouped worker", provider: "codex", workspaceId: ws, executionGroupId: "shared", model: "group-model" });
     const task = store.createTask({ agentId: agent.id, prompt: "Only group members" });
     store.saveExecutionGroup(ws, { name: "Shared", provider: "codex", profile_id: null, runtime_ids: [second.id] }, "shared");
-    expect(store.claimTask(second.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, second.id)).toBeNull();
     store.recordRuntimeExecutionBindingAcks(second.id, store.getRuntimeExecutionBindings(second.id).map(binding => ({
       ...binding, status: "ready",
     })));
-    expect(store.claimTask(first.id)).toBeNull();
-    expect(store.claimTask(second.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, second.id)?.id).toBe(task.id);
     store.cancelTask(task.id);
     expect(store.deleteRuntime(second.id)).toBeTrue();
     expect(store.getExecutionGroup("shared", ws)?.runtimeIds).toEqual([]);
@@ -2570,7 +2576,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const agent = store.createAgent({ name: "Reply PG", provider: "claude", workspaceId: ws, runtimeId: runtime.id });
     const issue = createResponsibleTestIssue(store, { title: "统计后端文件", workspaceId: ws });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "统计后端文件", workspaceId: ws });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "后端共 119 个文件。" });
 
@@ -2580,7 +2586,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
 
     // Self-replied run: completion must not double-post.
     const second = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "再来一次", workspaceId: ws });
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
     store.startTask(second.id);
     store.createIssueComment(issue.id, { taskId: second.id, authorType: "agent", authorId: agent.id, body: "自己发的回复" });
     const before = store.listIssueComments(issue.id).length;
@@ -2668,7 +2674,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const agent = store.createAgent({ name: "Terminal Race", provider: "codex", workspaceId: ws });
     const issue = createResponsibleTestIssue(store, { title: "Do not reopen", workspaceId: ws, status: "backlog" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Start after acceptance" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     db.run("DELETE FROM multiremi_system_events WHERE resource_id = ?", [issue.id]);
 
     const worker = new Worker(
@@ -2711,7 +2717,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const chat = store.createChatSession({ agentId: agent.id, workspaceId: ws });
     const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Projection race" });
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Freeze this prompt" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(task.issueSessionId).toBeString();
 
     const worker = new Worker(
@@ -2792,7 +2798,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const runtime = store.registerRuntime({ name: `steer-race-runtime-${wsCounter}`, provider: "claude", workspaceId });
     const agent = store.createAgent({ name: `Steer Race ${wsCounter}`, provider: "claude", workspaceId });
     const task = store.createTask({ agentId: agent.id, prompt: "steer race" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     return { workspaceId, task };
   };
@@ -2921,8 +2927,8 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       assigneeId: owner.id,
     });
     const prereqTask = store.createTask({ agentId: owner.id, issueId: prereq.id, prompt: "finish the prerequisite" });
-    let claimed = store.claimTask(runtime.id);
-    while (claimed && claimed.id !== prereqTask.id) claimed = store.claimTask(runtime.id);
+    let claimed = claimWithCurrentRuntime(store, runtime.id);
+    while (claimed && claimed.id !== prereqTask.id) claimed = claimWithCurrentRuntime(store, runtime.id);
     store.startTask(prereqTask.id);
     store.completeTask(prereqTask.id, { output: "prerequisite finished" });
 
@@ -3448,7 +3454,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       const dependent = createResponsibleTestIssue(store, { title: `Terminal check dependent PG ${wsCounter}`, status: "backlog",
         blockedBy: [prerequisite.id], assigneeType: "agent", assigneeId: owner.id });
       const task = store.createTask({ agentId: owner.id, issueId: prerequisite.id, prompt: "Finish intake" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       store.completeTask(task.id, { output: "Generated work" });
       expect(store.getIssue(prerequisite.id)?.status).toBe('in_review');

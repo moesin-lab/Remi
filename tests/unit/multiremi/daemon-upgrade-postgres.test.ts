@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { describe, expect, it } from "bun:test";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -41,7 +42,7 @@ describe.skipIf(!available)("automatic daemon upgrades on real PostgreSQL", () =
       const runtime = store.registerRuntime({ id: "rt_pg_upgrade", name: "PG upgrade", provider: "claude", daemonId: "dmn_pg_upgrade", metadata: { cli_version: "0.2.82" } });
       const agent = store.createAgent({ name: "Busy PG", provider: "claude", runtimeId: runtime.id });
       const task = store.createTask({ agentId: agent.id, runtimeId: runtime.id, prompt: "Keep upgrade pending" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       const ready: Promise<unknown>[] = [];
       for (let index = 0; index < 2; index++) {

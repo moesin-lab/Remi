@@ -5605,6 +5605,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "scm.change-request.bind": {
+      "command": "remi scm change-request bind",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.bind",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "scm.change-request.link": {
       "command": "remi scm change-request link",
       "auth": [

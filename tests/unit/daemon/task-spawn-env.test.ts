@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../multiremi/helpers.js";
 import { afterEach, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -26,7 +27,7 @@ pendingTurnBackendTests("Store offer to actual provider spawn", fixture => {
       // Exercise a replacement so the turn and attempt have distinct IDs.
       store.cancelTurn(seed.turn_id!);
       const turn = store.retryTurn(seed.turn_id!, true);
-      const claimed = store.claimTask(runtime.id)!;
+      const claimed = claimWithCurrentRuntime(store, runtime.id)!;
       expect(claimed.id).toBe(turn.current_attempt_id!);
       const task = store.getTaskWithAgent(claimed.id)!;
       const input = store.getDaemonTurnBridge().offerInput(task);

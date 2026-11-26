@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -43,11 +44,11 @@ async function exerciseDecisions(store: MultiremiStore): Promise<void> {
   const source = store.createIssue({ title: 'Question source', parentIssueId: parent.id, assigneeType: 'agent', assigneeId: sourceAgent.id });
   const originalSession = store.createIssueSession(source.id, { title: 'Original private question', holdsWorkspace: false });
   const sourceTask = store.createTask({ agentId: sourceAgent.id, issueId: source.id, issueSessionId: originalSession.id, prompt: 'Work child' });
-  expect(store.claimTask(runtime.id)?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
   const sourceTurn = store.getTurnForAttempt(sourceTask.id)!;
   const foreignSession = store.createIssueSession(parent.id, { title: 'Unrelated lane', holdsWorkspace: false });
   const foreignTask = store.createTask({ agentId: unrelated.id, issueId: parent.id, issueSessionId: foreignSession.id, prompt: 'Unrelated work', priority: 100 });
-  expect(store.claimTask(runtime.id)?.id).toBe(foreignTask.id); store.startTask(foreignTask.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(foreignTask.id); store.startTask(foreignTask.id);
   const app = createMultiremiApp({ store, authToken: 'test-master' });
   const memberToken = await store.createAccessToken({ name: 'Workspace member', type: 'pat', userId: 'local', workspaceId: 'local' });
   const [sourceToken, foreignToken] = await Promise.all([
@@ -80,7 +81,7 @@ async function exerciseDecisions(store: MultiremiStore): Promise<void> {
       .find(message => message.metadata.root_question_id === first.id && message.to_agent_id === owner.id)!;
     expect(notification.reply_to_id).toBeNull();
     expect(notification.metadata.question_route_revision).toBe(1);
-    const handlerTask = store.claimTask(runtime.id)!;
+    const handlerTask = claimWithCurrentRuntime(store, runtime.id)!;
     expect(handlerTask.agentId).toBe(owner.id); store.startTask(handlerTask.id);
     const handlerToken = await store.createTaskAccessToken(store.getTask(handlerTask.id)!, 'local');
     const handlerTurn = store.getTurnForAttempt(handlerTask.id)!;
@@ -385,7 +386,7 @@ async function exerciseHumanStageReminders(store: MultiremiStore): Promise<void>
     const session = store.createIssueSession(issueId, { title: `Human stage Q ${++sequence}`, holdsWorkspace: false });
     const task = store.createTask({ agentId: sourceAgent.id, issueId, issueSessionId: session.id,
       prompt: 'Raise one Q', priority: 100 + sequence });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const created = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id,
       body_md: `Question ${sequence}`, wait_id: `wait-explicit:${sequence}`, dedupe_key: `explicit:${sequence}`,
@@ -444,7 +445,7 @@ async function exerciseHumanStageReminders(store: MultiremiStore): Promise<void>
     // Q's actual notification lane, rather than depending on database tie order.
     const db = (store as unknown as { db: import('@multiremi/store/db/postgres.js').SqlDatabase }).db;
     db.run('UPDATE multiremi_turns SET priority = 200 WHERE id = ?', [notifiedTurn.id]);
-    const handler = store.claimTask(runtime.id)!;
+    const handler = claimWithCurrentRuntime(store, runtime.id)!;
     expect(handler.id).toBe(notifiedTurn.current_attempt_id!);
     expect(handler.agentId).toBe(agentless.id); store.startTask(handler.id);
     const turn = store.getTurnForAttempt(handler.id)!;

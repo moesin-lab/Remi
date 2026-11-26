@@ -16,6 +16,10 @@ import type {
 const PAGE_SIZE = 100;
 const OVERLAP_MS = 2 * 60 * 1000;
 
+export class CodebaseScmProviderError extends Error {
+  constructor(readonly code: string, message: string) { super(message); }
+}
+
 export class CodebaseScmProviderAdapter implements ScmProviderAdapter {
   readonly provider = "codebase" as const;
   readonly capabilities = CODEBASE_SCM_CAPABILITIES;
@@ -373,7 +377,8 @@ export class CodebaseScmProviderAdapter implements ScmProviderAdapter {
       const metadata = recordPick(response.data, "ResponseMetadata", "response_metadata");
       const error = recordPick(metadata, "Error", "error");
       if (Object.keys(error).length) {
-        throw new Error(`Codebase ${action} failed: ${stringPick(error, "Code", "code") || "Error"}: ${stringPick(error, "Message", "message")}`);
+        const code = stringPick(error, "Code", "code") || "Error";
+        throw new CodebaseScmProviderError(code, `Codebase ${action} failed: ${code}: ${stringPick(error, "Message", "message")}`);
       }
       return recordPick(response.data, "Result", "result");
     } finally {

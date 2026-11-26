@@ -1,4 +1,6 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
+import { useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -18,6 +20,7 @@ import { operationsCommandSpecs } from "../../../apps/remi/cli/commands/operatio
 import { TestMultiremiDaemon } from "../../fixtures/daemon-protocol.js";
 
 const cleanups: Array<() => Promise<void> | void> = [];
+useMigratedIntegrationDatabases();
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 function bed(cliVersion = "0.2.82") {
@@ -55,7 +58,7 @@ describe("HTTP daemon protocol upgrade channel (real SQLite)", () => {
     const b = bed();
     const agent = b.store.createAgent({ name: "Busy", provider: "claude", runtimeId: b.runtime.id });
     const task = b.store.createTask({ agentId: agent.id, runtimeId: b.runtime.id, prompt: "Keep the existing update gate closed" });
-    expect(b.store.claimTask(b.runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(b.store, b.runtime.id)?.id).toBe(task.id);
     b.store.startTask(task.id);
     const replies = await Promise.all([b.heartbeat(), b.heartbeat()]);
     expect(replies.every(ack => !ack.pending_update)).toBeTrue();

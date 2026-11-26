@@ -1219,7 +1219,8 @@ a replacement.
 
 `remi db prepare` 在所有数据库客户端停止后显式准备历史 schema，已完成步骤可续跑；
 `remi db schema` 读取 PostgreSQL schema level 与代码兼容区间；
+`remi db classify-scm-links` 在 expand 6 后显式固化存量 PR/MR 关联归属。停止并隔离所有旧 writer 后执行，完成前 SCM 写入保持关闭。中断后用同一命令续跑，见 [SCM 归属切换](dev/scm-checks.md#scm-归属切换)。
 `remi db contract --level <n>` 显式执行已声明、晚于 expand release 的收缩步骤。
-这两个 Registry 命令直接使用 `MULTIREMI_DATABASE_URL`，不使用平台 token；
+PostgreSQL 维护使用 `MULTIREMI_DATABASE_URL`。SQLite 分类使用 `remi db classify-scm-links --sqlite-file <absolute-path>`，需先取消设置该环境变量。两种入口都要求离线维护。
 contract 当前要求所有其他数据库客户端停止，不支持 SQLite。
 步骤声明与限制见 [Schema 迁移纪律](dev/schema-migrations.md)。

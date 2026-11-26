@@ -67,6 +67,7 @@ const UI_SYSTEM_PROMPT_ROUTES = [
   'POST /api/workspaces/:id/system-prompt/preview', 'POST /api/workspaces/:id/system-prompt/reset', 'POST /api/workspaces/:id/system-prompt/restore',
 ];
 const UI_BOT_ROUTES = ["GET /api/workspaces/:id/feishu-bots", "POST /api/workspaces/:id/feishu-bots"];
+const SCM_BIND_ROUTE = "PUT /api/issues/:issueId/change-requests/by-reference";
 const FEISHU_DAEMON_COMMAND_ROUTES = [
   "POST /api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender",
   "POST /api/daemon/runtimes/:runtimeId/feishu-bot/commands/v1",
@@ -361,6 +362,7 @@ describe("MUL-461 api role — env resolution", () => {
     // route next to the daemon prefix, a health-looking browser route next to the
     // real probes, and the peer channel that only the runtime process serves.
     const cases: Array<{ path: string; ui: boolean; runtime: boolean }> = [
+      { path: "/api/issues/iss_fixture/change-requests/by-reference", ui: false, runtime: true },
       { path: "/api/daemons/x", ui: false, runtime: true },
       { path: "/api/cloud-runtime/healthz", ui: false, runtime: true },
       { path: "/internal/peer/events", ui: false, runtime: false },
@@ -424,7 +426,7 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     expect(misdirected).not.toContain("GET /api/sessions/:sessionId/log/entry");
     expect(statuses.has("GET /api/projects/:id/activity")).toBe(true);
     expect(statuses.get("GET /api/projects/:id/activity")).not.toBe(421);
-    for (const route of [DELIVERY_TARGETS_ROUTE, ...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES, ...UI_SYSTEM_PROMPT_ROUTES]) {
+    for (const route of [SCM_BIND_ROUTE, DELIVERY_TARGETS_ROUTE, ...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES, ...UI_SYSTEM_PROMPT_ROUTES]) {
       expect(statuses.has(route)).toBe(true);
       expect(statuses.get(route), `${route} belongs to the browser/CLI process`).not.toBe(421);
     }
@@ -462,13 +464,13 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
-    for (const route of [DELIVERY_TARGETS_ROUTE, ...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES, ...UI_SYSTEM_PROMPT_ROUTES]) {
+    for (const route of [SCM_BIND_ROUTE, DELIVERY_TARGETS_ROUTE, ...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES, ...UI_SYSTEM_PROMPT_ROUTES]) {
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
     expect(statuses.get("GET /api/projects/:id/activity")).toBe(421);
-    expect(refused, routeCountHint("runtime")).toBe(787);
-    expect(refused + 2, routeCountHint("runtime")).toBe(789);
+    expect(refused, routeCountHint("runtime")).toBe(788);
+    expect(refused + 2, routeCountHint("runtime")).toBe(790);
     // ADR 0025: the Chat menu's catalogue is a UI read.
     expect(statuses.get("GET /api/chat/slash-commands")).toBe(421);
   });

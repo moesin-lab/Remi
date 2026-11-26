@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 import { createResponsibleTestIssue } from './helpers.js';
@@ -127,10 +128,10 @@ describe("queued task model capability waits", () => {
         expect(() => store.refreshQueuedCapabilityWaitReasons(now)).not.toThrow();
         if (location === "local" || location === "other" || (location === "none" && !dedicated)) {
           expect(store.getTask(task.id)?.waitReason).toBeNull();
-          expect(store.claimTask(location === "other" ? b.id : a.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, location === "other" ? b.id : a.id)?.id).toBe(task.id);
         } else {
-          expect(store.claimTask(a.id)).toBeNull();
-          expect(store.claimTask(b.id)).toBeNull();
+          expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+          expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
         }
       });
     }
@@ -150,7 +151,7 @@ describe("queued task model capability waits", () => {
       expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 1, alerted: 0 });
       expect(store.getTask(task.id)?.waitReason).toBeNull();
     }
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   });
 
   it("offers only Agent rebinding when a dedicated workspace owner already passes routing", () => {
@@ -170,11 +171,11 @@ describe("queued task model capability waits", () => {
     expect(reason).toStartWith("等待任务落点：");
     expect(reason).toContain(`remi agent update ${agent.id} --runtime ${owner.id}`);
     expect(reason).not.toContain("取消");
-    expect(store.claimTask(owner.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, owner.id)).toBeNull();
     store.updateAgent(agent.id, { runtimeId: owner.id });
     store.refreshQueuedCapabilityWaitReasons(now);
     expect(store.getTask(task.id)?.waitReason).toBeNull();
-    expect(store.claimTask(owner.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, owner.id)?.id).toBe(task.id);
   });
 
   it("never offers redispatch for a frozen Chat even when it also has an Issue", () => {
@@ -198,8 +199,8 @@ describe("queued task model capability waits", () => {
     const { store, runtime, agent, task, now, fail } = fixture();
     const second = store.registerRuntime({ name: "Second", provider: "codex", workspaceId: "local", models: models(false) });
     fail();
-    expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.claimTask(second.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, second.id)).toBeNull();
     const events: string[] = [];
     store.onTaskEvent(({ type }) => events.push(type));
 
@@ -225,7 +226,7 @@ describe("queued task model capability waits", () => {
       id: "bundled-gpt", label: "Bundled GPT", provider: "openai", default: true,
       catalog: { status: "error", error: "catalog HTTP 503 (fixture)" },
     }]);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.refreshQueuedCapabilityWaitReasons(now);
     expect(store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: expect.stringContaining(MODEL) });
     expect(store.getTask(task.id)?.waitReason).not.toContain("thinking:");
@@ -240,7 +241,7 @@ describe("queued task model capability waits", () => {
       if (state === "busy") {
         const worker = store.createAgent({ name: "Busy worker", provider: "codex", runtimeId: healthy.id });
         const active = store.createTask({ agentId: worker.id, prompt: "Occupy the healthy runtime", priority: 100 });
-        expect(store.claimTask(healthy.id)?.id).toBe(active.id);
+        expect(claimWithCurrentRuntime(store, healthy.id)?.id).toBe(active.id);
         store.startTask(active.id);
         expect(store.getRuntime(healthy.id)?.activeTaskCount).toBe(1);
       }
@@ -265,8 +266,8 @@ describe("queued task model capability waits", () => {
     fail();
     expect(agent.runtimeId).toBeNull();
     expect(task.runtimeId).toBe(runtime.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.claimTask(healthy.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, healthy.id)).toBeNull();
 
     expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 1, alerted: 0 });
     expect(store.getTask(task.id)).toMatchObject({
@@ -274,7 +275,7 @@ describe("queued task model capability waits", () => {
       waitReason: expect.stringContaining(`1 个候选 Runtime 均无法执行 ${MODEL}`),
     });
     recover();
-    expect(store.claimTask(runtime.id)).toMatchObject({ id: task.id, status: "dispatched", waitReason: null });
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: task.id, status: "dispatched", waitReason: null });
   });
 
   it("evaluates runtime pins independently for tasks sharing an agent", () => {
@@ -360,7 +361,7 @@ describe("queued task model capability waits", () => {
     store.refreshQueuedCapabilityWaitReasons(now);
     expect(store.getTask(task.id)?.waitReason).toContain(MODEL);
     recover();
-    const claimed = store.claimTask(runtime.id);
+    const claimed = claimWithCurrentRuntime(store, runtime.id);
     expect(claimed).toMatchObject({ id: task.id, status: "dispatched", waitReason: null });
     expect(store.startTask(task.id)).toMatchObject({ status: "running", waitReason: null });
   });
@@ -417,7 +418,7 @@ describe("queued task model capability waits", () => {
     const issue = createResponsibleTestIssue(store, { title: "Device issue", projectId: project.id, workspaceId: "local" });
     const parent = store.createIssueSession(issue.id, { title: "Main", holdsWorkspace: true });
     const seed = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: parent.id, prompt: "seed" });
-    store.claimTask(devbox.id);
+    claimWithCurrentRuntime(store, devbox.id);
     store.startTask(seed.id);
     store.completeTask(seed.id, { output: "ok", sessionId: "sess_device" });
     const move = () => {
@@ -450,8 +451,8 @@ describe("queued task model capability waits", () => {
     expect(waiting.waitReason).toContain("设备绑定");
     // A snapshot exists only on A, so neither machine may take the turn — and
     // the reason must survive that refusal instead of being recomputed away.
-    expect(store.claimTask(devbox.id)).toBeNull();
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, devbox.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
   });
 
@@ -473,7 +474,7 @@ describe("queued task model capability waits", () => {
     store.createProjectDevice(project.id, { daemonId: "device-routing-a" });
     expect(store.refreshQueuedCapabilityWaitReasons(now + GRACE_MS)).toMatchObject({ updated: 1 });
     expect(store.getTask(task.id)?.waitReason).toBeNull();
-    expect(store.claimTask(devbox.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, devbox.id)?.id).toBe(task.id);
   });
 
   it("prefers the device-routing reason over a model-capability reason and back", () => {
@@ -537,7 +538,7 @@ describe("queued task model capability waits", () => {
     expect(store.getTask(task.id)?.waitReason).toContain("把 devbox-a 加回项目的设备绑定");
     expect(store.getTask(task.id)?.waitReason).not.toContain("取消");
     // The workspace data only exists on the devbox: keep waiting, don't move it.
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     expect(store.getTask(task.id)).toMatchObject({ runtimeId: devbox.id, status: "queued" });
   });
 
@@ -585,7 +586,7 @@ describe("queued task model capability waits", () => {
     expect(waiting.waitReason).toContain("dev-unreg-missing");
     expect(waiting.waitReason).toContain("本机目录");
     // The registered-but-forbidden machine still cannot take it.
-    expect(store.claimTask(registered.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, registered.id)).toBeNull();
   });
 
   it("keeps a no-Project task with an unregistered pin scanable", () => {
@@ -619,7 +620,7 @@ describe("queued task model capability waits", () => {
     store.createProjectDevice(project.id, { daemonId: "dev-label-a" });
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id, workspaceId: "local" });
     const first = store.sendChatMessage(chat.id, { body: "first" }).task;
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_label", workDir: "/abs/label-a" });
     const second = store.sendChatMessage(chat.id, { body: "second" }).task;
@@ -636,7 +637,7 @@ describe("queued task model capability waits", () => {
     // `redispatch` mints another task with the same hard affinity, so the text
     // must not recommend it.
     expect(reason).not.toContain("redispatch");
-    expect(store.claimTask(b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
   });
 
   it("does not label a lease-free Issue task as holding a workspace", () => {
@@ -657,7 +658,7 @@ describe("queued task model capability waits", () => {
     const first = store.createTask({
       agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "first",
     });
-    expect(store.claimTask(a.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "ok", sessionId: "sess_lease_free" });
     const second = store.createTask({
@@ -673,10 +674,10 @@ describe("queued task model capability waits", () => {
     // Soft affinity: the observer writes nothing and the claim re-pools it.
     expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 0, alerted: 0 });
     expect(store.getTask(second.id)?.waitReason).toBeNull();
-    expect(store.claimTask(a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
     // Re-pooling clears any text the observer owned before the pin moved.
     expect(store.getTask(second.id)).toMatchObject({ runtimeId: null, sessionId: null, waitReason: null });
-    expect(store.claimTask(b.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(second.id);
   });
 
   // MUL-449 ruling 2: the observer decides from the claim's own placement
@@ -713,13 +714,13 @@ describe("queued task model capability waits", () => {
     expect(reason).toContain("remi turn retry");
     // The frozen pin survives — the remedy is redispatch, not an automatic move.
     expect(store.getTask(task.id)).toMatchObject({ runtimeId: a.id, attempt: 2 });
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
 
     // The suggested remedy really resolves it: the replacement has no frozen
     // pin, so the workspace machine can take it.
     const retry=store.retryTurn(store.getTurnForAttempt(task.id)!.id,true);
-    expect(store.claimTask(b.id)?.id).toBe(retry.current_attempt_id!);
+    expect(claimWithCurrentRuntime(store, b.id)?.id).toBe(retry.current_attempt_id!);
 
   });
 
@@ -740,7 +741,7 @@ describe("queued task model capability waits", () => {
     const now = Date.now();
     ageTask(task.id, GRACE_MS, now);
     expect(store.describeTaskPlacement(task.id).every((verdict) => !verdict.placementOk)).toBe(true);
-    expect(store.claimTask(m.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, m.id)).toBeNull();
     store.refreshQueuedCapabilityWaitReasons(now);
     expect(store.getTask(task.id)?.waitReason).toStartWith("等待任务落点：");
   });
@@ -749,7 +750,7 @@ describe("queued task model capability waits", () => {
     const { store, a, b, agent, issue } = conflictFixture({ codex: "dev-frozen-code-a", other: "dev-frozen-code-b" });
     const parent = store.createIssueSession(issue.id, { title: "Main", holdsWorkspace: true });
     const seed = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: parent.id, prompt: "seed" });
-    expect(store.claimTask(a.id)?.id).toBe(seed.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(seed.id);
     store.startTask(seed.id);
     store.completeTask(seed.id, { output: "ok", sessionId: "sess_frozen_code" });
     const side = store.createIssueSession(issue.id, {
@@ -781,8 +782,8 @@ describe("queued task model capability waits", () => {
     expect(store.getTask(replacement!.id)?.status).not.toBe("cancelled");
     expect(store.describeTaskPlacement(replacement!.id).find((verdict) => verdict.runtimeId === a.id))
       .toMatchObject({ placementOk: true, routingOk: true });
-    expect(store.claimTask(b.id)).toBeNull();
-    expect(store.claimTask(a.id)?.id).toBe(replacement!.id);
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(replacement!.id);
   });
 
   it("rebinds and resends a frozen Chat request through the creator's HTTP routes", async () => {
@@ -856,8 +857,8 @@ describe("queued task model capability waits", () => {
     expect(store.getChatMessage(resentBody.message.id)?.body).toBe(originalMessage!.body);
     expect(replayed.chatSessionId).toBe(task.chatSessionId);
     expect(replayed.prompt).toBe(task.prompt);
-    expect(store.claimTask(b.id)).toBeNull();
-    expect(store.claimTask(a.id)?.id).toBe(replayed.id);
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(replayed.id);
   });
 
   it("warns that directly rebinding a frozen Chat Agent cancels its queued task", () => {
@@ -891,16 +892,16 @@ describe("queued task model capability waits", () => {
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET execution_fingerprint = 'chat-route-fp' WHERE id = ?", [task.id]);
     const now = Date.now();
     ageTask(task.id, GRACE_MS, now);
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
     store.refreshQueuedCapabilityWaitReasons(now);
     expect(store.getTask(task.id)?.waitReason).toStartWith("等待项目设备：");
     expect(store.getTask(task.id)?.waitReason).toContain("把 A 加回项目的设备绑定");
     expect(store.getTask(task.id)?.waitReason).not.toContain("取消");
     store.createProjectDevice(project.id, { daemonId: "chat-route-a" });
     expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.claimTask(b.id)).toBeNull();
-    expect(store.claimTask(a.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(task.id);
   });
 
   it("orders device restoration before rebinding an Agent to its data machine", () => {
@@ -940,7 +941,7 @@ describe("queued task model capability waits", () => {
     expect(store.getTask(task.id)?.waitReason).not.toContain("已冻结");
     store.updateAgent(agent.id, { runtimeId: a.id });
     expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.claimTask(a.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(task.id);
   });
 
   it("lists exactly the single actions that clear each device-routing refusal", () => {
@@ -999,11 +1000,11 @@ describe("queued task model capability waits", () => {
               }
               if (action === "remove") store.updateDaemonDedicated("local", "table-a", false, "local");
               const after = store.describeTaskPlacement(task.id).find((v) => v.runtimeId === a.id)!;
-              const works = !before.routingOk && after.routingOk && store.claimTask(a.id)?.id === task.id;
+              const works = !before.routingOk && after.routingOk && claimWithCurrentRuntime(store, a.id)?.id === task.id;
               expect(works, `${coordinate}/${action}: ${reason}`).toBe(action === "add"
                 ? reason.includes("加回项目的设备绑定")
                 : /取消 .* 的独享设置/.test(reason));
-              if (works) expect(store.claimTask(b.id)).toBeNull();
+              if (works) expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
             }
           }
     expect(combinations).toBe(16);
@@ -1058,7 +1059,7 @@ describe("queued task model capability waits", () => {
                 if (dataOnA) {
                   const parent = store.createIssueSession(issue.id, { title: "Parent", holdsWorkspace: true });
                   const seed = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: parent.id, prompt: "seed" });
-                  expect(store.claimTask(a.id)?.id, coordinate).toBe(seed.id);
+                  expect(claimWithCurrentRuntime(store, a.id)?.id, coordinate).toBe(seed.id);
                   store.startTask(seed.id);
                   store.completeTask(seed.id, { output: "ok", sessionId: `matrix-session-${cells}` });
                   issueSessionId = store.createIssueSession(issue.id, {
@@ -1145,15 +1146,15 @@ describe("queued task model capability waits", () => {
                 tally.set(sequence, (tally.get(sequence) ?? 0) + 1);
                 expect(replacement.prompt, coordinate).toBe(prompt);
                 if (dataOnA) {
-                  expect(store.claimTask(b.id), coordinate).toBeNull();
-                  expect(store.claimTask(a.id)?.id, coordinate).toBe(replacement.id);
+                  expect(claimWithCurrentRuntime(store, b.id), coordinate).toBeNull();
+                  expect(claimWithCurrentRuntime(store, a.id)?.id, coordinate).toBe(replacement.id);
                 } else {
-                  const claimed = store.claimTask(a.id) ?? store.claimTask(b.id);
+                  const claimed = claimWithCurrentRuntime(store, a.id) ?? claimWithCurrentRuntime(store, b.id);
                   expect(claimed?.id, coordinate).toBe(replacement.id);
                 }
                 continue;
               }
-              const claimed = store.claimTask(a.id) ?? store.claimTask(b.id);
+              const claimed = claimWithCurrentRuntime(store, a.id) ?? claimWithCurrentRuntime(store, b.id);
               expect(claimed?.id, coordinate).toBe(task.id);
               expect(claimed?.prompt, coordinate).toBe(prompt);
               }
@@ -1205,8 +1206,8 @@ describe("queued task model capability waits", () => {
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET runtime_id = ?, attempt = 2, execution_fingerprint = NULL WHERE id = ?", [a.id, task.id]);
     const now = Date.now();
     ageTask(task.id, GRACE_MS, now);
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
     expect(store.refreshQueuedCapabilityWaitReasons(now).updated).toBe(1);
     expect(store.getTask(task.id)).toMatchObject({ status: "queued", runtimeId: a.id });
     const reason = store.getTask(task.id)?.waitReason ?? "";
@@ -1292,8 +1293,8 @@ describe("queued task model capability waits", () => {
     expect(reason).toContain("Agent 绑定");
     expect(reason).toContain(`remi agent update ${bound.id} --runtime ${b.id}`);
     // An Agent binding is configuration: it is never re-pooled automatically.
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
     void project;
   });
 
@@ -1314,8 +1315,8 @@ describe("queued task model capability waits", () => {
     // Pointing the reader at the Project binding would be wrong: no binding can
     // satisfy a workspace that names no machine.
     expect(reason).not.toContain("设备绑定");
-    expect(store.claimTask(a.id)).toBeNull();
-    expect(store.claimTask(b.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, a.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, b.id)).toBeNull();
   });
 
   it("stays silent for a legacy daemon alias that can still claim the task", () => {
@@ -1344,7 +1345,7 @@ describe("queued task model capability waits", () => {
     // A claimable machine exists, so the observer must write nothing at all.
     expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 0, alerted: 0 });
     expect(store.getTask(task.id)?.waitReason).toBeNull();
-    expect(store.claimTask(claude.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(task.id);
   });
 
   it("explains a code-snapshot conflict without offering redispatch", () => {
@@ -1356,7 +1357,7 @@ describe("queued task model capability waits", () => {
     store.reportIssueWorkspace({
       issueId: issue.id, runtimeId: a.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });
-    expect(store.claimTask(a.id)?.id).toBe(seed.id);
+    expect(claimWithCurrentRuntime(store, a.id)?.id).toBe(seed.id);
     store.startTask(seed.id);
     store.completeTask(seed.id, { output: "ok", sessionId: "sess_snap" });
 

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
@@ -130,7 +131,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       const issue = issueOn(source.id);
       const agent = store.createAgent({ name: "Worker", provider: "codex", workspaceId });
       const task = store.createTask({ agentId: agent.id, runtimeId: source.id, prompt: "In flight" });
-      expect(store.claimTask(source.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, source.id)?.id).toBe(task.id);
       store.startTask(task.id);
       const response = await request(`/api/runtimes/${source.id}?abandon_issue_workspaces=true`, "DELETE");
       expect(response.status).toBe(409);
@@ -176,7 +177,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       expect(store.getIssueWorkspace(issue.id)).toMatchObject({
         runtimeId: target.id, status: "ready", cleanedAt: null, rootPath: before.rootPath, branchName: before.branchName,
       });
-      expect(store.claimTask(target.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, target.id)?.id).toBe(task.id);
       assertNoOrphanedWorkspaces();
     });
 
@@ -189,7 +190,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       const target = runtime("recovery");
       const agent = store.createAgent({ name: "Recovery worker", provider: "codex", workspaceId });
       const task = store.createTask({ issueId: issue.id, agentId: agent.id, prompt: "Recover original request" });
-      expect(store.claimTask(target.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, target.id)).toBeNull();
       const before = store.getIssueWorkspace(issue.id)!;
       const response = await request(`/api/issues/${issue.id}/workspace/abandon`, "POST");
       expect(response.status).toBe(200);
@@ -200,7 +201,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       expect(repeated.status).toBe(200);
       expect(await repeated.json()).toMatchObject({ issue_workspaces_abandoned: 0 });
       expect(store.getIssueWorkspace(issue.id)?.cleanedAt).toBe(store.getIssueWorkspace(issue.id)?.updatedAt);
-      expect(store.claimTask(target.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, target.id)?.id).toBe(task.id);
       expect(store.getTask(task.id)?.prompt).toBe("Recover original request");
       assertNoOrphanedWorkspaces();
     });

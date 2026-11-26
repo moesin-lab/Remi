@@ -1,3 +1,4 @@
+import { scmOwnershipReady } from "./scm-ownership.js";
 import { listProjectActivity, type ProjectActivityScope } from "./project-activity.js";
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
@@ -2776,6 +2777,10 @@ runMigrations(this.db);
     return this.scm.deleteRepositoryBinding(connectionId, repositoryId);
   }
 
+  scmOwnershipReady(): boolean {
+    return scmOwnershipReady(this.db);
+  }
+
   reconcileScmRepositoryBindings(workspaceId: string): MultiremiScmRepositoryBinding[] {
     return this.scm.reconcileRepositoryBindings(workspaceId);
   }
@@ -2850,6 +2855,14 @@ runMigrations(this.db);
 
   listScmChangeRequestsForIssue(issueId: string): MultiremiScmChangeRequest[] | null {
     return this.scm.listChangeRequestsForIssue(issueId);
+  }
+
+  prepareScmChangeRequestBinding(...args: Parameters<ScmRepo["prepareChangeRequestBinding"]>) {
+    return this.scm.prepareChangeRequestBinding(...args);
+  }
+
+  bindScmChangeRequestByReference(input: Parameters<ScmRepo["bindChangeRequestByReference"]>[0]) {
+    return this.scm.bindChangeRequestByReference(input);
   }
 
   linkScmChangeRequestToIssue(issueId: string, changeRequestId: string): {

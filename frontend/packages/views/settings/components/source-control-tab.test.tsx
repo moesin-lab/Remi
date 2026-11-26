@@ -91,7 +91,7 @@ describe("SourceControlTab", () => {
     expect(screen.queryByText(/GitHub App/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Enable GitHub features/i)).not.toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Code changes sidebar" })).toBeChecked();
-    expect(screen.getByRole("switch", { name: "Auto-link issues and code changes" })).toBeChecked();
+    expect(screen.queryByRole("switch", { name: "Auto-link issues and code changes" })).toBeNull();
     expect(screen.getByRole("switch", { name: "Record merges on the issue" })).not.toBeChecked();
     // A merge never closes the issue; closing is a status change by a member or the parent owner.
     expect(screen.getByText(/record the merge on the issue\. Its status does not change\./)).toBeInTheDocument();

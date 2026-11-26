@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 /**
  * PR 6 §2.5, §2.6, §9: `lane.background_wake`, the doorbell.
  *
@@ -112,7 +113,7 @@ for (const backend of backends) {
         const first = wake(world);
         expect(first.outcome).toBe("created");
         // The doorbell turn is offered: the next end reaches it as input, not a merge.
-        expect(opened.store.claimTask(world.runtimeId)?.id).toBe(first.attempt_id!);
+        expect(claimWithCurrentRuntime(opened.store, world.runtimeId)?.id).toBe(first.attempt_id!);
         const taskInput: string[] = [];
         const off = opened.store.onWorkspaceEvent((event) => { if (event.type === "daemon:task_input") taskInput.push(String(event.payload.task_id)); });
         expect(wake(world, { task_id: "bash-2" })).toMatchObject({ ok: true, outcome: "delivered", turn_id: first.turn_id,
@@ -149,7 +150,7 @@ for (const backend of backends) {
         expect(person.metadata).toEqual({ execution_scope: "" });
 
         // The attempt runs; the next end reaches it as a steer with its own doorbell.
-        expect(store.claimTask(world.runtimeId)?.id).toBe(created.attempt_id!);
+        expect(claimWithCurrentRuntime(store, world.runtimeId)?.id).toBe(created.attempt_id!);
         store.startTask(created.attempt_id!);
         expect(wake(world, { task_id: "bash-2", status: "failed" }).outcome).toBe("delivered");
         const snapshot = bridge.snapshot({ runtimeId: world.runtimeId, daemonId: world.daemonId, workspaceId: "local" },

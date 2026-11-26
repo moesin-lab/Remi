@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 // Recovery of tasks a runtime abandoned, and the Go-compatible retry edge rules.
@@ -38,9 +39,9 @@ describe.skipIf(!backend.available)(`Multiremi store — orphan recovery and ret
       const first = store.createTask({ agentId: agent.id, issueId: firstIssue.id, prompt: "Run" });
       const second = store.createTask({ agentId: agent.id, issueId: secondIssue.id, prompt: "Wait" });
 
-      expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
       store.startTask(first.id);
-      expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
       store.markTaskWaitingLocalDirectory(second.id, "/tmp/project");
       const issuesBefore = [firstIssue.id, secondIssue.id].map((id) => store.getIssue(id)?.status);
       const turnsBefore = turnIdentities(db);
@@ -120,7 +121,7 @@ describe.skipIf(!backend.available)(`Multiremi store — orphan recovery and ret
       const pendingClaims = new Set([retryTask.id, chatTask.id, autopilotTask.id, exhaustedTask.id, directTask.id]);
 
       for (let i = 0; i < 5; i++) {
-        const claimed = store.claimTask(runtime.id);
+        const claimed = claimWithCurrentRuntime(store, runtime.id);
         expect(claimed).not.toBeNull();
         expect(pendingClaims.delete(claimed!.id)).toBeTrue();
       }
@@ -188,7 +189,7 @@ describe.skipIf(!backend.available)(`Multiremi store — orphan recovery and ret
         maxAttempts: 2,
       });
 
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       const failed = store.failTask(task.id, {
         error: "Codex did not make semantic progress",
@@ -223,14 +224,14 @@ describe.skipIf(!backend.available)(`Multiremi store — orphan recovery and ret
         prompt: "fail",
         maxAttempts: 1,
       });
-      expect(store.claimTask(runtime.id)?.id).toBe(failedTask.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(failedTask.id);
       store.startTask(failedTask.id);
       store.failTask(failedTask.id, { error: "terminal", failureReason: "agent_error" });
       expect(store.getIssue(failedIssue.id)?.status).toBe("blocked");
 
       const cancelledIssue = createResponsibleTestIssue(store, { title: "Cancelled", assigneeType: "agent", assigneeId: agent.id });
       const cancelledTask = store.createTask({ agentId: agent.id, issueId: cancelledIssue.id, prompt: "cancel" });
-      expect(store.claimTask(runtime.id)?.id).toBe(cancelledTask.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(cancelledTask.id);
       store.startTask(cancelledTask.id);
       store.cancelTask(cancelledTask.id);
       expect(store.getIssue(cancelledIssue.id)?.status).toBe("todo");

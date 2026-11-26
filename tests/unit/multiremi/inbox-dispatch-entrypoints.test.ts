@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import {it,expect} from 'bun:test';
 import {pendingTurnBackendTests} from './pending-turn-test-backends.js';
@@ -14,7 +15,7 @@ pendingTurnBackendTests('MUL-508 unified dispatch replacements',fixture=>{
       const sourceIssue=createResponsibleTestIssue(store, {title:'Source'}),target=createResponsibleTestIssue(store, {title:'Target',assigneeType:'agent',assigneeId:b!.id});
       const s0=store.createIssueSession(sourceIssue.id,{title:'Return here'}),s1=store.createIssueSession(target.id,{title:'Work here'});
       const source=store.createTask({agentId:a!.id,issueId:sourceIssue.id,issueSessionId:s0.id,prompt:'Coordinate'});
-      expect(store.claimTask(runtimes[0]!.id)?.id).toBe(source.id);store.startTask(source.id);
+      expect(claimWithCurrentRuntime(store, runtimes[0]!.id)?.id).toBe(source.id);store.startTask(source.id);
       const app=createMultiremiApp({store,authToken:'fixture-root'}),credential=(await store.createTaskAccessToken(source,'local')).token;
       const session=entry==='issue-owner'?store.getOrCreateDefaultIssueSession(target.id):s1;
       const response=await app.request(`/api/sessions/${session.id}/messages`,{method:'POST',headers:{Authorization:`Bearer ${credential}`,'Content-Type':'application/json'},body:JSON.stringify({
@@ -27,7 +28,7 @@ pendingTurnBackendTests('MUL-508 unified dispatch replacements',fixture=>{
       expect(turn.delegated_by_agent_id).toBe(a!.id);expect(turn.delegated_from_issue_session_id).toBe(s0.id);
       expect(store.getMessage(turn.trigger_message_id!)?.task_id).toBe(source.id);
       expect(store.getMessage(turn.trigger_message_id!)?.wake_reason).toBe('agent_dispatch');
-      store.completeTask(source.id,{output:'Dispatched'});expect(store.claimTask(runtimes[1]!.id)?.id).toBe(child.id);store.startTask(child.id);
+      store.completeTask(source.id,{output:'Dispatched'});expect(claimWithCurrentRuntime(store, runtimes[1]!.id)?.id).toBe(child.id);store.startTask(child.id);
       if(entry==='mention'){
         const progress=store.createIssueComment(target.id,{issueSessionId:child.issueSessionId,authorType:'agent',authorId:b!.id,taskId:child.id,body:`Progress [@Sender](mention://agent/${a!.id})`});
         const delivered=store.listMessages(s0.id).find(m=>m.metadata.source_comment_id===progress.id)!;
@@ -52,7 +53,7 @@ pendingTurnBackendTests('MUL-508 unified dispatch replacements',fixture=>{
       expect(finish).toThrow('Task not found or terminal');
       store.ensureDelegationWakeup({sourceTaskId:child.id,requiredEventSeq:1,terminalStatus:terminal,terminalBody:'Replay'});
       expect(store.listMessages(s0.id).filter(m=>m.message_kind==='report'&&(m.metadata.message_source as any)?.taskId===child.id)).toHaveLength(1);
-      expect(store.claimTask(runtimes[0]!.id)?.id).toBe(returned.id);store.startTask(returned.id);store.completeTask(returned.id,{output:'Reviewed'});
+      expect(claimWithCurrentRuntime(store, runtimes[0]!.id)?.id).toBe(returned.id);store.startTask(returned.id);store.completeTask(returned.id,{output:'Reviewed'});
       expect(store.listTurns({workspace_id:'local',session_id:s0.id}).filter(t=>t.status==='pending')).toHaveLength(0);
     }, 120_000);
     }
@@ -62,14 +63,14 @@ pendingTurnBackendTests('MUL-508 unified dispatch replacements',fixture=>{
     const [a,b]=runtimes.map(r=>store.createAgent({name:r.name,provider:'codex',runtimeId:r.id}));
     const issue=createResponsibleTestIssue(store, {title:'Pair'}),session=store.getOrCreateDefaultIssueSession(issue.id);
     let source=store.createTask({agentId:a!.id,issueId:issue.id,issueSessionId:session.id,prompt:'start'});
-    expect(store.claimTask(runtimes[0]!.id)?.id).toBe(source.id);store.startTask(source.id);
+    expect(claimWithCurrentRuntime(store, runtimes[0]!.id)?.id).toBe(source.id);store.startTask(source.id);
     for(let round=0;round<5;round++){
       expect(store.countDelegationPairHops(source,b!.id)).toBe(2*round);
       const dispatch=store.sendMessage({session_id:session.id,sender:{type:'agent',id:a!.id},source_turn_id:source.id,to:{type:'agent',ref:b!.id},message_kind:'request',wake_requested:'now',body_md:`dispatch ${round}`});
       store.completeTask(source.id,{output:'Dispatched'});const child=store.getTurn(dispatch.turn_id!)!;
-      expect(store.claimTask(runtimes[1]!.id)?.id).toBe(child.current_attempt_id!);store.startTask(child.current_attempt_id!);store.completeTask(child.current_attempt_id!,{output:'Result'});
+      expect(claimWithCurrentRuntime(store, runtimes[1]!.id)?.id).toBe(child.current_attempt_id!);store.startTask(child.current_attempt_id!);store.completeTask(child.current_attempt_id!,{output:'Result'});
       source=store.getTask(store.getTask(child.current_attempt_id!)!.delegationReturnTaskId!)!;
-      expect(store.claimTask(runtimes[0]!.id)?.id).toBe(source.id);store.startTask(source.id);
+      expect(claimWithCurrentRuntime(store, runtimes[0]!.id)?.id).toBe(source.id);store.startTask(source.id);
     }
     expect(store.countDelegationPairHops(source,b!.id)).toBe(10);
     const before=store.listTurns({workspace_id:'local'}).length,app=createMultiremiApp({store,authToken:'fixture-root'}),credential=(await store.createTaskAccessToken(source,'local')).token;

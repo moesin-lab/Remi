@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { seedHistoricalDecision } from './fixtures/historical-decision.js';
 import { afterEach, expect, it, setSystemTime } from "bun:test";
@@ -16,14 +17,14 @@ pendingTurnBackendTests("Historical Issue question revisions", fixture => {
     const parent = createResponsibleTestIssue(store, { title: "Parent", assigneeType: "agent", assigneeId: owner.id });
     const source = createResponsibleTestIssue(store, { title: "Source", parentIssueId: parent.id, assigneeType: "agent", assigneeId: worker.id });
     const sourceTask = store.createTask({ agentId: worker.id, issueId: source.id, prompt: "Ask" });
-    expect(store.claimTask(runtime.id)?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sourceTask.id); store.startTask(sourceTask.id);
     const decision = seedHistoricalDecision(store, source.id, { kind: "criteria", title: "Ready for review?" },
       { type: "agent", id: worker.id, taskId: sourceTask.id });
     const sessionId = store.getMessage(decision.id)!.session_id;
     const notice = store.sendMessage({ session_id: sessionId, sender: { type: 'platform', id: null },
       to: { type: 'agent', ref: owner.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Review original question',
       metadata: { root_question_id: decision.id, question_notification: true, question_route_revision: 1 } });
-    const task = store.claimTask(runtime.id)!;
+    const task = claimWithCurrentRuntime(store, runtime.id)!;
     expect(task.id).toBe(store.getTurn(notice.turn_id!)!.current_attempt_id!); store.startTask(task.id);
     const token = await store.createTaskAccessToken(task, "local");
     const ownerTurnId = store.getTurnForAttempt(task.id)!.id;

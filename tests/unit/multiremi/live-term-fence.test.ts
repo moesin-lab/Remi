@@ -1,3 +1,4 @@
+import { SCHEMA_EXPAND_LEVEL } from "@multiremi/store/schema-levels.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { MultiremiScheduler } from "@daemon/scheduler.js";
 import { IssueTitleScheduler } from "@multiremi/issue-title/poller.js";
@@ -115,7 +116,7 @@ test("a resumed slot stops all configured background services and only activatio
       headers: { Authorization: 'Bearer test' },
     })).json();
     expect(status.term).toBe("1");
-    expect(status.schema).toEqual({ expandLevel: 7, contractLevel: 0, compatibility: { minLevel: 7, maxLevel: 7 } });
+    expect(status.schema).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0, compatibility: { minLevel: SCHEMA_EXPAND_LEVEL, maxLevel: SCHEMA_EXPAND_LEVEL } });
     const old = captured!;
     store.activateBackgroundTerm("B", () => {});
     let effects = 0;

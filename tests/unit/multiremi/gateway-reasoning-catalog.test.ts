@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 import { codexNativeModel } from "../../fixtures/codex-native-catalog.js";
@@ -130,7 +131,7 @@ describe("gateway reasoning capability data flow", () => {
     expect(response.status).toBe(201);
     const agent = await response.json();
     const task = store.createTask({ agentId: agent.id, prompt: "Use configured reasoning" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(store.getAgent(agent.id)?.thinkingLevel).toBe("max");
   });
 
@@ -194,7 +195,7 @@ describe("gateway reasoning capability data flow", () => {
     expect(providers[0].models[0].thinking).toEqual({ status: "error", supported_levels: [], error: "catalog request failed" });
     const agent = store.createAgent({ name: "No fallback model", provider: "codex", model: "deepseek-flash", thinkingLevel: "max" });
     const task = store.createTask({ agentId: agent.id, prompt: "Wait for catalog" });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
   });
 
@@ -247,12 +248,12 @@ describe("gateway reasoning capability data flow", () => {
         thinking: { status: "error", supportedLevels: [], error: "catalog HTTP 503" },
       }]);
       fail();
-      expect(store.claimTask(runtime.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
       expect(store.getTask(task.id)?.status).toBe("queued");
       store.updateRuntimeModels(runtime.id, [{ id: "deepseek-flash", label: "DeepSeek", provider: "openai", default: true,
         thinking: reasoning(["low", "high", "max"], "high"),
       }]);
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       fail();
       store.heartbeatRuntime(runtime.id);
@@ -276,7 +277,7 @@ describe("gateway reasoning capability data flow", () => {
     expect(providers[0].models[0].thinking.status).toBe("supported");
     const agent = store.createAgent({ name: "Automatic reasoning", provider: "codex", model: "deepseek-flash", thinkingLevel: "max" });
     const task = store.createTask({ agentId: agent.id, prompt: "Use a working catalog" });
-    expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.claimTask(healthy.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, healthy.id)?.id).toBe(task.id);
   });
 });

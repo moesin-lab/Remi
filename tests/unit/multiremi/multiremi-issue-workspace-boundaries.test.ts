@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { acceptTestIssueDelivery, createHistoricalTestIssue, createResponsibleTestIssue, seedHistoricalIssueFacts } from './helpers.js';
 import { issueMessagesPath, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
@@ -129,7 +130,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
       const runtime = store.registerRuntime({ name: `Question host ${task.id}`, workspaceId: task.workspaceId,
         provider: 'codex', daemonId: `question_host_${task.id}`, maxConcurrency: 8 });
       store.updateAgent(task.agentId, { runtimeId: runtime.id });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       const turn = store.getTurnForAttempt(task.id)!;
       const result = store.getDaemonTurnBridge().rpc('turn.decision', {
@@ -751,14 +752,14 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         mutateExecutionFixture(db, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - 200_000).toISOString(), task.id]);
         store.refreshQueuedCapabilityWaitReasons(now);
         expect(store.getTask(task.id)?.waitReason).toBeNull();
-        expect(store.claimTask(targetRuntime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, targetRuntime.id)?.id).toBe(task.id);
         expect(store.getTask(task.id)?.runtimeId).toBe(targetRuntime.id);
         store.startTask(task.id);
         store.completeTask(task.id, { output: "Target turn finished", sessionId: `session_${target}` });
         const next = store.createTask({ issueId: issue.id, issueSessionId: session.id,
           agentId: agent.id, workspaceId: target, prompt: "Resume target turn" });
         expect(next).toMatchObject({ runtimeId: targetRuntime.id, sessionId: `session_${target}` });
-        expect(store.claimTask(targetRuntime.id)?.id).toBe(next.id);
+        expect(claimWithCurrentRuntime(store, targetRuntime.id)?.id).toBe(next.id);
       });
 
       for (const evidence of ["reclaim", "abandon", "missing", "in_use"] as const) {

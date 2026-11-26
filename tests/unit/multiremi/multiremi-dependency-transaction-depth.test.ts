@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue, acceptTestIssueDelivery } from './helpers.js';
 /**
  * MUL-400 E3 blocking 4 (MUL-409 fix round 2): the automatic-start chain must
@@ -56,8 +57,8 @@ describe("MUL-400 E3 — automatic start stays one transaction (SQLite)", () => 
     const prereq = createResponsibleTestIssue(store, { title: "Prerequisite", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
     const dependent = createResponsibleTestIssue(store, { title: "Dependent", status: "backlog", blockedBy: [prereq.id], assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: prereq.id, prompt: "finish" });
-    let claimed = store.claimTask(runtime.id);
-    while (claimed && claimed.id !== task.id) claimed = store.claimTask(runtime.id);
+    let claimed = claimWithCurrentRuntime(store, runtime.id);
+    while (claimed && claimed.id !== task.id) claimed = claimWithCurrentRuntime(store, runtime.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "done" });
 

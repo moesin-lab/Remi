@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 import { afterEach, expect, it } from "bun:test";
@@ -30,7 +31,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
       ...(fallback ? { fallbackModel: "fallback" } : {}) });
     const issue = createResponsibleTestIssue(store, { title: "Frozen retry", assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Keep frozen model" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const frozen = store.getTask(task.id)!;
     expect(frozen.executionFingerprint).toBeTruthy();
@@ -45,7 +46,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(store.refreshQueuedCapabilityWaitReasons(afterFiveMinutes).alerted).toBe(0);
     expect(store.getTask(retry.id)).toMatchObject({ status: "queued", waitReason: null, fallbackSwitched: false });
     expect(store.listTasks().filter(candidate => candidate.parentTaskId === retry.id)).toEqual([]);
-    expect(store.claimTask(runtime.id)).toMatchObject({ id: retry.id, executionModel: frozen.executionModel,
+    expect(claimWithCurrentRuntime(store, runtime.id)).toMatchObject({ id: retry.id, executionModel: frozen.executionModel,
       executionFingerprint: frozen.executionFingerprint, executionConnection: frozen.executionConnection,
       codexProfile: frozen.codexProfile, fallbackSwitched: false });
   });
@@ -64,7 +65,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     ack();
     const agent = store.createAgent({ name: "Saved", provider: "codex", executionGroupId: group.id, model: "blocked" });
     const claimedTask = store.createTask({ agentId: agent.id, prompt: "Already claimed" });
-    expect(store.claimTask(runtime.id)?.id).toBe(claimedTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(claimedTask.id);
     const queuedTask = store.createTask({ agentId: agent.id, prompt: "Not claimed" });
     store.saveExecutionGroup("local", { ...input, model_policy: { blocked_models: ["blocked", "future"] } }, group.id);
     ack();
@@ -74,7 +75,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(catalog.blocked_models).toEqual(["blocked", "future"]);
     expect(store.getAgent(agent.id)?.model).toBe("blocked");
     expect(() => store.createTask({ agentId: agent.id, prompt: "New" })).toThrow("model blocked by policy");
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(queuedTask.id)?.status).toBe("queued");
     store.refreshQueuedCapabilityWaitReasons(Date.now() + 180_000);
     expect(store.getTask(queuedTask.id)?.waitReason).toContain("model_blocked_by_policy");
@@ -96,13 +97,13 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     const retry = store.createTask({ agentId: agent.id, prompt: "Retry frozen execution", runtimeId: runtime.id,
       executionModel: frozen.executionModel, executionConnection: frozen.executionConnection,
       codexProfile: frozen.codexProfile, executionFingerprint: frozen.executionFingerprint, pluginSnapshot: frozen.pluginSnapshot });
-    const retryClaim = store.claimTask(runtime.id);
+    const retryClaim = claimWithCurrentRuntime(store, runtime.id);
     expect(retryClaim?.id).toBe(retry.id);
     expect(retryClaim?.executionModel).toBe("blocked");
     store.cancelTask(retry.id);
     const auto = store.createAgent({ name: "Automatic", provider: "codex", executionGroupId: group.id });
     const next = store.createTask({ agentId: auto.id, prompt: "Automatic default" });
-    const claim = store.claimTask(runtime.id);
+    const claim = claimWithCurrentRuntime(store, runtime.id);
     expect(claim?.id).toBe(next.id);
     expect(claim?.executionModel).toBe("allowed");
     expect(claim?.codexProfile?.model).toBe("allowed");
@@ -310,7 +311,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
       models: [{ id: "discovered", label: "Discovered", provider: "codex", default: true }] } }]);
     const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: group.id });
     const task = store.createTask({ agentId: agent.id, prompt: "Check" });
-    const claim = store.claimTask(runtime.id)!;
+    const claim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claim?.id).toBe(task.id);
     expect(claim.executionConnection).toMatchObject({ endpoint_id: endpoint.id, endpoint_revision: 1, mode: "endpoint" });
     expect(claim.executionModel).toBe("discovered");
@@ -336,7 +337,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(executionGroupModelCatalog(store, "local", group.id, "local")[0]?.models.map(model => model.id)).toEqual(["native-model"]);
     const agent = store.createAgent({ name: "Native worker", provider: "codex", executionGroupId: group.id });
     store.createTask({ agentId: agent.id, prompt: "Native" });
-    const claim = store.claimTask(runtime.id)!;
+    const claim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claim?.executionConnection).toEqual({ mode: "native", provider: "codex", endpoint_id: null, endpoint_revision: null, profile: null });
     expect(claim.executionModel).toBe("native-model");
     store.updateRuntime(runtime.id, { metadata: { execution_endpoints: 0 } });

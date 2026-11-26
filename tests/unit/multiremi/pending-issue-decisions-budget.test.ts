@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it, spyOn } from 'bun:test';
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from './pending-turn-test-backends.js';
 import { createNativeTestQuestion } from './fixtures/native-question.js';
@@ -38,7 +39,7 @@ function setup(f: PendingTurnTestFixture) {
   const agent = store.createAgent({ name: 'budget owner', provider: 'codex', runtimeId: runtime.id });
   const issue = store.createIssue({ title: 'budget issue', assigneeType: 'agent', assigneeId: agent.id });
   const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: 'budget' });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   const q = createNativeTestQuestion(store, task.id);
   expect(store.getQuestion(q.id)?.stage).toBe('human');
   const base = db.query('SELECT * FROM multiremi_conversation_log WHERE id=?').get(q.id);

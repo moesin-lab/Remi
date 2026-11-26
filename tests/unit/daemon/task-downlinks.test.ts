@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../multiremi/helpers.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { startMultiremiServer } from "../../fixtures/daemon-protocol.js";
@@ -83,7 +84,7 @@ function fixture() {
   };
   const task = () => {
     const row = store.createTask({ agentId: agent.id, prompt: "Task input fixture" });
-    expect(store.claimTask(rt)?.id).toBe(row.id);
+    expect(claimWithCurrentRuntime(store, rt)?.id).toBe(row.id);
     store.startTask(row.id); active.push(row.id);
     inbox.bindTurn({ turn_id: `turn_${row.id}`, attempt_id: row.id, input_from_seq: 0, input_to_seq: 1, input_messages: [] });
     return row;
@@ -163,11 +164,13 @@ describe("turn input push inbox over native WS", () => {
     const active: string[] = [];
     let offered: DaemonTurnTask | undefined;
     const client = new DaemonProtocolClient({ serverUrl: `http://127.0.0.1:${server.port}`, token: "store-input-fixture",
-      daemonId, cliVersion: DAEMON_MIN_CLI_VERSION,
+      daemonId, cliVersion: DAEMON_MIN_CLI_VERSION, caps: ["offer", "prompt.policy.adopt.v1"],
       onError: error => { errors.push(error); }, onFrame: frame => { frames.push(frame.raw); },
       connect: (url, init) => { const socket = new WebSocket(url, init as never); sockets.push(socket); return socket; } });
-    const inbox = new DaemonTaskDownlinks(client, () => rt);
-    registerDaemonOfferHandler(client, { runtimeId: () => rt, rejection: () => null,
+    const receipts = new MultiremiTaskReportOutbox({ path: ':memory:', deliver: async () => {} });
+    const inbox = new DaemonTaskDownlinks(client, () => rt, id => receipts.reportIdentity(id, rt));
+    registerDaemonOfferHandler(client, { runtimeId: () => rt,
+      adoption: { workspace: () => 'local', daemon: () => daemonId, lane: () => rt, outbox: () => receipts, held: () => false }, rejection: () => null,
       run: task => { offered = task; active.push(task.id); inbox.bindTurn(task); } });
     const lane: DaemonProtocolLane = {
       runtime: () => ({ runtime_id: rt, provider: "claude", max_concurrency: 1, active_task_ids: [...active] }),
@@ -187,7 +190,7 @@ describe("turn input push inbox over native WS", () => {
       expect(task.input_messages.some(m => m.id === initial.message.id && m.body_md.includes(initial.message.body_md))).toBe(true);
       const wire = frames.find(frame => frame.t === "task.offer")!.p;
       expect(wire).not.toHaveProperty("id"); expect(wire).not.toHaveProperty("prompt");
-      expect(await client.event({ t: "task.start", seq: 1, rt, p: { task_id: task.id } })).toMatchObject({ ok: true });
+      expect(await client.event({ t: "task.start", seq: 1, rt, p: { task_id: task.id, ...receipts.reportIdentity(task.id, rt) } })).toMatchObject({ ok: true });
       await inbox.consumeTaskSteerMessages(task.id, task.input_messages.map(m => m.id));
       expect(store.getTurn(task.turn_id)!.input_to_seq).toBe(task.input_to_seq);
 
@@ -219,7 +222,7 @@ describe("turn input push inbox over native WS", () => {
 
       store.wrapUpTurn(task.turn_id);
       await waitFor(() => inbox.pendingTaskSteerMessages(task.id).some(m => m.kind === "force_answer"));
-      const completion = { ...inbox.turnInput(task.id), reply: { body_md: "Store-backed final reply", message_kind: "final" } };
+      const completion = { ...inbox.turnInput(task.id), ...receipts.reportIdentity(task.id, rt), reply: { body_md: "Store-backed final reply", message_kind: "final" } };
       const done = await client.event({ t: "turn.complete", seq: 2, rt, p: completion });
       expect(done).toMatchObject({ ok: true, turn_id: task.turn_id });
       expect(store.getTurn(task.turn_id)).toMatchObject({ status: "completed", reply_message_id: done.reply_message_id });
@@ -228,6 +231,7 @@ describe("turn input push inbox over native WS", () => {
       expect(await client.event({ t: "turn.complete", seq: 3, rt, p: completion })).toEqual(done);
       expect(errors).toEqual([]);
     } finally {
+      await receipts.close();
       client.stopLane(lane); await client.drain();
       await waitFor(() => sockets.every(socket => socket.readyState === WebSocket.CLOSED) && layer.registry.size === 0);
       layer.closeAll(); await layer.drain(); server.stop(true);

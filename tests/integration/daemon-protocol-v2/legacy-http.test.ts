@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import type { Database } from "bun:sqlite";
@@ -143,7 +144,7 @@ it.each(["GET", "RPC"] as const)("reconciles completed-task plugin removal befor
       status: "ready", observedDigest: plugin.activeVersion!.artifactDigest,
     });
     const task = store.createTask({ agentId: agent.id, runtimeId: runtime.id, prompt: "Keep plugin snapshot active" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     expect(store.deleteAgentPluginBinding(agent.id, binding.id)).toBe(true);
     expect(store.listAgentPluginRuntimeStates({ runtimeId: runtime.id })).toHaveLength(1);

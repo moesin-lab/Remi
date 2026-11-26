@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 /**
  * Daemon-side Feishu command routing (MUL-358).
  *
@@ -169,7 +170,7 @@ describe("Feishu Task command handler", () => {
       chatType: "group", chatId: CHAT, threadId: "omt_live",
       senderOpenId: "ou_owner", text: "long running work", deliveryMode: "native_cot_v1",
     });
-    expect(store.claimTask("rt_bot")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(submitted.taskId);
     store.startTask(submitted.taskId);
 
     const before = store.listTasks().length;
@@ -239,7 +240,7 @@ describe("Feishu Task command handler", () => {
       chatType: "group", chatId: CHAT, threadId: "omt_status",
       senderOpenId: "ou_owner", text: "work", deliveryMode: "native_cot_v1",
     });
-    expect(store.claimTask("rt_bot")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(submitted.taskId);
     store.startTask(submitted.taskId);
 
     const { meta, text } = await run(
@@ -313,7 +314,7 @@ describe("Feishu Task command handler", () => {
       chatType: "group", chatId: CHAT, threadId: "omt_fail",
       senderOpenId: "ou_owner", text: "work that keeps running", deliveryMode: "native_cot_v1",
     });
-    expect(store.claimTask("rt_bot")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(submitted.taskId);
     store.startTask(submitted.taskId);
 
     // The transport itself fails (an internal route answered 500).

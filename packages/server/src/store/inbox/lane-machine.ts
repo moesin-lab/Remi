@@ -28,7 +28,7 @@ export function deliverToRunningTurn(ctx: StoreContext, turn: any, message: Unif
     'message_delivered_running', {message_id:message.id,seq:message.seq,reason:message.wake_reason});
   // S3 snapshots the log after this commit; a lost notification is recovered on reconnect.
   const task = ctx.tasks().getTask(turn.current_attempt_id);
-  if (task) afterCommit(ctx.db, () => ctx.emitWorkspaceEvent({type:'daemon:task_input',workspaceId:task.workspaceId,actorType:'system',actorId:null,payload:{runtime_id:task.runtimeId,task_id:task.id}}));
+  if (task) afterCommit(ctx.db, () => ctx.emitWorkspaceEvent({type:'daemon:task_input',workspaceId:task.workspaceId,actorType:'system',actorId:null,payload:{runtime_id:task.runtimeId,task_id:task.id,runtime_only:true}}));
   return turn.id;
 }
 

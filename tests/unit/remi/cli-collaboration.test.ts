@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { mkdtemp, writeFile, rm, truncate } from "node:fs/promises";
@@ -207,7 +208,7 @@ describe("native collaboration CLI contracts", () => {
           expect(await delivered(chat.id, chatDelivery.entry.seq)).toBe(false);
           expect(await delivered(session.id, legacy.seq)).toBeNull();
 
-          expect(store.claimTask(runtime.id)?.id).toBe(issueTask.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(issueTask.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(issueTask.id)!);
           expect(store.getSessionAgentLane(session.id, agent.id)?.cursorSeq ?? 0).toBeLessThan(issueDelivery.entry.seq);
           expect(store.findTurnEntry(issueTask.id)?.metadata.inbox?.delivered_to_seq)
@@ -236,7 +237,7 @@ describe("native collaboration CLI contracts", () => {
             { seq: 1, offset: 0 }, { seq: uncovered.entry.seq + 1, offset: 0 });
           expect(await delivered(session.id, uncovered.entry.seq)).toBe(false);
 
-          expect(store.claimTask(runtime.id)?.id).toBe(chatDelivery.task?.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(chatDelivery.task?.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(chatDelivery.task!.id)!);
           store.startTask(chatDelivery.task!.id);
           store.completeTask(chatDelivery.task!.id, { output: "Chat reply" });

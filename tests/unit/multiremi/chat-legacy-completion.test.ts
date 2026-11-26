@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -14,7 +15,7 @@ describe("Chat completion across Issue decoupling", () => {
     const issue = createResponsibleTestIssue(store, { title: "Former Chat binding" });
     const chat = store.createChatSession({ agentId: agent.id });
     const task = store.sendChatMessage(chat.id, { body: "Already running before migration" }).task;
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
 
     // Migration retains the running task's Issue audit and Chat work directory,

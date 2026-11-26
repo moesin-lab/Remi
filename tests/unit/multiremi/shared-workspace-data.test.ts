@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
@@ -139,7 +140,7 @@ pendingTurnBackendTests("Shared workspace operator data", fixture => {
     const agent = store.createAgent({ name: "Asker", provider: "codex" });
     const chat = store.createChatSession({ agentId: agent.id, creatorId: "historical-creator" });
     const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, prompt: "Ask" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const request = store.createTaskHumanRequest({ taskId: task.id, kind: "question", payload: { questions: [{ question: "Choose", options: [{ label: "A" }] }] } });
     const message = store.getMessage(request.id)!;
     const metadata = structuredClone(message.metadata) as Record<string, any>;
@@ -166,7 +167,7 @@ pendingTurnBackendTests("Shared workspace operator data", fixture => {
     const worker = store.createAgent({ name: "Question worker", provider: "codex" });
     const issue = store.createIssue({ title: "Agent question chain", assigneeType: "agent", assigneeId: leader.id });
     const task = store.createTask({ agentId: worker.id, issueId: issue.id, prompt: "Ask leader" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const request = store.createTaskHumanRequest({ taskId: task.id, kind: "question", payload: { questions: [{ question: "Choose", options: [{ label: "A" }] }] } });
     const before = store.getQuestion(request.id)!;
     expect(before.current_handler).toEqual({type: "agent", id: leader.id});
@@ -194,7 +195,7 @@ pendingTurnBackendTests("Shared workspace operator data", fixture => {
       const agent = store.createAgent({ name: `Historical ${status}`, provider: "codex" });
       const chat = store.createChatSession({ agentId: agent.id, creatorId: "historical-creator" });
       const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, prompt: "Historical question" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
       const request = store.createTaskHumanRequest({ taskId: task.id, kind: "question", payload: { questions: [{ question: "Choose", options: [{ label: "A" }] }] } });
       const operator = { type: "member" as const, id: store.getWorkspaceOperator("local")!.id };
       if (status === "answered") store.answerQuestion(request.id, { expected_route_revision: 1, response: { answer: "A" } }, operator);
@@ -217,6 +218,6 @@ pendingTurnBackendTests("Shared workspace operator data", fixture => {
     const runtime = store.registerRuntime({ name: "Historical private host", provider: "codex", visibility: "private", ownerId: "old-owner", daemonId: "shared-runtime" });
     const agent = store.createAgent({ name: "Shared agent", provider: "codex", ownerId: "local" });
     const task = store.createTask({ agentId: agent.id, prompt: "Shared work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   });
 });

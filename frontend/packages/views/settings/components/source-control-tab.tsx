@@ -10,7 +10,6 @@ import {
   CheckCircle2,
   ExternalLink,
   GitCommitHorizontal,
-  Link2,
   PanelRight,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -30,7 +29,6 @@ import { ScmConnectionsSection } from "./scm-connections-section";
 
 type SettingsKey =
   | "scm_change_sidebar_enabled"
-  | "scm_auto_link_enabled"
   | "scm_complete_issue_on_merge_enabled"
   | "co_authored_by_enabled";
 
@@ -102,15 +100,6 @@ export function SourceControlTab() {
               checked={settings.changeSidebar}
               disabled={!canManage || saving}
               onCheckedChange={(value) => persistSetting("scm_change_sidebar_enabled", value)}
-            />
-            <FeatureRow
-              id="scm-auto-link"
-              icon={<Link2 className="size-4" />}
-              label={t(($) => $.source_control.feature_auto_link_label)}
-              description={t(($) => $.source_control.feature_auto_link_description)}
-              checked={settings.autoLink}
-              disabled={!canManage || saving}
-              onCheckedChange={(value) => persistSetting("scm_auto_link_enabled", value)}
             />
             <FeatureRow
               id="scm-complete-on-merge"

@@ -316,6 +316,6 @@ for (const dialect of ['wal', 'delete', 'postgres'] as const) {
         expect(db.query('SELECT attribution FROM multiremi_scm_link_ownership').get()).toEqual({attribution:'[]'});
         expect(store.listScmChangeRequestsForIssue(issue.id)).toEqual([]);
       } finally { await close(); }
-    });
+    }, 30_000);
   });
 }

@@ -469,8 +469,16 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
     expect(statuses.get("GET /api/projects/:id/activity")).toBe(421);
-    expect(refused, routeCountHint("runtime")).toBe(798);
-    expect(refused + 2, routeCountHint("runtime")).toBe(800);
+    for (const route of [
+      "GET /api/root/agents/:agentId/grant-preview",
+      "POST /api/root/agent-pats",
+      "POST /api/root/agents/:agentId/configuration/approve",
+      "POST /api/root/delegations/:nodeId/revoke",
+    ]) {
+      expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
+    }
+    expect(refused, routeCountHint("runtime")).toBe(802);
+    expect(refused + 2, routeCountHint("runtime")).toBe(804);
     // ADR 0025: the Chat menu's catalogue is a UI read.
     expect(statuses.get("GET /api/chat/slash-commands")).toBe(421);
   });

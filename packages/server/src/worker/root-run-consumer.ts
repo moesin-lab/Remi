@@ -3,6 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { RootMachineClient } from '@daemon/agent-runtime/root-machine-client.js';
 import { RootRunSupervisor } from '@daemon/agent-runtime/root-run-supervisor.mjs';
 import type { RootDeliveryTuple, RootExecutionLocator } from '@multiremi/contracts/root-delivery.js';
+import { samePolicyOffer } from '@multiremi/contracts/system-prompt-policy.js';
 import { DaemonProtocolRpcError, type DaemonProtocolClient } from './daemon-protocol-client.js';
 import type { PlannedRestartJournal } from './planned-restart-journal.js';
 import { RootReceiptClient } from './root-receipt-client.js';
@@ -16,7 +17,7 @@ export class RootRunConsumer {
   constructor(readonly runtimeId: string, private readonly journal: PlannedRestartJournal,
     private readonly receipts: Pick<RootReceiptClient, 'status' | 'replay' | 'acknowledge' | 'proof'>,
     private readonly supervisor: Pick<RootRunSupervisor, 'ensureInstalled' | 'attach' | 'startOnce'>,
-    private readonly transport: Pick<DaemonProtocolClient, 'event'>) {}
+    private readonly transport: Pick<DaemonProtocolClient, 'event' | 'rpc'>) {}
 
   receive(tuple: RootDeliveryTuple, digest: string): Promise<void> {
     if (tuple.runtime_id !== this.runtimeId) throw new Error('stale_execution');
@@ -87,11 +88,22 @@ export class RootRunConsumer {
       const business = delivery.frozen_business_payload;
       if (rootBusinessPayloadDigest(business) !== tuple.business_payload_digest) throw new Error('receipt_conflict');
       const input = business.input as Record<string, unknown> | undefined;
-      const policy = input?.policy_receipt as Record<string, unknown> | undefined;
+      const proposed = input !== undefined && Object.hasOwn(input, 'policy_offer');
+      const policy = (proposed ? input.policy_offer : input?.policy_receipt) as Record<string, unknown> | undefined;
       if (!policy || typeof policy.receipt_id !== 'string' || !policy.receipt_id ||
           typeof policy.offer_generation !== 'string' || !policy.offer_generation ||
           typeof policy.content_hash !== 'string' || !/^[0-9a-f]{64}$/.test(policy.content_hash)) {
         throw new DaemonProtocolRpcError('policy_offer_mismatch', false);
+      }
+      if (proposed) {
+        if (typeof policy.workspace_id !== 'string' || !policy.workspace_id || policy.runtime_id !== tuple.runtime_id ||
+            policy.daemon_id !== tuple.daemon_id || policy.attempt_id !== tuple.attempt_id) throw new DaemonProtocolRpcError('policy_offer_mismatch', false);
+        const identity = { workspace_id:policy.workspace_id, runtime_id:tuple.runtime_id, daemon_id:tuple.daemon_id, attempt_id:tuple.attempt_id,
+          receipt_id:policy.receipt_id, offer_generation:policy.offer_generation, content_hash:policy.content_hash };
+        const adopted = await this.transport.rpc('task.offer_adopt',identity,tuple.runtime_id);
+        if (adopted.state !== 'adopted' || (adopted.grant !== 'first' && adopted.grant !== 'replay') || !samePolicyOffer(identity,adopted)) {
+          throw new DaemonProtocolRpcError('policy_offer_mismatch', false);
+        }
       }
       const reply = await this.transport.event({ t: 'task.start', id: randomUUID(), rt: tuple.runtime_id, p: {
         task_id: tuple.attempt_id, root_receipt_id: tuple.receipt_id, handoff_id: tuple.handoff_id,

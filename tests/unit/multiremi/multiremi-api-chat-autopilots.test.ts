@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, sentTask } from "./unified-test-paths.js";
@@ -38,7 +39,7 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     const detailBody = await detail.json();
     expect(detailBody.messages[0].body).toBe("Hello");
 
-    expect(store.claimTask(runtime.id)?.id).toBe(sentTask(store, sentBody).id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sentTask(store, sentBody).id);
     store.startTask(sentTask(store, sentBody).id);
     store.completeTask(sentTask(store, sentBody).id, { output: "Hi there", sessionId: "sess-chat" });
     const messages = await app.request(`/api/sessions/${createdBody.session.id}/messages`);

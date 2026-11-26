@@ -1,3 +1,5 @@
+import { adoptFixtureOffer } from "../../fixtures/task-offer.js";
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from "../multiremi/helpers.js";
 import { expect, it } from "bun:test";
 import { pendingTurnBackendTests } from "../multiremi/pending-turn-test-backends.js";
@@ -19,7 +21,7 @@ pendingTurnBackendTests("cold bootstrap offer acceptance", fixture => {
     const conversation = store.getOrCreateDefaultIssueSession(issue.id);
     const original = store.sendMessage({ session_id: conversation.id, sender: { type: "member", id: "mem_local_local" },
       to: { type: "agent", ref: agent.id }, message_kind: "request", wake_requested: "now", body_md: "original input ".repeat(2_000) });
-    const first = store.claimTask(runtimeId)!;
+    const first = claimWithCurrentRuntime(store, runtimeId)!;
     store.startTask(first.id);
     const initial = store.getDaemonTurnBridge().offerInput(store.getTaskWithAgent(first.id)!);
     store.recordSessionAgentRangeRead(conversation.id, agent.id, { seq: 1, offset: 0 }, { seq: initial.input_to_seq + 1, offset: 0 }, first.id);
@@ -38,9 +40,10 @@ pendingTurnBackendTests("cold bootstrap offer acceptance", fixture => {
       { accessToken: null, masterToken: true });
     try {
       await socket.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2, daemon_id: daemonId,
-        cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer"],
+        cli_version: DAEMON_MIN_CLI_VERSION, caps: ["offer", "prompt.policy.adopt.v1"],
         runtimes: [{ runtime_id: runtimeId, provider: "codex", max_concurrency: 1, active_task_ids: [] }] } }));
-      await layer.drain();
+      await socket.handleMessage(JSON.stringify({ v: 2, t: "runtime.ready", rt: runtimeId, p: { active_task_ids: [] } }));
+    await layer.drain();
       const frame = frames.find(value => value.t === "task.offer")!;
       expect(frame, JSON.stringify({ frames: frames.map(value => ({ t: value.t, code: value.p?.code })),
         status: store.getTask(replacement.current_attempt_id!)?.status })).toBeDefined();
@@ -51,7 +54,8 @@ pendingTurnBackendTests("cold bootstrap offer acceptance", fixture => {
       expect(offer.input_messages.find(message => message.id === original.message.id)?.body_md).toContain("还有");
       expect(JSON.parse(frame.p.session_projection.jsonl.split("\n")[0]).from_seq).toBe(0);
       expect(store.getSessionAgentReadProgress(conversation.id, agent.id)).toEqual(before);
-      await socket.handleMessage(JSON.stringify({ v: 2, t: "res", re: String(frame.seq), ack: frame.seq,
+      if (accepted) await adoptFixtureOffer(socket, store, frame, daemonId);
+    await socket.handleMessage(JSON.stringify({ v: 2, t: "res", re: String(frame.seq), ack: frame.seq,
         p: accepted ? { ok: true } : { ok: false, code: "capacity" } }));
       await layer.drain();
       expect(store.getSessionAgentReadProgress(conversation.id, agent.id)).toEqual(accepted ? { seq: 0, offset: 0 } : before);

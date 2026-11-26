@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -68,7 +69,7 @@ describe("persisted inherited context diagnostics", () => {
     const { store, runtime, agent, chat, parent, task: initialTask, app } = fixture(false, "member", "chat");
     store.cancelTask(initialTask.id);
     const parentTask = store.createSessionTask(parent.id, { agentId: agent.id, prompt: "Produce a durable finding" });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(parentTask.id);
     store.startTask(parentTask.id);
     const early = store.createSession(chat!.id, { title: "Early snapshot", parentSessionId: parent.id });

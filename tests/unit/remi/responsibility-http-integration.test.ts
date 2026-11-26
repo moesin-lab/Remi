@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -114,7 +115,7 @@ it("uses the browser API client against authenticated HTTP for creation, Q routi
     expect(facts).not.toHaveProperty("reviewOwner"); expect(facts).not.toHaveProperty("rootHuman");
     const sourceTask = store.createTask({ agentId: worker.id, issueId: child.id, prompt: "Ask and finish" });
     const ownerTask = store.createTask({ agentId: owner.id, issueId: root.id, prompt: "Coordinate and review" });
-    for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
+    for (let count = 0; count < 8; count++) { const claimed = claimWithCurrentRuntime(store, runtime.id); if (!claimed) break; store.startTask(claimed.id); }
     const sourceToken = await store.createTaskAccessToken(store.getTask(sourceTask.id)!, user.id);
     const ownerToken = await store.createTaskAccessToken(store.getTask(ownerTask.id)!, user.id);
     const sourceTurn = store.getTurnForAttempt(sourceTask.id)!;

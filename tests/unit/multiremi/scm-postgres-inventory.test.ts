@@ -111,7 +111,7 @@ describe.skipIf(!adminUrl)('historical adoption on direct isolated PostgreSQL da
     const bytes = inspect(template, db => {
       runStartupMigrations(db);
       db.exec(`DROP TABLE multiremi_scm_audit_changes; DROP TABLE multiremi_scm_audit_entries; DROP TABLE multiremi_scm_audit_generations; DROP TABLE multiremi_scm_audit_state;
-        DELETE FROM multiremi_schema_steps WHERE level=6; UPDATE multiremi_schema_meta SET expand_level=5;
+        DELETE FROM multiremi_schema_steps WHERE level=9; UPDATE multiremi_schema_meta SET expand_level=8;
         INSERT INTO multiremi_scm_ownership_cutover(singleton,cursor_id,complete) VALUES(1,'',1);
         INSERT INTO multiremi_scm_connections(id,name,provider,base_url,api_base_url,created_at,updated_at)
           VALUES ('fixture','fixture','github','https://github.com','https://api.github.com','then','then');

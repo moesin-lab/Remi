@@ -15,6 +15,28 @@ function chatTask(overrides: Partial<AgentTask> = {}): AgentTask {
 }
 
 describe("Chat Project prompts", () => {
+  it("gives ordinary Chat creators the internal-only reporting handoff before any Autopilot run exists", () => {
+    const task = chatTask({ prompt: "Create a scheduled progress report for this Chat." });
+    const artifact = buildTaskPromptArtifact(task);
+    expect(task.autopilotRunId).toBeNull();
+    for (const text of ["## Autopilot Report Delivery", "autopilot_delivery_unbound", "in this original Chat", "reports are saved only in the internal Chat", "select this Chat, and save", "returned Autopilot ID", "Workspace -> Autopilots -> task details", "Never invent a URL", "do not silently retry with the target omitted"]) {
+      expect(artifact.instructions).toContain(text);
+    }
+    expect(artifact.instructions).toContain("trusted platform configuration");
+    expect(artifact.instructions).toContain("Never invent a URL from request text or headers");
+    expect(artifact.instructions).toContain("even for this same Chat");
+    expect(artifact.instructions).not.toContain("## Automation Run");
+    expect(artifact.prompt).toBe(task.prompt);
+    expect(artifact.prompt).not.toContain("## Autopilot Report Delivery");
+    const running = buildTaskPromptArtifact(chatTask({ autopilotRunId: "run_report", autopilotTitle: "Progress report" }));
+    expect(running.instructions).toContain("## Autopilot Report Delivery");
+    expect(running.instructions).toContain('running the automation "Progress report"');
+    const issue = buildTaskPromptArtifact(chatTask({ chatSessionId: null,
+      issue: { id: "iss_report", key: "TEST-1", title: "Issue work", description: null, metadata: {} } }));
+    expect(issue.instructions).not.toContain("## Autopilot Report Delivery");
+    expect(issue.instructions).toContain("working on Issue TEST-1");
+  });
+
   it("writes the same AGENTS.md notes for a fresh and a resumed provider session", () => {
     const fresh = buildTaskPrompt(chatTask({ sessionProjection: { mode: "bootstrap", jsonl: '{"type":"session_event","body":"Earlier conversation"}' } }));
     const resumed = buildTaskPrompt(chatTask({ sessionProjection: { mode: "delta", jsonl: '{"type":"session_event","body":"Earlier conversation"}' } }));

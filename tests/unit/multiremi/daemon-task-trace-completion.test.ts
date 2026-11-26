@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { log } from "@multiremi/api/helpers/common.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
@@ -62,7 +63,7 @@ for (const backend of ["SQLite", "Postgres"] as const) {
           const runtime = store.registerRuntime({ daemonId: "fixture-reports", name: "Completion trace daemon", provider: "codex", workspaceId: "local" });
           const agent = store.createAgent({ name: "Trace completion", provider: "codex", workspaceId: "local", runtimeId: runtime.id });
           const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "trace completion" });
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           store.startTask(task.id);
           expect(store.getTaskTrace(task.id)?.location).toBe("daemon");
           const bridge = store.getDaemonTurnBridge();

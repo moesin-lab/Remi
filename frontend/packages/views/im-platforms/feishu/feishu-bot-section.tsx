@@ -1,5 +1,6 @@
 "use client";
 
+import { Textarea } from "@multiremi/ui/components/ui/textarea";
 import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
 
 import { useEffect, useState } from "react";
@@ -156,6 +157,7 @@ function SectionHeader({ status }: { status?: string }) {
 interface Draft {
   name: string;
   /** Answers Agent questions from Feishu Chats without an Issue; Issues never read it. */
+  wakeWords: string;
   responsibleMemberId: string | null;
   agentId: string;
   runtimeId: string;
@@ -168,6 +170,7 @@ interface Draft {
 
 const EMPTY_DRAFT: Draft = {
   name: "",
+  wakeWords: "",
   responsibleMemberId: null,
   agentId: "",
   runtimeId: "",
@@ -207,6 +210,7 @@ function draftFromConfig(config: FeishuBotConfig | null): Draft {
   return {
     ...EMPTY_DRAFT,
     name: config.name ?? "",
+    wakeWords: (config.wake_words ?? []).join("\n"),
     responsibleMemberId: config.responsible_member_id ?? null,
     agentId: config.agent_id ?? "",
     runtimeId: config.runtime_id ?? "",
@@ -280,6 +284,7 @@ function FeishuBotAdminPanel({
   function buildRequest(): UpsertFeishuBotRequest {
     const request: UpsertFeishuBotRequest = {
       name: draft.name.trim(),
+      wake_words: draft.wakeWords.trim() ? draft.wakeWords.trim().split(/\r?\n/) : [],
       responsible_member_id: draft.responsibleMemberId,
       agent_id: draft.agentId,
       runtime_id: draft.runtimeId,
@@ -359,6 +364,11 @@ function FeishuBotAdminPanel({
         <SectionHeader status={status?.status ?? (configured ? "stopped" : "not_configured")} />
         {status && <CardContent><StatusPanel status={status} config={config} /></CardContent>}
         <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="feishu-wake-words">{t($ => $.feishu.concierge.wake_words)}</Label>
+            <Textarea id="feishu-wake-words" value={draft.wakeWords} disabled={busy}
+              onChange={event => edit({ wakeWords: event.target.value })} />
+          </div>
           <ChatQuestionHandlerPicker workspaceId={workspaceId} value={draft.responsibleMemberId}
             onChange={(id) => edit({ responsibleMemberId: id })} disabled={busy} />
           <div className="grid gap-4 sm:grid-cols-2">

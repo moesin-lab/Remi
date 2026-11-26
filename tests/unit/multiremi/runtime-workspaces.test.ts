@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -22,12 +23,12 @@ describe("Runtime-owned workspaces", () => {
     const first = store.createTask({ agentId: agent.id, runtimeWorkspaceId: workspace.id, prompt: "First" });
     const second = store.createTask({ agentId: peer.id, runtimeWorkspaceId: workspace.id, prompt: "Second" });
     const independent = store.createTask({ agentId: peer.id, runtimeWorkspaceId: otherWorkspace.id, prompt: "Independent" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
     expect(store.getTaskQueueBlocker(second.id)?.taskId).toBe(first.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(independent.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(independent.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.cancelTask(first.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
   });
 
   it("keeps side discussions independent from their Issue's runtime workspace", () => {
@@ -43,8 +44,8 @@ describe("Runtime-owned workspaces", () => {
     expect(side.runtimeWorkspaceId).toBeNull();
     expect(() => store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: sideSession.id,
       runtimeWorkspaceId: workspace.id, prompt: "Cannot attach local files" })).toThrow("without workspace ownership");
-    expect(store.claimTask(runtime.id)?.id).toBe(main.id);
-    expect(store.claimTask(other.id)?.id).toBe(side.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(main.id);
+    expect(claimWithCurrentRuntime(store, other.id)?.id).toBe(side.id);
     const sideWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(side.id)!);
     expect(sideWire.runtime_workspace_id).toBeNull();
     expect(sideWire.runtime_workspace).toBeNull();
@@ -54,7 +55,7 @@ describe("Runtime-owned workspaces", () => {
     expect(retry).toBeDefined();
     expect(retry.holdsWorkspace).toBe(false);
     expect(retry.runtimeWorkspaceId).toBeNull();
-    expect(store.claimTask(other.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, other.id)?.id).toBe(retry.id);
     expect(store.getTask(main.id)?.runtimeWorkspaceId).toBe(workspace.id);
     expect(store.getIssue(issue.id)?.runtimeWorkspaceId).toBe(workspace.id);
   });
@@ -93,14 +94,14 @@ describe("Runtime-owned workspaces", () => {
     const t1 = store.sendChatMessage(first.id, { body: "Inspect local context" }).task;
     const t2 = store.sendChatMessage(second.id, { body: "Reuse local dependencies" }).task;
     expect(t1.runtimeWorkspaceId).toBe(workspace.id);
-    expect(store.claimTask(other.id)).toBeNull();
-    const claimed = store.claimTask(runtime.id)!;
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(t1.id);
     expect(claimed.runtimeWorkspace?.rootPath).toBe(workspace.rootPath);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(() => store.runtimeWorkspaces.archive(workspace.id)).toThrow("Finish or cancel tasks");
     store.cancelTask(t1.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(t2.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(t2.id);
     store.cancelTask(t2.id);
     store.deleteChatSession(first.id);
     store.deleteChatSession(second.id);
@@ -115,10 +116,10 @@ describe("Runtime-owned workspaces", () => {
     const agent = store.createAgent({ name: "Writer", provider: "claude" });
     const issue = createResponsibleTestIssue(store, { title: "Local-only Issue", runtime_workspace_id: workspace.id });
     const task = store.createTask({ issueId: issue.id, agentId: agent.id, prompt: "Inspect" });
-    expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.claimTask(claude.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, claude.id)).toBeNull();
     store.registerRuntime({ id: claude.id, name: claude.name, provider: "claude", daemonId: "laptop", workspaceId: "local", metadata: { runtime_workspaces: 1 } });
-    expect(store.claimTask(claude.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, claude.id)?.id).toBe(task.id);
     expect(() => store.updateIssue(issue.id, { runtime_workspace_id: null })).toThrow("executed Issue");
     store.cancelTask(task.id);
     store.deleteIssue(issue.id);
@@ -130,18 +131,18 @@ describe("Runtime-owned workspaces", () => {
     store.registerRuntime({ name: "Laptop Claude", provider: "claude", daemonId: "laptop", workspaceId: "local" });
     const other = store.registerRuntime({ name: "Other", provider: "codex", daemonId: "other", workspaceId: "local", metadata: { runtime_workspaces: 1 } });
     const task = store.createTask({ agentId: agent.id, prompt: "Use local context", runtime_workspace_id: workspace.id, maxAttempts: 2 });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(store.recoverOrphans(runtime.id)).toEqual({ orphaned: 1, retried: 1 });
     const retry = store.listTasks().find(t => t.parentTaskId === task.id)!;
     expect(retry.runtimeWorkspaceId).toBe(workspace.id);
     expect(retry.runtimeId).toBeNull();
     expect(retry.sessionId).toBeNull();
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     expect(store.deleteRuntime(runtime.id)).toBe(true);
     expect(store.runtimeWorkspaces.get(workspace.id)?.daemonId).toBe("laptop");
     const replacement = store.registerRuntime({ name: "Laptop Codex", provider: "codex", daemonId: "laptop", workspaceId: "local", metadata: { runtime_workspaces: 1 } });
     expect(replacement.id).not.toBe(runtime.id);
-    expect(store.claimTask(replacement.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, replacement.id)?.id).toBe(retry.id);
   });
 
   it("rejects cross-tenant bindings and paths outside the configured root", () => {
@@ -234,7 +235,7 @@ it("quick-creates a local intake and instructs its agent to preserve the directo
   expect(task.runtimeWorkspaceId).toBe(workspace.id);
   expect(task.prompt).toContain(`--runtime-workspace ${workspace.id}`);
   expect(task.prompt).not.toContain("Inspect the workspace's existing active projects");
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
 });
 
 
@@ -257,8 +258,8 @@ it("binds a project's context and device routing to Chat while rejecting Issue b
   const task = store.sendChatMessage(chat.id, { body: "Inspect the selected project" }).task;
   expect(store.getTaskWithAgent(task.id)?.project?.id).toBe(project.id);
   expect(store.getTaskWithAgent(task.id)?.chatAutoCheckoutRepos?.map((repo) => repo.url)).toEqual([repoUrl]);
-  expect(store.claimTask(other.id)).toBeNull();
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   store.cancelTask(task.id);
   expect(() => store.createChatSession({ agentId: agent.id, project_id: project.id, runtime_workspace_id: workspace.id })).toThrow("either a project");
   expect(() => store.createChatSession({ agentId: agent.id, runtime_workspace_id: workspace.id, issueId: issue.id } as any)).toThrow("cannot be bound to an Issue");
@@ -266,7 +267,7 @@ it("binds a project's context and device routing to Chat while rejecting Issue b
   const localTask = store.sendChatMessage(local.id, { body: "Inspect local files" }).task;
   expect(store.getTaskWithAgent(localTask.id)?.project).toBeNull();
   expect(store.getTaskWithAgent(localTask.id)?.projectContexts).toEqual([]);
-  const localClaim = store.claimTask(runtime.id)!;
+  const localClaim = claimWithCurrentRuntime(store, runtime.id)!;
   expect(localClaim.id).toBe(localTask.id);
   expect(localClaim.chatProjectId).toBeNull();
   expect(localClaim.chatAutoCheckoutRepos ?? []).toEqual([]);

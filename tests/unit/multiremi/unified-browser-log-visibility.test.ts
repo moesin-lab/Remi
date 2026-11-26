@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from "bun:test";
 import { startMultiremiServer } from "@multiremi/api.js";
@@ -38,7 +39,7 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
     function question(kind: "permission" | "question") {
       const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Public request" });
       hub.flushNow();
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
       db.run("UPDATE multiremi_turns SET legacy_prompt='Private turn prompt' WHERE current_attempt_id=?", [task.id]);
       const turn = store.getTurnForAttempt(task.id)!;
       const result = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id,

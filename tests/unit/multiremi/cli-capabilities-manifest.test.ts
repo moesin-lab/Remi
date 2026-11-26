@@ -87,6 +87,15 @@ describe("CLI capabilities manifest", () => {
     for (const id of taskOperable) expect(manifest.commands[id]?.auth, id).toEqual(["human", "task"]);
   });
 
+  it("keeps delivery-target discovery human-only while preserving task Autopilot management", () => {
+    expect(manifest.routes["GET /api/autopilot-delivery-targets"]).toEqual({ command: "autopilot.delivery-targets" });
+    expect(manifest.commands["autopilot.delivery-targets"]?.auth).toEqual(["human"]);
+    expect(CLI_CAPABILITIES_RUNTIME.commands["autopilot.delivery-targets"].auth).toEqual(["human"]);
+    for (const action of ["create", "update", "get", "list"]) {
+      expect(manifest.commands[`autopilot.${action}`]?.auth).toEqual(["human", "task"]);
+    }
+  });
+
   it("draws the same line on the channel-independent messaging commands", () => {
     // Wiring a workspace to a channel is a person's decision; reading what the
     // channel delivered and recording an outcome is an agent's job. The
@@ -259,12 +268,19 @@ describe("CLI capabilities manifest", () => {
   });
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
+    for (const route of [
+      "POST /api/daemon/runtimes/:runtimeId/feishu-bot/authorize-sender",
+      "POST /api/daemon/runtimes/:runtimeId/feishu-bot/commands/v1",
+    ]) {
+      expect(golden.routes).toContain(route);
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
+    }
     expect(manifest.routes["GET /api/projects/:id/activity"]).toEqual({command:"project.activity"});
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 660,
-      exempt: 184,
+      mapped: 668,
+      exempt: 186,
       missing: 0,
-      total: 844,
+      total: 854,
     });
     // PR #97 (MUL-168): these four loopback-only, dedicated-token endpoints are
     // the supervisor's slot lifecycle protocol, not user-facing CLI capabilities.

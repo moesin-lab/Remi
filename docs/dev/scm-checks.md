@@ -104,13 +104,17 @@ kind 为 workflow_run，保留 status、conclusion 和 runAttempt。同一 run I
 
 ### 旧库的来源核验
 
-- 从 level 0–3 首次升级且无历史 cutover 记录的库，经显式分类完成。已有 level 4/5 checkpoint 的库，即使当前库空、已有 complete 或强证据，也保持隔离。原 level 4 已处理的弱关系用缺行表示；level 5 无回滚前快照。事后快照不能证明过去的绑定。
-- 具备**独立受控、确认属于目标库的历史快照**时，针对隔离副本使用 `--export-inventory`，保存原始输出字节。需由独立的备份/审计管理方核验来源、版本、快照时间及旧 writer 隔离记录，并从受控副本计算文件 SHA-256。确认这份记录先于旧 writer 重入。level 5 还须确认所有历史强度已有可信依据。若无这样的记录，继续保持停写。
+- 从 main level 0–6 首次升级且无历史 cutover 记录的库，经显式分类完成。已有 SCM level 4/5 或 7/8 谱系或 checkpoint 的库，即使当前库空、已有 complete 或强证据，也保持隔离。原 SCM level 4 或正式 7 已处理的弱关系用缺行表示；SCM level 5 或正式 8 无回滚前快照。事后快照不能证明过去的绑定。
+- 具备**独立受控、确认属于目标库的历史快照**时，针对隔离副本使用 `--export-inventory`，保存原始输出字节。需由独立的备份/审计管理方核验来源、版本、快照时间及旧 writer 隔离记录，并从受控副本计算文件 SHA-256。确认这份记录先于旧 writer 重入。SCM level 5 或正式 8 还须确认所有历史强度已有可信依据。若无这样的记录，继续保持停写。
 - 支持主机独立预置的 `/etc/remi/scm-cutover-anchors.json`。`/etc`、`/etc/remi` 和文件必须由 root 持有、禁止组及其他用户写入，路径不得含符号链接。审核操作员不应拥有修改该文件的权限。`targets` 按 `sqlite:<规范绝对路径>` 或 `postgres://<主机>:<端口>/<库名>` 分别列出目标的 `sha256`。有独立连续隔离证明的旧部分分类才可登记 `continuousIsolation:true`。凭据、查询参数和调用者提供的哈希不用于选择信任来源。主机不能提供此来源时保持隔离。
 - PostgreSQL 历史采纳要求 `MULTIREMI_DATABASE_URL` 指定真实监听 IP、显式端口和区分大小写的库名，例如 `postgres://127.0.0.1:5432/Remi` 或 `postgres://[::1]:5432/Remi`。管理员须独立确认直连拓扑和对应 IP 键，DNS 名（含 localhost）、代理、池化器和端口转发均不适用。无法确认时保持隔离。清除 `PGDATABASE`、`PG_DATABASE`、`PGPORT`、`PG_PORT`、`PGHOST`、`PG_HOST`、`PGHOSTADDR`、`PG_HOSTADDR`、`PGSERVICE`、`PGSERVICEFILE` 和 `PGOPTIONS`。凭据仅用于认证，保留 TLS 验证。CLI 先以指定目标查受管 pin，worker 核对实际驱动参数；同一写事务获取迁移锁、排查其他连接并验证后端库名、IP 和端口。身份不符即中止，不能据此改选 pin。
 - 未设置 `PGSSLMODE` 时沿用驱动默认行为。显式设置 `disable` 会关闭 TLS，`prefer` 会优先尝试 TLS。端点要求 TLS 时可设置 `require`、`verify-ca` 或 `verify-full`。使用 `verify-full` 时证书须覆盖指定 IP。如果无法验证，请保持隔离并核对证书。
-- 目标离线 CLI 使用 `--adopt-inventory <历史文件>` 校验预置摘要并保存历史完整基线。之后使用同一查询、审核和 `--finalize` 流程。原 level 4 已处理的缺行只能在最终提交时补弱 `[]`；未处理尾页仅在有连续隔离证明且快照一致时续跑。已证强度与 inactive 保留。level 5 无来源的缺行不可恢复。从当前文件自身计算哈希并自行注册会破坏来源证明，维护过程不提供注册命令。
+- 目标离线 CLI 使用 `--adopt-inventory <历史文件>` 校验预置摘要并保存历史完整基线。之后使用同一查询、审核和 `--finalize` 流程。原 SCM level 4 或正式 7 已处理的缺行只能在最终提交时补弱 `[]`；未处理尾页仅在有连续隔离证明且快照一致时续跑。已证强度与 inactive 保留。SCM level 5 或正式 8 无来源的缺行不可恢复。从当前文件自身计算哈希并自行注册会破坏来源证明，维护过程不提供注册命令。
 
 捕获中断后继续隔离，再执行 `--hold-for-rollback`。若完整预捕获摘要已落库且仍与现状一致，可以补齐缺页；缺少该摘要或内容已变则维持停写。存储量随基线与差异行数增长，维护锁窗包括全量枚举和重验。前后快照只能证明端点，证明期间行为需可信日志。旧版不识别新门禁，数据库锁及连接清点不能替代进程隔离。
 
 poll、webhook、baseline 和 bind 都不会依据标题、分支或正文新增关联，旧 `scm_auto_link_enabled` 设置仅保留序列化兼容。显式 manual 关联具有归属；已存在的 auto/legacy 关联按切换时可证实的分支、标题、声明式正文保存归属。普通提及保持可见，解绑记录继续隐藏。后续文本更新不改变归属，合并只记录活动。切换前已丢失证据的关联可按原 URL 显式绑定，不补录历史活动。
+
+### 显式绑定协议混版发布
+
+先排空代码交付任务，保留运行中 attempt 身份，确认所有执行这些任务的 daemon 均已排空。升级 daemon、CLI 和 server，再用实际任务验证固定提示、bind 与 list 的同一引用后恢复调度。无法确认排空时保持暂停。`prompt.policy.adopt.v1` 仅确认可接收策略，旧 daemon 的固定段来自其自身二进制。新默认下无该能力的 daemon 无法领取新任务。

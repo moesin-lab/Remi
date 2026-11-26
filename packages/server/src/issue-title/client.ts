@@ -1,5 +1,6 @@
 import type { MultiremiIssue } from "@multiremi/contracts/types.js";
 import { extractBaseUrl, validateGatewayUrl } from "@multiremi/relay/fragment.js";
+import { chatCompletionsUrl, v1BaseUrl } from "@multiremi/relay/protocol-url.js";
 import {
   publicRelayHttpRequest,
   type RelayHttpRequest,
@@ -116,9 +117,8 @@ function resolveGateway(
 }
 
 function gatewayEndpoint(gateway: GatewayCandidate): string {
-  const base = gateway.baseUrl.replace(/\/+$/, "");
-  if (gateway.engine === "claude") return `${base}${base.endsWith("/v1") ? "" : "/v1"}/messages`;
-  return gateway.endpointId || base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
+  if (gateway.engine === "claude") return `${v1BaseUrl(gateway.baseUrl)}/messages`;
+  return chatCompletionsUrl(gateway.baseUrl, !!gateway.endpointId);
 }
 
 function gatewayHeaders(gateway: GatewayCandidate): Record<string, string> {

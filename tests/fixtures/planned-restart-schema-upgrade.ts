@@ -1,15 +1,19 @@
+import { removeScmSchema } from "./scm-schema-upgrade.js";
 import { expect } from 'bun:test';
 import type { SqlDatabase } from '../../packages/server/src/store/db/postgres.js';
 import { runMigrations, runStartupMigrations } from '../../packages/server/src/store/migrations.js';
-import { assertSchemaCompatible, readSchemaLevels } from '../../packages/server/src/store/schema-levels.js';
+import { assertSchemaCompatible, readSchemaLevels, SCHEMA_EXPAND_LEVEL } from '../../packages/server/src/store/schema-levels.js';
 import { runSchemaExpands } from '../../packages/server/src/store/schema-migration-runner.js';
 import { SCHEMA_MIGRATIONS } from '../../packages/server/src/store/schema-migrations.js';
 
 /** Reproduce an enrolled pre-#128 database, including an in-flight old drain. */
 export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
   const restoreLevel2 = () => {
+    removeScmSchema(db);
+    db.exec("DROP TABLE multiremi_attempt_system_prompts; DROP TABLE multiremi_system_prompt_versions; DROP TABLE multiremi_system_prompt_documents");
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
+      DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json;
       DELETE FROM multiremi_schema_steps WHERE level>=3;
       UPDATE multiremi_schema_meta SET expand_level=2;`);
   };
@@ -31,7 +35,7 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
     if (historicalMaintenance) restoreLevel2();
     if (historicalMaintenance) runMigrations(db, { historicalMaintenance: true });
     else runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 6, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 2, maxLevel: 2 })).not.toThrow();
     expect(db.query('SELECT * FROM multiremi_planned_restarts').all()).toEqual([]);
     const indexes = db.dialect === 'postgres'

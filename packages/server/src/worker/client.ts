@@ -44,6 +44,9 @@ import type {
   FeishuBotTaskSnapshot,
   FeishuBotCancelResult,
   FeishuBotSessionSnapshot,
+  FeishuBotCommandRequest, FeishuBotCommandResponse,
+  FeishuBotAuthorizeSenderRequest,
+  FeishuBotAuthorizeSenderResult,
   SubmitFeishuBotMessageInput,
   SubmitFeishuBotMessageResult,
 } from "@multiremi/contracts/types.js";
@@ -776,10 +779,10 @@ export class MultiremiDaemonClient {
     return readChatAttachmentBytes(response);
   }
 
-  async resetFeishuBotSession(runtimeId: string, revision: number, externalSessionKey: string): Promise<boolean> {
+  async resetFeishuBotSession(runtimeId: string, revision: number, externalSessionKey: string, senderOpenId: string | null): Promise<boolean> {
     const response = await this.post<{ reset: boolean }>(
       `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/session/reset`,
-      { revision, external_session_key: externalSessionKey },
+      { revision, external_session_key: externalSessionKey, sender_open_id: senderOpenId, cancel_current: true },
     );
     return response.reset === true;
   }
@@ -847,10 +850,37 @@ export class MultiremiDaemonClient {
     };
   }
 
+  async executeFeishuBotCommand(runtimeId: string, input: FeishuBotCommandRequest): Promise<FeishuBotCommandResponse> {
+    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/commands/v1`;
+    try {
+      const response = await this.post<FeishuBotCommandResponse>(path, input);
+      if (response?.state === 'missing' && input.mode === 'lookup_only') return response;
+      if (response?.state === 'committed' && response.result?.name === input.semantic.name) return response;
+      throw new Error('Invalid Feishu command response');
+    } catch (error) {
+      if (error instanceof MultiremiDaemonHttpError && (error.status === 404 || error.status === 405)) {
+        if (error.code === 'runtime_not_found' || /"error"\s*:\s*"runtime not found"/.test(error.responseBody)) {
+          throw new MultiremiDaemonHttpError(409, 'POST', path, error.responseBody, 'stale_revision');
+        }
+        throw new MultiremiDaemonHttpError(error.status, 'POST', path, error.responseBody, 'command_endpoint_unsupported');
+      }
+      throw error;
+    }
+  }
+
+  async authorizeFeishuBotSender(runtimeId: string, input: FeishuBotAuthorizeSenderRequest): Promise<boolean> {
+    const result = await this.post<FeishuBotAuthorizeSenderResult>(
+      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/authorize-sender`, input,
+    );
+    if (typeof result?.allowed !== "boolean") throw new Error("Invalid Feishu sender authorization response");
+    return result.allowed;
+  }
+
   async inspectFeishuBotSession(
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): Promise<FeishuBotSessionSnapshot> {
     const response = await this.post<{
       chat_session_id?: string | null;
@@ -866,6 +896,7 @@ export class MultiremiDaemonClient {
         usage?: TaskUsageEntry[];
       } | null;
     }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/session/inspect`, {
+      sender_open_id: senderOpenId,
       revision,
       external_session_key: externalSessionKey,
     });
@@ -1462,6 +1493,7 @@ export function normalizeDaemonClaimTask(raw: any | null): (MultiremiTaskWithAge
     quickCreatePrompt: stringOrNull(raw.quick_create_prompt ?? raw.quickCreatePrompt),
     workspaceContext: stringOrNull(raw.workspace_context ?? raw.workspaceContext),
     // "" is a value: a server with ADR 0023 always sends it, so its absence marks an older server.
+    systemPromptPolicy: raw.system_prompt_policy ?? raw.systemPromptPolicy ?? null,
     workspacePrompt: typeof (raw.workspace_prompt ?? raw.workspacePrompt) === "string" ? raw.workspace_prompt ?? raw.workspacePrompt : null,
     workspaceBootstrapPrompt: stringOrNull(raw.workspace_bootstrap_prompt ?? raw.workspaceBootstrapPrompt),
     workspaceDeltaPrompt: stringOrNull(raw.workspace_delta_prompt ?? raw.workspaceDeltaPrompt),

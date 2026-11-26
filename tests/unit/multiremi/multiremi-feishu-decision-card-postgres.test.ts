@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 /**
  * MUL-407 decision-card lifecycle on real PostgreSQL.
@@ -113,7 +114,7 @@ describe.skipIf(!available)("Feishu decision cards on Postgres (MUL-407)", () =>
     const ask = (title: string, oldShape = false) => {
       const session = store.createIssueSession(issue.id, { title, holdsWorkspace: false });
       const task = store.createTask({ agentId, issueId: issue.id, issueSessionId: session.id, workspaceId, prompt: title, priority: 200 });
-      expect(store.claimTask(runtimeId)?.id).toBe(task.id); store.startTask(task.id);
+      expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id); store.startTask(task.id);
       const turn = store.getTurnForAttempt(task.id)!;
       if (oldShape) {
         // The old deadline-window contract requires genuine pre-Q metadata,

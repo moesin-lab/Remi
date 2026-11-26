@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
@@ -24,24 +25,24 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     const otherChat = store.createChatSession({ agentId: agents[3]!.id });
     const independent = store.sendChatMessage(otherChat.id, { body: "Another checkout" }).task;
 
-    expect(store.claimTask(runtime.id)?.id).toBe(ordinary.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(ordinary.id);
     store.startTask(ordinary.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(independent.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(independent.id);
     store.cancelTask(independent.id);
     const issue = createResponsibleTestIssue(store, { title: "Independent Issue checkout" });
     const issueTask = store.createSessionTask(store.getOrCreateDefaultIssueSession(issue.id).id, {
       agentId: agents[3]!.id, prompt: "Issue work",
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(issueTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(issueTask.id);
     store.cancelTask(issueTask.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.completeTask(ordinary.id, { output: "Ordinary work finished" });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(workA.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(workA.id);
     store.startTask(workA.id);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     store.completeTask(workA.id, { output: "Session A finished" });
-    expect(store.claimTask(runtime.id)?.id).toBe(workB.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(workB.id);
   });
 
   it("keeps a Chat-owned terminal reply private when its Task audit loses the Chat pointer", async () => {
@@ -53,7 +54,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
     const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private projected work" });
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Private input" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     mutateExecutionFixture(store, "UPDATE multiremi_turn_execution_records SET chat_session_id = NULL WHERE id = ?", [task.id]);
     expect(store.getTask(task.id)?.chatSessionId).toBeNull();
@@ -189,7 +190,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     const runtime = store.registerRuntime({ name: "Target executor", provider: "claude", workspaceId: target.id });
     const agent = store.createAgent({ name: "Target worker", provider: "claude", workspaceId: target.id, runtimeId: runtime.id });
     const task = store.createSessionTask(targetMain.id, { agentId: agent.id, createdByType: "system", prompt: "New target work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.addIssueSubscriber(issue.id, human.id);
     const question = store.createTaskHumanRequest({ taskId: task.id, kind: "question", payload: { title: "TARGET_QUESTION_AFTER_MOVE" } });

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from "bun:test";
@@ -36,7 +37,7 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     }).message;
     const running = (chatSessionId?: string) => {
       const task = store.createTask({ agentId: agent.id, prompt: "Work", ...(chatSessionId ? { chatSessionId } : { issueId: issue.id }) });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
       return { task: store.getTask(task.id)!, turn: store.getTurnForAttempt(task.id)! };
     };
     const question = (source: ReturnType<typeof running>, kind: 'question' | 'permission') => {
@@ -387,7 +388,7 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     const before = (await f.request("/api/inbox", "GET", undefined, token.token)).data.unread_count;
     const privateAgent = f.store.createAgent({ name: "Private source", provider: "codex", visibility: "private", ownerId: "local" });
     const task = f.store.createTask({ agentId: privateAgent.id, issueId: f.issue.id, prompt: "Private source" });
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id); f.store.startTask(task.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(task.id); f.store.startTask(task.id);
     // A retained old private request has no new responsibility notification.
     // This case measures the historical row's generic Inbox visibility only.
     const request = f.store.sendMessage({ session_id: f.session.id, source_turn_id: f.store.getTurnForAttempt(task.id)!.id,

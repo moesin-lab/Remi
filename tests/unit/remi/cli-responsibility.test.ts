@@ -120,6 +120,8 @@ describe("responsibility CLI", () => {
     expect(requests).toHaveLength(0);
   });
   const cases: Array<{ args: string[]; method: string; path: string; body?: unknown }> = [
+    { args: ["workspace", "feishu-bot", "set", "local", "--disabled", "--wake-words-json", '[" Ask ","ASK","助手"]'], method: "PUT", path: "/api/workspaces/local/feishu-bot", body: { enabled: false, wake_words: ["Ask", "助手"] } },
+    { args: ["workspace", "feishu-bot", "set", "local", "--disabled", "--wake-words-json", "[]"], method: "PUT", path: "/api/workspaces/local/feishu-bot", body: { enabled: false, wake_words: [] } },
     // The bot's member handles Chat questions without an Issue.
     { args: ["workspace", "feishu-bot", "set", "local", "--disabled", "--responsible-member", "human"], method: "PUT", path: "/api/workspaces/local/feishu-bot", body: { enabled: false, responsible_member_id: "human" } },
     { args: ["workspace", "feishu-bot", "set", "local", "--disabled", "--clear-responsible"], method: "PUT", path: "/api/workspaces/local/feishu-bot", body: { enabled: false, responsible_member_id: null } },

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 import { linkProjectedTestChangeRequest } from "./helpers.js";
 import { createResponsibleTestIssue, acceptTestIssueDelivery, seedHistoricalIssueFacts, testWorkspaceMember } from './helpers.js';
@@ -321,7 +322,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
       }
     });
     try {
-      expect(store.claimTask(runtime)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime)?.id).toBe(task.id);
     } finally {
       unsubscribe();
     }
@@ -353,7 +354,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
       throw new Error("PG claim rollback injection");
     };
     try {
-      expect(() => store.claimTask(runtime)).toThrow("PG claim rollback injection");
+      expect(() => claimWithCurrentRuntime(store, runtime)).toThrow("PG claim rollback injection");
     } finally {
       StoreContext.prototype.appendIssueActivity = original;
       unsubscribe();
@@ -823,8 +824,8 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
     // The child parked at todo, as createTask's own derivation requires.
     expect(store.getIssue(child.id)?.status).toBe("todo");
 
-    let claimed = store.claimTask(runtime);
-    while (claimed && claimed.id !== task.id) claimed = store.claimTask(runtime);
+    let claimed = claimWithCurrentRuntime(store, runtime);
+    while (claimed && claimed.id !== task.id) claimed = claimWithCurrentRuntime(store, runtime);
     expect(claimed?.id).toBe(task.id);
     counter.reset();
     store.startTask(task.id);
@@ -877,8 +878,8 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
       assigneeId: agent,
     });
     const claimAndStart = (taskId: string) => {
-      let claimed = store.claimTask(runtime);
-      while (claimed && claimed.id !== taskId) claimed = store.claimTask(runtime);
+      let claimed = claimWithCurrentRuntime(store, runtime);
+      while (claimed && claimed.id !== taskId) claimed = claimWithCurrentRuntime(store, runtime);
       if (!claimed) throw new Error(`could not claim ${taskId}`);
       return store.startTask(taskId);
     };
@@ -948,8 +949,8 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
 
     const task = store.createTask({ agentId: agent, issueId: child.id, runtimeId: runtime, prompt: "finish" });
     try {
-      let claimed = store.claimTask(runtime);
-      while (claimed && claimed.id !== task.id) claimed = store.claimTask(runtime);
+      let claimed = claimWithCurrentRuntime(store, runtime);
+      while (claimed && claimed.id !== task.id) claimed = claimWithCurrentRuntime(store, runtime);
       if (!claimed) throw new Error(`could not claim ${task.id}`);
       store.startTask(task.id);
       store.failTask(task.id, { error: "boom" });
@@ -1210,8 +1211,8 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
     // The asking owner skips its own levels: any active member answers at the human stage.
     const answerer = testWorkspaceMember(store, workspaceId);
     const task = store.createTask({ agentId: agent, issueId: child.id, prompt: "PG ask" });
-    let claimed = store.claimTask(runtime);
-    while (claimed && claimed.id !== task.id) claimed = store.claimTask(runtime);
+    let claimed = claimWithCurrentRuntime(store, runtime);
+    while (claimed && claimed.id !== task.id) claimed = claimWithCurrentRuntime(store, runtime);
     if (!claimed) throw new Error("PG human request task was not claimed");
     store.startTask(task.id);
     const bridge = store.getDaemonTurnBridge();
@@ -1250,8 +1251,8 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
     store.createTask({ agentId: agent, issueId: child.id, runtimeId: runtime, triggerCommentId: comment.id, prompt: "PG triggered" });
     check("cancelTasksByTriggerComments", () => { store.cancelTasksByTriggerComments(workspaceId, [comment.id]); });
     const orphan = store.createTask({ agentId: agent, issueId: child.id, runtimeId: runtime, prompt: "PG orphan" });
-    claimed = store.claimTask(runtime);
-    while (claimed && claimed.id !== orphan.id) claimed = store.claimTask(runtime);
+    claimed = claimWithCurrentRuntime(store, runtime);
+    while (claimed && claimed.id !== orphan.id) claimed = claimWithCurrentRuntime(store, runtime);
     if (!claimed) throw new Error("PG orphan task was not claimed");
     check("recoverOrphans", () => { store.recoverOrphans(runtime); });
 

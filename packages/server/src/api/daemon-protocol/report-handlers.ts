@@ -176,7 +176,7 @@ function completionTraceEventCount(trace: unknown, taskId: string): number | und
   return undefined;
 }
 
-export function authorizeReportRuntime(store: MultiremiStore, session: DaemonProtocolSession, runtimeId: string): void {
+export function authorizeReportRuntime(store: MultiremiStore, session: DaemonProtocolSession, runtimeId: string) {
   const runtime = store.getRuntimeLite(runtimeId);
   const token = session.ownerAccessToken;
   if (!runtime || !session.runtimeIds.includes(runtimeId)) reject("authority_revoked");
@@ -185,14 +185,15 @@ export function authorizeReportRuntime(store: MultiremiStore, session: DaemonPro
   if (token && (token.workspaceId !== workspaceId || token.daemonId !== session.daemonId)) reject("authority_revoked");
   if (token && !store.getWorkspace(workspaceId)) reject("authority_revoked");
   if (store.isDaemonRetired(workspaceId, session.daemonId)) reject("authority_revoked");
+  return runtime;
 }
 
 export function authorizeReportTask(store: MultiremiStore, session: DaemonProtocolSession, taskId: string, runtimeId: string | null) {
-  const task = store.getTask(taskId);
+  const task = store.getTaskIdentity(taskId);
   if (!task) reject("task_not_found");
   if (!task.runtimeId || (runtimeId && runtimeId !== task.runtimeId)) reject("authority_revoked");
-  authorizeReportRuntime(store, session, task.runtimeId);
-  if ((store.getRuntimeLite(task.runtimeId)?.workspaceId ?? "local") !== task.workspaceId) reject("authority_revoked");
+  const runtime = authorizeReportRuntime(store, session, task.runtimeId);
+  if ((runtime.workspaceId ?? "local") !== task.workspaceId) reject("authority_revoked");
   return task;
 }
 
@@ -203,6 +204,13 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
   const handle = async (frame: DaemonParsedFrame, session: DaemonProtocolSession) => {
     try {
       const p = frame.payload;
+      if ((frame.type === 'turn.complete' || frame.type.startsWith('task.'))
+        && (p.receipt_id !== undefined || p.offer_generation !== undefined || p.content_hash !== undefined)) {
+        if (!frame.rt || !session.supportsPromptPolicy) reject('policy_offer_mismatch');
+        const taskId = string(frame.type === 'turn.complete' ? p.attempt_id : p.task_id);
+        const scope = {workspaceId:store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local',runtimeId:frame.rt,daemonId:session.daemonId};
+        if (!store.systemPromptsRepo().acceptsReport(taskId,scope,p)) reject('policy_offer_mismatch');
+      }
       // Persisted pre-turn reports must be quarantined, never upgraded on replay.
       if (frame.type === "task.complete") return { ok: false, code: "report_shape_retired", retryable: false };
       if (frame.type === "turn.complete") {
@@ -211,12 +219,12 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           || (p.input_to_seq as number) < 0 || !reply || typeof reply.body_md !== "string"
           || (reply.message_kind !== "reply" && reply.message_kind !== "final") || "output" in p || "task_id" in p) reject();
         const runtimeId = frame.rt ?? string(p.runtime_id);
-        authorizeReportRuntime(store, session, runtimeId);
+        const runtime = authorizeReportRuntime(store, session, runtimeId);
         const fields = completionFields(p, string(p.attempt_id));
         if (fields) fields.final_reply_md = reply.body_md;
         const result = await turns.complete({ payload: p as unknown as DaemonTurnCompletePayload, completionFields: fields,
           traceEventCount: completionTraceEventCount(p.trace, string(p.attempt_id)) },
-        { runtimeId, daemonId: session.daemonId, workspaceId: store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", userId: session.ownerAccessToken?.userId, inputUnread: session.supportsInputUnread, generation: p.generation as number | undefined });
+        { runtimeId, daemonId: session.daemonId, workspaceId: runtime.workspaceId ?? "local", userId: session.ownerAccessToken?.userId, inputUnread: session.supportsInputUnread, generation: p.generation as number | undefined });
         if (result.ok === true && fields?.trace) onTraceClosed?.(string(p.attempt_id), fields.trace.head, runtimeId);
         return result;
       }
@@ -265,7 +273,8 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
                 || (p.instructions !== undefined && typeof p.instructions !== "string")) reject();
               try {
                 store.recordTaskPrompt(taskId, { mode: p.mode as "bootstrap" | "delta", prompt: p.prompt as string, sha256: p.sha256 as string,
-                  ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}) });
+                  ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}),
+                  ...(p.system_prompt_policy !== undefined ? { systemPromptPolicy: p.system_prompt_policy as import("@multiremi/contracts/system-prompt-policy.js").SystemPromptPolicyBinding } : {}) });
               }
               catch { reject(); }
               break;
@@ -278,8 +287,9 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
               const step = typeof p.step === "number" ? p.step : undefined;
               const total = typeof p.total === "number" ? p.total : undefined;
               // An identical replay must not repeat a DB write or task notification.
-              if (task.progressSummary === summary
-                && task.progressStep === (step ?? null) && task.progressTotal === (total ?? null)) break;
+              const progress = store.getTask(taskId);
+              if (progress?.progressSummary === summary
+                && progress.progressStep === (step ?? null) && progress.progressTotal === (total ?? null)) break;
               if (!terminal(task.status) || p.final === true) store.reportProgress(taskId, summary, step, total,
                 { allowTerminal: p.final === true });
               break;
@@ -316,7 +326,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
               if (current?.lastTaskId === taskId && current.runtimeId === runtimeId
                 && current.rootPath === input.rootPath && current.branchName === input.branchName
                 && current.status === input.status && isDeepStrictEqual(current.repos, mapped)) break;
-              try { store.reportIssueWorkspace(input); }
+              try { store.reportIssueWorkspace(input, authority.workspaceId); }
               catch { reject(); }
               break;
             }
@@ -337,6 +347,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
             }
             case "task.fail":
               store.failTaskFromDaemon(taskId, {
+                reportedPolicy:p,
                 error: string(p.error) || "Task failed", traceEventCount,
                 sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), failureReason: nullable(p.failure_reason), completionFields: fields }, authority);
               break;
@@ -348,9 +359,13 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           return { ok: true };
         };
         // Accepted usage runs retain accounting authority after execution handoff.
-        return frame.type === "task.usage" || frame.type === "task.fail" ? apply()
+        if (frame.type === 'task.fail') return apply();
+        return store.systemPromptsRepo().withReportPolicy(authority.workspaceId, () => {
+          if (!store.systemPromptsRepo().acceptsReport(taskId,authority,p)) reject('policy_offer_mismatch');
+          return frame.type === "task.usage" ? apply()
           : store.plannedRestarts().withExecution(taskId, p.generation, authority, apply,
             frame.type === "task.start" && typeof p.usage_run_id === "string" ? p.usage_run_id : undefined);
+        });
       }
       const runtimeId = frame.rt ?? string(p.runtime_id);
       authorizeReportRuntime(store, session, runtimeId);

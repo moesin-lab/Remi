@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue, createHistoricalTestIssue, acceptTestIssueDelivery } from './helpers.js';
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 // Issues as first-class records plus the compatibility list/grouped/batch,
@@ -857,7 +858,7 @@ describe("Multiremi API — issue endpoints", () => {
       workspaceId: "local",
       maxConcurrency: 2,
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "Created MUL execution issue." });
     expect(store.getIssue(issue.id)?.status).toBe('in_review');

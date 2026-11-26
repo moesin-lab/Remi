@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { describe, expect, it } from 'bun:test';
 import { PostgresSyncDatabase } from '@multiremi/store/db/postgres.js';
@@ -13,7 +14,7 @@ describe('Canonical mention and delegation inputs',()=>{
         const session=store.getOrCreateDefaultIssueSession(issue.id);
         const parent=store.createSessionTask(session.id,{agentId:leader.id,prompt:'Coordinate'});
         const runtime=store.registerRuntime({id:'rt_rules',name:'Rules',provider:'codex',workspaceId:'local'});
-        expect(store.claimTask(runtime.id)?.id).toBe(parent.id);store.startTask(parent.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(parent.id);store.startTask(parent.id);
         const before=store.listConversationLogEntries(session.id);
         const queued:string[]=[];const unsubscribe=store.onTaskEnqueued(task=>queued.push(task.id));
         if(db instanceof PostgresSyncDatabase)db.resetTransactionDepthStats();

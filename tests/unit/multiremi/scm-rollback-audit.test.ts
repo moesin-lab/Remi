@@ -41,7 +41,46 @@ for (const dialect of ['wal', 'delete', 'postgres'] as const) {
     const packet = (page: ReturnType<typeof report>) => ({ ...page.receipt, after: page.after,
       items: page.entries!.map(row => ({ entry_key: row.entry_key, old_digest: row.old_digest, new_digest: row.new_digest, disposition: 'retain-frozen' })) });
 
-    for (const source of historicalCutovers) it(`matches the canonical inventory emitted from ${source.sha} and preserves its weak link and tombstone`, async () => {
+    function restoreInventoryStage(db: SqlDatabase, level: number) {
+      db.exec(`DROP TABLE multiremi_scm_audit_changes; DROP TABLE multiremi_scm_audit_entries;
+        DROP TABLE multiremi_scm_audit_generations; DROP TABLE multiremi_scm_audit_state`);
+      if (level === 4 || level === 7) db.exec('DROP TABLE multiremi_scm_rollback_review');
+      if (level < 7) {
+        db.exec(`DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json;
+          DROP TABLE multiremi_attempt_system_prompts; DROP TABLE multiremi_system_prompt_versions; DROP TABLE multiremi_system_prompt_documents;
+          DELETE FROM multiremi_schema_steps WHERE level BETWEEN 4 AND 6;
+          UPDATE multiremi_schema_steps SET id='20261124_scm_link_ownership', level=4 WHERE level=7;
+          UPDATE multiremi_schema_steps SET id='20261124_scm_rollback_review', level=5 WHERE level=8`);
+      }
+      db.run('DELETE FROM multiremi_schema_steps WHERE level>?', [level]);
+      db.run('UPDATE multiremi_schema_meta SET expand_level=?', [level]);
+    }
+
+    for (const level of [4, 5, 7, 8]) it(`holds stage ${level} with no checkpoint across startup`, async () => {
+      const { db, close } = await fixture();
+      try {
+        restoreInventoryStage(db, level);
+        runStartupMigrations(db);
+        runStartupMigrations(db);
+        expect(db.query('SELECT phase FROM multiremi_scm_audit_state').get()).toEqual({ phase: 'unknown' });
+        expect(scmOwnershipReady(db)).toBe(false);
+      } finally { await close(); }
+    });
+
+    it('rejects a main or mixed snapshot and refuses a malformed historical startup before writes', async () => {
+      const { db, close } = await fixture();
+      try {
+        restoreInventoryStage(db, 7);
+        db.run('UPDATE multiremi_schema_meta SET expand_level=4');
+        expect(() => legacyInventory(db)).toThrow('lineage');
+        db.run("UPDATE multiremi_schema_steps SET id='20261124_scm_link_ownership' WHERE level=7");
+        expect(() => runStartupMigrations(db)).toThrow('historical SCM');
+        expect(db.query('SELECT expand_level FROM multiremi_schema_meta').get()).toEqual({ expand_level: 4 });
+        expect(db.query('SELECT phase FROM multiremi_schema_steps WHERE level=8').get()).toBeNull();
+      } finally { await close(); }
+    });
+
+    for (const source of historicalCutovers) it(`matches the canonical inventory emitted from ${source.sha ?? source.step_id} and preserves its weak link and tombstone`, async () => {
       const {db,store,close}=await fixture();
       try {
         projections(db,1);
@@ -52,18 +91,22 @@ for (const dialect of ['wal', 'delete', 'postgres'] as const) {
             VALUES (?,'local',?,'pr0',?,?,'then','then','then')`,[link.id,link.issue_id,link.source,link.active]);
           if (link.attribution !== null) db.run('INSERT INTO multiremi_scm_link_ownership(link_id,attribution) VALUES(?,?)',[link.id,link.attribution]);
         }
-        db.exec(`DROP TABLE multiremi_scm_audit_changes; DROP TABLE multiremi_scm_audit_entries;
-          DROP TABLE multiremi_scm_audit_generations; DROP TABLE multiremi_scm_audit_state`);
-        if (source.level===4) db.exec('DROP TABLE multiremi_scm_rollback_review');
-        db.run('DELETE FROM multiremi_schema_steps WHERE level>?',[source.level]);
-        db.run('UPDATE multiremi_schema_meta SET expand_level=?',[source.level]);
+        restoreInventoryStage(db, source.level);
         db.run('INSERT INTO multiremi_scm_ownership_cutover(singleton,cursor_id,complete) VALUES(1,?,?)',[source.checkpoint.cursor_id,source.checkpoint.complete]);
         const archive=Buffer.from(JSON.stringify(legacyInventory(db))+'\n');
         expect(createHash('sha256').update(archive).digest('hex')).toBe(source.archive_sha256);
         runStartupMigrations(db);
         expect(()=>classifyScmLinks(db)).toThrow('baseline unavailable');
         expect(()=>holdScmWritersForReview(db)).toThrow('baseline unavailable');
+        if (source.level === 5 || source.level === 8) {
+          const gap = JSON.parse(archive.toString());
+          const entry = gap.entries.find((row: {entry_key: string}) => row.entry_key === 'link:a');
+          entry.identity_json = JSON.stringify({ ...JSON.parse(entry.identity_json), attribution: null });
+          const bytes = Buffer.from(JSON.stringify(gap));
+          expect(() => adoptLegacyInventory(db, bytes, createHash('sha256').update(bytes).digest('hex'), false)).toThrow(`level ${source.level} evidence gap`);
+        }
         adoptLegacyInventory(db,archive,source.archive_sha256,false);
+        runStartupMigrations(db);
         const unchanged=report(db);
         expect(unchanged.pending).toBe(0);
         auditScmRollback(db,{finalize:unchanged.receipt});
@@ -235,10 +278,11 @@ for (const dialect of ['wal', 'delete', 'postgres'] as const) {
           (id,workspace_id,issue_id,change_request_id,source,active,linked_at,created_at,updated_at)
           VALUES (?,'local',?,?,'auto',1,'then','then','then')`,[link,issue.id,pr]);
         db.run('UPDATE multiremi_scm_change_requests SET title=?',[issue.key]);
-        db.exec("UPDATE multiremi_schema_meta SET expand_level=4; INSERT INTO multiremi_scm_ownership_cutover(singleton,cursor_id,complete) VALUES(1,'a',0)");
+        restoreInventoryStage(db, 7);
+        db.exec("INSERT INTO multiremi_scm_ownership_cutover(singleton,cursor_id,complete) VALUES(1,'a',0)");
         const bytes=Buffer.from(JSON.stringify(legacyInventory(db)));
         const pin=createHash('sha256').update(bytes).digest('hex');
-        db.exec("UPDATE multiremi_schema_meta SET expand_level=6; UPDATE multiremi_scm_audit_state SET phase='unknown'");
+        runStartupMigrations(db);
         expect(()=>adoptLegacyInventory(db,bytes,pin,false)).toThrow('isolation');
         adoptLegacyInventory(db,bytes,pin,true);
         const unchanged=report(db);
@@ -258,10 +302,11 @@ for (const dialect of ['wal', 'delete', 'postgres'] as const) {
         const issue=store.createIssue({workspaceId:'local',title:'Old weak mention'});
         db.run(`INSERT INTO multiremi_scm_issue_links(id,workspace_id,issue_id,change_request_id,source,active,linked_at,created_at,updated_at)
           VALUES ('weak','local',?,'pr0','auto',0,'then','then','then')`,[issue.id]);
-        db.exec("UPDATE multiremi_schema_meta SET expand_level=4; INSERT INTO multiremi_scm_ownership_cutover(singleton,cursor_id,complete) VALUES(1,'weak',1)");
+        restoreInventoryStage(db, 7);
+        db.exec("INSERT INTO multiremi_scm_ownership_cutover(singleton,cursor_id,complete) VALUES(1,'weak',1)");
         const bytes=Buffer.from(JSON.stringify(legacyInventory(db)));
         const pinned=createHash('sha256').update(bytes).digest('hex');
-        db.exec("UPDATE multiremi_schema_meta SET expand_level=6; UPDATE multiremi_scm_audit_state SET phase='unknown'");
+        runStartupMigrations(db);
         expect(()=>classifyScmLinks(db)).toThrow('baseline unavailable');
         expect(()=>adoptLegacyInventory(db,Buffer.from('unverified'),pinned,false)).toThrow('independent');
         adoptLegacyInventory(db,bytes,pinned,false);

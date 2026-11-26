@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from 'bun:test';
@@ -14,7 +15,7 @@ pendingTurnBackendTests('MUL-506 actual reader and provider checkpoints', fixtur
     const session = chat ? f.store.createChatSession({ agentId: agent.id }) : f.store.getOrCreateDefaultIssueSession(issue.id);
     f.store.registerRuntime({ id: 'rt_read', daemonId: 'daemon_read', name: 'Reader runtime', provider: 'codex', workspaceId: 'local' });
     const sent = f.store.sendMessage({ session_id: session.id, sender: { type: 'member', id: 'mem_local_local' }, to: { type: 'agent', ref: agent.id }, message_kind: 'request', wake_requested: 'now', body_md: body });
-    const attempt = f.store.claimTask('rt_read')!;
+    const attempt = claimWithCurrentRuntime(f.store, 'rt_read')!;
     f.store.startTask(attempt.id);
     f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(attempt.id)!);
     const lane = () => fixture().db.query("SELECT cursor_seq,cursor_offset,provider_cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=''").get(session.id, agent.id)!;
@@ -73,7 +74,7 @@ pendingTurnBackendTests('MUL-506 actual reader and provider checkpoints', fixtur
     f.store.resetSessionAgentLane(f.session.id, f.agent.id);
     expect(f.store.getSessionAgentReadProgress(f.session.id, f.agent.id)).toEqual(before);
     const retried = f.store.retryTurn(f.sent.turn_id!, true);
-    expect(f.store.claimTask('rt_read')?.id).toBe(retried.current_attempt_id!);
+    expect(claimWithCurrentRuntime(f.store, 'rt_read')?.id).toBe(retried.current_attempt_id!);
     const bridge = f.store.getDaemonTurnBridge();
     const offered = bridge.offerInput(f.store.getTaskWithAgent(retried.current_attempt_id!)!);
     expect(offered.input_from_seq).toBe(0);

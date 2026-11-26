@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue, acceptTestIssueDelivery } from './helpers.js';
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 import { attemptMessagesPath } from "./unified-test-paths.js";
@@ -14,7 +15,7 @@ function createRunningTask(store: MultiremiStore): MultiremiTask {
   const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
   const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, prompt: "test" });
   store.registerRuntime({ id: "rt_test", daemonId: "human-request-test", name: "test-runtime", provider: "claude", workspaceId: "local", ownerId: "local" });
-  const claimed = store.claimTask("rt_test");
+  const claimed = claimWithCurrentRuntime(store, "rt_test");
   expect(claimed?.id).toBe(task.id);
   return store.startTask(task.id);
 }
@@ -57,7 +58,7 @@ describe("task human requests (store)", () => {
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Implement it" });
 
     expect(store.getIssue(issue.id)?.status).toBe("todo");
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     expect(store.getIssue(issue.id)?.status).toBe("todo");
 
     store.startTask(task.id);
@@ -164,7 +165,7 @@ describe("task human requests (store)", () => {
     const agent = store.createAgent({ name: "Review Failure Agent", provider: "claude" });
     const issue = createResponsibleTestIssue(store, { title: "Review failure", assigneeType:"agent", assigneeId:agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Try it" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const request = nativeHumanRequest(store, { taskId: task.id, kind: "question", payload: {} });
     expect(store.getIssue(issue.id)?.status).toBe("in_review");
@@ -200,7 +201,7 @@ describe("task human requests (store)", () => {
     const issue = createResponsibleTestIssue(store, { title: "Cancel execution only", assigneeType:"agent", assigneeId:agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Start" });
 
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     expect(store.getIssue(issue.id)?.status).toBe("in_progress");
 
@@ -219,7 +220,7 @@ describe("task human requests (store)", () => {
     for (const terminalStatus of ["done", "cancelled"] as const) {
       const issue = createResponsibleTestIssue(store, { title: `Keep ${terminalStatus}`, assigneeType: "agent", assigneeId: agent.id });
       const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Run" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
       store.startTask(task.id);
       if (terminalStatus === "done") acceptTestIssueDelivery(store, issue.id);
       else store.updateIssue(issue.id, { status: terminalStatus });
@@ -271,7 +272,7 @@ pendingTurnBackendTests("Human Request unified API", fixture => {
     });
     const chat = store.createChatSession({ agentId: agent.id, creatorId: "alice" });
     const task = store.sendChatMessage(chat.id, { content: "Ask Alice" }).task;
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const request = nativeHumanRequest(store, {
       taskId: task.id,

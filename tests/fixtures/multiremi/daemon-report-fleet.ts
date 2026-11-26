@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { activeRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import type { HubImpl } from "@multiremi/api/hub/hub-core.js";
@@ -316,7 +317,7 @@ export async function loadedFleet(size: number, runtimeCount = 8, startTarget = 
   });
   await f.layer.drain();
   if (f.store.getTask(task.id)?.status === "queued")
-    f.store.claimTask(f.runtimeIds[0]!);
+    claimWithCurrentRuntime(f.store, f.runtimeIds[0]!);
   if (startTarget) f.store.startTask(task.id);
   for (let attempt = 1; attempt < (size === 40 ? 8 : 1); attempt++) {
     const turn = f.store.getTurnForAttempt(task.id)!;
@@ -324,7 +325,7 @@ export async function loadedFleet(size: number, runtimeCount = 8, startTarget = 
     const retried = f.store.retryTurn(turn.id);
     await f.layer.drain();
     task = f.store.getTask(retried.current_attempt_id!)!;
-    if (task.status === "queued") f.store.claimTask(f.runtimeIds[0]!);
+    if (task.status === "queued") claimWithCurrentRuntime(f.store, f.runtimeIds[0]!);
     f.store.startTask(task.id);
     await f.sessions[0]!.handleMessage(
       JSON.stringify({ v: 2, t: "ack", ack: f.sessions[0]!.lastSentSeq, p: {} }),
@@ -351,7 +352,7 @@ export async function loadedFleet(size: number, runtimeCount = 8, startTarget = 
   let peer = f.store.sendChatMessage(chat.id, { body: "keep working" }).task;
   await f.layer.drain();
   if (f.store.getTask(peer.id)?.status === "queued")
-    f.store.claimTask(f.runtimeIds[2]!);
+    claimWithCurrentRuntime(f.store, f.runtimeIds[2]!);
   f.store.startTask(peer.id);
   for (let attempt = 1; attempt < (size === 40 ? 8 : 1); attempt++) {
     const turn = f.store.getTurnForAttempt(peer.id)!;
@@ -359,7 +360,7 @@ export async function loadedFleet(size: number, runtimeCount = 8, startTarget = 
     const retried = f.store.retryTurn(turn.id);
     await f.layer.drain();
     peer = f.store.getTask(retried.current_attempt_id!)!;
-    if (peer.status === "queued") f.store.claimTask(f.runtimeIds[2]!);
+    if (peer.status === "queued") claimWithCurrentRuntime(f.store, f.runtimeIds[2]!);
     f.store.startTask(peer.id);
     await f.sessions[1]!.handleMessage(
       JSON.stringify({

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // Sibling test for packages/server/src/store/repos/tasks-repo.ts.
 // Drives the carved-out repo directly over its StoreContext (not through the
 // MultiremiStore facade) so a broken delegation cannot mask a broken move.
@@ -44,7 +45,7 @@ function createRepo(): TasksRepo {
     const agent = store!.createAgent({ name: "Worker", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = repo.createTask({ agentId: agent.id, prompt: "ship it" });
 
-    const claimed = repo.claimTask(runtime.id);
+    const claimed = claimWithCurrentRuntime(repo, runtime.id);
     expect(claimed?.id).toBe(task.id);
     expect(claimed?.status).toBe("dispatched");
     expect(repo.startTask(task.id).status).toBe("running");
@@ -54,7 +55,7 @@ function createRepo(): TasksRepo {
     expect(done.status).toBe("completed");
     expect(repo.getTaskStatus(task.id)).toBe("completed");
     // A completed task no longer sits in the pool.
-    expect(repo.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(repo, runtime.id)).toBeNull();
   });
 
   it("rejects progress on terminal tasks unless the write is a final summary", () => {
@@ -62,7 +63,7 @@ function createRepo(): TasksRepo {
     const runtime = store!.registerRuntime({ id: "rt_worker", name: "Worker box", provider: "claude", workspaceId: "local" });
     const agent = store!.createAgent({ name: "Worker", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
     const task = repo.createTask({ agentId: agent.id, prompt: "ship it" });
-    repo.claimTask(runtime.id);
+    claimWithCurrentRuntime(repo, runtime.id);
     repo.startTask(task.id);
     repo.completeTask(task.id, { output: "shipped" });
 
@@ -105,7 +106,7 @@ function createRepo(): TasksRepo {
       try {
         if (status === "cancelled") repo.cancelTask(task.id);
         if (status === "failed") {
-          repo.claimTask(runtime.id);
+          claimWithCurrentRuntime(repo, runtime.id);
           repo.startTask(task.id);
           repo.failTask(task.id, { error: "Terminal failure" });
         }
@@ -135,7 +136,7 @@ function createRepo(): TasksRepo {
     const runtime = store!.registerRuntime({ name: "Completed runtime", provider: "codex" });
     const agent = store!.createAgent({ name: "Completed worker", provider: "codex" });
     const task = repo.createTask({ agentId: agent.id, prompt: "Finish" });
-    repo.claimTask(runtime.id);
+    claimWithCurrentRuntime(repo, runtime.id);
     repo.startTask(task.id);
     repo.completeTask(task.id, { output: "Done" });
     const previous = repo.getTask(task.id)!;

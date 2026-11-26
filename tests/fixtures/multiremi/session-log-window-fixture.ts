@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 // Session log window fixture: the Chat and Issue session windows read by
 // `GET /api/sessions/:sessionId/log`.
 //
@@ -38,7 +39,7 @@ export interface SessionLogWindowFixture {
 
 function completeTurn(store: MultiremiStore, runtimeId: string, taskId: string, output: string,
   usage?: { inputTokens: number; outputTokens: number }): void {
-  const claimed = store.claimTask(runtimeId);
+  const claimed = claimWithCurrentRuntime(store, runtimeId);
   if (claimed?.id !== taskId) throw new Error(`fixture claimed ${claimed?.id ?? "nothing"} instead of ${taskId}`);
   store.startTask(taskId);
   if (usage) {
@@ -71,7 +72,7 @@ export async function seedSessionLogWindowFixture(store: MultiremiStore): Promis
       : null;
     const sent = store.sendChatMessage(chat.id, { body: `Question ${turn}`, ...(attachment ? { attachmentIds: [attachment.id] } : {}) });
     if (turn === 36) {
-      const claimed = store.claimTask(runtime.id);
+      const claimed = claimWithCurrentRuntime(store, runtime.id);
       if (claimed?.id !== sent.task.id) throw new Error("fixture failed to claim the retried turn");
       store.startTask(sent.task.id);
       store.failTask(sent.task.id, { error: "fixture transient failure" });
@@ -114,7 +115,7 @@ export async function seedSessionLogWindowFixture(store: MultiremiStore): Promis
   // The last Chat request is still running (it holds the runtime's only slot,
   // so it is seeded last); its card stays hidden until it finishes.
   const running = store.sendChatMessage(chat.id, { body: "Still running" });
-  const claimedRunning = store.claimTask(runtime.id);
+  const claimedRunning = claimWithCurrentRuntime(store, runtime.id);
   if (claimedRunning?.id !== running.task.id) throw new Error("fixture failed to claim the running turn");
   store.startTask(running.task.id);
   const runningTask = store.getTask(running.task.id)!;

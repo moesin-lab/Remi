@@ -1,3 +1,4 @@
+import { assertScmInventoryLayout } from './schema-migrations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { applyInitialBatch } from './scm-ownership-classification.js';
 import type { SqlDatabase } from './db/postgres.js';
@@ -29,7 +30,18 @@ function inventoryDigest(entries: Entry[]): string {
 
 export function legacyInventory(db: SqlDatabase) {
   const level = Number(db.query('SELECT expand_level FROM multiremi_schema_meta WHERE singleton=1').get()?.expand_level);
-  if (level !== 4 && level !== 5) throw new Error('Export the inventory from the isolated historical level 4 or 5 snapshot');
+  const historical = level === 4 || level === 5;
+  const reviewed = level === 5 || level === 8;
+  if (!historical && level !== 7 && level !== 8) throw new Error('Unsupported SCM inventory level');
+  const prefix = historical ? '20261124_scm_' : '20261126_scm_';
+  const expected = historical ? [] : ['20261124_system_prompt_policy', '20261124_feishu_bot_wake_words', '20261125_feishu_command_results'];
+  expected.push(prefix + 'link_ownership');
+  if (reviewed) expected.push(prefix + 'rollback_review');
+  const steps = db.query('SELECT id, phase, level FROM multiremi_schema_steps WHERE level >= 4 OR id LIKE ? ORDER BY level, id').all('%scm%');
+  if (steps.length !== expected.length || steps.some((step, index) => step.id !== expected[index] || step.phase !== 'expand' || Number(step.level) !== index + 4)) {
+    throw new Error('Unrecognized SCM migration lineage');
+  }
+  assertScmInventoryLayout(db, reviewed ? 2 : 1, historical);
   const cutover = db.query('SELECT cursor_id,complete FROM multiremi_scm_ownership_cutover WHERE singleton=1').get();
   return { version: 1, level, checkpoint_present: Boolean(cutover), cursor: cutover?.cursor_id ?? '', complete: cutover?.complete ?? 0, entries: inventory(db) };
 }
@@ -37,7 +49,7 @@ export function legacyInventory(db: SqlDatabase) {
 export function adoptLegacyInventory(db: SqlDatabase, bytes: Buffer, authorizedDigest: string, continuousIsolation: boolean) {
   if (createHash('sha256').update(bytes).digest('hex') !== authorizedDigest) throw new Error('Historical inventory does not match the independent target-specific anchor');
   const source = JSON.parse(bytes.toString('utf8')) as ReturnType<typeof legacyInventory>;
-  if (source.version !== 1 || ![4,5].includes(source.level) || typeof source.cursor !== 'string' || ![0,1].includes(source.complete)
+  if (source.version !== 1 || ![4,5,7,8].includes(source.level) || typeof source.cursor !== 'string' || ![0,1].includes(source.complete)
     || (!source.complete && !continuousIsolation) || !Array.isArray(source.entries)) throw new Error('Historical provenance or continuous isolation is missing');
   if (ownershipPhase(db)?.phase !== 'unknown') throw new Error('Only a database without trusted provenance may adopt a historical anchor');
   const cutover = db.query('SELECT cursor_id,complete FROM multiremi_scm_ownership_cutover WHERE singleton=1').get();
@@ -49,9 +61,9 @@ export function adoptLegacyInventory(db: SqlDatabase, bytes: Buffer, authorizedD
     db.run('INSERT INTO multiremi_scm_audit_generations(id,version,baseline,baseline_count,legacy_cursor,legacy_complete,legacy_present,anchor_digest) VALUES(?,1,?,?,?,?,?,?)',
       [id,baseline,entries.length,source.cursor,source.complete,Number(source.checkpoint_present),authorizedDigest]);
     for (const entry of entries) {
-      if (source.level === 5 && entry.entry_key.startsWith('link:')) {
+      if ((source.level === 5 || source.level === 8) && entry.entry_key.startsWith('link:')) {
         const identity = JSON.parse(entry.identity_json);
-        if (identity.attribution === null && ['auto','legacy'].includes(identity.source) && (source.complete || Buffer.compare(Buffer.from(identity.id),Buffer.from(source.cursor)) <= 0)) throw new Error('Unverified level 5 evidence gap');
+        if (identity.attribution === null && ['auto','legacy'].includes(identity.source) && (source.complete || Buffer.compare(Buffer.from(identity.id),Buffer.from(source.cursor)) <= 0)) throw new Error(`Unverified level ${source.level} evidence gap`);
       }
       db.run('INSERT INTO multiremi_scm_audit_entries(generation,entry_key,identity_json,text_json) VALUES(?,?,?,?)', [id,entry.entry_key,entry.identity_json,entry.text_json]);
     }

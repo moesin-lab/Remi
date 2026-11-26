@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from "bun:test";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
@@ -131,7 +132,7 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
       const issue = createResponsibleTestIssue(store, { title: "Dual re-ring", assigneeType: "agent", assigneeId: agent.id });
       const session = store.getOrCreateDefaultIssueSession(issue.id);
       const running = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Original round" });
-      expect(store.claimTask(runtime.id)?.id).toBe(running.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(running.id);
       store.buildTaskSessionProjection(running.id);
       store.startTask(running.id);
       const comment = store.createIssueComment(issue.id, { authorType: "member", authorId: member.id,
@@ -155,7 +156,7 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
       });
       expect(store.getConversationLogEntryById(now.entry.id)?.body_md).toBe(now.entry.body_md);
       expect(store.listIssueActivity(issue.id).filter(row=>row.type==='re_ring')).toHaveLength(1);
-      expect(store.claimTask(runtime.id)?.id).toBe(replacements[0]!.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(replacements[0]!.id);
       const input=store.getTurnInput(replacements[0]!.id)!;
       expect(input.messages.map(message=>message.body_md)).toContain(now.entry.body_md);
       store.startTask(replacements[0]!.id);

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -40,7 +41,7 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
     const runtime = store.registerRuntime({ name: "Stage 1 native source", provider: "codex", daemonId: "stage1-native", maxConcurrency: 16 });
     store.updateAgent(agentId, { runtimeId: runtime.id });
     const task = store.createTask({ agentId, issueId, prompt: "Work" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const waitId = `stage1-wait:${task.id}`;
     const questions = payload.questions as Array<{ options?: Array<{ label: string }> }> | undefined;

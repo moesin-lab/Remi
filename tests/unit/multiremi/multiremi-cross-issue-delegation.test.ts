@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
@@ -74,12 +75,12 @@ function activities(store: MultiremiStore, issueId: string, type: string) {
 }
 
 function claimReturn(store:MultiremiStore,runtimeId:string,attemptId:string){
-  for(let i=0;i<3;i++){const task=store.claimTask(runtimeId);if(!task||task.id===attemptId)return task;
+  for(let i=0;i<3;i++){const task=claimWithCurrentRuntime(store, runtimeId);if(!task||task.id===attemptId)return task;
     store.startTask(task.id);store.completeTask(task.id,{output:"Reviewed owner status"});}
   throw new Error("Return attempt was not offered");
 }
 function finishLeaderRound(store: MultiremiStore, f: ReturnType<typeof fixture>): void {
-  expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+  expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
   store.buildTaskSessionProjection(f.leaderTask.id);
   store.startTask(f.leaderTask.id);
   store.completeTask(f.leaderTask.id, { output: "Task completed." });
@@ -143,7 +144,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         expect(store.getMessage(store.getTurn(childTask.id)!.trigger_message_id!)!.task_id).toBe(f.leaderTask.id);
         expect(childTask.issueSessionId).not.toBe(f.leaderSession.id);
         finishLeaderRound(store, f);
-        expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+        expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
         store.buildTaskSessionProjection(childTask.id);
         store.startTask(childTask.id);
         const comment = store.createIssueComment(f.child.id, { authorType: "agent", authorId: f.worker.id,
@@ -207,7 +208,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
 
     it("keeps child status in the default owner lane and terminal reports in the dispatch lane",async()=>withStore(backend,async store=>{
       const f=fixture(store),child=await dispatch(store,f.leaderTask,f.child,f.worker.id);
-      finishLeaderRound(store,f);expect(store.claimTask(f.workerRuntime.id)?.id).toBe(child.id);
+      finishLeaderRound(store,f);expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(child.id);
       store.buildTaskSessionProjection(child.id);store.startTask(child.id);
       // The parent's execution owner closes its direct child (the done rule).
       store.updateIssue(f.child.id,{status:"done",parentTaskId:f.leaderTask.id,actorType:"agent",actorId:f.leader.id});
@@ -263,7 +264,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const f = fixture(store);
       const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
       finishLeaderRound(store, f);
-      expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+      expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
       store.buildTaskSessionProjection(childTask.id);
       store.startTask(childTask.id);
       store.updateIssue(f.child.id, { status: "done", parentTaskId: f.leaderTask.id,
@@ -293,7 +294,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const f = fixture(store, db);
       const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
       finishLeaderRound(store, f);
-      expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+      expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
       store.buildTaskSessionProjection(childTask.id);
       store.startTask(childTask.id);
       store.failTask(childTask.id, { error: "Cannot proceed" });
@@ -324,7 +325,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const f = fixture(store);
       const first = await dispatch(store, f.leaderTask, f.child, f.worker.id);
       finishLeaderRound(store, f);
-      expect(store.claimTask(f.workerRuntime.id)?.id).toBe(first.id);
+      expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(first.id);
       store.buildTaskSessionProjection(first.id);
       store.startTask(first.id);
       // Cancellation has no automatic reply; the bell points to the source task.
@@ -348,12 +349,12 @@ for (const backend of ["sqlite", "postgres"] as const) {
       store.completeTask(withoutComment.id, { output: "Reviewed the first report.", sessionId: "reviewed_first_report" });
       const secondLeaderTask = store.createTask({ agentId: f.leader.id, issueId: f.parent.id,
         issueSessionId: f.leaderSession.id, prompt: "Coordinate again." });
-      expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(secondLeaderTask.id);
+      expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(secondLeaderTask.id);
       store.buildTaskSessionProjection(secondLeaderTask.id);
       store.startTask(secondLeaderTask.id);
       const second = await dispatch(store, secondLeaderTask, f.child, f.worker.id);
       store.completeTask(secondLeaderTask.id, { output: "Task completed." });
-      expect(store.claimTask(f.workerRuntime.id)?.id).toBe(second.id);
+      expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(second.id);
       store.buildTaskSessionProjection(second.id);
       store.startTask(second.id);
       store.createIssueComment(f.child.id, { authorType: "agent", authorId: f.worker.id,
@@ -381,7 +382,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const f = fixture(store);
       const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
       finishLeaderRound(store, f);
-      expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
+      expect(claimWithCurrentRuntime(store, f.workerRuntime.id)?.id).toBe(childTask.id);
       store.buildTaskSessionProjection(childTask.id);
       store.startTask(childTask.id);
       const write = spyOn(IssuesRepo.prototype, "createIssueCommentWithinTransaction").mockImplementation(() => {
@@ -422,7 +423,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       }
       expect(new Set(childTasks.map((task) => task.delegatedFromIssueSessionId)))
         .toEqual(new Set([f.leaderSession.id]));
-      expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+      expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
       store.buildTaskSessionProjection(f.leaderTask.id);
       store.startTask(f.leaderTask.id);
       store.completeTask(f.leaderTask.id, { output: "Task completed." });
@@ -430,7 +431,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       // coalesce into it because each terminal transaction drains the queue.
       for (let index = 0; index < childTasks.length; index += 1) {
         const task = childTasks[index]!;
-        expect(store.claimTask(f.workerRuntimes[index]!.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, f.workerRuntimes[index]!.id)?.id).toBe(task.id);
         store.buildTaskSessionProjection(task.id);
         store.startTask(task.id);
         store.completeTask(task.id, { output: `Report ${index}` });
@@ -482,14 +483,14 @@ for (const backend of ["sqlite", "postgres"] as const) {
         childTasks.push(store.getTask(sentTask(store, await response.json()).id)!);
       }
       snapshot("dispatched-five");
-      expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+      expect(claimWithCurrentRuntime(store, f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
       store.buildTaskSessionProjection(f.leaderTask.id);
       store.startTask(f.leaderTask.id);
       store.completeTask(f.leaderTask.id, { output: "Leader awaited the five children." });
       snapshot("leader-finished");
       for (let index = 0; index < childTasks.length; index += 1) {
         const task = childTasks[index]!;
-        expect(store.claimTask(f.workerRuntimes[index]!.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, f.workerRuntimes[index]!.id)?.id).toBe(task.id);
         store.buildTaskSessionProjection(task.id);
         store.startTask(task.id);
         store.completeTask(task.id, { output: `MUL-383 result ${index}` });

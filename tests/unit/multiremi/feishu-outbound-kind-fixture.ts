@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import type { MultiremiStore } from "@multiremi/store.js";
 
 export function configureKindBot(store: MultiremiStore, workspaceId = "local", runtimeId = "rt_kinds", responsibleMemberId?: string) {
@@ -13,7 +14,7 @@ export function configureKindBot(store: MultiremiStore, workspaceId = "local", r
     revision: config.revision, externalSessionKey: `oc_kind_${suffix}`, chatType: "p2p", chatId: `oc_kind_${suffix}`,
     externalMessageId: `om_kind_${suffix}`, senderOpenId: "ou_kind_sender", text: "Answer", deliveryMode: "native_cot_v1",
     });
-    const claimed = store.claimTask(runtimeId);
+    const claimed = claimWithCurrentRuntime(store, runtimeId);
     if (claimed?.id === result.taskId) store.startTask(result.taskId);
     else if (claimed) throw new Error("Kind fixture dispatched an unrelated Task");
     return result;

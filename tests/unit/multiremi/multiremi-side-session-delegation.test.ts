@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, issueMessagesPath, turnApiPath } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -148,9 +149,9 @@ describe("Side session delegation boundary", () => {
       priority: 10,
       prompt: "Continue the main task.",
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(mainTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(mainTask.id);
     store.startTask(mainTask.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(sideTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sideTask.id);
   });
 
   it("rejects same-agent requests through the canonical Session message API", async () => {
@@ -205,7 +206,7 @@ describe("Side session delegation boundary", () => {
       provider: "claude",
       workspaceId: "local",
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(sideTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sideTask.id);
     store.startTask(sideTask.id);
     const token = await store.createTaskAccessToken(sideTask, "local");
     const app = createMultiremiApp({ store, authToken: "test-root-token" });
@@ -368,7 +369,7 @@ describe("Side session delegation boundary", () => {
       provider: "claude",
       workspaceId: "local",
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(sideTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sideTask.id);
     store.startTask(sideTask.id);
     store.failTask(sideTask.id, { error: "Runtime disconnected", failureReason: "runtime_recovery" });
     const retried = store.getTask(store.getTurnForAttempt(sideTask.id)!.current_attempt_id!)!;

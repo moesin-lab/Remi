@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createNativeTestQuestion, answerNativeTestQuestion } from './fixtures/native-question.js';
 import { createResponsibleTestIssue } from './helpers.js';
 /**
@@ -403,7 +404,7 @@ function seedTask(store: ReturnType<typeof createStore>): { id: string; workspac
     issueSessionId: session.id,
     prompt: "ask a human",
   });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   return { id: task.id, workspaceId: task.workspaceId };
 }
 

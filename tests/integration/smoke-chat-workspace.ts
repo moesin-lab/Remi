@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 /**
  * Isolated browser smoke: real Next -> Bun HTTP API -> temporary SQLite.
  * The test drives task claiming/completion itself; it never starts a provider.
@@ -193,14 +194,14 @@ try {
   await page.waitForURL(url => url.searchParams.get("session") === sessionId);
   check("first send creates session, user message and task through Next HTTP in the selected workspace");
 
-  assert.equal(store.claimTask(runtime.id)?.id, first.attemptId);
+  assert.equal(claimWithCurrentRuntime(store, runtime.id)?.id, first.attemptId);
   store.startTask(first.attemptId);
   await action("stop").waitFor();
   // Queue is the default follow-up mode: the button names it and Mod-Enter uses it.
   const second = await enqueue("CHAT_SMOKE_SECOND: queued follow-up", () => action("queue").click());
   const third = await enqueue("CHAT_SMOKE_THIRD: queued follow-up", () => editor.press("ControlOrMeta+Enter"));
   assert.deepEqual(queued().map(item => item.id), [second.id, third.id]);
-  assert.equal(store.claimTask(runtime.id), null, "Queued follow-ups must not start a turn while one runs");
+  assert.equal(claimWithCurrentRuntime(store, runtime.id), null, "Queued follow-ups must not start a turn while one runs");
   assert(!store.listChatMessages(sessionId).some(message => message.body.includes("queued follow-up")), "Queued rows stay outside the log");
   await queueRow(1).getByText("CHAT_SMOKE_SECOND: queued follow-up", { exact: true }).waitFor();
   await queueRow(2).getByText("CHAT_SMOKE_THIRD: queued follow-up", { exact: true }).waitFor();
@@ -219,7 +220,7 @@ try {
   // Each completed turn releases exactly one queued row, oldest first (#458).
   store.completeTask(first.attemptId, { output: "CHAT_SMOKE_REPLY_ONE (simulated worker)", sessionId: "smoke-provider-session" });
   await page.getByText("CHAT_SMOKE_REPLY_ONE (simulated worker)", { exact: true }).last().waitFor();
-  const releasedSecond = store.claimTask(runtime.id);
+  const releasedSecond = claimWithCurrentRuntime(store, runtime.id);
   assert(releasedSecond, "Completing the turn must release the first queued row");
   assert.match(releasedSecond.prompt, /CHAT_SMOKE_SECOND_EDITED/);
   assert.doesNotMatch(releasedSecond.prompt, /CHAT_SMOKE_THIRD/);
@@ -228,7 +229,7 @@ try {
   await poll(async () => await queueRegion.locator("li").count() === 1, 10_000, "one queued row left");
   await page.getByText("CHAT_SMOKE_SECOND_EDITED", { exact: true }).waitFor();
   await runReply(releasedSecond.id, "CHAT_SMOKE_REPLY_TWO (simulated worker)");
-  const releasedThird = store.claimTask(runtime.id);
+  const releasedThird = claimWithCurrentRuntime(store, runtime.id);
   assert(releasedThird, "The next completed turn must release the next queued row");
   assert.match(releasedThird.prompt, /CHAT_SMOKE_THIRD/);
   assert.deepEqual(queued(), []);
@@ -244,7 +245,7 @@ try {
   // turn. Unread messages can still be edited and deleted; a queued row can
   // be steered on its own; deleting a row commits after its undo window.
   const active = await send("CHAT_SMOKE_ACTIVE_FOR_STEER");
-  assert.equal(store.claimTask(runtime.id)?.id, active.attemptId);
+  assert.equal(claimWithCurrentRuntime(store, runtime.id)?.id, active.attemptId);
   store.startTask(active.attemptId);
   await action("stop").waitFor();
   await editor.fill("CHAT_SMOKE_STEER_UNREAD");
@@ -253,7 +254,7 @@ try {
   const steerResponse = await steerPromise;
   assert.equal(steerResponse.status(), 200, `Steer failed: ${await steerResponse.text()}`);
   const steered = await steerResponse.json() as { message: { id: string } };
-  assert.equal(store.claimTask(runtime.id), null, "A steer joins the running turn");
+  assert.equal(claimWithCurrentRuntime(store, runtime.id), null, "A steer joins the running turn");
   const queuedHeaders = { Authorization: `Bearer ${pat}`, "X-Workspace-Slug": workspace.slug };
   const edited = await context.request.patch(`${frontend}/api/messages/${steered.message.id}`, {
     headers: queuedHeaders, data: { body_md: "CHAT_SMOKE_STEER_EDITED" },
@@ -268,7 +269,7 @@ try {
   await queueRegion.getByRole("button", { name: "Steer queued message 1", exact: true }).click();
   assert.equal((await rowSteerPromise).status(), 200);
   assert.deepEqual(queued(), []);
-  assert.equal(store.claimTask(runtime.id), null, "A steered row joins the running turn");
+  assert.equal(claimWithCurrentRuntime(store, runtime.id), null, "A steered row joins the running turn");
   await queueRegion.waitFor({ state: "hidden" });
   await page.getByText("CHAT_SMOKE_QUEUE_STEER", { exact: true }).waitFor();
   const rowDeleted = await enqueue("CHAT_SMOKE_QUEUE_DELETE", () => action("queue").click());
@@ -281,7 +282,7 @@ try {
   await page.getByText("CHAT_SMOKE_STEER_COMPLETE (simulated worker)", { exact: true }).last().waitFor();
   // The simulated worker never read the steered row: it opens the next turn
   // by itself, without the deleted message or the deleted row.
-  const unreadTurn = store.claimTask(runtime.id);
+  const unreadTurn = claimWithCurrentRuntime(store, runtime.id);
   assert(unreadTurn, "An unread steer must wake the next turn");
   assert.match(unreadTurn.prompt, /CHAT_SMOKE_QUEUE_STEER/);
   assert.doesNotMatch(unreadTurn.prompt, /CHAT_SMOKE_STEER_(UNREAD|EDITED)|CHAT_SMOKE_QUEUE_DELETE/);
@@ -326,7 +327,7 @@ try {
   assert.equal(store.listTasks().filter(item => item.prompt.includes(retryContent)).length, 1);
   assert.equal(store.listChatMessages(sessionId).filter(item => item.body === retryContent).length, 1);
   await retryButton.waitFor({ state: "hidden" });
-  assert.equal(store.claimTask(runtime.id)?.id, retried.attemptId);
+  assert.equal(claimWithCurrentRuntime(store, runtime.id)?.id, retried.attemptId);
   await runReply(retried.attemptId, "CHAT_SMOKE_RETRY_COMPLETE (simulated worker)");
   check("an injected gateway 503 leaves the send unconfirmed; Retry reuses its dedupe key and creates exactly one message and task");
 
@@ -399,7 +400,7 @@ try {
   const download = await context.request.get(`${frontend}/api/attachments/${upload.id}/content`);
   assert.equal(download.status(), 200);
   assert.match(await download.text(), /Private attachment fixture/);
-  assert.equal(store.claimTask(runtime.id)?.id, attached.attemptId);
+  assert.equal(claimWithCurrentRuntime(store, runtime.id)?.id, attached.attemptId);
   await runReply(attached.attemptId, "CHAT_SMOKE_ATTACHMENT_READ (simulated worker)");
   const downloadFromCard = page.getByRole("button", { name: "Download", exact: true });
   await downloadFromCard.waitFor();

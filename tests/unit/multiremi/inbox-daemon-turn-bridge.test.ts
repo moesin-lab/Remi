@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import {it,expect,spyOn} from 'bun:test';
 import {pendingTurnBackendTests} from './pending-turn-test-backends.js';
@@ -7,7 +8,7 @@ pendingTurnBackendTests('MUL-506 DaemonTurnBridge',fixture=>{
     store.registerRuntime({id:'rt_inbox_bridge',daemonId:'daemon_inbox_bridge',name:'Bridge runtime',provider:'codex',workspaceId:'local'});
     const issue=store.createIssue({title:'Bridge',assigneeType:'agent',assigneeId:agent.id,responsibleMemberId:'mem_local_local'}),session=store.getOrCreateDefaultIssueSession(issue.id);
     const sent=store.sendMessage({session_id:session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:agent.id},message_kind:'request',wake_requested:'now',body_md:'start'});
-    const attempt=store.claimTask('rt_inbox_bridge')!;store.startTask(attempt.id);
+    const attempt=claimWithCurrentRuntime(store, 'rt_inbox_bridge')!;store.startTask(attempt.id);
     const bridge=store.getDaemonTurnBridge(),scope={runtimeId:'rt_inbox_bridge',daemonId:'daemon_inbox_bridge',workspaceId:'local'},offer=bridge.offerInput(store.getTaskWithAgent(attempt.id)!);
     return {store,db,agent,issue,session,sent,attempt,bridge,scope,offer};}
   for(const mode of ['read','limit','legacy'] as const)it(`MUL-63 folded input completion: ${mode}`,()=>{
@@ -100,7 +101,7 @@ pendingTurnBackendTests('MUL-506 DaemonTurnBridge',fixture=>{
     const peerIssue=createResponsibleTestIssue(f.store,{title:'Duplicate lane',assigneeType:'agent',assigneeId:f.agent.id});
     const peerSession=f.store.getOrCreateDefaultIssueSession(peerIssue.id);
     const peer=f.store.sendMessage({session_id:peerSession.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:f.agent.id},message_kind:'request',wake_requested:'now',body_md:'peer start'});
-    const attempt=f.store.claimTask(f.scope.runtimeId)!;f.store.startTask(attempt.id);
+    const attempt=claimWithCurrentRuntime(f.store, f.scope.runtimeId)!;f.store.startTask(attempt.id);
     f.db.run('UPDATE multiremi_turns SET session_id=?,seq=seq+1 WHERE id=?',[f.session.id,peer.turn_id!]);
     f.store.wrapUpTurn(f.sent.turn_id!);f.store.wrapUpTurn(peer.turn_id!);
     const interrupt=f.store.sendMessage({session_id:f.session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:f.agent.id},message_kind:'request',wake_requested:'now',body_md:'shared interrupt'});

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it, spyOn } from 'bun:test';
 import { createMultiremiApp } from '@multiremi/api.js';
@@ -227,7 +228,7 @@ pendingTurnBackendTests('MUL-508 main parity', fixture => {
     const runtime=store.registerRuntime({name:'Chat runtime',provider:'codex'});
     const chat=store.createChatSession({agentId:worker.id,creatorId:'local'});
     const task=store.createTask({agentId:worker.id,chatSessionId:chat.id,prompt:'Request',maxAttempts:1});
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);store.startTask(task.id);
     store.completeTask(task.id,{output:'First reply'});
     const rows=store.listMessages(chat.id),reply=rows.find(message=>message.sender_type==='agent')!;
     const app=createMultiremiApp({store,authToken:'chat-master'});
@@ -237,7 +238,7 @@ pendingTurnBackendTests('MUL-508 main parity', fixture => {
     expect((await read(reply.seq)).status).toBe(200);expect(store.getChatSession(chat.id)?.hasUnread).toBe(false);
     expect((await (await read(0)).json()).cursor_seq).toBe(reply.seq);
     const next=store.createTask({agentId:worker.id,chatSessionId:chat.id,prompt:'Failure',maxAttempts:1});
-    expect(store.claimTask(runtime.id)?.id).toBe(next.id);store.startTask(next.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(next.id);store.startTask(next.id);
     store.failTask(next.id,{error:'Failure detail',failureReason:'unknown'});
     const failed=store.listChatMessagesFromLog(chat.id).at(-1)!;
     expect(failed.failureReason).toBe('unknown');expect(failed.elapsedMs).toBeGreaterThanOrEqual(0);
@@ -264,7 +265,7 @@ pendingTurnBackendTests('MUL-508 main parity', fixture => {
     const {store}=fixture();const agent=store.createAgent({name:'Legacy worker',provider:'codex'});
     const runtime=store.registerRuntime({name:'Orphan runtime',provider:'codex'});
     const task=store.createTask({agentId:agent.id,prompt:'Historical orphan'});
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);store.startTask(task.id);
     expect(store.createTaskSteerMessage({taskId:task.id,kind:'steer',content:'Follow up'}).attachments).toEqual([]);
     const parent=createResponsibleTestIssue(store, {title:'Unavailable parent',assigneeType:'agent',assigneeId:agent.id});
     const child=createResponsibleTestIssue(store, {title:'Child',parentIssueId:parent.id,status:'in_progress'});

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -411,7 +412,7 @@ describe("MUL-427 merge rulings", () => {
         const issue = createResponsibleTestIssue(store, { title: "Reply commit", workspaceId: "local", assigneeType: "squad", assigneeId: squad.id });
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const task = store.createSessionTask(session.id, { agentId: leader.id, prompt: "Lead the round" });
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         store.startTask(task.id);
         const repo = (store as unknown as { issues: IssuesRepo }).issues;
         const dispatch = repo as unknown as { triggerCommentMentions: (...args: any[]) => unknown };
@@ -481,7 +482,7 @@ describe("MUL-427 merge rulings", () => {
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const completeRound = (output: string) => {
           const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Answer" });
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           store.startTask(task.id);
           store.completeTask(task.id, { output });
           return task;

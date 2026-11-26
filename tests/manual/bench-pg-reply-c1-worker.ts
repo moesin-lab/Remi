@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 import { turnApiPath } from "../unit/multiremi/unified-test-paths.js";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -95,7 +96,7 @@ export async function runC1Worker(input: {
           issueId = issue.id;
           const task = store.createTask({ id: "tsk_c1_long", agentId, issueId, workspaceId: "local", prompt: "C1 long sample" });
           longTaskId = task.id;
-          if (store.claimTask("rt_c1_probe")?.id !== task.id) throw new Error("Long task was not claimed");
+          if (claimWithCurrentRuntime(store, "rt_c1_probe")?.id !== task.id) throw new Error("Long task was not claimed");
           store.startTask(task.id);
           store.appendTaskMessages(task.id, Array.from({ length: 96 }, (_, index) => ({
             seq: index + 1, type: "text", content: "x".repeat(256 * 1024),

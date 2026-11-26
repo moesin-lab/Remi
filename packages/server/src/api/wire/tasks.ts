@@ -426,6 +426,8 @@ export function daemonTaskClaimResponse(
     triggerMetadata = null;
   }
   const response = daemonTaskWireResponse(task, triggerMetadata);
+  const policy = store.getAttemptSystemPrompt(task.id);
+  if (policy) response.system_prompt_policy = policy;
   if (task.chatProjectId && task.chatProjectId === task.project?.id) response.chat_project_id = task.chatProjectId;
   response.runtime_workspace_id = task.runtimeWorkspaceId ?? null;
   // Path metadata only. Instruction/configuration contents are read on the host.

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { it, expect } from 'bun:test';
 import { createMultiremiApp } from '@multiremi/api.js';
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from './pending-turn-test-backends.js';
@@ -10,7 +11,7 @@ function setup(f: PendingTurnTestFixture) {
   const worker=store.createAgent({name:'Question source',provider:'codex'});
   const root=store.createIssue({title:'Root',assigneeType:'agent',assigneeId:owner.id});
   const task=store.createTask({agentId:worker.id,issueId:root.id,prompt:'Ask'});
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);store.startTask(task.id);
   const turn=store.getTurnForAttempt(task.id)!;
   const created=store.getDaemonTurnBridge().rpc('turn.decision',{turn_id:turn.id,attempt_id:task.id,dedupe_key:'transfer-question',body_md:'Which route?',
     options:[{label:'A',value:'A'}],metadata:{kind:'question'},timeout_ms:1000},{runtimeId:runtime.id,daemonId:'responsibility-hooks',workspaceId:'local'});

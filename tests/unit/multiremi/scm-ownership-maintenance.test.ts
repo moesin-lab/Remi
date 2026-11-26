@@ -1,3 +1,4 @@
+import { removeScmSchema } from "../../fixtures/scm-schema-upgrade.js";
 import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -152,8 +153,8 @@ it("upgrades historical links, then audits old-writer additions without reclassi
     db.run(addLink, ["s", strong.id, "legacy", 1]);
     db.run(addLink, ["w", weak.id, "auto", 1]);
     db.run(addLink, ["i", inactive.id, "auto", 0]);
-    db.exec(`DROP TABLE multiremi_scm_audit_state; DROP TABLE multiremi_scm_rollback_review; DROP TABLE multiremi_scm_link_ownership; DROP TABLE multiremi_scm_ownership_cutover;
-      DELETE FROM multiremi_schema_steps WHERE level>=4; UPDATE multiremi_schema_meta SET expand_level=3`);
+    removeScmSchema(db);
+    db.exec(`DELETE FROM multiremi_schema_steps WHERE level>=7; UPDATE multiremi_schema_meta SET expand_level=6`);
     expect(new MultiremiStore(db).scmOwnershipReady()).toBe(false);
   } finally { db.close(); }
   expect(classify().code).toBe(0);

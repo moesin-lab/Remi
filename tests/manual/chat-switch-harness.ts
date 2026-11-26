@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 /**
  * Local API for measuring Chat switching (in-memory SQLite, seeded chats).
  *
@@ -114,7 +115,7 @@ for (let chat = 1; chat <= CHATS; chat++) {
   // completes it, and the reply lands with its turn card.
   for (let turn = 1; turn <= TURNS; turn++) {
     const sent = store.sendChatMessage(session.id, { body: `Question ${turn} in chat ${chat}: can you look at the replica again?` });
-    if (store.claimTask(runtime.id)?.id !== sent.task.id) throw new Error("seed task was not claimed");
+    if (claimWithCurrentRuntime(store, runtime.id)?.id !== sent.task.id) throw new Error("seed task was not claimed");
     store.startTask(sent.task.id);
     const facts = SUBAGENTS && chat === 1 ? completionFacts(turn) : {};
     store.completeTask(sent.task.id, { output: reply(chat, turn), ...facts } as never);
@@ -188,7 +189,7 @@ if (AGENT_MS > 0) {
   let turn = 0;
   setInterval(() => {
     let claimed;
-    try { claimed = store.claimTask(runtime.id); } catch (error) { process.stderr.write(`agent claim: ${String(error)}\n`); return; }
+    try { claimed = claimWithCurrentRuntime(store, runtime.id); } catch (error) { process.stderr.write(`agent claim: ${String(error)}\n`); return; }
     if (!claimed) return;
     const taskId = claimed.id;
     const n = ++turn;

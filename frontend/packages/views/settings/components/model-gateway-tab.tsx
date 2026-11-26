@@ -8,12 +8,13 @@ import { Button } from "@multiremi/ui/components/ui/button";
 import { Card, CardContent } from "@multiremi/ui/components/ui/card";
 import { Label } from "@multiremi/ui/components/ui/label";
 import { Switch } from "@multiremi/ui/components/ui/switch";
-import { Input } from "@multiremi/ui/components/ui/input";
+import { SystemModelInput } from "./system-model-input";
+import { titleGatewayProtocol } from "./relay-fragment-format";
 import { NativeSelect, NativeSelectOption } from "@multiremi/ui/components/ui/native-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@multiremi/ui/components/ui/select";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
-import { executionEndpointListOptions } from "@multiremi/core/runtimes";
+import { executionEndpointListOptions, type ExecutionEndpoint, type SystemProtocol } from "@multiremi/core/runtimes";
 import { memberListOptions, workspaceKeys } from "@multiremi/core/workspace/queries";
 import { api } from "@multiremi/core/api";
 import type { Workspace } from "@multiremi/core/types";
@@ -45,6 +46,16 @@ export function ModelGatewayTab() {
   const canManage = members.data?.some(member => member.user_id === workspaceOperatorUser?.id && ["owner", "admin"].includes(member.role)) ?? false;
   const endpoints = useQuery({ ...executionEndpointListOptions(wsId), enabled: !!wsId && canManage });
   const defaults = useQuery({ queryKey: ["system-model-endpoints", wsId], queryFn: () => api.getSystemModelEndpoints(wsId), enabled: !!wsId && canManage });
+  const bound = (protocol: SystemProtocol) => endpoints.data?.endpoints.find(endpoint => endpoint.id === defaults.data?.defaults[protocol]
+    && endpoint.connection.auth_mode === "api_key" && endpoint.connection.protocols.includes(protocol));
+  const chat = bound("openai-chat-completions");
+  const messages = bound("anthropic-messages");
+  const relay = useQuery({ queryKey: ["system-model-relay", wsId, chat?.id, chat?.revision, messages?.id, messages?.revision],
+    queryFn: () => api.getRelayConfig(wsId), enabled: !!wsId && canManage && !!(chat || messages) });
+  const titleProtocol = titleGatewayProtocol(relay.data);
+  const titleRoute = titleProtocol && bound(titleProtocol);
+  const titleEndpoint = !relay.isError && !relay.isFetching && titleRoute?.connection.credential_id ? titleRoute : undefined;
+  const pending = endpoints.isPending || defaults.isPending;
   const [saving, setSaving] = useState(false);
   if (members.isPending) return <div data-testid="model-gateway-skeleton" aria-busy="true" />;
   if (!canManage) return <p>{t($ => $.modelGateway.insufficient)}</p>;
@@ -72,12 +83,12 @@ export function ModelGatewayTab() {
             </NativeSelect>
           </label>)}
     </section>
-    {workspace && <ProgressSummarySection workspace={workspace} />}
-    {workspace && <IssueAutoTitleSection workspace={workspace} />}
+    {workspace?.id === wsId && <ProgressSummarySection key={`summary-${wsId}`} workspace={workspace} chat={chat} messages={messages} pending={pending} />}
+    {workspace?.id === wsId && <IssueAutoTitleSection key={`title-${wsId}`} workspace={workspace} endpoint={titleEndpoint} protocol={titleProtocol ?? "openai-chat-completions"} pending={pending || relay.isFetching} />}
   </div>;
 }
 
-function IssueAutoTitleSection({ workspace }: { workspace: Workspace }) {
+function IssueAutoTitleSection({ workspace, endpoint, protocol, pending }: { workspace: Workspace; endpoint?: ExecutionEndpoint; protocol: SystemProtocol; pending: boolean }) {
   const { t } = useT("settings");
   const qc = useQueryClient();
   const resolved = readIssueAutoTitleSettings(workspace.settings);
@@ -148,10 +159,10 @@ function IssueAutoTitleSection({ workspace }: { workspace: Workspace }) {
             <Label htmlFor="issue-auto-title-model">
               {t(($) => $.modelGateway.auto_title_model_label)}
             </Label>
-            <Input
+            <SystemModelInput workspaceId={workspace.id} endpoint={endpoint} protocol={protocol} pending={pending}
               id="issue-auto-title-model"
               value={model}
-              onChange={(event) => setModel(event.target.value)}
+              onValueChange={setModel}
               placeholder="gpt-5.6-luna"
               className="font-mono text-xs"
             />
@@ -173,7 +184,7 @@ function IssueAutoTitleSection({ workspace }: { workspace: Workspace }) {
   );
 }
 
-function ProgressSummarySection({ workspace }: { workspace: Workspace }) {
+function ProgressSummarySection({ workspace, chat, messages, pending }: { workspace: Workspace; chat?: ExecutionEndpoint; messages?: ExecutionEndpoint; pending: boolean }) {
   const { t } = useT("settings");
   const qc = useQueryClient();
   const resolved = readProgressSummarySettings(workspace.settings);
@@ -253,10 +264,10 @@ function ProgressSummarySection({ workspace }: { workspace: Workspace }) {
               <Label htmlFor="progress-summary-openai-model">
                 {t(($) => $.modelGateway.progress_openai_model_label)}
               </Label>
-              <Input
+              <SystemModelInput workspaceId={workspace.id} endpoint={chat} protocol="openai-chat-completions" pending={pending} inactive={transport !== "auto" && transport !== "openai"}
                 id="progress-summary-openai-model"
                 value={openAiModel}
-                onChange={(event) => setOpenAiModel(event.target.value)}
+                onValueChange={setOpenAiModel}
                 placeholder="gpt-5.6-luna"
                 className="font-mono text-xs"
               />
@@ -268,10 +279,10 @@ function ProgressSummarySection({ workspace }: { workspace: Workspace }) {
               <Label htmlFor="progress-summary-claude-model">
                 {t(($) => $.modelGateway.progress_claude_model_label)}
               </Label>
-              <Input
+              <SystemModelInput workspaceId={workspace.id} endpoint={messages} protocol="anthropic-messages" pending={pending} inactive={transport !== "auto" && transport !== "api"}
                 id="progress-summary-claude-model"
                 value={model}
-                onChange={(event) => setModel(event.target.value)}
+                onValueChange={setModel}
                 placeholder="claude-haiku-4-5-20251001"
                 className="font-mono text-xs"
               />
@@ -280,6 +291,7 @@ function ProgressSummarySection({ workspace }: { workspace: Workspace }) {
               </p>
             </div>
           </div>
+          {transport === "cli" && <p className="text-xs text-muted-foreground">{t($ => $.modelGateway.catalog_cli)}</p>}
           <div className="flex justify-end pt-1">
             <Button type="button" size="sm" onClick={save} disabled={saving}>
               <Save className="h-3.5 w-3.5" />
@@ -297,7 +309,7 @@ function ProgressSummarySection({ workspace }: { workspace: Workspace }) {
 function readProgressSummarySettings(
   settings: Record<string, unknown> | undefined,
 ): ProgressSummarySettings {
-  const raw = settings?.progress_summary;
+  const raw = settings?.progress_summary ?? settings?.progressSummary;
   const progress = raw && typeof raw === "object" && !Array.isArray(raw)
     ? raw as Record<string, unknown>
     : {};
@@ -305,10 +317,11 @@ function readProgressSummarySettings(
     && ["auto", "api", "cli", "openai"].includes(progress.transport)
     ? progress.transport as ProgressSummaryTransport
     : "auto";
+  const openAiModel = progress.openai_model ?? progress.openAiModel;
   return {
     transport,
     model: typeof progress.model === "string" ? progress.model : "",
-    openAiModel: typeof progress.openai_model === "string" ? progress.openai_model : "",
+    openAiModel: typeof openAiModel === "string" ? openAiModel : "",
   };
 }
 

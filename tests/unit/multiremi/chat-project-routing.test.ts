@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { daemonRuntimeId } from "@multiremi/store.js";
@@ -17,16 +18,16 @@ describe("Chat Project routing after dispatch and Runtime changes", () => {
       const agent = store.createAgent({ name: "Chat", provider: "codex" });
       const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
       const task = store.sendChatMessage(chat.id, { body: "Use the selected device" }).task;
-      expect(store.claimTask(first.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, first.id)?.id).toBe(task.id);
       mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
 
       // Simulate a lost claim response followed by a routing settings change.
       store.deleteProjectDevice(project.id, "chat-first");
       if (restriction === "project_devices") store.createProjectDevice(project.id, { daemonId: "chat-second" });
 
-      expect(store.claimTask(first.id)).toBeNull();
+      expect(claimWithCurrentRuntime(store, first.id)).toBeNull();
       expect(store.getTask(task.id)).toMatchObject({ status: "queued", runtimeId: null, sessionId: null });
-      expect(store.claimTask(second.id)?.id).toBe(task.id);
+      expect(claimWithCurrentRuntime(store, second.id)?.id).toBe(task.id);
     });
   }
 
@@ -39,7 +40,7 @@ describe("Chat Project routing after dispatch and Runtime changes", () => {
     const agent = store.createAgent({ name: "Chat", provider: "codex" });
     const chat = store.createChatSession({ agentId: agent.id, projectId: project.id });
     const first = store.sendChatMessage(chat.id, { body: "First turn" }).task;
-    expect(store.claimTask(directory.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, directory.id)?.id).toBe(first.id);
     store.buildTaskSessionProjection(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, { output: "Done", sessionId: "old-native-session", workDir: "/abs/chat-directory" });
@@ -50,10 +51,10 @@ describe("Chat Project routing after dispatch and Runtime changes", () => {
 
     const replacementId = daemonRuntimeId("chat-directory", "codex");
     expect(store.getTask(next.id)).toMatchObject({ status: "queued", runtimeId: replacementId, sessionId: null });
-    expect(store.claimTask(directory.id)).toBeNull();
-    expect(store.claimTask(other.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, directory.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, other.id)).toBeNull();
     store.registerRuntime({ id: replacementId, name: "Directory Codex", provider: "codex", daemonId: "chat-directory" });
-    const claimed = store.claimTask(replacementId);
+    const claimed = claimWithCurrentRuntime(store, replacementId);
     expect(claimed).toMatchObject({ id: next.id, runtimeId: replacementId, sessionId: null, chatProjectId: project.id });
     expect(claimed?.projectResources).toMatchObject([{ resourceType: "local_directory",
       resourceRef: { local_path: "/abs/chat-directory", daemon_id: "chat-directory" } }]);

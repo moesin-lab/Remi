@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "./claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from '../unit/multiremi/helpers.js';
 import { randomUUID } from "node:crypto";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -79,7 +80,7 @@ async function command(name: string, args: any): Promise<unknown> {
       revision: args.revision, externalSessionKey: "oc_split_test", chatType: "p2p", chatId: "oc_split_test",
       externalMessageId: "om_split_test", senderOpenId: "ou_split_test", text: "Reply", deliveryMode: "native_cot_v1",
     });
-    if (store.claimTask(args.runtimeId)?.id !== submitted.taskId) throw new Error("Feishu fixture did not claim its Task");
+    if (claimWithCurrentRuntime(store, args.runtimeId)?.id !== submitted.taskId) throw new Error("Feishu fixture did not claim its Task");
     store.startTask(submitted.taskId);
     store.completeTask(submitted.taskId, { output: "Reply completed on runtime API" });
     return submitted.taskId;

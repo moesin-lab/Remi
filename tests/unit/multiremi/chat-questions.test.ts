@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from './pending-turn-test-backends.js';
 import { StoreContext, createCommitEventQueue } from '@multiremi/store/context.js';
@@ -14,7 +15,7 @@ function setup(f: PendingTurnTestFixture, transport = false, native = true, crea
       ['fbb_chat_q', 'local', 'cli_chat_q', agent.id, 'transport_chat_q', chat.id, at, at]);
   }
   const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, prompt: 'Original Chat work' });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   const turn = store.getTurnForAttempt(task.id)!;
   let questionId: string;
   if (native) {
@@ -106,7 +107,7 @@ pendingTurnBackendTests('Chat question shared workspace responsibility', fixture
       // An Issue Q at the human stage keeps Remi's summary step in its Issue.
       const issue = f.createIssue({ title: 'No execution owner' });
       const issueTask = h.store.createTask({ agentId: h.agent.id, issueId: issue.id, prompt: 'Issue work' });
-      expect(h.store.claimTask(h.runtime.id)?.id).toBe(issueTask.id); h.store.startTask(issueTask.id);
+      expect(claimWithCurrentRuntime(h.store, h.runtime.id)?.id).toBe(issueTask.id); h.store.startTask(issueTask.id);
       const issueTurn = h.store.getTurnForAttempt(issueTask.id)!;
       const created = h.store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: issueTurn.id, attempt_id: issueTask.id, wait_id: `issue_wait_${issueTask.id}`,
         dedupe_key: `issue_question_${issueTask.id}`, options: [{ label: 'A', value: 'A' }], body_md: 'Choose Issue direction',

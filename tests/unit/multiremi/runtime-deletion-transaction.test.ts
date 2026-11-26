@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, mutateExecutionFixture, sentTask } from "./unified-test-paths.js";
@@ -304,7 +305,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       store.updateIssue(f.parent.id, { assigneeType: "squad", assigneeId: squad.id });
       store.updateIssue(f.issue.id, { assigneeType: "agent", assigneeId: f.agent.id });
       const leaderTask = store.createTask({ agentId: leader.id, issueId: f.parent.id, prompt: "Coordinate child work" });
-      expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+      expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id);
       store.buildTaskSessionProjection(leaderTask.id);
       store.startTask(leaderTask.id);
       const token = await store.createTaskAccessToken(store.getTask(leaderTask.id)!, "local");

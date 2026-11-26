@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue, acceptTestIssueDelivery } from './helpers.js';
 import { appendCanonicalInboxInput } from "./fixtures/canonical-inbox-input.js";
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
@@ -47,7 +48,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           const issue = createResponsibleTestIssue(store, { title: "Ring", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
           const session = store.getOrCreateDefaultIssueSession(issue.id);
           const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "First round" });
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!);
           store.startTask(task.id);
           if (wake === "self_now") {
@@ -81,7 +82,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           const issue = createResponsibleTestIssue(store, { title: "Ring fallback", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
           const session = store.getOrCreateDefaultIssueSession(issue.id);
           const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "First round" });
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           const projection = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!).session_projection as { to_seq: number };
           store.startTask(task.id);
           const entry = appendCanonicalInboxInput(store, { sessionId: session.id, kind: "system", authorType: "system",
@@ -114,15 +115,15 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const session=store.getOrCreateDefaultIssueSession(issue.id);
         const covered=sendIssueWake(store,db,session.id,agent.id,"now","Covered work").task!;
         coverBusiness(db,store,covered.id,wakeSeq(db,covered.id));
-        expect(store.claimTask(runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
         expect(store.getTask(covered.id)?.status).toBe("cancelled");
         const skips=()=>store.listIssueActivity(issue.id).filter(row=>row.type==='wake_downgraded'&&(row.data as {reason?:string})?.reason==='already_covered');
-        expect(skips()).toHaveLength(1);expect(store.claimTask(runtime.id)).toBeNull();expect(skips()).toHaveLength(1);
+        expect(skips()).toHaveLength(1);expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();expect(skips()).toHaveLength(1);
         const human=store.createSessionTask(session.id,{agentId:agent.id,prompt:"New human work"});
-        expect(store.claimTask(runtime.id)?.id).toBe(human.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(human.id);
         store.completeTask(human.id,{output:"Done"});
         const unread=sendIssueWake(store,db,session.id,agent.id,"now","Unread now").task!;
-        expect(store.claimTask(runtime.id)?.id).toBe(unread.id);expect(skips()).toHaveLength(1);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(unread.id);expect(skips()).toHaveLength(1);
       });
     },60_000);
 
@@ -137,7 +138,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           prompt: "Legacy system round", wakeSource: "child_status" });
         db.run("UPDATE multiremi_turns SET wake_seq=0 WHERE current_attempt_id=?",[task.id]);
         expect(Number(db.query("SELECT wake_seq FROM multiremi_turn_execution_records WHERE id = ?").get(task.id).wake_seq)).toBe(0);
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         const skipped = db.query("SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'wake_downgraded' AND data LIKE '%already_covered%'").all(issue.id);
         expect(skipped).toHaveLength(0);
       });
@@ -152,7 +153,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const issue = createResponsibleTestIssue(store, { title: "Requeue", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
         const session = store.createIssueSession(issue.id, { title: "Requeue lane", withCode: false, holdsWorkspace: false });
         const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Initial" });
-        expect(store.claimTask(firstRuntime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, firstRuntime.id)?.id).toBe(task.id);
         const first = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!).session_projection as { to_seq: number };
         expect(store.findTurnEntry(task.id)?.metadata.inbox?.delivered_to_seq).toBe(first.to_seq);
         const later = store.appendConversationLog({ sessionId: session.id, kind: "system", authorType: "system", bodyMd: "Later update" });
@@ -160,7 +161,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         db.run("UPDATE multiremi_agents SET runtime_id = ? WHERE id = ?", [nextRuntime.id, agent.id]);
         const stale = new Date(Date.now() - 120_000).toISOString();
         runTurnExecutionMutation(db as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", [stale, task.id]);
-        expect(store.claimTask(firstRuntime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, firstRuntime.id)).toBeNull();
         expect(store.getTask(task.id)).toMatchObject({ status: "queued", runtimeId: null,
           projectionFromSeq: null, projectionToSeq: null, projectionMode: null,
           inheritedProjectionToSeq: null });
@@ -168,7 +169,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           .get(task.id);
         expect(repooled).toEqual({ inherited_projection_from_seq: null, inherited_projection_to_seq: null });
         db.run("UPDATE multiremi_agents SET runtime_id = ? WHERE id = ?", [firstRuntime.id, agent.id]);
-        expect(store.claimTask(firstRuntime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, firstRuntime.id)?.id).toBe(task.id);
         const second = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!).session_projection as { to_seq: number };
         expect(second.to_seq).toBeGreaterThanOrEqual(later.seq);
         expect(store.findTurnEntry(task.id)?.metadata.inbox?.delivered_to_seq).toBe(second.to_seq);
@@ -187,7 +188,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const source = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: session.id,
           prompt: "Delegated work", delegationId: "dlg_delivery", delegatedByAgentId: leader.id,
           delegatedFromIssueSessionId: session.id });
-        expect(store.claimTask(runtime.id)?.id).toBe(source.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(source.id);
         daemonTaskClaimResponse(store, store.getTaskWithAgent(source.id)!);
         store.startTask(source.id);
         const queued = store.createTask({ agentId: leader.id, issueId: issue.id, issueSessionId: session.id,
@@ -206,10 +207,10 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         db.run("UPDATE multiremi_session_lanes SET cursor_seq = ? WHERE session_id = ? AND reader_id = ?", [cursor, session.id, leader.id]);
         runTurnExecutionMutation(db as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET wake_seq = ? WHERE id = ?", [cursor, queued.id]);
         coverBusiness(db,store,queued.id,cursor);
-        expect(store.claimTask(runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
         expect(store.getTask(queued.id)?.status).toBe("cancelled");
         expect(Number(db.query("SELECT COUNT(*) AS n FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'wake_downgraded' AND data LIKE '%already_covered%'").get(issue.id).n)).toBe(1);
-        expect(store.claimTask(runtime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
         expect(Number(db.query("SELECT COUNT(*) AS n FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'wake_downgraded' AND data LIKE '%already_covered%'").get(issue.id).n)).toBe(1);
       });
     }, 30_000);
@@ -225,7 +226,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const source = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: session.id,
           prompt: "Delegated work", delegationId: "dlg_unread", delegatedByAgentId: leader.id,
           delegatedFromIssueSessionId: session.id });
-        expect(store.claimTask(runtime.id)?.id).toBe(source.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(source.id);
         daemonTaskClaimResponse(store, store.getTaskWithAgent(source.id)!);
         store.startTask(source.id);
         store.completeTask(source.id, { output: "Report", sessionId: "provider_delegate" });
@@ -233,7 +234,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         expect(queued).toHaveLength(1);
         expect(queued[0]!.wakeSource).toBe("delegation_return");
         expect(store.getMessage(store.getTurnForAttempt(queued[0]!.id)!.trigger_message_id!)?.wake_reason).toBe("platform_to_owner");
-        expect(store.claimTask(runtime.id)?.id).toBe(queued[0]!.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(queued[0]!.id);
         expect(db.query("SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'wake_downgraded' AND data LIKE '%already_covered%'").all(issue.id))
           .toHaveLength(0);
       });
@@ -251,7 +252,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const source = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: session.id,
           prompt: "Delegated work", delegationId: "dlg_redrain", delegatedByAgentId: leader.id,
           delegatedFromIssueSessionId: session.id });
-        expect(store.claimTask(workerRuntime.id)?.id).toBe(source.id);
+        expect(claimWithCurrentRuntime(store, workerRuntime.id)?.id).toBe(source.id);
         daemonTaskClaimResponse(store, store.getTaskWithAgent(source.id)!);
         store.startTask(source.id);
         const unrelated = store.createTask({ agentId: leader.id, issueId: issue.id, issueSessionId: session.id,
@@ -275,7 +276,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         expect(store.listTasksForIssue(issue.id).filter(row => row.status === "queued" && row.agentId === leader.id))
           .toHaveLength(1);
         const beforeClaim=store.listIssueActivity(issue.id).filter(row=>row.type==="wake_downgraded");
-        expect(store.claimTask(leaderRuntime.id)?.id).toBe(replacements[0]!.id);
+        expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(replacements[0]!.id);
         expect(store.listIssueActivity(issue.id).filter(row=>row.type==="wake_downgraded")).toEqual(beforeClaim);
       });
     }, 30_000);
@@ -293,7 +294,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           const source = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: session.id,
             prompt: "Delegated work", delegationId: `dlg_${terminal}`, delegatedByAgentId: leader.id,
             delegatedFromIssueSessionId: session.id, maxAttempts: 1 });
-          expect(store.claimTask(workerRuntime.id)?.id).toBe(source.id);
+          expect(claimWithCurrentRuntime(store, workerRuntime.id)?.id).toBe(source.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(source.id)!);
           store.startTask(source.id);
           if (terminal === "completed") store.completeTask(source.id, { output: "Work complete" });
@@ -306,7 +307,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           expect(store.getTask(source.id)?.delegationReturnTaskId).toBe(returns[0]!.id);
           expect(store.listConversationLogShown(session.id).filter(row => row.metadata.message_source && (row.metadata.message_source as {taskId?:string}).taskId === source.id))
             .toHaveLength(1);
-          expect(store.claimTask(leaderRuntime.id)?.id).toBe(returns[0]!.id);
+          expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(returns[0]!.id);
           const projection = daemonTaskClaimResponse(store, store.getTaskWithAgent(returns[0]!.id)!);
           expect(store.getTurnInput(returns[0]!.turn_id!)?.messages.some(message=>message.body_md.includes(`Status: ${terminal}`))).toBe(true);
         }
@@ -322,7 +323,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const worker = store.createAgent({ name: "Worker", provider: "codex" });
         const issue = createResponsibleTestIssue(store, { title: "Scope isolation" });
         const main = store.createTask({ agentId: leader.id, issueId: issue.id, prompt: "Coordinate" });
-        expect(store.claimTask(runtime.id)?.id).toBe(main.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(main.id);
         daemonTaskClaimResponse(store, store.getTaskWithAgent(main.id)!);
         store.startTask(main.id);
         const delegate = (scope: string) => store.createTask({ agentId: worker.id, issueId: issue.id,
@@ -331,8 +332,8 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         db.run("UPDATE multiremi_turns SET execution_scope='dlg_first' WHERE current_attempt_id=?",[first.id]);
         const second=store.sendMessage({session_id:main.issueSessionId!,sender:{type:'platform',id:null},to:{type:'agent',ref:worker.id},message_kind:'request',wake_requested:'now',body_md:'Independent sibling',execution_scope:'dlg_second'});
         const secondTask=store.getTask(store.getTurn(second.turn_id!)!.current_attempt_id!)!;
-        expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-        expect(store.claimTask(runtime.id)?.id).toBe(secondTask.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(secondTask.id);
         daemonTaskClaimResponse(store, store.getTaskWithAgent(first.id)!);
         daemonTaskClaimResponse(store, store.getTaskWithAgent(secondTask.id)!);
         store.startTask(first.id);
@@ -342,7 +343,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         expect(store.listTasksForIssue(issue.id).filter(row => row.status === "queued" && row.agentId === worker.id))
           .toHaveLength(0);
         const continued = delegate("dlg_first");
-        expect(store.claimTask(runtime.id)?.id).toBe(continued.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(continued.id);
         expect(store.getTask(continued.id)?.sessionId).toBe("provider_first");
       });
     }, 30_000);
@@ -360,7 +361,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const task = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: session.id,
           prompt: "Pinned turn", runtimeId: directoryRuntime.id });
-        expect(store.claimTask(directoryRuntime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, directoryRuntime.id)?.id).toBe(task.id);
         const first = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!)
           .session_projection as { to_seq: number };
         expect(store.findTurnEntry(task.id)?.metadata.inbox?.delivered_to_seq).toBe(first.to_seq);
@@ -369,7 +370,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         expect(later.seq).toBeGreaterThan(first.to_seq);
         db.run("UPDATE multiremi_agents SET runtime_id = ? WHERE id = ?", [directoryRuntime.id, agent.id]);
         runTurnExecutionMutation(db as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET runtime_id = ?, dispatched_at = ? WHERE id = ?", [oldRuntime.id, new Date(Date.now() - 120_000).toISOString(), task.id]);
-        expect(store.claimTask(oldRuntime.id)).toBeNull();
+        expect(claimWithCurrentRuntime(store, oldRuntime.id)).toBeNull();
         const repooled = db.query("SELECT * FROM multiremi_turn_execution_records WHERE id = ?").get(task.id) as Record<string, unknown>;
         expect(repooled.status).toBe("queued");
         expect(repooled.runtime_id).toBe(directoryRuntime.id);
@@ -379,7 +380,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         }
         expect(repooled.projection_truncated).toBeFalsy();
         expect(repooled.projection_omitted_events).toBe(0);
-        expect(store.claimTask(directoryRuntime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, directoryRuntime.id)?.id).toBe(task.id);
         const second = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!)
           .session_projection as { to_seq: number };
         expect(second.to_seq).toBeGreaterThanOrEqual(later.seq);
@@ -401,7 +402,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
             let pendingId: string;
             if (source === "re_ring") {
               const initial = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Initial turn" });
-              expect(store.claimTask(runtime.id)?.id).toBe(initial.id);
+              expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(initial.id);
               daemonTaskClaimResponse(store, store.getTaskWithAgent(initial.id)!);
               store.startTask(initial.id);
               appendCanonicalInboxInput(store, { sessionId: session.id, kind: "system", authorType: "system",
@@ -420,7 +421,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
               const delegated = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: session.id,
                 prompt: "Delegated", delegationId: `dlg_${source}_${boundary}`,
                 delegatedByAgentId: agent.id, delegatedFromIssueSessionId: session.id });
-              expect(store.claimTask(runtime.id)?.id).toBe(delegated.id);
+              expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(delegated.id);
               daemonTaskClaimResponse(store, store.getTaskWithAgent(delegated.id)!);
               store.startTask(delegated.id);
               store.completeTask(delegated.id, { output: "Worker report", sessionId: "worker_provider" });
@@ -456,7 +457,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
                   kind: "report", wake: "now", source: {}, priority: 3,
                 } } });
             }
-            const claimed = store.claimTask(runtime.id);
+            const claimed = claimWithCurrentRuntime(store, runtime.id);
             const skip = boundary !== "below" && !hasUnreadNow;
             expect(claimed?.id ?? null).toBe(skip ? null : pendingId);
             expect(store.getTask(pendingId)?.status).toBe(skip ? "cancelled" : "dispatched");
@@ -490,9 +491,9 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         db.run("UPDATE multiremi_session_lanes SET cursor_seq = ? WHERE session_id = ? AND reader_id = ? AND execution_scope = ''",
           [wakeSeq(db, first.id), firstSession.id, owner.id]);
         coverBusiness(db,store,first.id,wakeSeq(db,first.id));
-        expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
         expect(store.getTask(first.id)?.status).toBe("cancelled");
-        expect(store.claimTask(runtime.id)?.id).toBe(scoped.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(scoped.id);
         expect(store.listIssueActivity(firstIssue.id).filter(row => row.type === "wake_downgraded"))
           .toHaveLength(1);
         expect(store.listIssueActivity(secondIssue.id).filter(row => row.type === "wake_downgraded"))
@@ -511,7 +512,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           if(kind==='chat'){const chat=store.createChatSession({agentId:agent.id});task=store.sendChatMessage(chat.id,{content:'Chat work'}).task;}
           else if(kind==='continuation'){
             const prior=store.createSessionTask(session.id,{agentId:agent.id,prompt:'Prior work'});
-            expect(store.claimTask(runtime.id)?.id).toBe(prior.id);store.startTask(prior.id);store.completeTask(prior.id,{output:'Done'});
+            expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(prior.id);store.startTask(prior.id);store.completeTask(prior.id,{output:'Done'});
             task=store.createTask({agentId:agent.id,issueId:issue.id,continuedFromTaskId:prior.id,prompt:'Explicit new work'});
             expect(task.turn_id).not.toBe(prior.turn_id);
           }else if(kind==='human'){
@@ -521,7 +522,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           const turn=store.getTurn(task.turn_id!)!;
           if(kind!=="chat")store.getOrCreateSessionAgentLane(turn.session_id,agent.id);
           db.run("UPDATE multiremi_session_lanes SET cursor_seq=? WHERE session_id=? AND reader_id=?",[store.getConversationLogHead(turn.session_id)!.headSeq,turn.session_id,agent.id]);
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           expect(store.listIssueActivity(issue.id).filter(row=>row.type==='wake_downgraded'&&(row.data as {reason?:string})?.reason==='already_covered')).toHaveLength(0);
           store.completeTask(task.id,{output:'Done'});
         }
@@ -558,7 +559,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
                 kind: "report", wake: "now", source: {}, priority: 3,
               } } });
           }
-          const claimed = store.claimTask(runtime.id);
+          const claimed = claimWithCurrentRuntime(store, runtime.id);
           expect(claimed?.id ?? null).toBe(boundary === "covered" ? null : summary.id);
           expect(store.getTask(summary.id)?.status).toBe(boundary === "covered" ? "cancelled" : "dispatched");
           expect(store.listIssueActivity(parent.id).filter(row => row.type === "wake_downgraded"))
@@ -600,7 +601,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
             { claimToken: topic.claimToken, status: "sent", externalMessageId: "om_mul484_topic" });
           const session = store.getOrCreateDefaultIssueSession(issue.id);
           const leaderTask = store.createSessionTask(session.id, { agentId: leader.id, prompt: "Delegate work" });
-          expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+          expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(leaderTask.id)!);
           store.startTask(leaderTask.id);
           for (const worker of workers) {
@@ -610,7 +611,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           const delegated = workers.map(worker => store.listTasksForIssue(issue.id).find(row => row.agentId === worker.id)!);
           store.completeTask(leaderTask.id, { output: "Task completed." });
           for (const [index, task] of delegated.entries()) {
-            expect(store.claimTask(workerRuntimes[index]!.id)?.id).toBe(task.id);
+            expect(claimWithCurrentRuntime(store, workerRuntimes[index]!.id)?.id).toBe(task.id);
             daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!);
             store.startTask(task.id);
             if (index === 1 && noLineageEndpoint) {
@@ -619,7 +620,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
             store.completeTask(task.id, { output: `Worker ${index} report` });
           }
           const returned = store.listTasksForIssue(issue.id).find(row => row.status === "queued" && row.agentId === leader.id)!;
-          expect(store.claimTask(leaderRuntime.id)?.id).toBe(returned.id);
+          expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(returned.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(returned.id)!);
           store.startTask(returned.id);
           store.completeTask(returned.id, { output: "Reviewed the result" });
@@ -655,7 +656,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const chat = store.createChatSession({ agentId: agent.id });
         const chatTask = store.sendChatMessage(chat.id, { content: "Chat request" }).task;
         for (const task of [main, sibling, chatTask]) {
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!);
           store.startTask(task.id);
         }
@@ -676,7 +677,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         expect(store.listTasks().filter(row => row.chatSessionId === chat.id && row.status === "queued"))
           .toHaveLength(0);
         expect(store.getConversationLogEntryById(unread.id)?.body_md).toBe("Default scope only");
-        expect(store.claimTask(runtime.id)?.id).toBe(rings[0]!.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(rings[0]!.id);
       });
     }, 30_000);
 
@@ -693,7 +694,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const chatTask = store.sendChatMessage(chat.id, { content: "Chat payload" }).task;
 
         for (const task of [issueTask, chatTask]) {
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           const projection = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!)
             .session_projection as { from_seq: number; to_seq: number };
           expect(store.getTask(task.id)).toMatchObject({ projectionFromSeq: projection.from_seq,
@@ -725,7 +726,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         for (const terminal of ["cancelled", "retrying"] as const) {
           const chat = store.createChatSession({ agentId: agent.id });
           const task = store.sendChatMessage(chat.id, { content: `No reply ${terminal}` }).task;
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           const projection = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!)
             .session_projection as { to_seq: number };
           expect(store.getTask(task.id)?.projectionToSeq).toBe(projection.to_seq);
@@ -749,7 +750,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           assigneeType: "agent", assigneeId: original.id });
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const first = store.createSessionTask(session.id, { agentId: original.id, prompt: "First round" });
-        expect(store.claimTask(originalRuntime.id)?.id).toBe(first.id);
+        expect(claimWithCurrentRuntime(store, originalRuntime.id)?.id).toBe(first.id);
         daemonTaskClaimResponse(store, store.getTaskWithAgent(first.id)!);
         store.startTask(first.id);
         const [delivery] = db.transaction(() => store.sendEnvelopeWithinTransaction({
@@ -772,7 +773,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         expect(queued[0]!.agentId).toBe(original.id);
         expect(store.listIssueActivity(issue.id).filter(row => row.type === "re_ring").map(row => row.data))
           .toEqual([expect.objectContaining({ action: "created", task_id: queued[0]!.id })]);
-        expect(store.claimTask(originalRuntime.id)?.id).toBe(queued[0]!.id);
+        expect(claimWithCurrentRuntime(store, originalRuntime.id)?.id).toBe(queued[0]!.id);
         const projection = daemonTaskClaimResponse(store, store.getTaskWithAgent(queued[0]!.id)!)
           .session_projection as { to_seq: number };
         expect(projection.to_seq).toBeGreaterThanOrEqual(delivery.entry.seq);
@@ -791,7 +792,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const issue = createResponsibleTestIssue(store, { title: "Recoverable failure", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Before failure" });
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         const projection = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!)
           .session_projection as { to_seq: number };
         store.startTask(task.id);
@@ -824,7 +825,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         const session = store.getOrCreateDefaultIssueSession(issue.id);
         const task = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: session.id,
           prompt: "Before failure", maxAttempts: 1 });
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
         const projection = daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!)
           .session_projection as { to_seq: number };
         store.startTask(task.id);
@@ -855,7 +856,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           const agent = store.createAgent({ name: "Chat owner", provider: "codex", runtimeId: runtime.id });
           const chat = store.createChatSession({ agentId: agent.id });
           const task = store.sendChatMessage(chat.id, { content: "Initial message" }).task;
-          expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(task.id)!);
           store.startTask(task.id);
           if (wake === "self_now") {
@@ -893,7 +894,7 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           const issue = createResponsibleTestIssue(store, { title: "Ordered wake", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
           const session = store.getOrCreateDefaultIssueSession(issue.id);
           const running = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Running" });
-          expect(store.claimTask(runtime.id)?.id).toBe(running.id);
+          expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(running.id);
           daemonTaskClaimResponse(store, store.getTaskWithAgent(running.id)!);
           store.startTask(running.id);
           const append = (body: string) => appendCanonicalInboxInput(store, { sessionId: session.id, kind: "system",

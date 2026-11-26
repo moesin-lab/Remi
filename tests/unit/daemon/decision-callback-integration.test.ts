@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,13 +52,13 @@ async function setup({ store, db }: PendingTurnTestFixture, delegated = false, u
     const leader = store.createAgent({ name: 'Original delegator', provider: 'claude', runtimeId: leaderRuntime.id });
     const dispatchSession = store.createIssueSession(issue.id, { title: 'Original dispatch', inheritMode: 'none' });
     const leaderTask = store.createTask({ agentId: leader.id, issueId: issue.id, issueSessionId: dispatchSession.id, prompt: 'Coordinate' });
-    expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id); store.startTask(leaderTask.id);
+    expect(claimWithCurrentRuntime(store, leaderRuntime.id)?.id).toBe(leaderTask.id); store.startTask(leaderTask.id);
     store.sendMessage({ session_id: session.id, sender: { type: 'agent', id: leader.id }, source_turn_id: store.getTurnForAttempt(leaderTask.id)!.id,
       to: { type: 'agent', ref: agent.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Start delegated work' });
     store.completeTask(leaderTask.id, { output: 'Dispatched the original work' });
     dispatch = { leaderId: leader.id, sessionId: dispatchSession.id };
   } else send("Start");
-  const claimed = store.claimTask(rt)!;
+  const claimed = claimWithCurrentRuntime(store, rt)!;
   store.startTask(claimed.id);
   const attempt = store.getTaskWithAgent(claimed.id)!;
   const offer = store.getDaemonTurnBridge().offerInput(attempt);
@@ -213,7 +214,7 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
       const childSession = h.store.createIssueSession(h.issue.id, { title: 'Child work', inheritMode: 'none' });
       h.store.sendMessage({ session_id: childSession.id, sender: { type: 'agent', id: h.agent.id }, source_turn_id: h.offer.turn_id,
         to: { type: 'agent', ref: child.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Return your finding' });
-      const childTask = h.store.claimTask(childRuntime.id)!;
+      const childTask = claimWithCurrentRuntime(h.store, childRuntime.id)!;
       h.store.startTask(childTask.id);
       h.send('Ordinary context before the return', 'next_turn');
       h.store.completeTask(childTask.id, { output: 'Delegated finding' });

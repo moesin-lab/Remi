@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
@@ -76,7 +77,7 @@ function fixture(options: { fallback?: boolean } = {}) {
 
 /** Claim and fail the task the way the daemon does: classify, then report. */
 function failClaimed(store: Store, runtimeId: string, taskId: string, error: string): void {
-  expect(store.claimTask(runtimeId)?.id).toBe(taskId);
+  expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(taskId);
   store.startTask(taskId);
   store.failTask(taskId, { error, failureReason: classifyDaemonTaskFailure("claude", error) });
 }
@@ -123,7 +124,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     // A switch cannot carry the previous model's provider session, so the chain
     // restarts the provider conversation rather than resuming it.
     expect(retry.sessionId).toBeNull();
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
   });
 
   it("dispatches the fallback model to the execution engine and records it", () => {
@@ -135,7 +136,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     // The engine runs whatever model the claim hands it, so the override has to
     // survive all the way to the daemon payload — otherwise the recovery chain
     // would re-run the exhausted primary model and fail again.
-    const recovered = store.claimTask(runtime.id)!;
+    const recovered = claimWithCurrentRuntime(store, runtime.id)!;
     expect(recovered.id).toBe(retry.id);
     const claimAgent = daemonTaskClaimResponse(store, recovered).agent as Record<string, unknown>;
     expect(claimAgent).toMatchObject({ model: FALLBACK, thinking_level: "high", fallback_model: "" });
@@ -156,7 +157,7 @@ describe("MUL-336 model fallback recovery chain", () => {
       title: "Independent", assigneeType: "agent", assigneeId: agent.id,
     });
     const plain = store.createTask({ agentId: agent.id, issueId: otherIssue.id, prompt: "Primary again" });
-    const plainClaim = store.claimTask(runtime.id)!;
+    const plainClaim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(plainClaim.id).toBe(plain.id);
     expect(daemonTaskClaimResponse(store, plainClaim).agent as Record<string, unknown>).toMatchObject({
       model: PRIMARY, thinking_level: "high", fallback_model: "", fallback_thinking_level: "",
@@ -175,7 +176,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(independent.fallbackSwitched).toBe(false);
     // The queued fallback retry is older, so it is claimed first — and it is the
     // only task on the fallback model.
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.executionModel).toBe(FALLBACK);
     expect(store.getTask(independent.id)).toMatchObject({
       status: "queued", executionModel: null, fallbackSwitched: false,
@@ -195,10 +196,10 @@ describe("MUL-336 model fallback recovery chain", () => {
     const next = store.createTask({ agentId: agent.id, issueId: nextIssue.id, prompt: "Primary only" });
     // The queued retry still runs, because the capability that matters is the
     // one the task will actually execute with (requirement 6) ...
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
     // ... while the fresh task on the primary model is left queued rather than
     // dispatched to a machine that cannot execute it.
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(next.id)?.status).toBe("queued");
     expect(store.getTask(retry.id)?.executionModel).toBe(FALLBACK);
   });
@@ -302,7 +303,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(store.getIssue(issue.id)?.status).toBe("todo");
     store.refreshQueuedCapabilityWaitReasons(created + 15 * 60_000);
     expect(store.listTasks().filter((candidate) => candidate.parentTaskId === task.id)).toHaveLength(1);
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
   });
 
   it("keeps queued fallback creation atomic and publishes events only after commit", () => {
@@ -341,7 +342,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(store.getTask(task.id)?.failureReason).toBe(TaskFailureReason.QueuedModelUnavailable);
     const retry = successor(store, task.id)!;
     expect(retry).toMatchObject({ executionModel: FALLBACK, fallbackSwitched: true });
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
   });
 
   it.each(["no fallback", "already switched", "attempt limit", "pinned runtime"])("keeps capability waits when switching is ineligible: %s", (scenario) => {
@@ -383,11 +384,11 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(waitMs).toBeLessThanOrEqual(300_000);
     // Deferred work must not be claimed early — that is the whole point of
     // honouring Retry-After instead of hammering a shared account pool.
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET next_retry_at = ? WHERE id = ?", [
       new Date(Date.now() - 1_000).toISOString(), retry.id,
     ]);
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
   });
 
   it("isolates concurrent tasks of the same Agent", () => {
@@ -407,7 +408,7 @@ describe("MUL-336 model fallback recovery chain", () => {
       status: "queued", executionModel: null, fallbackSwitched: false,
     });
     const retry = successor(store, first.id)!;
-    const claimed = [store.claimTask(runtime.id)?.id, store.claimTask(runtime.id)?.id].sort();
+    const claimed = [claimWithCurrentRuntime(store, runtime.id)?.id, claimWithCurrentRuntime(store, runtime.id)?.id].sort();
     expect(claimed).toEqual([retry.id, second.id].sort());
     expect(store.getTask(second.id)?.executionModel).toBe(PRIMARY);
     expect(store.getTask(retry.id)?.executionModel).toBe(FALLBACK);
@@ -445,7 +446,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(store.listInboxItems(owner.id).filter((item) => item.type.startsWith("autopilot_run"))).toHaveLength(0);
 
     // The fallback finishes the work: the run succeeds and is announced once.
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
     store.startTask(retry.id);
     store.completeTask(retry.id, { output: "Sweep complete on the fallback model" });
 
@@ -498,7 +499,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(retry).toMatchObject({ executionModel: FALLBACK, chatSessionId: chat.id, issueId: null });
     expect(store.getChatSession(chat.id)?.latestTaskId).toBe(retry.id);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
     store.startTask(retry.id);
     store.completeTask(retry.id, { output: "Shipped on the fallback" });
 
@@ -540,7 +541,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     // The delegator hears nothing until the chain actually ends.
     expect(store.listTasksForIssue(issue.id).filter((task) => task.agentId === leader.id)).toHaveLength(0);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
     store.startTask(retry.id);
     store.completeTask(retry.id, { output: "Done by the fallback model" });
 
@@ -576,7 +577,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     // The recovered task must actually be claimable: pinning the primary's level
     // leaves every Runtime rejecting the fallback model, and the task waits
     // forever instead of recovering.
-    const recovered = store.claimTask(runtime.id);
+    const recovered = claimWithCurrentRuntime(store, runtime.id);
     expect(recovered?.id).toBe(retry.id);
     const claimAgent = daemonTaskClaimResponse(store, recovered!).agent as Record<string, unknown>;
     // An empty level means "the engine's default for THIS model", which for the
@@ -598,6 +599,6 @@ describe("MUL-336 model fallback recovery chain", () => {
     // short backoff would fire inside that window and hammer the same pool, so
     // the chain ends instead and keeps the throttle as its reported reason.
     expect(successor(store, task.id)).toBeNull();
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
   });
 });

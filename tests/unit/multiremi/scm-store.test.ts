@@ -1,3 +1,5 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
+import { MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
@@ -1506,7 +1508,7 @@ describe("SCM connection and canonical event store", () => {
     });
     expect(genericRoleResponse.status).toBe(200);
     expect(await genericRoleResponse.json()).toMatchObject({ role: "maintainer", supervisor: false });
-    expect(store.claimTask(runtime.id)?.id).toBe(probeTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(probeTask.id);
     store.completeTask(probeTask.id, { output: "role boundary probe complete" });
 
     store.createAutopilotTrigger(ordinary.id, {
@@ -1557,7 +1559,10 @@ describe("SCM connection and canonical event store", () => {
 
   it("collapses Wiki revisions without exposing them to ordinary SCM automation claims", async () => {
     const { store, connection } = seedConnection();
-    const runtime = store.registerRuntime({ name: "SCM claim runtime", provider: "claude" });
+    const runtime = store.registerRuntime({
+      name: "SCM claim runtime", provider: "claude", daemonId: "dmn_scm_claim",
+      metadata: { agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION, parallel_agent_execution: 1 },
+    });
     const { autopilot: wiki, trigger: wikiTrigger } = configureRepositoryWikiAutomation(store, { runtimeId: runtime.id });
     store.updateAutopilotTrigger(wiki.id, wikiTrigger.id, {
       eventConfig: {

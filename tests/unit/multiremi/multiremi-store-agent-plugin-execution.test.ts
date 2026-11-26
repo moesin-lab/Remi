@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { beforeAll, afterAll, afterEach, describe, expect, it } from "bun:test";
 import { snapshotStatsForFile, createLocalSnapshotStore as createSnapshotStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -52,7 +53,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
        WHERE runtime_id = ? AND plugin_version_id = ?`,
       [plugin.activeVersion!.artifactDigest, runtime.id, plugin.activeVersionId],
     );
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
   });
 
@@ -72,7 +73,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
     });
     const task = store.createTask({ agentId: agent.id, prompt: "prove the plugin" });
 
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     expect(store.getTask(task.id)).toMatchObject({
       pluginSnapshot: [],
       executionFingerprint: null,
@@ -83,7 +84,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
       status: "ready",
       observedDigest: plugin.activeVersion!.artifactDigest,
     });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.id).toBe(task.id);
     expect(claimed.executionFingerprint).toMatch(/^[0-9a-f]{64}$/);
     expect(claimed.pluginSnapshot).toEqual([{
@@ -126,7 +127,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
 
     const issue = createResponsibleTestIssue(store, { title: "old version run", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "run v1" });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     store.startTask(task.id);
 
     const candidate = store.createAgentPluginVersion(plugin.id, {
@@ -147,14 +148,14 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
     });
     expect(store.getRuntimeAgentPluginDesiredSnapshot(runtime.id).plugins.map((entry) => entry.versionId).sort())
       .toEqual([plugin.activeVersionId!, candidate.id].sort());
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
 
     // A user-created task is not a retry and therefore resolves the Agent's
     // current active Plugin only when this fresh task is claimed.
     store.startTask(retry.id);
     store.completeTask(retry.id, { output: "recovered" });
     const current = store.createTask({ agentId: agent.id, prompt: "run current config" });
-    const currentClaim = store.claimTask(runtime.id)!;
+    const currentClaim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(currentClaim.id).toBe(current.id);
     expect(currentClaim.pluginSnapshot).toMatchObject([{ versionId: candidate.id, version: "2.0.0" }]);
     expect(currentClaim.executionFingerprint).not.toBe(claimed.executionFingerprint);
@@ -176,7 +177,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
       prompt: "run without plugins",
       maxAttempts: 2,
     });
-    const claimed = store.claimTask(runtime.id)!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id)!;
     expect(claimed.pluginSnapshot).toEqual([]);
     expect(claimed.executionFingerprint).toMatch(/^[0-9a-f]{64}$/);
 
@@ -192,7 +193,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
     const plugin = importPlugin(store);
     store.createAgentPluginBinding(agent.id, { pluginId: plugin.id });
     expect(store.listAgentPluginRuntimeStates({ runtimeId: runtime.id })[0]?.status).not.toBe("ready");
-    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
   });
 
   it("starts a fresh provider session when an Agent Plugin binding changes", () => {
@@ -216,7 +217,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
 
     const chat = store.createChatSession({ agentId: agent.id, title: "Plugin session" });
     const first = store.sendChatMessage(chat.id, { body: "Read product docs" }).task;
-    const firstClaim = store.claimTask(runtime.id)!;
+    const firstClaim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(firstClaim.id).toBe(first.id);
     store.startTask(first.id);
     store.completeTask(first.id, {
@@ -233,7 +234,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
     });
     const second = store.sendChatMessage(chat.id, { body: "Read engineering docs" }).task;
     expect(second.sessionId).toBeNull();
-    const secondClaim = store.claimTask(runtime.id)!;
+    const secondClaim = claimWithCurrentRuntime(store, runtime.id)!;
     expect(secondClaim.id).toBe(second.id);
     expect(secondClaim.executionFingerprint).not.toBe(firstClaim.executionFingerprint);
     expect(secondClaim.pluginSnapshot).toMatchObject([{ config: { space: "engineering" } }]);
@@ -257,7 +258,7 @@ describe("Multiremi store - Agent Plugin execution snapshots", () => {
 
     const issue = createResponsibleTestIssue(store, { title: "provider drift", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "run once" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.failTask(task.id, { error: "runtime offline", failureReason: "runtime_offline" });
     const retry = store.listTasks().find((entry) => entry.parentTaskId === task.id)!;

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { readOfferedTurnInput, turnCompletion, completionResponse } from "../../fixtures/turn-report.js";
 // MUL-74: outbox delivery is at-least-once, so every daemon report endpoint
@@ -21,7 +22,7 @@ describe("daemon report replay idempotency", () => {
     const agent = store.createAgent({ name: "Replay Bot", provider: "claude", runtimeId: runtime.id });
     const issue = createResponsibleTestIssue(store, { title: "Replay", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "x" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     readOfferedTurnInput(store, task.id);
     store.startTask(task.id);
 
@@ -57,7 +58,7 @@ describe("daemon report replay idempotency", () => {
     const runtime = store.registerRuntime({ id: "rt_replay_msg", name: "replay-msg", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Replay Msg Bot", provider: "claude", runtimeId: runtime.id });
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "x" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
 
     const batch = {
@@ -90,7 +91,7 @@ describe("daemon report replay idempotency", () => {
     const prompt = "do the thing";
     const sha256 = new Bun.CryptoHasher("sha256").update(prompt).digest("hex");
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const response = await reportFrame(store, "task.prompt", { task_id: task.id, mode: "bootstrap", prompt, sha256 });
+      const response = await reportFrame(store, "task.prompt", { task_id: task.id, system_prompt_policy: store.getAttemptSystemPrompt(task.id), mode: "bootstrap", prompt, sha256 });
       expect(response).toEqual({ ok: true });
     }
     expect(store.getTaskPrompt(task.id)?.prompt).toBe(prompt);

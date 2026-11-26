@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { issueMessagesPath, requestMessageBody, sentTask, taskRequestPath } from "./unified-test-paths.js";
@@ -55,7 +56,7 @@ function fixture(store: MultiremiStore, humanAssigned = false) {
 
 function start(store: MultiremiStore, task: MultiremiTask) {
   const runtimeId = store.getAgent(task.agentId)!.runtimeId!;
-  expect(store.claimTask(runtimeId)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtimeId)?.id).toBe(task.id);
   store.buildTaskSessionProjection(task.id);
   store.startTask(task.id);
 }
@@ -512,7 +513,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
           expect(store.listTasksForIssue(f.b.id)).toHaveLength(2);
           for (const { task: source } of sources) store.completeTask(source.id, { output: "Waiting for Atlas." });
           for (let i = 0; i < children.length; i++) {
-            const child = store.claimTask(f.atlas.runtimeId!)!;
+            const child = claimWithCurrentRuntime(store, f.atlas.runtimeId!)!;
             expect(children.map(task => task.id)).toContain(child.id);
             store.buildTaskSessionProjection(child.id);
             store.startTask(child.id);

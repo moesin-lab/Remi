@@ -1,5 +1,8 @@
 import { foldStoredTrace } from "./trace-pages.js";
-import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
+import type { FeishuBotCommandRequest, FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
+import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution, type RestartJournalEntry } from "./planned-restart-journal.js";
+import { samePolicyOffer } from '@multiremi/contracts/system-prompt-policy.js';
+import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
 import { restartQuestionKey, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
 import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
@@ -22,7 +25,7 @@ import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } fro
 import { cpus, homedir, hostname } from "node:os";
 import { multiremiStateDir } from "@shared/home-paths.js";
 import { basename, dirname, join, resolve } from "node:path";
-import { acquireDaemonOutbox, releaseDaemonOutbox, daemonReportTransport, daemonOutboxHasPriority } from "./report-transport.js";
+import { acquireDaemonOutbox, releaseDaemonOutbox, daemonReportTransport, daemonOutboxHasPriority, registerRestartSource } from "./report-transport.js";
 import { acquireDaemonTrace, releaseDaemonTrace, daemonTraceStore, type DaemonTraceTransport } from "./trace-transport.js";
 import { installedExternalCodexCommand, registerDaemonExternalChats } from "./external-chats.js";
 import { CodexExternalChats } from "@daemon/external-chats/index.js";
@@ -1621,11 +1624,14 @@ export class MultiremiDaemon {
       daemonId: this.options.daemonId ?? this.options.runtimeName,
       cliVersion: multiremiVersion,
       launchedBy: this.options.launchedBy,
-      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch"],
+      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch", "prompt.policy.adopt.v1"],
       log,
       ...options.protocolClientOptions,
     });
-    this.taskDownlinks = new DaemonTaskDownlinks(this.protocolClient, () => this.options.runtimeId ?? undefined);
+    registerRestartSource(this.protocolClient,this.legacyOutboxPath,() => PlannedRestartJournal.discover({server:this.options.serverUrl,workspace:this.options.workspaceId ?? 'local',
+      daemon:this.options.daemonId ?? this.options.runtimeName,provider:this.options.provider,legacyPath:this.legacyOutboxPath}));
+    this.taskDownlinks = new DaemonTaskDownlinks(this.protocolClient, () => this.options.runtimeId ?? undefined,
+      attempt => this.ensureOutbox().reportIdentity(attempt,this.options.runtimeId));
     if (this.options.provider === "codex" && typeof process.getuid === "function") {
       this.externalChats = registerDaemonExternalChats(this.protocolClient,
         () => this.stopped ? undefined : this.options.runtimeId ?? undefined,
@@ -1637,7 +1643,7 @@ export class MultiremiDaemon {
         }));
     }
     // Co-resident lanes share a client whose construction-time caps may be empty.
-    this.protocolClient.advertiseCaps(["input_unread", "turn.restart"]);
+    this.protocolClient.advertiseCaps(["input_unread", "turn.restart", "prompt.policy.adopt.v1"]);
     // PR 6 §5.3: this lane keeps Chat processes alive for background tasks; it parks only when the server echoes the cap.
     if (this.options.asyncTasks) this.protocolClient.advertiseCaps(["lane.background"]);
     this.parkedLanes = new ParkedLanes({
@@ -1676,7 +1682,10 @@ export class MultiremiDaemon {
         runtime_id: this.options.runtimeId,
         provider: this.options.provider,
         max_concurrency: this.options.maxConcurrency,
-        active_task_ids: [...new Set([...this.activeTaskIds, ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId) ?? [])])],
+        active_task_ids: [...new Set([...this.activeTaskIds, ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId).filter(id => !this.outbox?.isHeld(id)) ?? [])])],
+        held_restart_attempts: [...(this.outbox?.mappedHandoffs(this.restartJournalPath()) ?? []), ...(this.restartJournal?.entries().filter(entry => entry.execution.runtime_id === this.options.runtimeId &&
+          this.restartRecoveryCandidates.has(entry.execution.handoff_id) && !this.resumedRestartIds.has(entry.execution.handoff_id))
+          .map(({execution}) => ({attempt_id:execution.attempt_id,handoff_id:execution.handoff_id})) ?? [])],
         active_question_waits: this.taskDownlinks.activeQuestionWaits(),
         capabilities: this.runtimeCapabilities(),
         // PR 6 §5.2: the lanes whose process lives, so the server settles the others' rows.
@@ -1726,24 +1735,65 @@ export class MultiremiDaemon {
       },
       onStateChange: () => { this.taskDownlinks.connectionChanged(); this.wakeClaim(); },
       readyToConnect: () => this.supervisorReady(),
-      onConnected: () => {
+      onConnected: async () => {
+        this.feishuConcierge?.connectionRestored();
         // welcome follows the server's authenticated target-version hello transition.
         this.updateConfirmation ??= this.confirmRuntimeUpdate().catch(error => {
           log.warn(`Update confirmation deferred: ${error instanceof Error ? error.message : String(error)}`);
         }).finally(() => { this.updateConfirmation = null; });
         for (const reporter of this.activityReporters) reporter.resend();
         this.parkedLanes?.resendAll();
-        const runtime = this.protocolLane.runtime();
-        if (runtime) this.protocolClient.send({ t: "runtime.ready",
-          rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids, active_question_waits: runtime.active_question_waits ?? [] } });
-        if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
-          this.onceOfferTimer = setTimeout(() => { this.onceOfferTimer = null; this.stop(); }, this.options.onceOfferTimeoutMs);
-        }
+        if (!this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
       },
+      onRuntimeConfirmed: async () => {
+        if (this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
+      },
+    };
+    const sendRuntimeReady = async () => {
+        const generation = this.protocolClient.connectionGeneration();
+        const runtime = this.protocolLane.runtime();
+        if (runtime) {
+          const outbox = this.ensureOutbox();
+          for (const incident of outbox.uncertainHandoffs()) {
+            if (!this.protocolClient.sharesCap('turn.restart') || !this.protocolClient.sharesCap('prompt.policy.adopt.v1')) break;
+            try {
+              const result = await this.protocolClient.rpc('task.offer_status',{inspect_handoff:true,handoff_id:incident.handoff},runtime.runtime_id);
+              if (result.handoff_id !== incident.handoff || typeof result.created_through !== 'string') continue;
+              const ownSource = incident.source === this.restartJournalPath();
+              outbox.recordHandoffEvidence(incident.source,incident.handoff,ownSource && typeof result.attempt_id === 'string' ? result.attempt_id : null,result.created_through);
+            } catch { continue; }
+          }
+          const exited = [];
+          if (this.protocolClient.sharesCap('prompt.policy.adopt.v1')) {
+            for (const proof of outbox.exitedLaunches(runtime.runtime_id)) {
+              try {
+                const status = await this.protocolClient.rpc('task.offer_status',proof,runtime.runtime_id);
+                if (!samePolicyOffer(proof,status)) continue;
+                if (status.state === 'terminal') outbox.transitionPolicyReceipt(proof,'terminal');
+                if (status.state === 'adopted') exited.push(proof);
+              } catch { continue; }
+            }
+          }
+          if (this.stopped || this.protocolClient.connectionGeneration() !== generation) return;
+          this.protocolClient.send({ t: "runtime.ready", rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids,
+            held_restart_attempts: this.protocolLane.runtime()?.held_restart_attempts,
+            prepared_offers: this.ensureOutbox().preparedOffers(runtime.runtime_id),
+            exited_launches: exited,
+            active_question_waits: runtime.active_question_waits ?? [] } });
+        }
+        if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
+          const stopWhenIdle = () => {
+            this.onceOfferTimer = null;
+            if (hasPendingOffer()) this.onceOfferTimer = setTimeout(stopWhenIdle,this.options.onceOfferTimeoutMs);
+            else this.stop();
+          };
+          this.onceOfferTimer = setTimeout(stopWhenIdle,this.options.onceOfferTimeoutMs);
+        }
     };
     // Requests are derived from persisted server handoffs, never a local timer.
     this.protocolClient.registerFrameHandler("turn.restart", frame => {
       const p = frame.payload;
+      if (!this.protocolClient.sharesCap('prompt.policy.adopt.v1') || !this.protocolClient.sharesCap('turn.restart')) return;
       if (!frame.rt || frame.rt !== this.options.runtimeId || typeof p.attempt_id !== "string"
         || typeof p.turn_id !== "string" || typeof p.handoff_id !== "string"
         || !Number.isSafeInteger(p.generation) || Number(p.generation) < 0) return;
@@ -1771,9 +1821,12 @@ export class MultiremiDaemon {
       this.restartDeadlines.set(p.attempt_id, deadline);
     });
     this.protocolClient.addLane(this.protocolLane);
-    registerDaemonOfferHandler(this.protocolClient, {
+    const hasPendingOffer = registerDaemonOfferHandler(this.protocolClient, {
+      stopSignal: () => this.pollAbort.signal,
       runtimeId: () => this.options.runtimeId,
-      rejection: (task) => {
+      adoption: { workspace: () => this.options.workspaceId ?? 'local', daemon: () => this.options.daemonId ?? this.options.runtimeName,lane: () => this.restartJournalPath(),
+        outbox: () => this.ensureOutbox(), held: id => this.ensureOutbox().isHeld(id) || Boolean(this.restartJournal?.entries().some(entry => entry.execution.attempt_id === id)) },
+      rejection: (task, preparing) => {
         if (this.diskMonitor.critical) return "disk_critical";
         if (this.options.once && this.onceTaskAccepted) return "draining";
         if (this.serverDrainActive) return "draining";
@@ -1781,7 +1834,7 @@ export class MultiremiDaemon {
         // PR 6 D5: an offer for a parked lane takes no new slot's worth of work; its process already runs.
         const lane = this.backgroundLaneOf(task as MultiremiTaskWithAgent);
         const parked = lane !== null && this.parkedLanes.isParked(laneKeyOf(lane));
-        if ((!parked && this.activeTaskCount >= this.options.maxConcurrency) || (this.options.once && this.onceTaskAccepted)) return "capacity";
+        if ((!parked && this.activeTaskCount + preparing >= this.options.maxConcurrency) || (this.options.once && (this.onceTaskAccepted || preparing > 0))) return "capacity";
         return null;
       },
       run: task => {
@@ -1912,8 +1965,8 @@ export class MultiremiDaemon {
     return this.client.respondTaskHumanRequest(requestId, response, credential);
   }
 
-  resetFeishuBotSession(revision: number, externalSessionKey: string): Promise<boolean> {
-    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  resetFeishuBotSession(revision: number, externalSessionKey: string, senderOpenId: string | null): Promise<boolean> {
+    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, senderOpenId);
   }
 
   cancelFeishuBotSessionTask(
@@ -1926,8 +1979,16 @@ export class MultiremiDaemon {
     );
   }
 
-  inspectFeishuBotSession(revision: number, externalSessionKey: string) {
-    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  executeFeishuBotCommand(input: FeishuBotCommandRequest) {
+    return this.client.executeFeishuBotCommand(this.options.runtimeId!, input);
+  }
+
+  authorizeFeishuBotSender(input: FeishuBotAuthorizeSenderRequest) {
+    return this.client.authorizeFeishuBotSender(this.options.runtimeId!, input);
+  }
+
+  inspectFeishuBotSession(revision: number, externalSessionKey: string, senderOpenId: string | null) {
+    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, senderOpenId);
   }
 
   async ensureTopicWorkspace(sessionKey: string, topicId: string): Promise<string | null> {
@@ -2039,7 +2100,9 @@ export class MultiremiDaemon {
     this.parkedLanesClosing = null;
     const outbox = this.ensureOutbox();
     this.plannedRestartTransfer();
-    this.restartRecoveryCandidates = new Set(this.restartJournal!.entries().map(entry => entry.execution.handoff_id));
+    const awaitingRecovery = this.restartJournal!.awaitingRecovery();
+    this.restartRecoveryCandidates = new Set(awaitingRecovery.map(entry => entry.execution.handoff_id));
+    for (const entry of awaitingRecovery) outbox.holdAttempt(entry.execution.attempt_id,true);
     this.startRepoCheckoutServer();
     try {
       await this.registerCurrentRuntime();
@@ -2286,6 +2349,7 @@ export class MultiremiDaemon {
   }
 
   private async canRecoverOrphans(outbox: MultiremiTaskReportOutbox): Promise<boolean> {
+    if (this.restartRecoveryCandidates.size || outbox.hasRestartIncident() || outbox.preparedOffers(this.options.runtimeId ?? '').length) return false;
     const pending = outbox.taskIdsWithPendingTerminal(this.options.runtimeId ?? undefined);
     if (!pending.length) return true;
     if (this.protocolClient.connectionState() === "connected") {
@@ -3808,12 +3872,13 @@ export class MultiremiDaemon {
    * never unwinds the agent's provider session.
    */
   private enqueueTaskReport(taskId: string, kind: MultiremiOutboxKind, payload: Record<string, unknown>): void {
-    const terminal = kind === "complete" || kind === "fail";
+    const identity = this.ensureOutbox().reportIdentity(taskId,this.options.runtimeId);
+    const terminal = !this.ensureOutbox().classifyReport(taskId,payload.receipt_id ?? identity.receipt_id,this.options.runtimeId) && (kind === "complete" || kind === "fail");
     const status = kind === "complete" ? "completed" : "failed";
     if (terminal && this.options.runtimeId) this.ensureTrace().track(taskId, this.options.runtimeId);
     // The completion fields describe the close that follows the enqueue.
-    this.ensureOutbox().enqueue(taskId, kind, { ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
-      ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) });
+    this.ensureOutbox().enqueue(taskId, kind, { ...identity, ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
+      ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) },this.options.runtimeId);
     if (terminal) {
       this.attemptSlashCommands.delete(taskId);
       this.ensureTrace().close(taskId, status, typeof payload.error === "string"
@@ -4287,8 +4352,9 @@ export class MultiremiDaemon {
       const startSignal = AbortSignal.any([abort.signal, this.pollAbort.signal]);
       startSignal.throwIfAborted();
       const startReply = await this.ensureOutbox().enqueueAndWait(task.id, "start", {
+        ...this.ensureOutbox().reportIdentity(task.id, this.options.runtimeId),
         usage_run_id: usageRunId, runtime_id: this.options.runtimeId, ...(this.executionGenerations.has(task.id) ? { generation: this.executionGenerations.get(task.id) } : {}),
-      }, this.options.requestTimeoutMs, startSignal);
+      }, this.options.requestTimeoutMs, startSignal,this.options.runtimeId);
       if (startReply.execution_authorized !== true) throw new Error("Task execution start does not authorize this run to execute");
       startSignal.throwIfAborted();
       if (codexCatalogError) {
@@ -4444,7 +4510,12 @@ export class MultiremiDaemon {
             } catch (error) {
               log.warn(`Task ${task.id}: optional trace identity snapshot omitted: ${error instanceof Error ? error.message : String(error)}`);
             }
-            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: head };
+            const scope = checkpointRestart!;
+            const local = this.ensureOutbox().policyReceipt(scope);
+            if (!local || local.state !== 'launch_claimed') throw new Error('restart_policy_unverifiable');
+            const {state, ...identity} = local;
+            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: head, policy_receipt:{ ...identity,
+              handoff_id:scope.handoff_id,turn_id:scope.turn_id,prior_restart_generation:scope.generation } };
           });
           const deadline = this.restartDeadlines.get(task.id);
           if (deadline) clearTimeout(deadline);
@@ -4476,13 +4547,34 @@ export class MultiremiDaemon {
     }
   }
 
-  private readonly pendingResumedTasks = new Map<string, ReturnType<typeof normalizeDaemonTurnOffer>>();
+  private readonly pendingResumedTasks = new Map<string, () => ReturnType<typeof normalizeDaemonTurnOffer>>();
+
+  private async preflightRestart(entry: RestartJournalEntry): Promise<boolean> {
+    const scope = entry.execution;
+    const proof = entry.checkpoint.policy_receipt;
+    const local = this.ensureOutbox().policyReceipt(scope);
+    if (this.ensureOutbox().hasIndependentHold(scope.attempt_id,scope.handoff_id) || !proof || !local || local.state !== 'launch_claimed' || !samePolicyOffer(local,proof) || proof.turn_id !== scope.turn_id
+      || proof.handoff_id !== scope.handoff_id || proof.prior_restart_generation !== scope.generation
+      || !this.protocolClient.sharesCap('turn.restart') || !this.protocolClient.sharesCap('prompt.policy.adopt.v1')) return false;
+    const info = await this.taskDownlinks.rpc('task.offer_status',{...proof});
+    const current = info.handoff as import('../store/planned-restarts.js').PlannedRestartHandoff | undefined;
+    if (info.state !== 'adopted' || !samePolicyOffer(proof,info) || !current || current.handoff_id !== scope.handoff_id || current.turn_id !== scope.turn_id) return false;
+    if (current.state === 'requested') return entry.state === 'prepared' && current.generation === scope.generation;
+    const frozen = current.checkpoint?.policy_receipt;
+    return Boolean(frozen && samePolicyOffer(proof,frozen) && frozen.handoff_id === proof.handoff_id && frozen.prior_restart_generation === scope.generation
+      && (current.state === 'suspended' && current.generation === scope.generation || ['resuming','running'].includes(current.state)
+        && current.generation === scope.generation + 1 && current.consumer_id === entry.consumer_id));
+  }
 
   private async resumePlannedRestarts(): Promise<void> {
     this.plannedRestartTransfer();
     for (const entry of this.restartJournal!.entries()) {
       if (this.stopped || !this.restartRecoveryCandidates.has(entry.execution.handoff_id) || this.resumedRestartIds.has(entry.execution.handoff_id)
         || entry.execution.runtime_id !== this.options.runtimeId) continue;
+      if (!await this.preflightRestart(entry).catch(() => false)) {
+        this.restartJournal!.hold(entry.execution.handoff_id);
+        continue;
+      }
       const retry = this.restartJournal!.reserveResume(entry.execution.handoff_id);
       if (retry === "waiting") continue;
       if (retry === "expired") {
@@ -4493,10 +4585,13 @@ export class MultiremiDaemon {
         continue;
       }
       try {
-        await this.restartTransfer!.resume(entry.execution.handoff_id);
-        const task = this.pendingResumedTasks.get(entry.execution.handoff_id)!;
+        const resumed = await this.restartTransfer!.resume(entry.execution.handoff_id);
+        const activate = this.pendingResumedTasks.get(entry.execution.handoff_id);
         this.pendingResumedTasks.delete(entry.execution.handoff_id);
         this.resumedRestartIds.add(entry.execution.handoff_id);
+        if (!activate || this.ensureOutbox().hasIndependentHold(entry.execution.attempt_id,entry.execution.handoff_id) || !this.restartJournal!.claimLaunch(resumed)) continue;
+        this.ensureOutbox().releaseRestartGrant(entry.execution.attempt_id,entry.execution.handoff_id);
+        const task = activate();
         const run = this.handleTask(task).finally(() => this.inflight.delete(run));
         this.inflight.add(run);
         void run.catch(error => log.error(`Resumed task ${task.id} failed: ${String(error)}`));
@@ -4514,39 +4609,50 @@ export class MultiremiDaemon {
     }
   }
 
+  private restartJournalPath(): string {
+    return this.outboxPath === ':memory:' ? ':memory:' : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash('sha256').update(this.legacyOutboxPath).digest('hex').slice(0, 16)}.db`);
+  }
+
   private plannedRestartTransfer(): PlannedRestartTransfer {
     if (this.restartTransfer) return this.restartTransfer;
-    this.restartJournal ??= new PlannedRestartJournal(this.outboxPath === ":memory:" ? ":memory:"
-      : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash("sha256").update(this.legacyOutboxPath).digest("hex").slice(0, 16)}.db`));
+    this.restartJournal ??= new PlannedRestartJournal(this.restartJournalPath());
     return this.restartTransfer = new PlannedRestartTransfer(this.restartJournal, {
+      preflight: entry => this.preflightRestart(entry),
       suspend: async entry => {
         await this.taskDownlinks.rpc("turn.restart.suspend", { ...entry.execution, checkpoint: entry.checkpoint }, this.options.requestTimeoutMs);
       },
       resume: async entry => {
         const identities = this.restartJournal!.traceIdentities(entry, reason => log.warn(`Task ${entry.execution.attempt_id}: ${reason}; using trace fold only`));
-        const result = await this.taskDownlinks.rpc("turn.restart.resume", { ...entry.execution, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
+        const proof = entry.checkpoint.policy_receipt!;
+        const result = await this.taskDownlinks.rpc("turn.restart.resume_bound", { ...entry.execution, ...proof, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
         const task = normalizeDaemonTurnOffer(result.task as Record<string, unknown>);
+        const echoed = result.policy_receipt as typeof proof | undefined;
+        if (!echoed || !samePolicyOffer(proof,echoed) || echoed.handoff_id !== proof.handoff_id || echoed.turn_id !== proof.turn_id
+          || echoed.prior_restart_generation !== proof.prior_restart_generation || task.id !== proof.attempt_id || task.turn_id !== proof.turn_id
+          || task.workspaceId !== proof.workspace_id || !task.systemPromptPolicy || hashSystemPromptContent(task.systemPromptPolicy.content) !== proof.content_hash
+          || task.systemPromptPolicy.contentHash !== proof.content_hash) throw new Error('restart_policy_mismatch');
         const generation = Number(result.generation);
         if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
-        this.executionGenerations.set(task.id, generation);
-        if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
-        this.resumedUsageRuns.set(task.id, entry.consumer_id);
-        this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
-        this.taskDownlinks.bindTurn({ ...task, generation });
-        const prior = foldStoredTrace(this.ensureTrace().store, task.id).fold.state();
-        const replay = new Set(prior.items.flatMap(item => item.type === "user_message" && item.steer && !item.steer.consumed ? [item.steer.steer_id] : []));
-        let firstReplay = true;
-        task.input_messages = task.input_messages.map(message => {
-          if (!replay.has(message.id)) return message;
-          const notice = firstReplay ? "以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。\n" : "";
-          firstReplay = false;
-          return { ...message, body_md: withSteerIdentity(message.body_md, message.id, notice) };
+        this.pendingResumedTasks.set(entry.execution.handoff_id, () => {
+          this.executionGenerations.set(task.id, generation);
+          if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
+          this.resumedUsageRuns.set(task.id, entry.consumer_id);
+          this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
+          this.taskDownlinks.bindTurn({ ...task, generation });
+          const prior = foldStoredTrace(this.ensureTrace().store, task.id).fold.state();
+          const replay = new Set(prior.items.flatMap(item => item.type === "user_message" && item.steer && !item.steer.consumed ? [item.steer.steer_id] : []));
+          let firstReplay = true;
+          task.input_messages = task.input_messages.map(message => {
+            if (!replay.has(message.id)) return message;
+            const notice = firstReplay ? "以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。\n" : "";
+            firstReplay = false;
+            return { ...message, body_md: withSteerIdentity(message.body_md, message.id, notice) };
+          });
+          const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
+          this.restartQuestions.set(task.id, questions);
+          for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
+          return task;
         });
-        const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
-        this.restartQuestions.set(task.id, questions);
-        for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
-        // No model may run until transfer.resume has persisted the local receipt.
-        this.pendingResumedTasks.set(entry.execution.handoff_id, task);
         return { generation };
       },
     });
@@ -5717,6 +5823,7 @@ export class MultiremiDaemon {
         sha256: promptArtifact.sha256,
         // ADR 0023: Remi's part of the AGENTS.md in effect, for the transcript's session notes. Never the local context.
         instructions: promptArtifact.instructions,
+        system_prompt_policy: task.systemPromptPolicy ?? null,
       });
       if (previousTrace?.turn && this.resumedUsageRuns.has(task.id)) trace.restarted(this.executionGenerations.get(task.id)!);
       signal.throwIfAborted();

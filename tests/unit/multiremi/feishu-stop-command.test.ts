@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 /**
@@ -89,7 +90,7 @@ function submit(
 
 /** Mark a submitted Task as actually running. */
 function start(store: MultiremiStore, taskId: string, startedAt?: string) {
-  expect(store.claimTask("rt_bot")?.id).toBe(taskId);
+  expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(taskId);
   store.startTask(taskId);
   if (startedAt) mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET started_at = ? WHERE id = ?", [startedAt, taskId]);
 }
@@ -124,7 +125,7 @@ describe("Feishu stop resolution", () => {
     });
     start(store, submitted.taskId);
 
-    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey);
+    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey, { senderOpenId: "ou_owner" });
     expect(result).toMatchObject({ outcome: "cancelled", taskId: submitted.taskId });
     expect(store.getTask(submitted.taskId)?.status).toBe("cancelled");
   });
@@ -267,7 +268,7 @@ describe("Feishu stop resolution", () => {
     });
     const before = census();
 
-    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey);
+    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey, { senderOpenId: "ou_owner" });
     expect(result).toMatchObject({ outcome: "cancelled", taskId: leaderTask.id });
 
     // Only the conversation's own run stopped; the Issue work is untouched.
@@ -303,12 +304,12 @@ describe("Feishu stop resolution", () => {
     });
 
     store.completeTask(issueLeader.id, { output: "Delegated the verification." });
-    store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey);
+    store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey, { senderOpenId: "ou_owner" });
     expect(store.getTask(leaderTask.id)?.status).toBe("cancelled");
     expect(store.getTask(child.id)?.status).toBe("queued");
 
     // The child still runs to completion on the Issue side.
-    expect(store.claimTask("rt_bot")?.id).toBe(child.id);
+    expect(claimWithCurrentRuntime(store, "rt_bot")?.id).toBe(child.id);
     store.buildTaskSessionProjection(child.id);
     store.startTask(child.id);
     store.completeTask(child.id, { output: "Verified.", sessionId: "child_session" });

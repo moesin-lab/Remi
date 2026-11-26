@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { issueMessagesPath, requestMessageBody, turnApiPath } from "./unified-test-paths.js";
@@ -47,7 +48,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       issueSessionId: firstSession.id,
       prompt: "Review",
     });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
 
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const headers = { Authorization: "Bearer root-secret" };
@@ -1252,7 +1253,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     expect(chatLogBody.entries.at(-1).session_id).toBe(chat.id);
     expect(chatLogBody.entries.at(-1).body_md).toBe("hello page");
 
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     const waitLocalDirectory = await app.request(`/api/daemon/tasks/${task.id}/wait-local-directory`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

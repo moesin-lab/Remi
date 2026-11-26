@@ -693,6 +693,9 @@ export class WorkspacesRepo {
       this.ctx.lockWorkspaceRuntimeLifecycle(id);
       this.assertWorkspaceDaemonTrustRevoked(id);
       this.deleteWorkspaceScmState(id);
+      this.ctx.db.run("DELETE FROM multiremi_attempt_system_prompts WHERE workspace_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_system_prompt_versions WHERE workspace_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_system_prompt_documents WHERE workspace_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_execution_group_members WHERE workspace_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_execution_groups WHERE workspace_id = ?", [id]);
       const result = this.ctx.db.run("DELETE FROM multiremi_workspaces WHERE id = ?", [id]);

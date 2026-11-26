@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import {it,expect} from 'bun:test';
@@ -35,7 +36,7 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
     const runtime=f.store.registerRuntime({name:'Permission host',provider:'codex',daemonId:'permission-host'});
     f.store.updateAgent(f.a.id,{runtimeId:runtime.id});
     const sent=f.send('work',f.a.id),turn=f.store.getTurn(sent.turn_id!)!,attemptId=turn.current_attempt_id!;
-    expect(f.store.claimTask(runtime.id)?.id).toBe(attemptId);f.store.startTask(attemptId);
+    expect(claimWithCurrentRuntime(f.store, runtime.id)?.id).toBe(attemptId);f.store.startTask(attemptId);
     const result=f.store.getDaemonTurnBridge().rpc('turn.decision',{turn_id:turn.id,attempt_id:attemptId,
       wait_id:`permission_${attemptId}`,dedupe_key:`permission:${attemptId}`,body_md:'May I run?',
       options:[{label:'Allow',value:'allow'}],metadata:{kind:'permission',permission:'run',

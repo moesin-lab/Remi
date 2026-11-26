@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { normalizeDaemonTurnOffer } from "@multiremi/worker/daemon-offers.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
@@ -113,7 +114,7 @@ function fixture(options: {
 describe("claim hydrates only the selected task", () => {
   it("picks the highest-priority task and keeps its Skills and files complete", () => {
     const { store, runtime } = fixture();
-    const claimed = store.claimTask(runtime.id, { supportsBinarySkillFiles: true })!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true })!;
     expect(claimed.id).toBe(store.listTasks().find((task) => task.priority === 100)!.id);
     expect(claimed.agent?.id).toBe("agt_hydrate_0");
     // The selected task's own payload is still complete: the Skill body and its file content.
@@ -133,27 +134,27 @@ describe("claim hydrates only the selected task", () => {
     const second = store.createTask({ agentId: agent.id, prompt: "second", priority: 10 });
     // Same session lane, so the SQL's `created_at ASC` decides; the later row must lose.
     expect(store.getTask(second.id)!.createdAt >= store.getTask(first.id)!.createdAt).toBe(true);
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(second.id);
   });
 
   it("still excludes a profile task the runtime cannot serve and claims the next one", () => {
     const { store, runtime } = fixture({ agents: 3 });
     // Drop the runtime's model catalog so the profile task's frozen connection cannot be honoured.
     store.updateRuntime(runtime.id, { metadata: { codex_profiles: 0, parallel_agent_execution: 1 } });
-    const claimed = store.claimTask(runtime.id, { supportsBinarySkillFiles: true });
+    const claimed = claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true });
     // Whatever it picks, it must not be a profile task: this runtime advertises no profiles.
     expect(claimed?.codexProfile ?? null).toBeNull();
   });
 
   it("recovers a stale dispatch instead of leaving it stranded", () => {
     const { store, runtime } = fixture({ agents: 2 });
-    const dispatched = store.claimTask(runtime.id, { supportsBinarySkillFiles: true })!;
+    const dispatched = claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true })!;
     const stale = "2000-01-01T00:00:00.000Z";
     runTurnExecutionMutation((store as unknown as { db: import("@multiremi/store/db/postgres.js").SqlDatabase })
       .db, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", [stale, dispatched.id]);
 
-    const recovered = store.claimTask(runtime.id, { supportsBinarySkillFiles: true });
+    const recovered = claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true });
     expect(recovered?.id).toBe(dispatched.id);
     expect(store.getTask(dispatched.id)?.dispatchedAt).not.toBe(stale);
   });
@@ -161,7 +162,7 @@ describe("claim hydrates only the selected task", () => {
   it("never reads a Skill file for an Agent that is only being tested for eligibility", () => {
     const { store, runtime } = fixture({ agents: 5, skillFileBytes: 200_000 });
     const counter = counting(store);
-    const claimed = store.claimTask(runtime.id, { supportsBinarySkillFiles: true })!;
+    const claimed = claimWithCurrentRuntime(store, runtime.id, { supportsBinarySkillFiles: true })!;
     const counts = counter.stop();
 
     const skillFileReads = [...counts.entries()]
@@ -188,7 +189,7 @@ describe("claim hydrates only the selected task", () => {
     store.setAgentSkills(agent.id, [skill.id!]);
 
     const counter = counting(store);
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
     const counts = counter.stop();
     const skillFileReads = [...counts.entries()]
       .filter(([sql]) => sql.includes("FROM multiremi_skill_files"))

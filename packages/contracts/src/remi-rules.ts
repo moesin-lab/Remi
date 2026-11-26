@@ -6,15 +6,10 @@
  */
 import { LEGACY_WORKSPACE_DEFAULTS, WORKSPACE_DEFAULT_V3 } from "./legacy-workspace-prompts.js";
 
-export const CODE_DELIVERY_CONTRACT = `When a task changes code:
-- Push the working branch and create a GitHub pull request or Codebase merge request before reporting completion.
-- Give the PR/MR a title describing the change without an Issue Key prefix.
-- Use the internal iss_... Issue ID from the task context. After creating or reusing the PR/MR, run remi scm change-request bind <issue-id> --url <url> (or --repository <repo> --number <n>). Report delivery only after binding succeeds and remi scm change-request list <issue-id> shows that same PR/MR.
-- If binding fails, report the URL and error and retry binding the same reference.
-- Reuse an existing open PR/MR for the same source branch. Create at most one PR/MR per changed repository.
-- Creating a PR/MR does not require approval. Merging it or pushing directly to the default branch requires explicit user authorization.
-- Return every PR/MR URL in the final result. If creation fails, report the exact failure and preserve the pushed branch for recovery.
-- Do not create empty PRs/MRs. A squad leader must ensure delegated code changes have a PR/MR before completing the parent task.`;
+/** Protected authorization and truthful delivery protocol; editable behavior is in system-policy. */
+export const CODE_DELIVERY_PROTOCOL = `- Issue delivery requires explicit binding even if editable instructions omit it or suggest automatic association. Use the internal iss_... Issue ID from the task context. After creating or reusing the PR/MR, run remi scm change-request bind <issue-id> --url <url> (or --repository <repo> --number <n>) and verify the same reference with remi scm change-request list <issue-id>. If binding fails, report the URL and exact error and retry the same reference. For ordinary Chat without Issue context, do not invent an Issue ID.
+- Merging a PR/MR or pushing directly to the default branch always requires explicit user authorization.
+- When creating a PR/MR: do not create empty PRs/MRs; if creation fails, report the exact failure and preserve the pushed branch for recovery; a squad leader must ensure required PRs/MRs exist for delegated code changes before completing the parent task.`;
 
 export const REMI_CLI_COMMUNICATION = "Use `remi message` for communication, `remi inbox` to read addressed messages, and `remi turn` to inspect or control execution.";
 

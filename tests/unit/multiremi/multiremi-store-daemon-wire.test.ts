@@ -1,3 +1,5 @@
+import { MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { normalizeDaemonTurnOffer } from "@multiremi/worker/daemon-offers.js";
@@ -209,7 +211,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       sameNew.id,
     ]);
 
-    expect(store.claimTask(runtime.id)?.id).toBe(high.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(high.id);
 
     const app = createMultiremiApp({ store });
     const pendingBody = pendingTaskWireSnapshot(store, runtime.id);
@@ -678,6 +680,8 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     });
     const runtime = store.registerRuntime({
       id: "rt_claim_context",
+      daemonId: "dmn_claim_context",
+      metadata: { agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION, parallel_agent_execution: 1 },
       name: "claim context",
       provider: "claude",
       workspaceId: "local",
@@ -728,9 +732,12 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     for (let index = 0; index < 3; index++) {
       const claim = await taskOfferResponse(store, runtime.id);
       expect(claim.status).toBe(200);
-      claimed.push((await claim.json()).task);
+      const task = (await claim.json()).task;
+      expect(task).toBeTruthy();
+      claimed.push(task);
     }
     const byId = new Map(claimed.map((task) => [task.attempt_id, task]));
+    expect(new Set(byId.keys())).toEqual(new Set([firstChat.task.id, run.taskId, quick.task.id]));
 
     expect(byId.get(firstChat.task.id)).toMatchObject({
       attempt_id: firstChat.task.id,
@@ -841,7 +848,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     const agent = store.createAgent({ name: "Stale Wire", provider: "claude" });
     const chat = store.createChatSession({ agentId: agent.id, title: "Recover" });
     const first = store.sendChatMessage(chat.id, { body: "Original question" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id);
     store.startTask(first.task.id);
     store.completeTask(first.task.id, {
       output: "Original answer",
@@ -849,7 +856,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       workDir: "/tmp/stale-wire",
     });
     const resumed = store.sendChatMessage(chat.id, { body: "Continue from that" });
-    expect(store.claimTask(runtime.id)?.id).toBe(resumed.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(resumed.task.id);
     store.startTask(resumed.task.id);
     store.failTask(resumed.task.id, {
       error: "Stale provider session: no conversation found",
@@ -890,7 +897,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     store.createIssueComment(issue.id, { body: "UNRELATED_ISSUE_HISTORY_MUST_NOT_SHIP" });
     const chat = store.createChatSession({ agentId: agent.id });
     const first = store.sendChatMessage(chat.id, { body: "Our earlier private question" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.task.id);
     store.startTask(first.task.id);
     store.completeTask(first.task.id, {
       output: "Our earlier private answer",
@@ -898,7 +905,9 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       workDir: "/tmp/detached-chat-work",
     });
     const pending = store.sendChatMessage(chat.id, { body: "Continue our conversation" });
-    expect(store.claimTask(runtime.id)?.id).toBe(pending.task.id);
+    const generation = 'detached-private-chat-proposal';
+    expect(store.claimTask(runtime.id,{policyProtocol:'adopt',supportsPromptPolicy:true,offerGeneration:generation})?.id).toBe(pending.task.id);
+    expect(store.recordTaskOffered(pending.task.id,runtime.id,'2020-01-01T00:00:00.000Z',generation)).toBe(true);
     // Ownership migration retains old bindings as audit data, never as this turn's conversation.
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ?, execution_fingerprint = ? WHERE id = ?",
       ["2020-01-01T00:00:00.000Z", CHAT_ISSUE_DECOUPLED_FINGERPRINT, pending.task.id]);
@@ -1083,7 +1092,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     const chat = prepareIssueTopic(store, { runtimeId: runtime.id, agentId: agent.id, issueId: issue.id });
     const task = store.sendChatMessage(chat.id, { body: "Please summarize the topic" }).task;
     expect(task.issueId).toBe(issue.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
 
     const claimed = store.getTaskWithAgent(task.id)!;
     const wire = daemonTaskClaimResponse(store, claimed);
@@ -1123,7 +1132,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     const run = store.runAutopilot(autopilot.id);
     const autopilotTask = store.getTask(run.taskId!)!;
 
-    expect(store.claimTask(runtime.id)?.id).toBe(workdirTask.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(workdirTask.id);
     store.pinTaskSession(workdirTask.id, "sess-workdir", "/Users/alice/src/remi");
 
     const app = createMultiremiApp({ store });
@@ -1229,7 +1238,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     const issue = createResponsibleTestIssue(store, { title: "Comment trigger", workspaceId: "local" });
     const previous = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "previous run" });
     const previousStartedAt = "2025-01-01T00:00:00.000Z";
-    expect(store.claimTask(runtime.id)?.id).toBe(previous.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(previous.id);
     store.startTask(previous.id);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET started_at = ?, updated_at = ? WHERE id = ?", [previousStartedAt, previousStartedAt, previous.id]);
     store.completeTask(previous.id, { output: "done" });

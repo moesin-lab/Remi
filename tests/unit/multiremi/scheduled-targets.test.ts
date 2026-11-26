@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
@@ -65,7 +66,7 @@ describe("scheduled targets", () => {
       expect(store.getKnowledgeSubmission(raw.submission.id)?.status).toBe("consumed");
       const denied = await app.request(target.kind === "repository" ? `/api/projects/${project.id}/knowledge/publish` : "/api/workspaces/local/repos/repo_example/wiki/publish", { method: "POST", headers, body: JSON.stringify({ outputs: [{ action: "noop" }] }) });
       expect(denied.status).toBe(403);
-      expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(run.taskId!);
       store.startTask(run.taskId!);
       store.completeTask(run.taskId!, { output: "Published" });
       store.advanceScheduledTargetRuns();
@@ -143,7 +144,7 @@ describe("scheduled targets", () => {
     const { store, autopilot, trigger } = setup();
     const first = store.runAutopilot(autopilot.id, { triggerId: trigger.id });
     const runtime = store.registerRuntime({ name: "Scheduled runtime", provider: "claude", workspaceId: "local" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.taskId!);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(first.taskId!);
     store.startTask(first.taskId!);
     store.completeTask(first.taskId!, { output: "Completed target" });
     store.updateAutopilot(autopilot.id, { status: "paused" });

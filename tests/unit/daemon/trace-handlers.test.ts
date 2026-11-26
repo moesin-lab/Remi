@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -36,7 +37,7 @@ describe("trace RPC read authority", () => {
     });
     store.registerRuntime({ id: "rt_trace_executor", name: "Trace executor", provider: "codex", workspaceId: "local",
       daemonId: "trace-executor", ownerId: "local" });
-    expect(store.claimTask("rt_trace_executor")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_trace_executor")?.id).toBe(submitted.taskId);
     store.startTask(submitted.taskId);
     expect(await reportFrame(store, "trace.head", { task_id: submitted.taskId }, host)).toMatchObject({ ok: true, head: 0 });
     expect(await reportFrame(store, "trace.subscribe", { task_id: submitted.taskId, from_seq: 0 }, host)).toMatchObject({ ok: true, head: 0 });

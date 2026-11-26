@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import {it,expect} from 'bun:test';
 import {pendingTurnBackendTests} from './pending-turn-test-backends.js';
 import {StoreContext,createCommitEventQueue} from '@multiremi/store/context.js';
@@ -29,7 +30,7 @@ pendingTurnBackendTests('MUL-506 Issue derivation and read progress',fixture=>{
   // An owner question at the human stage needs a human: in_review until running work resumes.
   it('unanswered owner decision at the human stage parks the Issue in_review until work resumes',()=>{const f=setup();
     const runtime=f.store.registerRuntime({name:'Derivation native host',provider:'codex',daemonId:'derive-native'});
-    const attempt=f.store.claimTask(runtime.id)!;f.store.startTask(attempt.id);
+    const attempt=claimWithCurrentRuntime(f.store, runtime.id)!;f.store.startTask(attempt.id);
     const requested=f.store.getDaemonTurnBridge().rpc('turn.decision',{turn_id:f.sent.turn_id,attempt_id:attempt.id,wait_id:'derive-native-wait',dedupe_key:'derive-question',body_md:'Approve?',options:[],metadata:{kind:'question',questions:[{question:'Approve?'}]}},{runtimeId:runtime.id,daemonId:'derive-native',workspaceId:'local'});
     expect(requested.ok).toBe(true);const questionId=String(requested.message_id);
     expect(f.store.getIssue(f.issue.id)?.status).toBe('in_review');f.derive();expect(f.store.getIssue(f.issue.id)?.status).toBe('in_review');

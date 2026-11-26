@@ -151,6 +151,10 @@ function createLoopDaemon(options: {
     registerCurrentRuntime: async () => "rt_cadence",
     refreshWorkspaceRepos: async () => {},
     ensureOutbox: (_options?: unknown) => ({
+      hasRestartIncident: () => false,
+      preparedOffers: () => [],
+      exitedLaunches: () => [],
+      uncertainHandoffs: () => [],
       stats: () => null,
       taskIdsWithPendingTerminal: () => [],
       pendingTaskIds: () => [],

@@ -1,3 +1,4 @@
+import { MultiremiTaskReportOutbox } from '@multiremi/worker/outbox.js';
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DaemonTaskDownlinks } from '@multiremi/worker/daemon-downlinks.js';
 import { registerDaemonOfferHandler } from '@multiremi/worker/daemon-offers.js';
@@ -10,8 +11,9 @@ import type { ElicitationCreateParams, ElicitationResult } from '@multiremi/cont
 const input = JSON.parse(process.argv[2]!);
 const active = new Set<string>(input.mode === 'source' ? [input.attempt.id] : []);
 const client = new DaemonProtocolClient({ serverUrl: input.serverUrl, token: 'callback-fixture',
-  daemonId: 'daemon_decision_callback', cliVersion: DAEMON_MIN_CLI_VERSION });
-const downlinks = new DaemonTaskDownlinks(client, () => input.rt);
+  daemonId: 'daemon_decision_callback', caps: ['offer','prompt.policy.adopt.v1'], cliVersion: DAEMON_MIN_CLI_VERSION });
+const receipts = new MultiremiTaskReportOutbox({ path: ':memory:', deliver: async () => {} });
+const downlinks = new DaemonTaskDownlinks(client, () => input.rt, id => receipts.reportIdentity(id, input.rt));
 const lane: DaemonProtocolLane = {
   runtime: () => ({ runtime_id: input.rt, provider: 'claude', max_concurrency: 1,
     active_task_ids: [...active], active_question_waits: downlinks.activeQuestionWaits() }),
@@ -23,6 +25,7 @@ const lane: DaemonProtocolLane = {
 };
 client.addLane(lane);
 if (input.mode === 'consumer') registerDaemonOfferHandler(client, {
+  adoption: { workspace: () => 'local', daemon: () => 'daemon_decision_callback', lane: () => input.rt, outbox: () => receipts, held: () => false },
   runtimeId: () => input.rt, rejection: () => active.size ? 'capacity' : null,
   run: task => {
     active.add(task.id); downlinks.bindTurn(task);
@@ -46,7 +49,7 @@ if (input.mode === 'consumer') registerDaemonOfferHandler(client, {
       await downlinks.consumeTaskSteerMessages(task.id, []);
       console.log(JSON.stringify({ event: 'consumer_ack', attempt_id: task.id, turn_id: task.turn_id }));
       const receipt = await client.event({ t: 'turn.complete', rt: input.rt, seq: 1,
-        p: { turn_id: task.turn_id, attempt_id: task.id, input_to_seq: task.input_to_seq,
+        p: { ...receipts.reportIdentity(task.id, input.rt), turn_id: task.turn_id, attempt_id: task.id, input_to_seq: task.input_to_seq,
           reply: { body_md: 'Continued original work using Paris', message_kind: 'final' } } });
       if (receipt.ok !== true) throw new Error(`continuation completion rejected: ${JSON.stringify(receipt)}`);
       console.log(JSON.stringify({ event: 'consumer_completed', attempt_id: task.id, turn_id: task.turn_id }));

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../helpers/claim-with-current-runtime.js";
 // Bundled into the disposable application's API image by the Docker smoke.
 // Uses the real authenticated API and PostgreSQL store across API restarts.
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -19,7 +20,7 @@ app.post("/fixture/task", async (c) => {
   store.heartbeatRuntime(runtime.id);
   const agent = store.createAgent({ name: "Fixture", provider: "claude", runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "fixture" });
-  if (store.claimTask(runtime.id)?.id !== task.id) throw new Error("Fixture could not claim task");
+  if (claimWithCurrentRuntime(store, runtime.id)?.id !== task.id) throw new Error("Fixture could not claim task");
   store.startTask(task.id);
   return c.json({ id: task.id });
 });

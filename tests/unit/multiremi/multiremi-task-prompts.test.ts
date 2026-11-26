@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { turnApiPath } from "./unified-test-paths.js";
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
@@ -43,12 +44,12 @@ describe("assembled task prompt audit", () => {
     });
     const agent = store.createAgent({ name: "Prompt worker", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, runtimeId: runtime.id, prompt: "Do it" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
 
     const prompt = "# Delta Prompt\n\n## Current Request\nDo it";
     const sha256 = createHash("sha256").update(prompt).digest("hex");
-    const reported = await reportFrame(store, "task.prompt", { task_id: task.id, mode: "delta", prompt, sha256 }, { headers: { "Content-Type": "application/json" }, authToken: "" });
+    const reported = await reportFrame(store, "task.prompt", { task_id: task.id, system_prompt_policy: store.getAttemptSystemPrompt(task.id), mode: "delta", prompt, sha256 }, { headers: { "Content-Type": "application/json" }, authToken: "" });
     expect(reported.ok).toBe(true);
     expect(store.getTaskPrompt(task.id)).toMatchObject({ taskId: task.id, mode: "delta", sha256 });
 
@@ -68,12 +69,12 @@ describe("assembled task prompt audit", () => {
     const runtime = store.registerRuntime({ id: "rt_notes", name: "Notes runtime", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Notes worker", provider: "claude" });
     const task = store.createTask({ agentId: agent.id, runtimeId: runtime.id, prompt: "你好" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const prompt = "你好";
     const instructions = "# Notes worker\n\n# Remi\nNotes.\n";
     const sha256 = createHash("sha256").update(prompt).digest("hex");
-    const reported = await reportFrame(store, "task.prompt", { task_id: task.id, mode: "bootstrap", prompt, sha256, instructions },
+    const reported = await reportFrame(store, "task.prompt", { task_id: task.id, system_prompt_policy: store.getAttemptSystemPrompt(task.id), mode: "bootstrap", prompt, sha256, instructions },
       { headers: { "Content-Type": "application/json" }, authToken: "" });
     expect(reported.ok).toBe(true);
     expect(store.getTaskPrompt(task.id)).toMatchObject({ prompt, instructions });
@@ -150,7 +151,7 @@ describe("assembled task prompt audit", () => {
     expect(JSON.stringify(firstWire)).not.toContain(oldResult.body);
 
     const firstPrompt = "Bootstrap";
-    store.recordTaskPrompt(first.id, {
+    store.recordTaskPrompt(first.id, { systemPromptPolicy: store.getAttemptSystemPrompt(first.id) ?? undefined,
       mode: "bootstrap",
       prompt: firstPrompt,
       sha256: createHash("sha256").update(firstPrompt).digest("hex"),

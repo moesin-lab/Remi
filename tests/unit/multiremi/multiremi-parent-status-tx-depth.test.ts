@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { linkProjectedTestChangeRequest } from "./helpers.js";
 import { createResponsibleTestIssue, createHistoricalTestIssue, seedHistoricalIssueFacts, acceptTestIssueDelivery, testWorkspaceMember } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
@@ -124,8 +125,8 @@ export function setupDepthStore() {
 }
 
 export function runTask(store: Store, runtimeId: string, taskId: string) {
-  let claimed = store.claimTask(runtimeId);
-  while (claimed && claimed.id !== taskId) claimed = store.claimTask(runtimeId);
+  let claimed = claimWithCurrentRuntime(store, runtimeId);
+  while (claimed && claimed.id !== taskId) claimed = claimWithCurrentRuntime(store, runtimeId);
   if (!claimed) throw new Error(`Could not claim task ${taskId}`);
   return store.startTask(taskId);
 }
@@ -324,8 +325,8 @@ describe("MUL-400 S1 transaction depth — task terminal paths", () => {
     expect(counter.max, "createTask").toBe(1);
     expect(store.getIssue(child.id)?.status).toBe("todo");
 
-    let claimed = store.claimTask(runtime.id);
-    while (claimed && claimed.id !== task.id) claimed = store.claimTask(runtime.id);
+    let claimed = claimWithCurrentRuntime(store, runtime.id);
+    while (claimed && claimed.id !== task.id) claimed = claimWithCurrentRuntime(store, runtime.id);
     counter.reset();
     store.startTask(task.id);
     expect(counter.max, "startTask").toBe(1);

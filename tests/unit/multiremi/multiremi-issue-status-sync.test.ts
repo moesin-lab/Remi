@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createNativeTestQuestion, answerNativeTestQuestion } from './fixtures/native-question.js';
 import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
 // Regression coverage for MUL-253 symptom A: an Issue parked at `in_review`
@@ -86,8 +87,8 @@ function createSessionTask(
 
 /** Claim + start one specific task, regardless of what else is queued. */
 function runTask(store: MultiremiStore, runtimeId: string, taskId: string) {
-  let claimed = store.claimTask(runtimeId);
-  while (claimed && claimed.id !== taskId) claimed = store.claimTask(runtimeId);
+  let claimed = claimWithCurrentRuntime(store, runtimeId);
+  while (claimed && claimed.id !== taskId) claimed = claimWithCurrentRuntime(store, runtimeId);
   if (!claimed) throw new Error(`Could not claim task ${taskId}`);
   return store.startTask(taskId);
 }

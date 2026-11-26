@@ -42,7 +42,7 @@ export function databaseCommandSpecs(adoptInventory: (file: string) => Promise<u
     mutation: 'destructive', outputs: ['json'],
     options: [
       { name: 'sqlite-file', type: 'string', valueName: 'absolute-path', description: 'Existing SQLite Server database file for exclusive offline classification' },
-      { name: 'export-inventory', type: 'boolean', conflictsWith: ['adopt-inventory','hold-for-rollback','after','review-page','finalize'], description: 'Export from an isolated historical level 4/5 snapshot for independent provenance verification' },
+      { name: 'export-inventory', type: 'boolean', conflictsWith: ['adopt-inventory','hold-for-rollback','after','review-page','finalize'], description: 'Export from an isolated SCM historical level 4/5 or 7/8 snapshot for independent provenance verification' },
       { name: 'adopt-inventory', type: 'string', valueName: 'archive-file', conflictsWith: ['hold-for-rollback','after','review-page','finalize'], description: 'Compare a historical archive against the independently provisioned target-specific pin' },
       { name: 'hold-for-rollback', type: 'boolean', conflictsWith: ['after','review-page','finalize'], description: 'Gate writers and capture the immutable pre-rollback inventory' },
       { name: 'after', type: 'string', conflictsWith: ['review-page','finalize'], description: 'Show the next 25 differences after this stable entry key' },

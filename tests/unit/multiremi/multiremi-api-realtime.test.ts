@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 // Daemon and browser websocket upgrades, workspace-scoped fanout, and the
@@ -325,7 +326,7 @@ describe("Multiremi API — realtime websockets", () => {
       });
       await expectNoWebSocketMessage(local);
 
-      expect(store.claimTask(localRuntime.id)?.id).toBe(localTask.id);
+      expect(claimWithCurrentRuntime(store, localRuntime.id)?.id).toBe(localTask.id);
       expect(await nextWebSocketMessage(local)).toMatchObject({
         type: "task:dispatch",
         payload: {
@@ -403,7 +404,7 @@ describe("Multiremi API — realtime websockets", () => {
       expect(store.getMessage(queued.message.id)?.body_md).toBe("private revised input");
       store.deleteMessage(queued.message.id);
       expect(store.getMessage(queued.message.id)?.deleted_at).toBeString();
-      expect(store.claimTask(runtime.id)?.id).toBe(sent.task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(sent.task.id);
       store.startTask(sent.task.id);
       store.completeTask(sent.task.id, { output: "all done", sessionId: "sess-chat", workDir: "/tmp/chat" });
       store.markChatSessionRead(chat.id);
@@ -489,7 +490,7 @@ describe("Multiremi API — realtime websockets", () => {
       workspaceId: "local",
       prompt: "Do not assume daemon identity",
     });
-    expect(store.claimTask("rt_ws_local")?.id).toBe(task.id);
+    expect(claimWithCurrentRuntime(store, "rt_ws_local")?.id).toBe(task.id);
     store.startTask(task.id);
     const taskToken = await store.createTaskAccessToken(task, "local");
     const removedMember = store.createWorkspaceMember({

@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 import { createResponsibleTestIssue } from './helpers.js';
@@ -712,7 +713,7 @@ describe("Multiremi API — authentication and token scoping", () => {
       });
     }
     expect(store.getTask(otherDaemonTask.id)?.status).toBe("queued");
-    expect(store.claimTask(otherDaemonRuntime.id)?.id).toBe(otherDaemonTask.id);
+    expect(claimWithCurrentRuntime(store, otherDaemonRuntime.id)?.id).toBe(otherDaemonTask.id);
     const crossDaemonClaimedTaskRoutes: Array<{ method: string; path: string; body?: unknown }> = [
       { method: "POST", path: `/api/daemon/tasks/${otherDaemonTask.id}/start` },
       {

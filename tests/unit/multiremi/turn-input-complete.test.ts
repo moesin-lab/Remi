@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it, describe } from "bun:test";
 import type { ConversationLogEntry } from "@multiremi/contracts/conversation-log.js";
 import { parseUnreadRange, splitProjectedInput } from "@multiremi/contracts/session-input.js";
@@ -91,7 +92,7 @@ pendingTurnBackendTests("plain turn input acknowledgement", fixture => {
     const bridge = f.store.getDaemonTurnBridge();
     const scope = { workspaceId: "local", runtimeId: "rt_plain", daemonId: "daemon_plain" };
     const claim = () => {
-      const attempt = f.store.claimTask("rt_plain")!;
+      const attempt = claimWithCurrentRuntime(f.store, "rt_plain")!;
       f.store.startTask(attempt.id);
       const offer = bridge.offerInput(f.store.getTaskWithAgent(attempt.id)!);
       return { attempt, offer, range: splitProjectedInput(offer.input_messages[0]!.body_md).range };
@@ -189,7 +190,7 @@ pendingTurnBackendTests("plain turn input acknowledgement", fixture => {
     const { offer } = f.claim();
     expect(f.bridge.rpc("turn.input", f.receipt(offer), f.scope).ok).toBe(true);
     const retried = f.store.retryTurn(sent.turn_id!, true);
-    expect(f.store.claimTask("rt_plain")?.id).toBe(retried.current_attempt_id!);
+    expect(claimWithCurrentRuntime(f.store, "rt_plain")?.id).toBe(retried.current_attempt_id!);
     // A replacement whose own receipt starts past the original input replays it ahead of the range.
     f.db.run("UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_read_seq=? WHERE id=?", [offer.input_to_seq, offer.input_to_seq, retried.current_attempt_id]);
     const replay = f.bridge.offerInput(f.store.getTaskWithAgent(retried.current_attempt_id!)!);

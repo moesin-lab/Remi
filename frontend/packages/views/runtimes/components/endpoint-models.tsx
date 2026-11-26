@@ -92,9 +92,9 @@ export function EndpointModels({
       const response = await api.inspectExecutionEndpoint(
         wsId,
         {
-          endpoint_id: endpointId,
-          connection,
-          ...(apiKey ? { api_key: apiKey } : {}),
+          ...(endpointId && !dirty && !apiKey
+            ? { endpoint_id: endpointId }
+            : { endpoint_id: endpointId, connection, ...(apiKey ? { api_key: apiKey } : {}) }),
           operation,
           protocol,
           model,

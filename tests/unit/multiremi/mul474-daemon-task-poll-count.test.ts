@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { reportFrame } from "../../fixtures/report-session.js";
 import { readOfferedTurnInput, turnCompletion } from "../../fixtures/turn-report.js";
@@ -497,7 +498,7 @@ describe("MUL-474 daemon task authority matrix", () => {
     const taskPath = `/api/daemon/tasks/${submitted.taskId}`;
     const host = { Authorization: `Bearer ${fixture.foreignDaemonToken}` };
     // The executor claims the Task, which is what makes its daemon the owner.
-    expect(store.claimTask("rt_mul474_executor")?.id).toBe(submitted.taskId);
+    expect(claimWithCurrentRuntime(store, "rt_mul474_executor")?.id).toBe(submitted.taskId);
     store.startTask(submitted.taskId);
 
     // Exception holds: the hosting daemon may read the snapshot ...

@@ -1,3 +1,4 @@
+import { removeScmSchema } from "../../fixtures/scm-schema-upgrade.js";
 import { auditScmRollback, holdScmWritersForReview } from "@multiremi/store/scm-rollback-audit.js";
 import { ScmRepo } from "@multiremi/store/repos/scm-repo.js";
 import { runStartupMigrations } from "@multiremi/store/migrations.js";
@@ -79,11 +80,9 @@ for (const backend of ["sqlite", "postgres"] as const) {
       }
       const links = () => db.query("SELECT * FROM multiremi_scm_issue_links ORDER BY id").all();
       const before = links();
-      db.exec("DROP TABLE multiremi_scm_audit_state");
-      db.exec("DROP TABLE multiremi_scm_link_ownership");
-      db.exec("DROP TABLE multiremi_scm_ownership_cutover");
-      db.run("DELETE FROM multiremi_schema_steps WHERE level >= 4");
-      db.run("UPDATE multiremi_schema_meta SET expand_level = 3");
+      removeScmSchema(db);
+      db.run("DELETE FROM multiremi_schema_steps WHERE level >= 7");
+      db.run("UPDATE multiremi_schema_meta SET expand_level = 6");
       runStartupMigrations(db);
       runStartupMigrations(db);
       expect(count("ownership_cutover")).toBe(0);

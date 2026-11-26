@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { createMultiremiApp, startMultiremiServer } from '@multiremi/api.js';
 import { createReadPool } from '@multiremi/store/db/read-pool.js';
@@ -22,7 +23,7 @@ pendingTurnBackendTests('shared native Q notifications', fixture => {
     const child = createResponsibleTestIssue(store, { title: 'Private source work', parentIssueId: parent.id, assigneeType: 'agent', assigneeId: worker.id });
     const parentSession = store.getOrCreateDefaultIssueSession(parent.id);
     const task = store.createTask({ issueId: child.id, agentId: worker.id, prompt: 'Source' });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const turn = store.getTurnForAttempt(task.id)!;
     const created = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id,
       wait_id: 'notification-private', dedupe_key: 'notification-private', body_md: 'PRIVATE-NATIVE-NOTIFICATION-BODY',
@@ -155,7 +156,7 @@ pendingTurnBackendTests('shared native Q notifications', fixture => {
       const issue = createResponsibleTestIssue(store, { title: 'Private question for root', assigneeType: 'agent', assigneeId: worker.id });
       const session = store.getOrCreateDefaultIssueSession(issue.id);
       const task = store.createTask({ agentId: worker.id, issueId: issue.id, prompt: 'Private question' });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
+      expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id); store.startTask(task.id);
       const turn = store.getTurnForAttempt(task.id)!;
       const created = store.getDaemonTurnBridge().rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id,
         wait_id: 'presenter-private', dedupe_key: 'presenter-private', body_md: 'PRIVATE-PRESENTER-QUESTION',
@@ -163,7 +164,7 @@ pendingTurnBackendTests('shared native Q notifications', fixture => {
         { runtimeId: runtime.id, daemonId: runtime.daemonId!, workspaceId: 'local' });
       expect(created.ok).toBe(true); const id = String(created.message_id);
       const notification = store.listMessages(session.id).find(row => row.metadata.question_present_request && row.metadata.root_question_id === id)!;
-      const notified = store.claimTask(runtime.id)!; expect(notified.agentId).toBe(remi.id); store.startTask(notified.id);
+      const notified = claimWithCurrentRuntime(store, runtime.id)!; expect(notified.agentId).toBe(remi.id); store.startTask(notified.id);
       const credential = await store.createTaskAccessToken(store.getTask(notified.id)!, user.id);
       const app = createMultiremiApp({ store, authToken: 'presenter-master' });
       const call = (path: string, token: string, body?: unknown) => app.request(path, { method: body ? 'POST' : 'GET',
@@ -173,7 +174,7 @@ pendingTurnBackendTests('shared native Q notifications', fixture => {
       expect((await call(`/api/messages/${id}`, credential.token)).status).toBe(404);
       const side = store.sendMessage({ session_id: session.id, execution_scope: 'unrelated-presenter-scope',
         sender: { type: 'member', id: human.id }, to: { type: 'agent', ref: remi.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Unrelated work' });
-      const sideTask = store.claimTask(runtime.id)!; expect(sideTask.id).toBe(store.getTurn(side.turn_id!)!.current_attempt_id!); store.startTask(sideTask.id);
+      const sideTask = claimWithCurrentRuntime(store, runtime.id)!; expect(sideTask.id).toBe(store.getTurn(side.turn_id!)!.current_attempt_id!); store.startTask(sideTask.id);
       const wrong = await store.createTaskAccessToken(store.getTask(sideTask.id)!, user.id);
       expect((await call(`/api/messages/${notification.id}`, wrong.token)).status).toBe(404);
       expect((await call(`/api/messages/${id}/question`, wrong.token)).status).toBe(403);

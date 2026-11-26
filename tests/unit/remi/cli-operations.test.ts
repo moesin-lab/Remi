@@ -29,6 +29,134 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  const deliveryWarning = {
+    code: "autopilot_delivery_unbound",
+    message: "Reports are saved only in the internal Chat. Open the Autopilot details to configure delivery.",
+  };
+  const unboundAutopilot = { id: "aut_report", title: "Progress report", execution_mode: "run_only", delivery_chat_session_id: null, warnings: [deliveryWarning] };
+
+  it.each(["create", "update", "get", "list"])("shows the unbound warning and ID for autopilot %s while preserving structured output", async operation => {
+    useCliEnv();
+    const spec = specById(`autopilot.${operation}`);
+    const boundAutopilot = { ...unboundAutopilot, id: "aut_bound", delivery_chat_session_id: "chat_current", warnings: [] };
+    const data = operation === "list" ? { autopilots: [boundAutopilot, unboundAutopilot] }
+      : operation === "get" ? { autopilot: unboundAutopilot } : unboundAutopilot;
+    globalThis.fetch = capabilityFetch(spec.id, request => {
+      if (new URL(request.url).pathname === "/api/autopilots" && request.method === "GET" && operation !== "list") {
+        return Response.json({ autopilots: [unboundAutopilot] });
+      }
+      return Response.json(data);
+    });
+    const args = ["autopilot", operation, ...(["update", "get"].includes(operation) ? ["aut_report"] : [])];
+    const text = await capture(() => registryFor([spec]).execute(args));
+    expect(text.stdout).toContain(`Warning [${deliveryWarning.code}] Autopilot aut_report: ${deliveryWarning.message}`);
+    expect(text.stdout).toContain("Autopilots -> task details -> choose current Chat and save");
+    expect(text.stdout).toContain("Internal Chat only");
+    expect(text.stdout).not.toContain("Warning [autopilot_delivery_unbound] Autopilot aut_bound");
+    expect(JSON.parse((await capture(() => registryFor([spec]).execute([...args, "--json"]))).stdout)).toEqual(data);
+    const jsonl = await capture(() => registryFor([spec]).execute([...args, "--output", "jsonl"]));
+    expect(jsonl.stdout.split("\n").map(line => JSON.parse(line))).toEqual(operation === "list" ? [boundAutopilot, unboundAutopilot] : [unboundAutopilot]);
+  });
+
+  it("does not display an unbound warning for a bound report or an Issue-producing autopilot", async () => {
+    useCliEnv();
+    const spec = specById("autopilot.list");
+    globalThis.fetch = capabilityFetch(spec.id, () => Response.json({ autopilots: [
+      { ...unboundAutopilot, delivery_chat_session_id: "chat_current", warnings: [] },
+      { ...unboundAutopilot, id: "aut_issues", execution_mode: "create_issue", warnings: [] },
+    ] }));
+    const text = await capture(() => registryFor([spec]).execute(["autopilot", "list"]));
+    expect(text.stdout).toContain("chat_current");
+    expect(text.stdout).not.toContain("Warning");
+    expect(text.stdout).not.toContain("Internal Chat only");
+    expect(text.stdout).not.toContain("choose current Chat");
+  });
+
+  it("lists delivery target IDs, titles and channels in the selected workspace", async () => {
+    useCliEnv();
+    const spec = specById("autopilot.delivery-targets");
+    expect(spec.auth).toEqual(["human"]);
+    expect(registryFor([spec]).inventory().find(entry => entry.id === spec.id)!.auth).toEqual(["human"]);
+    const data = { targets: [{ id: "chat_web", title: "Web report", channel: "web_chat" }, { id: "chat_feishu", title: "Feishu report", channel: "feishu" }] };
+    globalThis.fetch = capabilityFetch(spec.id, request => {
+      const url = new URL(request.url);
+      expect(request.method).toBe("GET");
+      expect(url.pathname).toBe("/api/autopilot-delivery-targets");
+      expect(url.searchParams.get("workspace_id")).toBe("ws_other");
+      expect(request.headers.get("X-Workspace-ID")).toBe("ws_other");
+      return Response.json(data);
+    });
+    const args = ["autopilot", "delivery-targets", "--workspace", "ws_other"];
+    const text = await capture(() => registryFor([spec]).execute(args));
+    for (const target of data.targets) for (const value of Object.values(target)) expect(text.stdout).toContain(value);
+    expect(JSON.parse((await capture(() => registryFor([spec]).execute([...args, "--json"]))).stdout)).toEqual(data);
+    globalThis.fetch = capabilityFetch(spec.id, () => Response.json({ targets: [] }));
+    expect((await capture(() => registryFor([spec]).execute(args))).stdout).toBe("No eligible delivery Chats.");
+  });
+
+  it.each(["create", "update"])("preserves delivery binding, explicit clearing and omission in autopilot %s JSON input", async operation => {
+    useCliEnv();
+    const spec = specById(`autopilot.${operation}`);
+    expect(spec.auth).toEqual(["human"]);
+    const bodies: unknown[] = [];
+    globalThis.fetch = capabilityFetch(spec.id, async request => {
+      if (request.method === "GET") return Response.json({ autopilots: [unboundAutopilot] });
+      bodies.push(await request.json());
+      return Response.json({ autopilot: unboundAutopilot });
+    });
+    const inputs = [{ title: "Report" }, { title: "Report", delivery_chat_session_id: "chat_current" }, { title: "Report", delivery_chat_session_id: null }];
+    for (const input of inputs) {
+      await capture(() => registryFor([spec]).execute(["autopilot", operation, ...(operation === "update" ? ["aut_report"] : []), "--data", JSON.stringify(input), "--json"]));
+    }
+    expect(bodies).toEqual(inputs.map(input => operation === "create" ? { ...input, workspace_id: "ws_1" } : input));
+  });
+
+  it.each([400, 403, 404, 409, 503])("propagates HTTP %s with nonzero exit status and never retries dropping a delivery target", async status => {
+    useCliEnv();
+    for (const operation of ["create", "update"]) {
+      const spec = specById(`autopilot.${operation}`);
+      const bodies: unknown[] = [];
+      globalThis.fetch = capabilityFetch(spec.id, async request => {
+        if (request.method === "GET") return Response.json({ autopilots: [unboundAutopilot] });
+        bodies.push(await request.json());
+        return Response.json({ error: "Autopilot delivery requires a human operator", code: "delivery_rejected" }, { status });
+      });
+      const failure = await capture(() => registryFor([spec]).execute(["autopilot", operation, ...(operation === "update" ? ["aut_report"] : []), "--data", '{"delivery_chat_session_id":"chat_current"}', "--json"]))
+        .then(() => null, error => error as CliError);
+      expect(failure).toBeInstanceOf(CliError);
+      expect(failure!.status).toBe(status);
+      expect(failure!.exitCode).not.toBe(0);
+      expect(failure!.message).toBe("Autopilot delivery requires a human operator");
+      expect(failure!.details).toMatchObject({ code: "delivery_rejected" });
+      expect(bodies).toEqual([{ delivery_chat_session_id: "chat_current", ...(operation === "create" ? { workspace_id: "ws_1" } : {}) }]);
+    }
+  });
+
+  it("rejects task credentials for delivery-target discovery before reading Chats", async () => {
+    useCliEnv();
+    const spec = specById("autopilot.delivery-targets");
+    const paths: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      paths.push(new URL(request.url).pathname);
+      return Response.json({ identity: "task", commands: [{ id: spec.id, allowed: false }] });
+    }) as typeof fetch;
+    const failure = await capture(() => registryFor([spec]).execute(["autopilot", "delivery-targets"]))
+      .then(() => null, error => error as CliError);
+    expect(failure!.code).toBe("forbidden");
+    expect(failure!.exitCode).not.toBe(0);
+    expect(paths).toEqual(["/api/cli/capabilities"]);
+  });
+
+  it("keeps the original-Chat warning handoff and delivery three-state semantics in generated help", async () => {
+    for (const operation of ["create", "update"]) {
+      const spec = specById(`autopilot.${operation}`);
+      const help = registryFor([spec]).renderHelp(["autopilot", operation]);
+      for (const text of ["human only", "autopilot_delivery_unbound", "warning and Autopilot ID in the original Chat", "Autopilots -> task details -> choose current Chat and save", "Do not invent a URL"]) expect(help).toContain(text);
+      if (operation === "update") expect(help).toContain("null clears it; omission preserves it");
+    }
+  });
+
   it("renders nested model catalogs, empty states and missing defaults", async () => {
     useCliEnv();
     const spec = specById("runtime.model.catalog");

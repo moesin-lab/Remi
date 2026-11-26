@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createStore, resetMultiremiTestEnv } from "./helpers.js";
@@ -32,7 +33,7 @@ function fixture() {
   expect(session.chatId).toBeNull();
   const main = store.createSessionTask(session.id, { agentId: leader.id, prompt: "Coordinate." });
   expect(main.issueSessionId).toBeTruthy();
-  expect(store.claimTask(runtime.id)?.id).toBe(main.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(main.id);
   store.buildTaskSessionProjection(main.id);
   store.startTask(main.id);
   const mention = (body: string) => store.createIssueComment(issue.id, {
@@ -84,7 +85,7 @@ describe("rich mention continuation", () => {
     const f = fixture();
     f.mention("First pass.");
     const [first] = f.delegated();
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(first!.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(first!.id);
     f.store.buildTaskSessionProjection(first!.id);
     f.store.startTask(first!.id);
     f.store.completeTask(first!.id, {
@@ -106,7 +107,7 @@ describe("rich mention continuation", () => {
     const f = fixture();
     f.mention("First pass.");
     const [first] = f.delegated();
-    expect(f.store.claimTask(f.runtime.id)?.id).toBe(first!.id);
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)?.id).toBe(first!.id);
     f.store.buildTaskSessionProjection(first!.id);
     f.store.startTask(first!.id);
 
@@ -115,6 +116,6 @@ describe("rich mention continuation", () => {
     expect(f.store.getTask(first!.id)?.status).toBe('running');
     expect(f.store.getMessage(comment.id)).toMatchObject({to_agent_id:f.teammate.id,wake_applied:'now',task_id:f.main.turn_id});
     expect(f.store.listIssueActivity(f.issue.id).filter(row=>row.type==='message_delivered_running')).toHaveLength(1);
-    expect(f.store.claimTask(f.runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(f.store, f.runtime.id)).toBeNull();
   });
 });

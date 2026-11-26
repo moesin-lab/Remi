@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { attemptMessagesPath, requestMessageBody, sentTask, turnApiPath } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -109,7 +110,7 @@ describe("topic Task credential handoff through existing APIs", () => {
   it("an explicit message resumes the owner's Issue lane", async () => {
     const { store, app, headers, task, owner, remi, issue, session, runtime, chat } = await authenticatedTopic();
     const previous = store.createSessionTask(session.id, { agentId: owner.id, prompt: "Original implementation" });
-    expect(store.claimTask(runtime.id)?.id).toBe(previous.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(previous.id);
     store.startTask(previous.id);
     store.completeTask(previous.id, { output: "Ready for follow-up", sessionId: "acp_issue_owner", workDir: "/tmp/issue-followup-work" });
     const before = store.listTasks().length;
@@ -130,7 +131,7 @@ describe("topic Task credential handoff through existing APIs", () => {
       delegationSkipReason: null,
     });
     expect(store.listTasks()).toHaveLength(before + 1);
-    expect(store.claimTask(runtime.id)?.id).toBe(mentioned.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(mentioned.id);
     store.startTask(mentioned.id);
     store.completeTask(mentioned.id, { output: "Rich mention follow-up verified." });
     expect(store.getTask(mentioned.id)?.delegationReturnTaskId).toBeNull();
@@ -152,7 +153,7 @@ describe("topic Task credential handoff through existing APIs", () => {
     const listed = await app.request(`/api/turns?session_id=${session.id}`, { headers });
     expect(listed.status).toBe(200);
     expect((await listed.json()).turns.some((entry: { id: string }) => entry.id === store.getTurnForAttempt(next.id)!.id)).toBe(true);
-    expect(store.claimTask(runtime.id)?.id).toBe(next.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(next.id);
     expect(store.getSessionAgentLane(session.id, owner.id)?.providerSessionId).toBe("acp_issue_owner");
     expect(store.getChatSession(chat.id)?.agentId).toBe(remi.id);
     expect(store.listIssueSessions(issue.id)).toHaveLength(1);
@@ -176,7 +177,7 @@ describe("topic Task credential handoff through existing APIs", () => {
       status: "queued", delegationId: null,
     });
     const mentioned = created[0]!;
-    expect(store.claimTask(runtime.id)?.id).toBe(mentioned.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(mentioned.id);
     store.startTask(mentioned.id);
     store.completeTask(mentioned.id, { output: "Rich mention follow-up verified." });
     expect(store.getTask(mentioned.id)?.delegationReturnTaskId).toBeNull();
@@ -189,7 +190,7 @@ describe("topic Task credential handoff through existing APIs", () => {
   it("amends a running Issue task without creating another task or steering the Chat", async () => {
     const { store, app, headers, task, owner, issue, session, runtime } = await authenticatedTopic();
     const active = store.createSessionTask(session.id, { agentId: owner.id, prompt: "Implement" });
-    expect(store.claimTask(runtime.id)?.id).toBe(active.id);
+    expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(active.id);
     store.startTask(active.id);
     const before = store.listTasks().length;
     const sent = await app.request(attemptMessagesPath(store, active.id), {

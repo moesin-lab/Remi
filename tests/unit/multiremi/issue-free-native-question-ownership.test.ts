@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from 'bun:test';
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from './pending-turn-test-backends.js';
 
@@ -10,7 +11,7 @@ function setup(fixture: PendingTurnTestFixture, kind: 'orphan' | 'autopilot', na
   const run = autopilot ? store.runAutopilot(autopilot.id, { prompt: 'Ask in the automation conversation' }) : null;
   const task = run ? store.getTask(run.taskId!)!
     : store.createTask({ agentId: agent.id, runtimeId: runtime.id, prompt: 'Ask without an Issue or Chat' });
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   store.startTask(task.id);
   const turn = store.getTurnForAttempt(task.id)!;
   const bridge = store.getDaemonTurnBridge();
@@ -65,7 +66,7 @@ pendingTurnBackendTests('Issue-free native Question ownership', fixture => {
       expect(h.store.getMessage(h.id)).toEqual(original);
       const nextId = replacement.current_attempt_id!;
       expect(h.store.getTask(nextId)?.runtimeId).toBeNull();
-      expect(h.store.claimTask(h.runtime.id)?.id).toBe(nextId);
+      expect(claimWithCurrentRuntime(h.store, h.runtime.id)?.id).toBe(nextId);
       expect(h.store.getTask(nextId)?.runtimeId).toBe(h.runtime.id);
       h.store.startTask(nextId);
       const next = h.create(nextId);

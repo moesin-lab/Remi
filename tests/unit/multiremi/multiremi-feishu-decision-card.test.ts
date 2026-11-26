@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
 import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
@@ -136,7 +137,7 @@ function sourceTask(store: MultiremiStore, agentId: string, issueId: string): st
     priority: 10 + store.listTasks().length });
   store.registerRuntime({ id: `rt_worker_${task.id}`, name: "Executor", provider: store.getAgent(agentId)!.provider, workspaceId: "local", daemonId: `worker-${task.id}` });
   runTurnExecutionMutation(db! as unknown as UnifiedFixtureDatabase,"UPDATE multiremi_turn_execution_records SET runtime_id = ? WHERE id = ?", [`rt_worker_${task.id}`, task.id]);
-  expect(store.claimTask(`rt_worker_${task.id}`)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, `rt_worker_${task.id}`)?.id).toBe(task.id);
   store.startTask(task.id);
   return task.id;
 }
@@ -910,7 +911,7 @@ describe("Feishu decision cards for Issue human requests", () => {
     store.registerRuntime({ id: "rt_chat_executor", name: "Chat executor", provider: "codex",
       workspaceId: "local", daemonId: "chat-executor" });
     runTurnExecutionMutation(db! as unknown as UnifiedFixtureDatabase,"UPDATE multiremi_turn_execution_records SET runtime_id = ? WHERE id = ?", ["rt_chat_executor", chat.taskId]);
-    expect(store.claimTask('rt_chat_executor')?.id).toBe(chat.taskId);
+    expect(claimWithCurrentRuntime(store, 'rt_chat_executor')?.id).toBe(chat.taskId);
     store.startTask(chat.taskId);
     const request = askQuestion(store, chat.taskId);
     expect(store.canFeishuBotDaemonAccessTask("local", "bot-host", chat.taskId)).toBe(true);

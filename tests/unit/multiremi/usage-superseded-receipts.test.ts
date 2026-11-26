@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +15,7 @@ function assertSupersededReceipts(db: SqlDatabase, reconnect: () => { db: SqlDat
   const otherRuntime = store.registerRuntime({ name: "unauthorized", provider: "claude", workspaceId: "local" });
   const agent = store.createAgent({ name: "superseded", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, prompt: "retired observations", workspaceId: "local" });
-  store.claimTask(runtime.id); store.startTask(task.id);
+  claimWithCurrentRuntime(store, runtime.id); store.startTask(task.id);
   const authority = { runtimeId: runtime.id, workspaceId: "local", daemonId: "test-daemon" };
   const base: TaskUsageUnit = { unitId: "live", revision: 1, provider: "claude", model: "opus", scope: "request",
     source: "provider_request", accuracy: "exact", inputTokens: 10, outputTokens: 2, cacheReadTokens: 0,

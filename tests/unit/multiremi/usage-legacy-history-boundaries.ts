@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { expect } from "bun:test";
@@ -68,7 +69,7 @@ export function assertRejectedAuditWithLegacyRun(store: MultiremiStore, db: SqlD
   const original = db.query("SELECT usage FROM multiremi_turn_execution_records WHERE id=?").get(task.id).usage;
   expect(db.query("SELECT task_id FROM multiremi_usage_legacy_sources WHERE task_id=?").get(task.id)).toBeNull();
   expect(db.query("SELECT task_id FROM multiremi_usage_legacy_audit WHERE task_id=?").get(task.id)).toBeNull();
-  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(task.id);
   store.startTask(task.id, "accepted-native", runtime.id);
   store.reportTaskUsageSnapshot(task.id, { version: 2, runId: "accepted-native", revision: 1, complete: false,
     units: [actualUnit({ unitId: "native", provider: "claude", model: "reported", scope: "request", source: "provider_request",
@@ -108,7 +109,7 @@ export async function assertRecordedV2RetryChain(store: MultiremiStore, db: SqlD
   const agent = store.createAgent({ name: `native retry ${startupWhileQueued}`, provider: "claude", workspaceId: "local", runtimeId: runtime.id });
   const issue = createResponsibleTestIssue(store, { title: "synthetic recovery", workspaceId: "local" });
   const parent = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "synthetic retry chain", workspaceId: "local", maxAttempts: 2 });
-  expect(store.claimTask(runtime.id)?.id).toBe(parent.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(parent.id);
   store.startTask(parent.id, "v2-parent", runtime.id);
   const snapshot = (taskId: string, runId: string, tokens: number) => ({ version: 2 as const, runId, revision: 1, complete: true,
     units: [actualUnit({ unitId: `native:${taskId}`, provider: "claude", model: "reported", scope: "request", source: "provider_request",
@@ -123,7 +124,7 @@ export async function assertRecordedV2RetryChain(store: MultiremiStore, db: SqlD
     ensureUsageAccountingStartup(db);
     expect(db.query("SELECT run_id FROM multiremi_usage_runs WHERE task_id=?").all(retry.id)).toEqual([]);
   }
-  expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+  expect(claimWithCurrentRuntime(store, runtime.id)?.id).toBe(retry.id);
   store.startTask(retry.id, "v2-retry", runtime.id);
   store.reportTaskUsageSnapshot(retry.id, snapshot(retry.id, "v2-retry", 5));
   store.completeTask(retry.id, { output: "synthetic complete" });

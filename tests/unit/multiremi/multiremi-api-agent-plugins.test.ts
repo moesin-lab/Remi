@@ -1,3 +1,4 @@
+import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
 import { reportFrame } from "../../fixtures/report-session.js";
@@ -1002,7 +1003,7 @@ describe("Multiremi API — agent plugins", () => {
       executionFingerprint: null,
       assignmentSourceEventId: null,
     });
-    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(claimWithCurrentRuntime(store, runtime.id)).toBeNull();
   });
 
   it("includes the frozen Plugin snapshot in daemon claim wire and client models", async () => {

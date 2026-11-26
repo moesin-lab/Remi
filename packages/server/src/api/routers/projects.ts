@@ -1,4 +1,5 @@
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
+import { ProjectActivityQueryError } from "../../store/project-activity.js";
 import type { Hono } from "hono";
 import {
   compatibilityWorkspaceId,
@@ -24,6 +25,7 @@ import {
 } from "../helpers.js";
 import {
   cleanString,
+  currentAccessToken,
   currentRequestUserId,
   parseOptionalInt,
   projectCompatibilityResponse,
@@ -334,6 +336,22 @@ export function registerProjectRoutes(app: Hono, deps: RouterDeps): void {
     const project = loadProjectForDocs(c, store, c.req.param("id"));
     if (project instanceof Response) return project;
     return c.json(projectCompatibilityResponse(project));
+  });
+  app.get("/api/projects/:id/activity", (c) => {
+    const project = loadProjectForDocs(c, store, c.req.param("id"));
+    if (project instanceof Response) return project;
+    const token = currentAccessToken(c);
+    if (token?.type === "daemon" || (token?.type === "task" && (!token.taskId || token.workspaceId !== project.workspaceId))) return c.json({ error: "forbidden" }, 403);
+    const user = currentRequestUserId(c);
+    const role = user === "local" ? "owner" : store.getUserRoleInWorkspace(user, project.workspaceId);
+    try {
+      return c.json(store.listProjectActivity({ workspaceId: project.workspaceId, projectId: project.id,
+        identity: token?.id ?? user, taskId: token?.type === "task" ? token.taskId : null,
+        privateAgentOwner: role === "owner" || role === "admin" ? null : user }, c.req.query()));
+    } catch (error) {
+      if (error instanceof ProjectActivityQueryError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
   });
   app.put("/api/projects/:id", async (c) => {
     const body = await readJsonStrict<UpdateProjectInput>(c);

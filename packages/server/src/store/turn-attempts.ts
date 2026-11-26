@@ -55,7 +55,7 @@ export function createReplacementAttemptWithinTransaction(db: SqlDatabase, turnI
   db.run(`UPDATE multiremi_turns SET current_attempt_id=?,status=CASE WHEN ?='pending' THEN 'pending'
     WHEN status IN ('failed','cancelled') THEN 'running' ELSE status END,
     ended_at=NULL,ended_reason=NULL WHERE id=?`,[id,input.turnStatus??null,turnId]);
-  notifyTurnChanged(db,turnId);
+  notifyTurnChanged(db,turnId,false,true);
   return {turn_id:turnId,attempt_id:id,attempt_no:attemptNo};
 }
 

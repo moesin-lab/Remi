@@ -83,6 +83,10 @@ SDK 的直接 AUQ 题项与 ACP 的 `{fieldKey, question}` 题项在展示表单
 
 ## 一次任务读取与更新
 
+项目执行页 `/projects/:id/activity` 独立挂载，默认进入进行中视图。每行对应一个 Attempt，历史随 Issue 的当前项目归集。状态、实际 Agent、Issue、UTC 创建时间范围和绑定筛选的分页游标由 URL 恢复。摘要在 core 边界只接受受控 code 与有界整数后映射到语言资源。日志点击后按 Turn/Attempt 读取，展开当前 Issue 的代码关联时才读取 PR 与工作树。
+
+活动查询按 `project-activity`、工作区、项目、规范化筛选分区。`project:activity_changed` 由唯一精确处理器合并 250ms，可见页每 30 秒补读。断线重连和服务器 resync 都会刷新项目活动；耗时由页面共享的可见时钟更新。
+
 ```text
 页面 / 组件
   → core/<领域>/queries.ts、mutations.ts

@@ -161,6 +161,7 @@ function ProjectCard({
           </p>
         </div>
         <ProjectLifecycleAction project={project} onArchive={onArchive} onRestore={() => {}} />
+        <AppLink className="text-xs text-primary hover:underline" href={wsPaths.projectActivity(project.id)}>{t(($) => $.activity.title)}</AppLink>
       </div>
       <div className="px-3 pb-3">
         <IssueCompletion project={project} />
@@ -210,7 +211,7 @@ function ProjectCompactRow({
   return (
     <div data-perf-item="project" data-perf-key={project.id} className={cn(COMPACT_GRID, "group min-h-12 items-center gap-3 border-b px-4 text-sm transition-colors hover:bg-accent/30", archived && "text-muted-foreground opacity-70 hover:opacity-100")}>
       <ProjectIcon project={project} size="sm" />
-      <AppLink href={wsPaths.projectDetail(project.id)} className="min-w-0">
+      <div className="min-w-0"><AppLink href={wsPaths.projectDetail(project.id)} className="min-w-0">
         <span className="block truncate text-left font-medium text-foreground">{project.title}</span>
         <span className="block truncate text-left text-xs text-muted-foreground">
           {project.resource_count > 0
@@ -218,6 +219,8 @@ function ProjectCompactRow({
             : ""}
         </span>
       </AppLink>
+        <AppLink className="text-xs text-primary hover:underline" href={wsPaths.projectActivity(project.id)}>{t(($) => $.activity.title)}</AppLink>
+      </div>
       <div className="hidden sm:block"><IssueCompletion project={project} compact /></div>
       <div className="hidden min-w-0 sm:block">
         {archived ? (

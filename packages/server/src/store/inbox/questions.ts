@@ -823,7 +823,8 @@ export class Questions {
     if (record.status === 'answered' && (reason === 'timeout' || reason === 'cancelled')) return true;
     record.wait = { ...record.wait, status: 'detached', reason };
     // Release the turn before saving, so the save's Issue derivation sees it running again.
-    this.ctx.db.run("UPDATE multiremi_turns SET waiting_on_message_id=NULL,status=CASE WHEN status='awaiting_human' THEN 'running' ELSE status END WHERE waiting_on_message_id=?", [id]);
+    const resumed = this.ctx.db.query("UPDATE multiremi_turns SET waiting_on_message_id=NULL,status=CASE WHEN status='awaiting_human' THEN 'running' ELSE status END WHERE waiting_on_message_id=? RETURNING workspace_id,issue_id,chat_session_id").all(id);
+    for (const turn of resumed) if (turn.issue_id && !turn.chat_session_id) this.ctx.notifyIssueProjectActivity(turn.workspace_id,turn.issue_id);
     this.event(record, 'detach', null, { reason }); this.save(message, record, events);
     if (autoContinuation && record.status === 'answered' && record.answer && !/cancelled|explicit_stop/.test(reason)) this.scheduleContinuation(message, record, record.answer.actor, events);
     return true;

@@ -15,7 +15,7 @@ const drop = 'import os,sys; uid=int(sys.argv[1]); os.setgroups([]); os.setgid(u
 if (!process.env.MULTIREMI_TEST_POSTGRES_URL || process.env.MULTIREMI_TEST_LOCK_ORDER_SENTINEL !== '1') throw Error('Dual database and sentinel required');
 
 pendingTurnBackendTests('multi-UID root consumer with one authority database', (fixture, backend) => {
-  it('recovers through two interrupted ACKs and a lost start reply with one model, Q and run', async () => {
+  it.each(['before disconnect','after reconnect'] as const)('recovers interrupted ACKs and a lost start reply with one model, run and Q created %s', async questionTiming => {
     const {db,store} = fixture();
     if (backend === 'PostgreSQL') expect(Number(db.query("SELECT current_setting('server_version_num') AS version").get().version)).toBe(170012);
     const root = mkdtempSync('/srv/a2-');
@@ -66,8 +66,10 @@ pendingTurnBackendTests('multi-UID root consumer with one authority database', (
       expect(await issuer.exited).toBe(0);
       const {tuple,envelope_digest:digest} = delivery;
       const reportPolicy = delivery.frozen_business_payload.input.policy_offer;
-      expect(reportPolicy).toMatchObject({workspace_id:'local',runtime_id:execution.runtimeId,daemon_id:execution.daemonId,attempt_id:target.attemptId,
-        receipt_id:expect.any(String),offer_generation:expect.any(String),content_hash:expect.stringMatching(/^[0-9a-f]{64}$/)});
+      expect(reportPolicy).toMatchObject({workspace_id:'local',runtime_id:execution.runtimeId,daemon_id:execution.daemonId,attempt_id:target.attemptId});
+      expect(reportPolicy.receipt_id).toMatch(/^[0-9a-f]{64}$/);
+      expect(reportPolicy.offer_generation).toMatch(/\S/);
+      expect(reportPolicy.content_hash).toMatch(/^[0-9a-f]{64}$/);
       writeFileSync(`${root}/offer`,JSON.stringify({tuple,digest,origin,reportPolicy}));
       const node = '/usr/bin/node';
       writeFileSync(`${root}/plans`,JSON.stringify({plans:[{tuple,uid:1103,gid:1103,file:node,args:[`${tests}/root-daemon-recovery-model.mjs`,root,url],
@@ -88,17 +90,24 @@ pendingTurnBackendTests('multi-UID root consumer with one authority database', (
       const {socket,replies} = await modelConnected;
       const next = async () => { const line = await replies.next(); if (line.done) throw Error('Model exited'); return JSON.parse(line.value); };
       const model = await next(); expect(model).toMatchObject({uid:1103,version:String(tuple.delivery_version)});
+      expect(Number.isSafeInteger(model.pid) && model.pid > 1).toBe(true);
       const ask = async (command:object) => {socket.write(JSON.stringify(command)+'\n'); return next();};
       expect(await ask({name:'Before daemon loss'})).toEqual({pid:model.pid,status:200});
       const copy = await ask({copy:true,name:'Replica before loss'}); expect(copy.status).toBe(200); expect(copy.pid).not.toBe(model.pid);
-      const question = await ask({question:true});
-      original.child.stdin.write(JSON.stringify(question)+'\n');
-      const {question:questionId} = JSON.parse(await original.next('GUEST '));
-      expect(questionId).toEqual(expect.any(String));
-      expect(store.getQuestion(questionId)?.id).toBe(questionId);
+      expect(Number.isSafeInteger(copy.pid) && copy.pid > 1).toBe(true);
+      const createQuestion = async (daemon: typeof original) => {
+        daemon.child.stdin.write(JSON.stringify(await ask({question:true}))+'\n');
+        const {question} = JSON.parse(await daemon.next('GUEST '));
+        expect(question).toMatch(/\S/);
+        expect(store.getQuestion(question)).toMatchObject({id:question,status:'pending',wait_status:'waiting',source_attempt_id:tuple.attempt_id});
+        return question;
+      };
+      let questionId = questionTiming === 'before disconnect' ? await createQuestion(original) : undefined;
       original.child.kill('SIGKILL'); await original.exited;
       const restored = controller('resume'); expect(JSON.parse(await restored.next('GUEST '))).toEqual({ready:true,uid:1101});
       expect(await ask({name:'After daemon recovery'})).toEqual({pid:model.pid,status:200});
+      if (questionTiming === 'after reconnect') questionId = await createQuestion(restored);
+      expect(store.getQuestion(questionId)).toMatchObject({id:questionId,status:'pending',wait_status:'waiting',source_attempt_id:tuple.attempt_id});
       expect(store.getWorkspace(workspace.id)?.name).toBe('After daemon recovery');
       expect(readFileSync(`${root}/execution/launches`,'utf8').trim().split('\n')).toEqual([String(model.pid)]);
       const task = store.getTask(tuple.attempt_id)!;

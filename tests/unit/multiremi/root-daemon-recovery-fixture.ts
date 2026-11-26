@@ -10,7 +10,6 @@ import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connecti
 import type { MachineChallenge } from '@shared/machine-challenge.js';
 import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
 import { PreparedRootDelivery, RootReceiptStore, rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
-import { retryAdmittedTurn } from '@multiremi/store/attempt-admission.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
@@ -41,11 +40,6 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
     const runtime=store.registerRuntime({id:'rt_auth',name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
     const agent=store.createAgent({name:'admitted',provider:'codex',runtimeId:runtime.id});
     const issue=fixture.createIssue({title:'admission',assigneeType:'agent',assigneeId:agent.id});
-    const previous=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'previous',runtimeId:runtime.id});
-    const turnId=db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(previous.id).turn_id;
-    const target={turnId,previousAttemptId:previous.id,attemptId:'tsk_admitted'};
-    const execution={attemptId:target.attemptId,runtimeId:'rt_auth',daemonId:'daemon',incarnation:'inc',configEpoch:0,executionDigest:hash('execution'),
-      providerTrust:{id:'provider',version:1},checkpointTrust:null};
     const parent=created.grant.authority_node_id;
     const nodes=(id:string,kind:string,type:string,subject:string,parents:string[])=>{
       const seq=Number(db.query('SELECT MAX(issued_seq) AS maximum FROM multiremi_authority_nodes').get().maximum)+1;
@@ -54,7 +48,7 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
         FROM multiremi_authority_nodes WHERE node_id=?`).run(id,seq,source);
     };
     nodes('machine','machine_registration','daemon','daemon',[]);
-    nodes('runtime-trust','runtime_trust','runtime',execution.runtimeId,['machine',parent]);
+    nodes('runtime-trust','runtime_trust','runtime',runtime.id,['machine',parent]);
     db.query("INSERT INTO multiremi_access_tokens(id,name,type,workspace_id,daemon_id,token_hash,token_prefix,created_at) VALUES('machine-token','test','daemon','local','daemon',?,'test','now')").run(hash('machine-token'));
     db.query(`INSERT INTO multiremi_machine_enrollments VALUES('inc','deploy','consumer','rt_auth','daemon','machine-token',?,'machine',1,?,?,'key',9999999999999,1,NULL,1,9999999999999,'test')`)
       .run(hash('machine-token'),signer,recipient);
@@ -66,7 +60,7 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
     db.query(`INSERT INTO multiremi_runtime_trusts VALUES('trust','rt_auth',1,'inc',?,'runtime-trust','{}',NULL)`).run(challenge.id);
     const sources: Array<AgentConfigurationApproval['sources'][number]> = [];
     function record(kind:string,id:string,use:string,value:unknown) {
-      const ref = {kind,id,use,version:0,digest:agentDependencyDigest(value)};
+      const ref = {kind,id,use,version:1,digest:agentDependencyDigest(value)};
       sources.push({ref,content:JSON.stringify(value),dependencies:[]});
       return ref;
     }
@@ -99,12 +93,11 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
       subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,
       expected_revision:grantPlan.expectedRevision,idempotency_key:'recovery-grant',reason:'approved recovery fixture'}));
     nodes('provider','provider_trust','agent',agent.id,['runtime-trust',grant.authority_node_id]);
-    const inputs={manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
-      entries:[{source:{id:'password',version:1},purpose:'instruction' as const,snapshot:'previous',author:{type:'user' as const,id:'usr_auth'}}],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
     const directProof = await store.rootManagement.verifyIndependentPassword('usr_auth', 'test-dashboard-password');
-    db.query("UPDATE multiremi_turn_attempts SET status='lost' WHERE id=?").run(previous.id);
-    db.query("UPDATE multiremi_turns SET status='failed' WHERE id=?").run(turnId);
-    expect(retryAdmittedTurn(store,turnId,previous.id,directProof,execution,()=>({execution,inputs})).current_attempt_id).toBe(target.attemptId);
+    const task = store.createAdmittedTask({agentId:agent.id,issueId:issue.id,prompt:'Recover the original execution'},directProof,{messages:[],includeSubmittedPrompt:true});
+    const target = {attemptId:task.id};
+    const turnId = task.id;
+    const {execution} = JSON.parse(db.query('SELECT manifest_snapshot FROM multiremi_attempt_input_approvals WHERE attempt_id=?').get(task.id).manifest_snapshot);
     return {db,store,target,execution,runtime,human,signing,grant,approved,turnId,service};
 }
 

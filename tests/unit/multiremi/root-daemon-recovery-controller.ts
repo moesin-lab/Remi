@@ -34,7 +34,10 @@ client.rpc = async (method, ...args) => {
     console.error(`guest ${fault} ${method} failed (${error instanceof DaemonProtocolRpcError ? error.code : 'transport'})`);
     throw error;
   });
-  if (method === 'task.offer_adopt' && (reply.state !== 'adopted' || reply.receipt_id !== reportPolicy.receipt_id)) throw Error('Missing adoption for sealed offer');
+  if (method === 'task.offer_adopt' && (reply.state !== 'adopted' || reply.receipt_id !== reportPolicy.receipt_id)) {
+    console.error('guest adoption response',Object.keys(reply).sort(),{adopted:reply.state==='adopted',matchingReceipt:reply.receipt_id===reportPolicy.receipt_id});
+    throw Error('Missing adoption for sealed offer');
+  }
   if (method === 'delivery.receipt.install_ack' && fault === 'after-ack' && reply.ok) process.exit(42);
   return reply;
 };
@@ -66,6 +69,15 @@ const live = await openRootRunConsumer(tuple.runtime_id,tuple.daemon_id,()=>jour
   MULTIREMI_ROOT_MACHINE_UID:'1102', MULTIREMI_ROOT_SUPERVISOR_UID:'0',
 });
 if (!live) throw Error('Machine binding mismatch');
+const receive = live.consumer.receive.bind(live.consumer);
+live.consumer.receive = async (...args) => {
+  try { return await receive(...args); }
+  catch (error) {
+    const reason = error instanceof Error ? error.message : '';
+    console.error(`guest ${fault} recovery rejected (${/^[\w :().-]{1,100}$/.test(reason) ? reason : 'unclassified'})`);
+    throw error;
+  }
+};
 try {
   if (fault === 'before-ack') await live.consumer.receive(tuple,digest);
   else {

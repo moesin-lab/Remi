@@ -136,6 +136,25 @@ describe("SessionLogList", () => {
     }
   }
 
+  it("keeps the scroll root attached and skips width reads for height-only resizes", () => {
+    const replica = new MemorySessionReplica();
+    const first = vi.fn();
+    const latest = vi.fn();
+    const view = renderList(replica, { onScrollRoot: first });
+    view.rerender(<SessionLogList sessionId={SESSION} replica={replica} onScrollRoot={latest} />);
+    expect(first.mock.calls).toEqual([[view.root]]);
+    expect(latest).not.toHaveBeenCalled();
+    const width = vi.fn(() => 800);
+    Object.defineProperty(view.content, "clientWidth", { configurable: true, get: width });
+    act(() => resized(view.content));
+    width.mockClear();
+    act(() => resized(view.content));
+    expect(width).not.toHaveBeenCalled();
+    view.unmount();
+    expect(latest.mock.calls).toEqual([[null]]);
+    view.restore();
+  });
+
   it("stays hidden with a skeleton until the replica is ready, then publishes ready and fresh", () => {
     const replica = new MemorySessionReplica({
       [SESSION]: { entries: [entry(1)], ready: false, fresh: false },

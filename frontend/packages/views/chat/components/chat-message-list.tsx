@@ -4,7 +4,7 @@ import { isMemberQuestionReminder, LinkedQuestion, linkedQuestionId, QuestionRep
 import { questionReplyText } from "../../common/question-answer";
 import { useActorName } from "@multiremi/core/workspace/hooks";
 import { useAfterFirstScreen } from "@multiremi/core/platform/use-after-first-screen";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { api } from "@multiremi/core/api";
@@ -191,6 +191,7 @@ export function ChatMessageList({
   const { getActorName } = useActorName({ enabled: visible && namesReady });
   const { t: traceT } = useT("agents");
   const scrollRoot = useRef<HTMLElement | null>(null);
+  const setScrollRoot = useCallback((element: HTMLDivElement | null) => { scrollRoot.current = element; }, []);
   const prependAnchor = useRef<{ id: string; top: number } | null>(null);
   const snapshot = useSyncExternalStore(
     useCallback(listener => replica.subscribe(sessionId, listener), [replica, sessionId]),
@@ -292,7 +293,7 @@ export function ChatMessageList({
 
   return <SessionLogList sessionId={sessionId} replica={replica} perfScroll="session-log"
     className={CHAT_LIST_CLASS} contentClassName={CHAT_CONTENT_CLASS} scrollButton="arrow"
-    onScrollRoot={element => { scrollRoot.current = element; }}
+    onScrollRoot={setScrollRoot}
     initialPositioned={initialPositioned} showPendingSkeleton={false}
     localDataReady={optimisticRows.length > 0}
     transformEntries={transformEntries}
@@ -312,21 +313,8 @@ export function ChatMessageList({
       </div>
     </>}
     renderEntry={({ entry }) => {
-      const row = entry as SessionLogEntry & {
-        author_type?: string; sender_type?: string; task_id?: string | null; created_at?: string;
-        message_kind?: SessionLogRow["message_kind"];
-        wake_applied?: SessionLogRow["wake_applied"]; wake_reason?: SessionLogRow["wake_reason"];
-        metadata?: Record<string, unknown>;
-      };
+      const row = entry as ChatLogRow;
       const isUser = row.kind === "message" && (row.sender_type ?? row.author_type) === "member";
-      const message: ChatMessage = {
-        id: row.id, chat_session_id: sessionId, role: isUser ? "user" : "assistant",
-        content: questionReplyText(isUser ? row.body_md : String(row.metadata?.final_reply_md ?? row.body_md), row.metadata),
-        task_id: row.kind === "turn" ? row.task_id ?? null : null, turn_id: typeof row.metadata?.turn_id === "string" ? row.metadata.turn_id : undefined, created_at: row.created_at ?? "",
-        failure_reason: typeof row.metadata?.failure_reason === "string" ? row.metadata.failure_reason : null,
-          elapsed_ms: typeof row.metadata?.elapsed_ms === "number" ? row.metadata.elapsed_ms : null,
-          attachments: AttachmentSchema.array().safeParse(row.metadata?.attachments).data as ChatMessage["attachments"],
-      };
       // The doorbell a parked task's end rang (PR 6 §8.1): a line before the
       // reply it started, never a bubble.
       const doorbell = rowDoorbell(row);
@@ -336,46 +324,12 @@ export function ChatMessageList({
       const local = optimisticRows.find((item) => item.clientId === clientId);
       const isPush = row.kind === "turn" && isNonterminalTurn(row.metadata);
       const questionId = row.kind === "message" ? linkedQuestionId(row.id, row.metadata) : null;
-      const turnId = row.kind === "turn" && typeof row.metadata?.turn_id === "string" ? row.metadata.turn_id : null;
-      const turnStatus = turnId && typeof row.metadata?.status === "string" ? row.metadata.status : null;
-      // A reply row carries its turn's outcome; a reply whose card is outside
-      // the window still reaches the log through its own turn id.
       const card = row.kind === "message" ? cardsByReply.get(row.id) : undefined;
-      const trace = card ? { taskId: card.attemptId ?? card.turnId, turnId: card.turnId }
-        : row.kind === "message" && !isUser && row.message_kind === "reply" && row.task_id ? { taskId: row.task_id, turnId: row.task_id }
-          : null;
-      // A finished turn whose card counted process items folds its steps above
-      // the reply (or the failure notice); older cards have no count and no fold.
-      const stepsRef = card ? card.steps : row.kind === "turn" && !isPush ? turnStepsRef(row.metadata, row.task_id) : null;
-      // A failed or cancelled turn's notice carries its own execution log.
-      const endNotice = !!(card && endedBadly(card.status)) || !!(turnId && endedBadly(turnStatus));
-      // The execution log is never in the fold: the reply's footer row or the
-      // end notice carries it, in one place whether or not there are steps.
-      const stepsFold = stepsRef ? <FinishedTurnSteps attemptId={stepsRef.attemptId} turnId={stepsRef.turnId} sessionId={sessionId}
-        header={finishedFoldHeader(stepsRef)} visible={visible} open={openSteps.has(row.id)}
-        onOpenChange={(open) => setStepsOpen(row.id, open)} /> : null;
-      // Subagents that finished after the reply started: rows under the reply,
-      // read from the card (MUL-472: no trace until the reader opens one).
-      const lateRef = card ? (card.attemptId && card.lateSubagents ? { attemptId: card.attemptId, turnId: card.turnId, late: card.lateSubagents } : null)
-        : row.kind === "turn" && !isPush && row.task_id && turnId ? (() => {
-          const late = lateSubagentsOf(row.metadata);
-          return late ? { attemptId: row.task_id, turnId, late } : null;
-        })() : null;
-      const lateRows = lateRef && !endNotice ? <SubagentCompletionRows late={lateRef.late}
-        source={{ sessionId, attemptId: lateRef.attemptId, turnId: lateRef.turnId, live: false }} /> : null;
       return <div className="group/message">
         {questionId ? <LinkedQuestion id={questionId} getActorName={getActorName} /> : null}
-        {card && endedBadly(card.status)
-          ? <div className="space-y-3">{stepsFold}<TurnEndNotice turnId={card.turnId} attemptId={card.attemptId} status={card.status}
-            failureReason={card.failureReason ?? message.failure_reason ?? null} details={message.content} visible={visible} /></div>
-          : turnId && endedBadly(turnStatus)
-            ? <div className="space-y-3">{stepsFold}<TurnEndNotice turnId={turnId} attemptId={row.task_id ?? null} status={turnStatus}
-              failureReason={message.failure_reason ?? null} details={message.content} visible={visible} /></div>
-            : row.kind === "turn" && row.metadata?.final_entry_id
-              // The reply row is not loaded; a finished card has nothing of its own to show.
-              ? null
-              : <MessageBubble message={message} isPending={!!pendingTaskId && row.task_id === pendingTaskId}
-                isPush={isPush} visible={visible} trace={trace} steps={stepsFold} after={lateRows} />}
+        <MessageBubble {...row} sessionId={sessionId} isUser={isUser} isPush={isPush} card={card}
+          isPending={!!pendingTaskId && row.task_id === pendingTaskId} visible={visible}
+          stepsOpen={openSteps.has(row.id)} setStepsOpen={setStepsOpen} />
         {isUser && <NotWokenHint wakeApplied={row.wake_applied} wakeReason={row.wake_reason} />}
         {row.kind === "message" && !questionId && <QuestionReplyReference metadata={row.metadata} />}
         {isUser && local && <div className="flex justify-end"><SendStatus status={local.status}
@@ -416,13 +370,60 @@ function SendStatus({ status, onRetry }: { status: OptimisticChatRow["status"]; 
 
 type TraceRef = { taskId: string; turnId?: string } | null;
 
-function MessageBubble({ message, isPending, isPush, visible, trace = null, steps = null, after = null }: {
-  message: ChatMessage; isPending: boolean; isPush: boolean; visible: boolean; trace?: TraceRef;
-  /** The finished turn's steps fold, rendered above the reply. */
-  steps?: React.ReactNode;
-  /** Rendered under the reply, above its footer: the late subagents' completion rows. */
-  after?: React.ReactNode;
+type ChatLogRow = SessionLogEntry & {
+  author_type?: string; sender_type?: string; task_id?: string | null; created_at?: string;
+  message_kind?: SessionLogRow["message_kind"];
+  wake_applied?: SessionLogRow["wake_applied"]; wake_reason?: SessionLogRow["wake_reason"];
+  metadata?: Record<string, unknown>;
+};
+
+const MessageBubble = memo(function MessageBubble({ sessionId, isUser, isPush, card, isPending, visible, stepsOpen, setStepsOpen, ...row }: ChatLogRow & {
+  sessionId: string; isUser: boolean; isPush: boolean; card?: TurnCardRef; isPending: boolean;
+  visible: boolean; stepsOpen: boolean; setStepsOpen: (rowId: string, open: boolean) => void;
 }) {
+  const message: ChatMessage = {
+    id: row.id, chat_session_id: sessionId, role: isUser ? "user" : "assistant",
+    content: questionReplyText(isUser ? row.body_md : String(row.metadata?.final_reply_md ?? row.body_md), row.metadata),
+    task_id: row.kind === "turn" ? row.task_id ?? null : null, turn_id: typeof row.metadata?.turn_id === "string" ? row.metadata.turn_id : undefined, created_at: row.created_at ?? "",
+    failure_reason: typeof row.metadata?.failure_reason === "string" ? row.metadata.failure_reason : null,
+    elapsed_ms: typeof row.metadata?.elapsed_ms === "number" ? row.metadata.elapsed_ms : null,
+    attachments: AttachmentSchema.array().safeParse(row.metadata?.attachments).data as ChatMessage["attachments"],
+  };
+  const turnId = row.kind === "turn" && typeof row.metadata?.turn_id === "string" ? row.metadata.turn_id : null;
+  const turnStatus = turnId && typeof row.metadata?.status === "string" ? row.metadata.status : null;
+  // A reply row carries its turn's outcome; a reply whose card is outside
+  // the window still reaches the log through its own turn id.
+  const trace = card ? { taskId: card.attemptId ?? card.turnId, turnId: card.turnId }
+    : row.kind === "message" && !isUser && row.message_kind === "reply" && row.task_id ? { taskId: row.task_id, turnId: row.task_id }
+      : null;
+  // A finished turn whose card counted process items folds its steps above
+  // the reply (or the failure notice); older cards have no count and no fold.
+  const stepsRef = card ? card.steps : row.kind === "turn" && !isPush ? turnStepsRef(row.metadata, row.task_id) : null;
+  // A failed or cancelled turn's notice carries its own execution log.
+  const endNotice = !!(card && endedBadly(card.status)) || !!(turnId && endedBadly(turnStatus));
+  // The execution log is never in the fold: the reply's footer row or the
+  // end notice carries it, in one place whether or not there are steps.
+  const stepsFold = stepsRef ? <FinishedTurnSteps attemptId={stepsRef.attemptId} turnId={stepsRef.turnId} sessionId={sessionId}
+    header={finishedFoldHeader(stepsRef)} visible={visible} open={stepsOpen}
+    onOpenChange={(open) => setStepsOpen(row.id, open)} /> : null;
+  // Subagents that finished after the reply started: rows under the reply,
+  // read from the card (MUL-472: no trace until the reader opens one).
+  const lateRef = card ? (card.attemptId && card.lateSubagents ? { attemptId: card.attemptId, turnId: card.turnId, late: card.lateSubagents } : null)
+    : row.kind === "turn" && !isPush && row.task_id && turnId ? (() => {
+      const late = lateSubagentsOf(row.metadata);
+      return late ? { attemptId: row.task_id, turnId, late } : null;
+    })() : null;
+  const lateRows = lateRef && !endNotice ? <SubagentCompletionRows late={lateRef.late}
+    source={{ sessionId, attemptId: lateRef.attemptId, turnId: lateRef.turnId, live: false }} /> : null;
+  if (card && endedBadly(card.status)) {
+    return <div className="space-y-3">{stepsFold}<TurnEndNotice turnId={card.turnId} attemptId={card.attemptId} status={card.status}
+      failureReason={card.failureReason ?? message.failure_reason ?? null} details={message.content} visible={visible} /></div>;
+  }
+  if (turnId && endedBadly(turnStatus)) {
+    return <div className="space-y-3">{stepsFold}<TurnEndNotice turnId={turnId} attemptId={row.task_id ?? null} status={turnStatus}
+      failureReason={message.failure_reason ?? null} details={message.content} visible={visible} /></div>;
+  }
+  if (row.kind === "turn" && row.metadata?.final_entry_id) return null;
   if (message.role === "user") {
     const markdown = message.content;
     const rendered = leadingCommandChipMarkdown(markdown);
@@ -447,8 +448,8 @@ function MessageBubble({ message, isPending, isPush, visible, trace = null, step
     );
   }
 
-  return <AssistantMessage message={message} isPending={isPending} isPush={isPush} visible={visible} trace={trace} steps={steps} after={after} />;
-}
+  return <AssistantMessage message={message} isPending={isPending} isPush={isPush} visible={visible} trace={trace} steps={stepsFold} after={lateRows} />;
+});
 
 function AssistantMessage({
   message,

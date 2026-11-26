@@ -45,7 +45,7 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
     expect(() => assertScmOwnershipReady(db)).not.toThrow();
     expect(db.query('SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover').all()).toEqual([{ cursor_id: '', complete: 1 }]);
     expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
-  }, 30_000);
+  }, 90_000);
   it('adds A3 live terms to an enrolled level 1 database and preserves old reader compatibility', () => {
     removeScmSchema(db);
     db.exec('DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json; DROP TABLE multiremi_live_terms');

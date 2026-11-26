@@ -3012,11 +3012,12 @@ describe("ADR 0018 local records migration", () => {
   it("ends a fresh database and an upgraded one in the same schema", () => {
     const fresh = freshDb();
     run(fresh);
-    expect(schema(upgraded())).toEqual(schema(fresh));
+    const migrated = upgraded();
+    expect(schema(migrated)).toEqual(schema(fresh));
     expect(tableNames(fresh).filter((name) => name.startsWith("multiremi_legacy_"))).toEqual([]);
     const indexes = (database: Database) => (database.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'").all() as Array<{ name: string }>)
       .map((row) => row.name).sort();
-    expect(indexes(upgraded())).toEqual(indexes(fresh));
+    expect(indexes(migrated)).toEqual(indexes(fresh));
   });
 
   it("resets native sessions exactly once", () => {

@@ -1,4 +1,5 @@
 import { removeScmSchema } from "./scm-schema-upgrade.js";
+import { removeRootSchema } from './root-schema-upgrade.js';
 import { expect } from 'bun:test';
 import type { SqlDatabase } from '../../packages/server/src/store/db/postgres.js';
 import { runMigrations, runStartupMigrations } from '../../packages/server/src/store/migrations.js';
@@ -9,28 +10,11 @@ import { SCHEMA_MIGRATIONS } from '../../packages/server/src/store/schema-migrat
 /** Reproduce an enrolled pre-#128 database, including an in-flight old drain. */
 export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
   const restoreLevel2 = () => {
+    removeRootSchema(db);
     removeScmSchema(db);
     db.exec("DROP TABLE multiremi_attempt_system_prompts; DROP TABLE multiremi_system_prompt_versions; DROP TABLE multiremi_system_prompt_documents");
     db.exec(`DROP TABLE multiremi_planned_restarts;
       ALTER TABLE multiremi_daemon_drains DROP COLUMN drain_id;
-      DROP TABLE multiremi_security_state;
-      DROP TABLE multiremi_jwt_current;
-      DROP TABLE multiremi_jwt_materials;
-      DROP TABLE multiremi_jwt_signing_domains;
-      DROP TABLE multiremi_delivery_receipts;
-      DROP TABLE multiremi_credential_materials;
-      DROP TABLE multiremi_credential_version_bindings;
-      DROP TABLE multiremi_runtime_trusts;
-      DROP TABLE multiremi_machine_challenges;
-      DROP TABLE multiremi_machine_enrollments;
-      DROP TABLE multiremi_root_bootstrap_authorizations;
-      DROP TABLE multiremi_root_management_events;
-      DROP TABLE multiremi_credential_families;
-      DROP TABLE multiremi_password_authority_versions;
-      DROP TABLE multiremi_root_subject_state;
-      DROP TABLE multiremi_root_grants;
-      DROP TABLE multiremi_authority_edges;
-      DROP TABLE multiremi_authority_nodes;
       DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json;
       DELETE FROM multiremi_schema_steps WHERE level>=3;
       UPDATE multiremi_schema_meta SET expand_level=2;`);

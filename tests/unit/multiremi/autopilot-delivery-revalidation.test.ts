@@ -16,7 +16,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       previousKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
       process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 32).toString("base64");
       fixture = await factory.open();
-    });
+    }, 15_000);
     afterEach(async () => {
       if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
       else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;

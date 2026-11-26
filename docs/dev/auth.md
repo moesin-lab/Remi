@@ -123,6 +123,12 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 - HTTP root 后备授权已接入工作区详情、Agent 详情、平台状态等只读路径，以及工作区基础元数据更新、删除和平台操作创建、取消。注册任务使用真实 attempt 与 Agent 权限，保留 daemon、updater、保护配置和维护检查。跨工作区 log/trace 订阅在确认目标存在后校验 root，并在每个受 root 约束的帧发出前重新检查，包括异步日志投影完成后。
 - Agent 目标 grant 仍需授权时固化实际依赖与受保护引用。Agent 来源持久 PAT 与子 grant 仍需独立于正常任务终态、可撤销的委派来源及真实主体绑定。其他业务写入点、B 线生产首次投递及真实浏览器联调仍随整合分支推进。
 
+### Agent grant 的依赖绑定
+
+`new RootManagement(db, resolveAgentDependencies)` 在服务端注入与 admission 共用的依赖解析器。未装配解析器时 Agent grant 拒绝签发。人类 root 使用 `planAgentGrant(proof, agentId, trustIds)` 并在同一事务传入 `grant(tx, actor, {subject:{type:'agent',id:agentId}, runtime_trust_ids, accepted_dependency_digest, expected_revision, idempotency_key, reason})`。内核验证当前 trust，原子记录 grant 代际、配置 epoch、信任版本和逐项引用。新 attempt 从该快照复核实际选择的 runtime trust。
+
+配置与共享资源写入器使用 `guardProtectedMutation(tx, actor, request, expectedVersion)`，`request.actualTarget` 为真实资源的种类和 ID。写入与守卫共用事务。命中引用时必须使用已绑定该写动作的 root actor，版本不符回滚；核验成功同步推进 epoch 并撤销旧授权节点，需要重新批准才能使用新配置。
+
 ### 已准入 attempt 的首次 offer
 
 机器投递使用 `await PreparedRootDelivery.prepare(tuple, payload, publicKey)` 生成不可替换的候选。调用方先用 `rootManagement.planFirstOffer(candidate)` 合并自己的 run/Q 锁计划，再在带当前 fence 的 `withSecurityWrite` 中调用 `rootReceipts.activate(tx, candidate, lease, callback)`。`callback(activeTx, prepared)` 在同一事务完成 run/Q CAS 后返回 `rootManagement.issue(activeTx, prepared)`。只有实际 `activate` 回调中的原始对象能签发。发送方在最外层事务提交后才能交付 envelope。

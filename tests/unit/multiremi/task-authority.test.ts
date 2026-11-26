@@ -213,6 +213,26 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const unrelated=store.createAgent({name:'different provider',provider:'claude'});
     expect(()=>service.reviewAgentGrantRuntimeTrusts(proof,unrelated.id,[result.trust.id])).toThrow('root_runtime_untrusted');
     expect(()=>service.reviewAgentGrantRuntimeTrusts({kind:'invalid'},candidate.id,[result.trust.id])).toThrow();
+    const dependencyDigest=hash('frozen fixture policy');
+    const kernel=new RootManagement(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:dependencyDigest,
+      trustVersions:[{id:result.trust.id,version:result.trust.generation}],refs:[{kind:'policy',id:'shared',version:2,digest:hash('policy'),use:'instruction'}]}));
+    const registered=kernel.registeredCredentials.verifyJwt(compact,signing);
+    const createUse={action:'root.grant.create',use:'management',actualTarget:{type:'agent',id:candidate.id}};
+    const mutation={action:'policy.update',use:'write',actualTarget:{type:'policy',id:'shared'}};
+    const grantPlan=kernel.planAgentGrant(registered,candidate.id,[result.trust.id]);
+    const checkGrant=(acceptedDigest:string)=>withSecurityWrite(db,undefined,{...grantPlan,domainTargets:[...grantPlan.domainTargets,'management:policy:shared'].sort()},tx=>{
+      const created=kernel.grant(tx,kernel.authorizeWrite(tx,registered,createUse),{subject:{type:'agent',id:candidate.id},reason:'approve policy',
+        expected_revision:grantPlan.expectedRevision,idempotency_key:'agent-creation',runtime_trust_ids:[result.trust.id],accepted_dependency_digest:acceptedDigest});
+      expect(created.grant.subject).toEqual({type:'agent',id:candidate.id});
+      expect(db.query('SELECT resource_version FROM multiremi_agent_grant_protected_refs WHERE grant_id=?').get(created.grant.id).resource_version).toBe(2);
+      kernel.guardProtectedMutation(tx,kernel.authorizeWrite(tx,registered,mutation),mutation,2);
+      expect(Number(db.query('SELECT config_epoch FROM multiremi_agent_grant_dependencies WHERE grant_id=?').get(created.grant.id).config_epoch)).toBe(2);
+      expect(db.query('SELECT revoked_at_ms FROM multiremi_authority_nodes WHERE node_id=?').get(created.grant.authority_node_id).revoked_at_ms).toBeTruthy();
+      throw new Error('fixture rollback');
+    });
+    expect(()=>checkGrant(hash('stale'))).toThrow('authority_revision_conflict');
+    expect(()=>checkGrant(dependencyDigest)).toThrow('fixture rollback');
+    expect(db.query('SELECT grant_id FROM multiremi_agent_grant_dependencies WHERE agent_id=?').get(candidate.id)).toBeNull();
     const revokeUse={action:'root.runtime-trust.revoke',use:'management',actualTarget:{type:'runtime_trust',id:result.trust.id}};
     const response = await api('/api/root/runtime-trust/' + result.trust.id + '/revoke', compact,
       { reason:'retire',expected_revision:result.security_revision,idempotency_key:'revoke',reason_code:'operator_security_revoke' });

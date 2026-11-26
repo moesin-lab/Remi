@@ -24,6 +24,9 @@ type StoredReceipt = Lease & { binding_json: string; envelope_digest: string; ru
   ack_state: 'pending' | 'confirmed'; execution_locator_json: string | null };
 
 const preparedDeliveries = new WeakSet<PreparedRootDelivery>();
+class CommittedRunConflict extends Error {
+  constructor() { super('receipt_conflict'); }
+}
 const activatingDeliveries = new WeakMap<SecurityTx, { db: SqlDatabase; candidate: PreparedRootDelivery }>();
 
 export function requireActivatingDelivery(db: SqlDatabase, tx: SecurityTx, input: unknown): PreparedRootDelivery {
@@ -207,10 +210,9 @@ export class RootReceiptStore {
     const previous = existing();
     if (previous) return replay(previous);
     const plan = this.authority.planFirstOffer(candidate);
-    const concurrent = new Error('first_offer_already_committed');
     try {
       return withSecurityWrite(this.db, lease.fence_term, plan, tx => {
-        if (existing()) throw concurrent;
+        if (existing()) throw new CommittedRunConflict();
         return this.activate(tx, candidate, lease, (activeTx, prepared) => {
           const bound = this.db.query(`INSERT INTO multiremi_usage_task_scopes(task_id,workspace_id,agent_id,runtime_id,active_run_id,runtime_provenance)
             SELECT a.id,t.workspace_id,t.agent_id,a.runtime_id,?,'live_task' FROM multiremi_turn_attempts a
@@ -228,7 +230,7 @@ export class RootReceiptStore {
         });
       });
     } catch (error) {
-      if (error !== concurrent) throw error;
+      if (!(error instanceof CommittedRunConflict)) throw error;
       const winner = existing();
       if (!winner) throw error;
       return replay(winner);
@@ -279,12 +281,14 @@ export class RootReceiptStore {
         fenceTerm: lease.fence_term, consumerId: tuple.consumer_id, runGeneration: tuple.run_generation,
         runtimeId: tuple.runtime_id, daemonId: tuple.daemon_id, incarnation: tuple.incarnation,
         expiresAtMs: Math.min(Date.parse(tuple.material_expires_at), Date.parse(lease.start_deadline)), state: 'dispatched' });
-      this.db.run(`INSERT INTO multiremi_delivery_receipts(receipt_id,attempt_id,handoff_id,run_generation,consumer_id,receipt_version,
+      const receipt = this.db.query(`INSERT INTO multiremi_delivery_receipts(receipt_id,attempt_id,handoff_id,run_generation,consumer_id,receipt_version,
         delivery_version,material_version,credential_id,binding_json,envelope,envelope_digest,business_payload_json,start_deadline,lease_id,
-        fence_term,ack_state,run_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending_start')`,
-      [tuple.receipt_id, tuple.attempt_id, tuple.handoff_id, tuple.run_generation, tuple.consumer_id, tuple.receipt_version, tuple.delivery_version,
+        fence_term,ack_state,run_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending_start')
+        ON CONFLICT(attempt_id,run_generation) DO NOTHING RETURNING receipt_id`)
+        .get(tuple.receipt_id, tuple.attempt_id, tuple.handoff_id, tuple.run_generation, tuple.consumer_id, tuple.receipt_version, tuple.delivery_version,
         tuple.material_version, issued.credential.id, serializeRootDeliveryTuple(tuple), candidate.envelope, candidate.envelopeDigest, businessJson,
-        lease.start_deadline, lease.lease_id, lease.fence_term]);
+        lease.start_deadline, lease.lease_id, lease.fence_term);
+      if (!receipt) throw new CommittedRunConflict();
       this.authority.requireReceiptAuthority(tx,tuple.receipt_id);
       return { tuple, ...lease, run_state: 'pending_start', envelope: candidate.envelope, envelope_digest: candidate.envelopeDigest,
         frozen_business_payload: JSON.parse(businessJson) };

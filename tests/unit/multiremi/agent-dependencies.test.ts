@@ -1,9 +1,10 @@
 import { expect, it } from 'bun:test';
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
 import { AgentDependencies, agentDependencyDigest } from '@multiremi/store/agent-dependencies.js';
 import type { StoreContext } from '@multiremi/store/context.js';
 import { beginMachineChallenge, verifyMachineChallenge } from '@multiremi/store/machine-proof.js';
+import { machineEnrollmentPayload } from '@multiremi/store/machine-enrollment.js';
 import { bootstrapAuthorizationDigest, RootManagement } from '@multiremi/store/root-management.js';
 import { withSecurityWrite, type SecurityTx } from '@multiremi/store/security-write.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
@@ -27,16 +28,22 @@ async function trustRuntime(ctx: StoreContext, runtimeId: string) {
   const proof = await service.verifyIndependentPassword('usr_test',password);
   service.bootstrapHuman(proof,bootstrap);
   db.run("UPDATE multiremi_security_state SET feature_activation=1,minimum_enforcement_version='test'");
-  const keys = new RootMachineKeys({runtime_id:runtimeId,daemon_id:'worker',consumer_id:'consumer',incarnation:'inc',recipient_key_id:'key'},
+  const expires = Date.now()+600_000;
+  const keys = new RootMachineKeys({runtimeId,daemonId:'worker',consumerId:'consumer',incarnation:'inc',recipientKeyId:'key',
+    deploymentId:'test', credentialId:'token', credentialDigest:hash('test-daemon'), keyExpiresAtMs:expires},
     generateKeyPairSync('rsa',{modulusLength:3072}).privateKey,generateKeyPairSync('ed25519').privateKey);
   const binding = keys.publicBinding();
-  const expires = Date.now()+600_000;
-  db.query("INSERT INTO multiremi_authority_nodes VALUES('machine',100,1,'machine_registration','daemon','worker','system',1,?,NULL,0)").run(expires);
+  const issuer = generateKeyPairSync('ed25519');
+  const host = generateKeyPairSync('ed25519');
+  db.query("INSERT INTO multiremi_authority_nodes VALUES('deployment',100,1,'deployment_origin','deployment','test','system',1,?,NULL,0)").run(expires);
+  db.query("INSERT INTO multiremi_machine_deployment_roots VALUES('test','deployment',?,?)").run(
+    issuer.publicKey.export({type:'spki',format:'pem'}),host.publicKey.export({type:'spki',format:'pem'}));
   db.query("INSERT INTO multiremi_access_tokens(id,name,type,workspace_id,daemon_id,token_hash,token_prefix,created_at) VALUES('token','test','daemon','local','worker',?,'test','now')").run(hash('test-daemon'));
-  db.query(`INSERT INTO multiremi_machine_enrollments(incarnation,deployment_id,consumer_id,runtime_id,daemon_id,credential_id,credential_digest,
-    authority_node_id,generation,signing_spki,recipient_spki,recipient_key_id,key_expires_at_ms,isolation_verified_at_ms,immutable_carrier_verified_at_ms,attestation_expires_at_ms,attestation_id)
-    VALUES('inc','test','consumer',?,'worker','token',?,'machine',1,?,?,'key',?,1,1,?,'test-attestation')`)
-    .run(runtimeId,hash('test-daemon'),binding.signing_spki,binding.recipient_spki,expires,expires);
+  const report = {id:'test-attestation',isolationVerifiedAtMs:Date.now(),immutableCarrierVerifiedAtMs:Date.now(),expiresAtMs:expires};
+  const deploymentProof = sign(null,machineEnrollmentPayload('deployment',binding,report,0),issuer.privateKey).toString('base64url');
+  const signature = sign(null,machineEnrollmentPayload('attestation',binding,report,0),host.privateKey).toString('base64url');
+  withSecurityWrite(db,undefined,{expectedRevision:1,workspaceIds:['local'],numberKeys:[],domainTargets:['authority:deployment',`machine:${runtimeId}`]},
+    tx => service.enrollMachine(tx,deploymentProof,{...report,signature},binding,0));
   const action = 'root.runtime-trust.grant';
   const use = {action,use:'management',actualTarget:{type:'runtime',id:runtimeId}};
   const plan = service.plan(proof,use);
@@ -45,8 +52,8 @@ async function trustRuntime(ctx: StoreContext, runtimeId: string) {
   const reply = keys.answerChallenge(challenge);
   const verified = withSecurityWrite(db,undefined,machinePlan,tx => verifyMachineChallenge(db,tx,'test-daemon',challenge.id,action,runtimeId,reply));
   return withSecurityWrite(db,undefined,plan,tx => service.grantRuntimeTrust(tx,service.authorizeWrite(tx,proof,use),{
-    runtime_id:runtimeId,daemon_id:binding.daemon_id,incarnation:binding.incarnation,recipient_key_id:binding.recipient_key_id,
-    recipient_key_fingerprint:binding.recipient_key_fingerprint,challenge_id:challenge.id,challenge_response:verified.proofDigest,
+    runtime_id:runtimeId,daemon_id:binding.daemonId,incarnation:binding.incarnation,recipient_key_id:binding.recipientKeyId,
+    recipient_key_fingerprint:reply.recipient_key_fingerprint,challenge_id:challenge.id,challenge_response:verified.proofDigest,
     expected_revision:plan.expectedRevision,idempotency_key:'trust',reason:'signed runtime',
   }));
 }
@@ -107,7 +114,7 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     expect(resolve).toThrow('root_required');
     store.updateAgent(agent.id,{executable:null});
     expect(resolve().trustVersions).toEqual(snapshot.trustVersions);
-    db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='machine'");
+    db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id=(SELECT authority_node_id FROM multiremi_machine_enrollments WHERE incarnation='inc')");
     expect(resolve).toThrow('root_runtime_untrusted');
   });
 });

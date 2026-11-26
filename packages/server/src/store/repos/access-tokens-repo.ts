@@ -325,7 +325,7 @@ export class AccessTokensRepo {
     // must not disagree because the clock moved between them.
     const nowMs = Date.now();
     if (!accessTokenIsValid(accessToken, nowMs)) return null;
-    if ((row.root_attempt || (accessToken.type === 'pat' && row.agent_id != null)) && !row.registered) return null;
+    if (accessToken.type === 'pat' && row.agent_id != null || row.root_attempt && !row.registered) return null;
     if (row.registered) {
       const proof = this.authority.registeredCredentials.verify(token);
       if (proof.kind!=='dependent') return null;

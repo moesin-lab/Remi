@@ -184,6 +184,15 @@ export class RegisteredCredentialProofs {
         if (evidence.receipt && (evidence.receipt.binding!==active.binding_json || evidence.receipt.lease!==active.lease_id ||
             evidence.receipt.fence!==active.fence_term)) throw new SecurityAbort('root_authority_revoked');
         evidence.receipt ??= {binding:active.binding_json,lease:active.lease_id,fence:active.fence_term};
+      } else if (identity.credentialType==='pat' && identity.subject.type==='agent' && identity.purpose==='personal' && evidence.attemptId===null) {
+        const delegated = this.db.query(`SELECT d.node_id FROM multiremi_delegated_pats p JOIN multiremi_durable_delegations d ON d.node_id=p.origin_node_id
+          JOIN multiremi_root_subject_state s ON s.active_grant_id=d.issuer_grant_id AND s.generation_counter=d.issuer_generation AND s.subject_id=d.issuer_agent_id
+          JOIN multiremi_credential_families f ON f.family_id=p.family_id JOIN multiremi_authority_edges e ON e.child_id=f.authority_node_id
+          AND e.parent_id=d.node_id AND e.dependency='continuous' JOIN multiremi_agents a ON a.id=d.issuer_agent_id AND a.archived_at IS NULL
+          WHERE s.subject_type='agent' AND p.credential_id=? AND p.family_id=? AND d.issuer_agent_id=? AND d.action='credential.pat.create'
+          AND NOT EXISTS(SELECT 1 FROM multiremi_attempt_security_revocations security WHERE security.attempt_id=d.attempt_id)`)
+          .get(identity.credentialId,binding.familyId,identity.subject.id);
+        if (!delegated) throw new SecurityAbort('root_authority_revoked');
       } else if (identity.credentialType==='pat' && identity.subject.type==='user' && identity.subject.id.startsWith('usr_') && evidence.attemptId===null) {
         const human = this.db.query(`SELECT u.id FROM multiremi_users u JOIN multiremi_access_tokens t ON t.user_id=u.id
           WHERE u.id=? AND t.id=? AND t.type='pat' AND t.purpose IN ('personal','session','cli')

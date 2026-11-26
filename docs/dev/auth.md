@@ -125,15 +125,27 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 ### Agent grant 的依赖绑定
 
+生产 Store 通过 `AgentDependencies.resolveAgentDependencies` 读取真实 Agent、工作区、指令、运行时/profile、插件、技能、执行来源与间接引用。受保护的配置先由已验证 root 在 `root.agent-configuration.approve` 写事务调用 `approveAgentConfiguration(tx,actor,agentId,expectedEpoch,approval)`；首次传 `null`，后续使用当前 epoch。输入为版本化的 `sources` 和 `executions`，不接受调用方指定的 authority 父节点。服务器校验材料摘要，并在同一事务用实际解析器复查。审批或读源失败回滚全部材料。`previewAgentGrant(proof,agentId,trustIds)` 返回实际摘要，客户端只提交明确选择的 trust IDs 与该摘要。审批来源撤销或配置代际变化会使旧来源失效。
+
 `new RootManagement(db, resolveAgentDependencies)` 在服务端注入与 admission 共用的依赖解析器。未装配解析器时 Agent grant 拒绝签发。人类 root 使用 `planAgentGrant(proof, agentId, trustIds)` 并在同一事务传入 `grant(tx, actor, {subject:{type:'agent',id:agentId}, runtime_trust_ids, accepted_dependency_digest, expected_revision, idempotency_key, reason})`。内核验证当前 trust，原子记录 grant 代际、配置 epoch、信任版本和逐项引用。新 attempt 从该快照复核实际选择的 runtime trust。
 
 配置与共享资源写入器使用 `guardProtectedMutation(tx, actor, request, expectedVersion)`，`request.actualTarget` 为真实资源的种类和 ID。写入与守卫共用事务。命中引用时必须使用已绑定该写动作的 root actor，版本不符回滚；核验成功同步推进 epoch 并撤销旧授权节点，需要重新批准才能使用新配置。
+
+### Agent 来源的持久委派
+
+`resolveDurableDelegation(tx, actor, use, beneficiary)` 只接受已准入、当前运行中的 task。`use` 绑定 `action`、`actualTarget`、`use`、`idempotencyKey`、`requestDigest` 与 `expiresAtMs`。内核存储真实 Agent、grant generation、attempt、run、lease/fence、credential version 和 family。原 task 材料是 evidence，持续来源包含当前 grant、trust 和输入批准的来源。正常 run 结束后子项仍可通过自身来源验证。
+
+签发 `personal` PAT 时先 `const candidate = PreparedAgentPat.prepare()`，将 `credential:<candidate.credentialId>` 加入真实操作的锁计划。事务内执行 `root.issue(tx, {kind:'delegated-pat', actor, use, beneficiary, candidate})`。最外层提交后 `candidate.takeCommittedToken()` 才能取出 raw，且只能取一次。读写管理入口用 `root.registeredCredentials.verify(raw)` 与 `resolveCurrent` / `authorizeWrite` 核验，返回 `transport='agent_pat'`、真实 Agent subject 和凭证来源。历史 `verifyAccessToken` 的 PAT 消费者会走 human/local 分支，因此这一入口拒绝 Agent PAT。接入方应将已验证的 Agent subject 传给相应的身份与路由守卫。
+
+子 grant 仍使用 `grant(tx,actor,input)`，Agent 来源必须指定有限 `expires_at`。`revokeDurableDelegation(tx,actor,nodeId,input)` 单独撤销一条来源；`revokeAttemptDelegations(tx,attemptId,reason)` 供执行安全终止事务调用，对应 attempt 的已签发后代随即失效。正常终态不调用安全撤销接口。
 
 ### 已准入 attempt 的首次 offer
 
 机器投递使用 `await PreparedRootDelivery.prepare(tuple, payload, publicKey)` 生成不可替换的候选。调用方先用 `rootManagement.planFirstOffer(candidate)` 合并自己的 run/Q 锁计划，再在带当前 fence 的 `withSecurityWrite` 中调用 `rootReceipts.activate(tx, candidate, lease, callback)`。`callback(activeTx, prepared)` 在同一事务完成 run/Q CAS 后返回 `rootManagement.issue(activeTx, prepared)`。只有实际 `activate` 回调中的原始对象能签发。发送方在最外层事务提交后才能交付 envelope。
 
 签发器从主库读取 attempt 的 Agent、grant 代际、输入批准与连续来源、运行时 trust 和当前 run。`activate` 写入材料版本、lease 和 receipt，并在提交前重新验证。首次 offer 的材料版本为 1。重复的 offer 由调用方通过已提交 receipt 恢复；重新构造候选不能覆盖原材料。
+
+`RootReceiptStore.commitFirstOffer(candidate, lease)` 已封装首次 run/Q CAS、事务内签发以及提交回复丢失后的复查与重放。并发的两个调用会获得相同 envelope、原始版本、期限和 lease。调用者不应再次创建 run 或另行插入 token。
 
 ### 机器登记与退役
 

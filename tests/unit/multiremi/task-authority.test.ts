@@ -8,21 +8,47 @@ import { expect, it } from 'bun:test';
 import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
 import { RootReceiptClient } from '@multiremi/worker/root-receipt-client.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
+import type { RaceInput } from './fixtures/root-issuer-race.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { PreparedRootDelivery, RootReceiptStore, rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
 import { createAdmittedTask, retryAdmittedTurn } from '@multiremi/store/attempt-admission.js';
+import { PreparedAgentPat } from '@multiremi/store/durable-delegation.js';
+import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
 import { prepareRunInstallation, acknowledgeRunEnvironment } from '@multiremi/worker/root-run-installation.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
-import { bootstrapAuthorizationDigest, RootManagement } from '@multiremi/store/root-management.js';
+import { RootManagement } from '@multiremi/store/root-management.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
 import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease } from '@multiremi/store/task-authority.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 const hash = (input:string) => createHash('sha256').update(input).digest('hex');
+
+async function raceIssuers(db:SqlDatabase,databaseUrl:string|undefined,inputs:[RaceInput,RaceInput],verify:(result:string[],database:SqlDatabase)=>void) {
+  const directory=mkdtempSync(join(tmpdir(),'root-issuer-race-'));
+  const database=databaseUrl??join(directory,'fixture.sqlite');
+  const workers:Worker[]=[];
+  try {
+    if (!databaseUrl) db.query('VACUUM INTO ?').run(database);
+    const barrier=new SharedArrayBuffer(4);
+    const results=await Promise.all(inputs.map(input=>new Promise<string>((resolve,reject)=>{
+      const worker=new Worker(new URL('./fixtures/root-issuer-race.ts',import.meta.url).href);
+      workers.push(worker);
+      worker.onmessage=event=>resolve(event.data);
+      worker.onerror=event=>reject(new Error(event.message));
+      worker.postMessage({database,backend:db.dialect,barrier,input});
+    })));
+    const copy=databaseUrl?null:openSqliteDatabase(database);
+    try { verify(results,copy ? copy as unknown as SqlDatabase : db); } finally { copy?.close(); }
+  } finally { await Promise.all(workers.map(worker=>worker.terminate())); rmSync(directory,{recursive:true,force:true}); }
+}
 
 function rootClient(store: MultiremiStore, signing: { domainId: string; keyEpoch: string; secret: string }) {
   const master = 'isolated-master-token';
@@ -42,27 +68,6 @@ function rootClient(store: MultiremiStore, signing: { domainId: string; keyEpoch
       }
     }
   };
-}
-
-async function bootstrap(db:SqlDatabase) {
-    const service = new RootManagement(db);
-    const password = 'test-dashboard-password';
-    const verifier = await Bun.password.hash(password,{algorithm:'argon2id',memoryCost:19456,timeCost:2});
-    db.run("INSERT INTO multiremi_users(id,name,email,created_at,updated_at) VALUES('usr_auth','test','auth@example.invalid','now','now')");
-    db.query("INSERT INTO multiremi_password_credentials(user_id,login_email,password_hash,updated_at) VALUES('usr_auth','auth@example.invalid',?,'now')").run(verifier);
-    db.run("INSERT INTO multiremi_authority_nodes VALUES('identity',1,1,'independent_identity','user','usr_auth','system',0,9999999999999,NULL,0)");
-    db.run("INSERT INTO multiremi_authority_nodes VALUES('password',2,1,'password','user','usr_auth','system',0,9999999999999,NULL,1)");
-    db.run("INSERT INTO multiremi_authority_edges VALUES('password',1,2,'identity',1,1,'continuous')");
-    db.query("INSERT INTO multiremi_password_authority_versions VALUES('usr_auth',1,?,'password','identity')").run(hash(verifier));
-    const signing={domainId:'test-dashboard',keyEpoch:'1',secret:'local-test-signing-secret'};
-    const input={userId:'usr_auth',deploymentId:'test',authorization:'test-once',reason:'isolated test',expectedRevision:0,
-      dashboardSigningDomain:{domainId:signing.domainId,keyEpoch:signing.keyEpoch,keyDigest:hash(signing.secret)}};
-    db.query(`INSERT INTO multiremi_root_bootstrap_authorizations(authorization_digest,deployment_id,user_id,reason,expires_at_ms)
-      VALUES(?,?,?,?,?)`).run(bootstrapAuthorizationDigest(input),input.deploymentId,input.userId,input.reason,Date.now()+60000);
-    const passwordProof=await service.verifyIndependentPassword(input.userId,password);
-    const created=service.bootstrapHuman(passwordProof,input);
-    db.run("UPDATE multiremi_security_state SET feature_activation=1,minimum_enforcement_version='fixture'");
-    return {service,passwordProof,signing,input,created};
 }
 
 pendingTurnBackendTests('task and mutation authority', fixture=>{
@@ -245,9 +250,12 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);
   });
 
-  it.each(['expired lease','preempted fence','revoked source'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
+  it.each(['expired lease','preempted fence','revoked source','durable delegation','concurrent first offer','concurrent security termination'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
     const {db,store}=fixture();
-    const {service,passwordProof,created,signing}=await bootstrap(db);
+    const dependency=hash('protected instructions');
+    const trustVersions=[{id:'trust',version:1}];
+    const {service,passwordProof,created,signing}=await bootstrap(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:dependency,trustVersions,
+      refs:[{kind:'instructions',id:'policy',version:1,digest:dependency,use:'instruction'}]}));
     const api = rootClient(store, signing);
     const runtime=store.registerRuntime({id:'rt_auth',name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
     const agent=store.createAgent({name:'admitted',provider:'codex',runtimeId:runtime.id});
@@ -268,6 +276,8 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     db.query(`INSERT INTO multiremi_root_grants(grant_id,subject_type,subject_id,generation,scope,authority_node_id,issuer_type,issuer_id,revision,reason,created_at_ms)
       VALUES('grant-agent','agent',?,1,'system','grant-agent','user','usr_auth',2,'fixture',1)`).run(agent.id);
     db.query("INSERT INTO multiremi_root_subject_state VALUES('agent',?,1,'grant-agent')").run(agent.id);
+    db.query(`INSERT INTO multiremi_agent_grant_dependencies VALUES('grant-agent',1,?,1,?,?,NULL)`).run(agent.id,dependency,JSON.stringify(trustVersions));
+    db.query(`INSERT INTO multiremi_agent_grant_protected_refs VALUES('grant-agent','instructions','policy',1,?,'instruction')`).run(dependency);
     expect(()=>store.createTask({id:'tsk_unadmitted',agentId:agent.id,prompt:'ordinary entry'})).toThrow('root_invoker_untrusted');
     expect(store.getTask('tsk_unadmitted')).toBeNull();
     db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,proof_node_id,actor_grant_id,actor_generation,action,target_id,idempotency_key,
@@ -314,6 +324,21 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const lease={...execution,leaseId:'one',fenceTerm:'1',consumerId:'consumer',runGeneration:1,expiresAtMs:Date.now()+60000,state:'dispatched' as const};
     const offerLease={lease_id:'one',fence_term:'1',start_deadline:new Date(lease.expiresAtMs).toISOString()};
     const offerPlan=service.planFirstOffer(candidate);
+    if (failure==='concurrent first offer') {
+      db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(task.id);
+      const offer={action:'offer' as const,tuple,business,publicKey:recipientKeys.publicKey.export({format:'jwk'})};
+      await raceIssuers(db,fixture().databaseUrl,[offer,offer],(results,database)=>{
+        expect(results[1]).toBe(results[0]);
+        const receipt=database.query('SELECT envelope_digest,lease_id,material_version,start_deadline FROM multiremi_delivery_receipts WHERE attempt_id=?').get(task.id);
+        expect(JSON.parse(results[0]!)).toEqual([receipt.envelope_digest,receipt.lease_id,Number(receipt.material_version),receipt.start_deadline]);
+        for (const table of ['multiremi_current_task_leases','multiremi_delivery_receipts','multiremi_credential_materials','multiremi_credential_version_bindings']) {
+          expect(Number(database.query(`SELECT COUNT(*) AS total FROM ${table}`).get().total)).toBe(1);
+        }
+        expect(Number(database.query('SELECT COUNT(*) AS total FROM multiremi_access_tokens WHERE task_id=?').get(task.id).total)).toBe(1);
+        expect(Number(database.query('SELECT COUNT(*) AS total FROM multiremi_usage_runs WHERE task_id=?').get(task.id).total)).toBe(1);
+      });
+      return;
+    }
     expect(()=>withSecurityWrite(db,'1',offerPlan,tx=>service.issue(tx,candidate))).toThrow('credential_version_conflict');
     const receipts=new RootReceiptStore(db,service);
     expect(()=>receipts.commitFirstOffer(candidate,offerLease)).toThrow('stale_execution');
@@ -460,6 +485,80 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       {...locator,birth_token_id:birthToken},lease.expiresAtMs));
     expect(()=>start('different')).toThrow('stale_execution');
     expect(start('birth')).toBe('replayed');
+    if (failure==='concurrent security termination') {
+      const use={action:'credential.pat.create' as const,actualTarget:{type:'agent',id:agent.id},use:'write',requestDigest:hash('race'),expiresAtMs:Date.now()+120000,idempotencyKey:'race'};
+      const input={agentId:agent.id,attemptId:task.id,raw:token.token,use};
+      await raceIssuers(db,fixture().databaseUrl,[{...input,action:'pat'},{...input,action:'revoke'}],(results,database)=>{
+        expect([...results].sort()).toEqual(['authority_revision_conflict','committed']);
+        const committedPat=results[0]==='committed';
+        expect(Number(database.query('SELECT COUNT(*) AS total FROM multiremi_delegated_pats').get().total)).toBe(Number(committedPat));
+        if (committedPat) {
+          const root=new RootManagement(database);
+          const revision=Number(database.query('SELECT security_revision FROM multiremi_security_state').get().security_revision);
+          withSecurityWrite(database,undefined,{expectedRevision:revision,workspaceIds:['local'],numberKeys:[],domainTargets:[`attempt:${task.id}`]},
+            tx=>root.revokeAttemptDelegations(tx,task.id,'security_compromised'));
+        }
+        expect(database.query('SELECT attempt_id FROM multiremi_attempt_security_revocations').all()).toEqual([{attempt_id:task.id}]);
+        expect(database.query(`SELECT d.node_id FROM multiremi_durable_delegations d JOIN multiremi_authority_nodes n ON n.node_id=d.node_id WHERE n.revoked_at_ms IS NULL`).all()).toEqual([]);
+      });
+      return;
+    }
+    if (failure==='durable delegation') {
+      const beneficiary={type:'agent' as const,id:agent.id};
+      const use={action:'credential.pat.create' as const,use:'write',actualTarget:beneficiary,idempotencyKey:'issue-pat',requestDigest:hash('personal'),expiresAtMs:Date.now()+60000};
+      const issuePat=(candidate:PreparedAgentPat,rollback:boolean)=>{
+        const plan=service.plan(taskProof,use);
+        return withSecurityWrite(db,plan.fenceTerm,{...plan,domainTargets:[...plan.domainTargets,`credential:${candidate.credentialId}`].sort()},tx=>{
+          const actor=service.authorizeWrite(tx,taskProof,use);
+          const issued=service.issue(tx,{kind:'delegated-pat',actor,use,beneficiary,candidate});
+          expect(candidate.takeCommittedToken()).toBeNull();
+          if (rollback) throw new Error('rollback PAT');
+          return issued;
+        });
+      };
+      const candidate=PreparedAgentPat.prepare();
+      expect(()=>issuePat(candidate,true)).toThrow('rollback PAT');
+      expect(candidate.takeCommittedToken()).toBeNull();
+      const issued=issuePat(candidate,false);
+      const raw=candidate.takeCommittedToken()!;
+      expect(candidate.takeCommittedToken()).toBeNull();
+      expect(()=>issuePat(PreparedAgentPat.prepare(),false)).toThrow('credential_version_conflict');
+      expect(issued.subject).toEqual(beneficiary);
+      const patProof=service.registeredCredentials.verify(raw);
+      expect(service.resolveCurrent(patProof,use)).toMatchObject({subject:beneficiary,transport:'agent_pat',effectiveRoot:true});
+      expect(await store.verifyAccessToken(raw)).toBeNull();
+      const peer=store.createAgent({name:'delegation target',provider:'codex',runtimeId:execution.runtimeId});
+      const childDigest=hash('shared fixture for child grant');
+      const childKernel=new RootManagement(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:childDigest,trustVersions:[{id:'trust',version:1}],
+        refs:[{kind:'policy',id:'policy',version:1,digest:childDigest,use:'instruction'}]}));
+      const target={type:'agent' as const,id:peer.id};
+      const childUse={action:'root.grant.create',use:'management',actualTarget:target};
+      const childProof=childKernel.registeredCredentials.verify(token.token);
+      const childPlan=childKernel.planAgentGrant(childProof,peer.id,['trust']);
+      const child=withSecurityWrite(db,childPlan.fenceTerm,childPlan,tx=>childKernel.grant(tx,childKernel.authorizeWrite(tx,childProof,childUse),{
+        subject:target,runtime_trust_ids:['trust'],accepted_dependency_digest:childDigest,expires_at:new Date(use.expiresAtMs).toISOString(),
+        idempotency_key:'child',expected_revision:childPlan.expectedRevision,reason:'shared config'})).grant;
+      const sourceFamily=db.query('SELECT family_id FROM multiremi_credential_materials WHERE credential_id=?').get(token.id).family_id;
+      expect(child).toMatchObject({issuer:beneficiary,origin_attempt_id:task.id,origin_family_id:sourceFamily});
+      db.query('UPDATE multiremi_usage_runs SET complete=1 WHERE task_id=? AND run_id=?').run(task.id,tuple.consumer_id);
+      expect(service.registeredCredentials.verify(token.token).kind).toBe('invalid');
+      expect(service.resolveCurrent(patProof,use).effectiveRoot).toBe(true);
+      const childStatus=()=>service.listRootGrants(patProof,{limit:100,cursor:'',subjectType:'agent',subjectId:peer.id,status:''}).grants.find(grant=>grant.id===child.id);
+      expect(childStatus()?.effective).toBe(true);
+      const childOrigin=db.query(`SELECT node_id FROM multiremi_durable_delegations WHERE beneficiary_id=? AND action='root.grant.create'`).get(peer.id).node_id;
+      const revokeUse={action:'root.delegation.revoke',use:'management',actualTarget:{type:'durable_delegation',id:childOrigin}};
+      const revokePlan=service.plan(patProof,revokeUse);
+      withSecurityWrite(db,undefined,revokePlan,tx=>service.revokeDurableDelegation(tx,service.authorizeWrite(tx,patProof,revokeUse),childOrigin,
+        {expected_revision:revokePlan.expectedRevision,idempotency_key:'retire-child',reason:'retire',reason_code:'operator_security_revoke'}));
+      expect(childStatus()?.effective).toBe(false);
+      expect(service.resolveCurrent(patProof,use).effectiveRoot).toBe(true);
+      const revision=service.plan(patProof,use).expectedRevision;
+      withSecurityWrite(db,undefined,{expectedRevision:revision,workspaceIds:['local'],numberKeys:[],domainTargets:[`attempt:${task.id}`]},
+        tx=>service.revokeAttemptDelegations(tx,task.id,'security_compromised'));
+      expect(service.registeredCredentials.verify(raw).kind).toBe('invalid');
+      expect(()=>service.resolveCurrent(patProof,use)).toThrow('root_authority_revoked');
+      return;
+    }
     expect(Number(db.query('SELECT COUNT(*) AS total FROM multiremi_usage_runs WHERE task_id=?').get(task.id).total)).toBe(1);
     const plan=receipts.planRecovery(tuple.receipt_id);
     expect(()=>withSecurityWrite(db,'1',plan,tx=>writeCurrentTaskLease(db,tx,1,lease))).toThrow('authority_revision_conflict');

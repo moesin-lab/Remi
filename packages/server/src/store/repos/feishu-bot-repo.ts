@@ -1,4 +1,5 @@
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+import { resolveAssistantExecutor } from "@multiremi/assistant/routing.js";
 /** Feishu message UUID dedup is one hour; reserve five minutes for transit/clock skew. */
 export const FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS = 55 * 60_000;
 import { patchDecisionRecord } from "../inbox/decision-records.js";
@@ -526,38 +527,39 @@ export class FeishuBotRepo {
     chatType: "p2p" | "group",
     chatId?: string | null,
   ): ResolvedFeishuBotAgent | null {
-    const candidates: Row[] = [];
-    const normalizedChatId = cleanOptionalString(chatId);
-    if (normalizedChatId) {
-      const exact = this.ctx.db.query(
-        `SELECT r.agent_id, a.name AS agent_name, a.workspace_id AS agent_workspace_id,
-                a.archived_at AS agent_archived_at
-         FROM multiremi_feishu_bot_agent_routes r
-         LEFT JOIN multiremi_agents a ON a.id = r.agent_id
-         WHERE r.workspace_id = ? AND r.bot_id = ? AND r.scope = 'chat' AND r.chat_id = ?
-         ORDER BY r.updated_at DESC, r.id DESC LIMIT 1`,
-      ).get(workspaceId, this.botId, normalizedChatId) as Row | null;
-      if (exact) candidates.push(exact);
-    }
-    const typeDefault = this.ctx.db.query(
-      `SELECT r.agent_id, a.name AS agent_name, a.workspace_id AS agent_workspace_id,
-              a.archived_at AS agent_archived_at
-       FROM multiremi_feishu_bot_agent_routes r
-       LEFT JOIN multiremi_agents a ON a.id = r.agent_id
-       WHERE r.workspace_id = ? AND r.bot_id = ? AND r.scope = ? AND r.chat_id IS NULL
-       ORDER BY r.updated_at DESC, r.id DESC LIMIT 1`,
-    ).get(workspaceId, this.botId, chatType === "p2p" ? "p2p_default" : "group_default") as Row | null;
-    if (typeDefault) candidates.push(typeDefault);
-
-    for (const candidate of candidates) {
-      if (candidate.agent_workspace_id !== workspaceId || candidate.agent_archived_at != null) continue;
-      const agentId = String(candidate.agent_id ?? "");
-      if (agentId) return { agentId, agentName: String(candidate.agent_name ?? agentId) };
-    }
-    const config = this.getConfig(workspaceId);
-    if (!config) return null;
-    const agent = this.ctx.agents().getAgent(config.agentId);
-    return { agentId: config.agentId, agentName: agent?.name ?? config.agentId };
+    // Compatibility adapter: storage is still bot-scoped; Assistant owns
+    // precedence and eligibility. No credentials or Runtime reach the policy.
+    return resolveAssistantExecutor({ workspaceId, conversationKind: chatType, conversationId: chatId }, {
+      findRoute: (scope, conversationId) => {
+        const row = this.ctx.db.query(
+          `SELECT r.agent_id, a.name AS agent_name, a.workspace_id AS agent_workspace_id,
+                  a.archived_at AS agent_archived_at
+           FROM multiremi_feishu_bot_agent_routes r
+           LEFT JOIN multiremi_agents a ON a.id = r.agent_id
+           WHERE r.workspace_id = ? AND r.bot_id = ? AND r.scope = ?
+             AND ${scope === "conversation" ? "r.chat_id = ?" : "r.chat_id IS NULL"}
+           ORDER BY r.updated_at DESC, r.id DESC LIMIT 1`,
+        ).get(...(scope === "conversation"
+          ? [workspaceId, this.botId, "chat", conversationId]
+          : [workspaceId, this.botId, scope === "direct" ? "p2p_default" : "group_default"])) as Row | null;
+        return row ? {
+          agentId: String(row.agent_id ?? ""),
+          agentName: String(row.agent_name ?? row.agent_id ?? ""),
+          workspaceId: nullableString(row.agent_workspace_id),
+          archivedAt: row.agent_archived_at == null
+            ? null
+            : (typeof row.agent_archived_at === "string"
+                ? (row.agent_archived_at || "archived")
+                : "archived"),
+        } : null;
+      },
+      legacyDefault: () => {
+        const config = this.getConfig(workspaceId);
+        if (!config) return null;
+        const agent = this.ctx.agents().getAgent(config.agentId);
+        return { agentId: config.agentId, agentName: agent?.name ?? config.agentId };
+      },
+    });
   }
 
   /** Reject run intent before changing the saved host, secrets, or revision. */

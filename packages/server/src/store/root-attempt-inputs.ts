@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connection.js';
 import type { CreateTaskInput } from '@multiremi/contracts/types.js';
 import { createId } from '@multiremi/ids.js';
-import { agentDependencyDigest, type AgentDependencyRef } from './agent-dependencies.js';
+import { agentDependencyDigest, planFrozenAgentDependencies, type AgentDependencyRef } from './agent-dependencies.js';
 import { planVerifiedAttemptWrite } from './attempt-admission.js';
 import type { SqlDatabase } from './db/postgres.js';
 import type { CredentialProof, FinalExecution, VersionedRef } from './root-authority-contract.js';
@@ -19,7 +19,7 @@ function reject(): never { throw new SecurityAbort('root_required'); }
 
 function sources(db: SqlDatabase, store: MultiremiStore, agentId: string, runtimeId: string | null, attemptId: string) {
   const agent = store.getAgent(agentId) ?? reject();
-  const rows = db.query(`SELECT x.*, d.grant_id,d.dependency_digest,d.trust_versions_json,c.approval_node_id,e.daemon_id
+  const rows = db.query(`SELECT x.*, d.grant_id,d.grant_generation,d.dependency_digest,d.trust_versions_json,c.approval_node_id,e.daemon_id
     FROM multiremi_current_agent_execution_sources x JOIN multiremi_current_agent_config_epochs c
       ON c.agent_id=x.agent_id AND c.workspace_id=x.workspace_id AND c.config_epoch=x.config_epoch
     JOIN multiremi_root_subject_state s ON s.subject_type='agent' AND s.subject_id=x.agent_id
@@ -58,11 +58,8 @@ function sources(db: SqlDatabase, store: MultiremiStore, agentId: string, runtim
     configEpoch: Number(row.config_epoch), providerTrust: { id: provider.id, version: provider.version }, checkpointTrust: null,
     executionDigest: agentDependencyDigest({ agentId, grant: row.grant_id, frozen: row.dependency_digest, epochNode: row.approval_node_id,
       runtime: row.runtime_id, trust: row.trust_id, profile: row.profile_digest, provider, checkpoint, policy }) };
-  const runtimeTargets = trusts.map(trust => {
-    const runtime = db.query('SELECT runtime_id FROM multiremi_runtime_trusts WHERE trust_id=? AND generation=?').get(trust.id, trust.version) ?? reject();
-    return `management:runtime:${runtime.runtime_id}`;
-  });
-  return { execution, sourcePolicy: { id: policy.id, version: policy.version }, runtimeTargets, provider: agent.provider };
+  const scope = planFrozenAgentDependencies(db, row.grant_id, Number(row.grant_generation), agentId);
+  return { execution, sourcePolicy: { id: policy.id, version: policy.version }, scope, provider: agent.provider };
 }
 
 type Target = Parameters<typeof planVerifiedAttemptWrite>[2];
@@ -117,8 +114,9 @@ function writeAttempt<T>(db: SqlDatabase, store: MultiremiStore, proof: Credenti
       providerState: { sessionId: null, securityDomainId: agentDependencyDigest([turn.workspace_id, turn.agent_id, live.execution.executionDigest]), checkpointDigest: null } };
     return { execution: live.execution, inputs };
   });
-  const domainTargets = [...new Set([...plan.domainTargets, `management:agent:${target.agentId}`, ...planned.runtimeTargets])].sort();
-  return store.withAttemptAdmission(plan.fenceTerm, { ...plan, domainTargets }, write, () => operation(planned.execution.runtimeId));
+  const domainTargets = [...new Set([...plan.domainTargets, ...planned.scope.domainTargets])].sort();
+  const workspaceIds = [...new Set([...plan.workspaceIds, ...planned.scope.workspaceIds])].sort();
+  return store.withAttemptAdmission(plan.fenceTerm, { ...plan, workspaceIds, domainTargets }, write, () => operation(planned.execution.runtimeId));
 }
 
 export function createRootAttempt(db: SqlDatabase, store: MultiremiStore, input: CreateTaskInput, proof: CredentialProof, approval: RootAttemptApproval) {

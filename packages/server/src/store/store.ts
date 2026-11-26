@@ -5,7 +5,9 @@ import { PlannedRestarts } from "./planned-restarts.js";
 import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
 import { RootManagement } from './root-management.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
-import { SecurityAbort, type SecurityLockPlan } from './security-write.js';
+import { SecurityAbort, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
+import type { AuthorityKernel, AuthorityUse, CredentialProof } from './root-authority-contract.js';
+import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease, type TaskLease } from './task-authority.js';
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
@@ -5810,6 +5812,24 @@ runMigrations(this.db);
   withAttemptAdmission<T>(fence: string | undefined, plan: SecurityLockPlan, write: AttemptWrite, operation: () => T): T {
     return withAttemptAdmission(this.db, fence, plan, write, operation);
   }
+
+  withSecurityWrite<T>(fence:string|undefined, plan:SecurityLockPlan, operation:(tx:SecurityTx)=>T):T {
+    return withSecurityWrite(this.db,fence,plan,operation);
+  }
+
+  withAuthorizedMutation<T>(proof:CredentialProof, use:AuthorityUse, plan:SecurityLockPlan,
+    operation:(tx:SecurityTx, actor:ReturnType<AuthorityKernel['authorizeWrite']>)=>T, fence?:string):T {
+    if (use.use==='read') throw new SecurityAbort('root_required');
+    const authority=this.rootManagement.plan(proof,use);
+    if (authority.expectedRevision!==plan.expectedRevision) throw new SecurityAbort('authority_revision_conflict');
+    if (fence && authority.fenceTerm && authority.fenceTerm!==fence) throw new SecurityAbort('security_tx_invalid');
+    const domainTargets=[...new Set([...plan.domainTargets,...authority.domainTargets])].sort();
+    return this.withSecurityWrite(fence??authority.fenceTerm,{...plan,domainTargets},tx=>operation(tx,this.rootManagement.authorizeWrite(tx,proof,use)));
+  }
+
+  readAttemptEligibility(tx:SecurityTx,attemptId:string) { return readAttemptEligibility(this.db,tx,attemptId); }
+  readCurrentTaskLease(tx:SecurityTx,attemptId:string) { return readCurrentTaskLease(this.db,tx,attemptId); }
+  writeCurrentTaskLease(tx:SecurityTx,expectedVersion:number,lease:TaskLease) { return writeCurrentTaskLease(this.db,tx,expectedVersion,lease); }
 
   createTask(input: CreateTaskInput, options?: { requireIdleIssue?: boolean }): MultiremiTask {
     return this.tasks.createTask(input, options);

@@ -38,7 +38,7 @@ async function bootstrap(db:SqlDatabase) {
 
 pendingTurnBackendTests('task and mutation authority', fixture=>{
   it('resolves registered dashboard material on a generic target and rechecks its origin for mutations',async()=>{
-    const {db}=fixture();
+    const {db,store}=fixture();
     const {service,passwordProof,signing,input}=await bootstrap(db);
     const compact=service.issueIndependentDashboardSession(passwordProof,(Math.floor(Date.now()/1000)+300)*1000,
       (tx,source,claims)=>new JwtMaterials(db).issue(tx,source,claims,signing));
@@ -46,6 +46,9 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const use={use:'write',action:'issue.update',actualTarget:{type:'issue',id:'isolated'}};
     expect(service.resolveCurrent(proof,{...use,use:'read'})).toMatchObject({effectiveRoot:true,scope:'system',subject:{id:input.userId,type:'user'}});
     const plan=service.plan(proof,use);
+    const storeProof=store.rootManagement.registeredCredentials.verifyJwt(compact,signing);
+    expect(store.withAuthorizedMutation(storeProof,use,plan,(tx,verified)=>
+      store.rootManagement.requireMutationActor(tx,verified,use).credentialOrigin?.credential.id)).toBe(service.resolveCurrent(proof,use).credentialOrigin?.credential.id);
     const actor=withSecurityWrite(db,undefined,plan,tx=>{
       const verified=service.authorizeWrite(tx,proof,use);
       expect(service.requireMutationActor(tx,verified,use).credentialOrigin?.credential.version).toBe(1);

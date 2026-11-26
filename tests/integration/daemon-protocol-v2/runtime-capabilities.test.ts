@@ -46,7 +46,7 @@ afterAll(() => {
 });
 
 async function fixture(options: Parameters<typeof DaemonProtocolHarness.create>[0] = {}) {
-  const h = await DaemonProtocolHarness.create(options);
+  const h = await DaemonProtocolHarness.create({database:'migrated',...options});
   fixtures.push(h);
   return h;
 }

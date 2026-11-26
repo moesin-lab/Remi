@@ -12,7 +12,9 @@ Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后
 
 `store.rootManagement.registeredCredentials.verify(raw)` 校验已登记的 PAT 或 task 材料；`verifyJwt(compact, signing)` 校验登记过的 dashboard JWT。证明仅在创建它的 `RootManagement` 实例内有效。读取使用 `resolveCurrent(proof, use)`。写入先取 `plan(proof, use)`，以 `plan.fenceTerm` 进入同一个 Store 连接上的 `withSecurityWrite`，再调用 `authorizeWrite(tx, proof, use)`。在实际写入处调用 `requireMutationActor(tx, actor, use)` 复核 action、use、目标类型和 ID。其 `credentialOrigin` 提供材料 ID/version、family 和来源节点。授权检查保留实际 transport 与 subject。
 
-`planAttemptAdmission` 规划直接重试的锁。`verifyDirectRetryInvocation` 核验真实调用者与旧 attempt；`approveAttemptInputs` 在同一事务中冻结目标、新执行及获准输入。`withAttemptAdmission` 在真实 INSERT 前后分别调用 `admitAttempt` 与 `consumeAdmission`。后者核对已存行和当前来源，消费限当前事务的一次性 ticket。level 10 的 `multiremi_attempt_input_approvals` 保存获准快照与持续来源，`multiremi_attempt_eligibility` 按 attempt 唯一记录初始资格。历史缺行、普通 attempt 和 resume 均不能据此取得新资格。
+路由可直接调用 `store.withAuthorizedMutation(proof, use, plan, (tx, actor) => ..., fence?)`，传入资源的 workspace、编号键和域目标计划。Store 合并凭据检查的域目标，并在自己的连接上完成授权和回调。投递方使用 `store.withSecurityWrite(fence, plan, callback)` 及同一 Store 的 `readAttemptEligibility(tx, id)`、`readCurrentTaskLease(tx, id)`、`writeCurrentTaskLease(tx, expectedVersion, lease)`。
+
+`planAttemptAdmission` 规划首次创建或直接重试的锁。`verifyAttemptInvocation` 核验真实调用者与目标 turn；`approveAttemptInputs` 在同一事务中冻结目标、新执行及获准输入。`withAttemptAdmission` 在真实 INSERT 前后分别调用 `admitAttempt` 与 `consumeAdmission`。后者核对已存行和当前来源，消费限当前事务的一次性 ticket。level 10 的 `multiremi_attempt_input_approvals` 保存获准快照与持续来源，`multiremi_attempt_eligibility` 按 attempt 唯一记录初始资格。历史缺行、普通 attempt 和 resume 均不能据此取得新资格。
 
 `readAttemptEligibility(db, tx, attemptId)` 和 `readCurrentTaskLease(db, tx, attemptId)` 使用同一个 `attempt:<id>` 域目标。`writeCurrentTaskLease(db, tx, expectedVersion, lease)` 需要最外层以当前 background term 取得 F，再取得 S；首次 dispatched 使用版本 0，后续 CAS 返回新版本。`multiremi_current_task_leases` 按 attempt 唯一绑定 consumer、run generation、runtime/daemon/incarnation、lease、fence 与过期时间。pending-start 只使用首次 receipt 的固定 deadline，running 复核实时 lease。收据留存的历史 lease/fence 不充当当前授权。
 

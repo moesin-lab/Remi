@@ -4,6 +4,7 @@ import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
 import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
 import { RootManagement } from './root-management.js';
+import { AgentDependencies } from './agent-dependencies.js';
 import { RootReceiptStore } from './root-receipts.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
 import { SecurityAbort, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
@@ -547,6 +548,7 @@ export class MultiremiStore {
   private accessTokens: AccessTokensRepo;
   readonly jwtMaterials: JwtMaterials;
   readonly rootManagement: RootManagement;
+  readonly resolveAgentDependencies: AgentDependencies['resolveAgentDependencies'];
   readonly rootReceipts: RootReceiptStore;
   private passwordAccounts: PasswordAccountsRepo;
   private issueShares: IssueSharesRepo;
@@ -626,7 +628,9 @@ export class MultiremiStore {
     this.ctx = new StoreContext(this.db, () => this);
     this.feedback = new FeedbackRepo(this.db);
     this.jwtMaterials = new JwtMaterials(this.db);
-    this.rootManagement = new RootManagement(this.db);
+    const dependencies = new AgentDependencies(this.ctx);
+    this.resolveAgentDependencies = dependencies.resolveAgentDependencies.bind(dependencies);
+    this.rootManagement = new RootManagement(this.db,this.resolveAgentDependencies);
     this.accessTokens = new AccessTokensRepo(this.db,this.rootManagement);
     this.rootReceipts = new RootReceiptStore(this.db,this.rootManagement);
     this.issueShares = new IssueSharesRepo(this.db);

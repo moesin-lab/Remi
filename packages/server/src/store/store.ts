@@ -4,11 +4,11 @@ import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
 import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
 import { RootManagement } from './root-management.js';
-import { AgentDependencies } from './agent-dependencies.js';
+import { AgentDependencies, agentDependencyDigest, runtimeExecutionFields } from './agent-dependencies.js';
 import { RootReceiptStore } from './root-receipts.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
 import { createRootAttempt, retryRootAttempt, sendRootRequest, type RootAttemptApproval } from './root-attempt-inputs.js';
-import { SecurityAbort, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
+import { SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
 import type { AuthorityKernel, AuthorityUse, CredentialProof } from './root-authority-contract.js';
 import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease, type TaskLease } from './task-authority.js';
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
@@ -1240,15 +1240,15 @@ runMigrations(this.db);
   }
 
   updateSkill(id: string, input: UpdateSkillInput): MultiremiSkill {
-    return this.agents.updateSkill(id, input);
+    return this.guardOrdinaryResource('skill', id, () => this.agents.updateSkill(id, input));
   }
 
   upsertSkill(input: CreateSkillInput & { id: string }): MultiremiSkill {
-    return this.agents.upsertSkill(input);
+    return this.guardOrdinaryResource('skill', input.id, () => this.agents.upsertSkill(input));
   }
 
   archiveSkill(id: string): MultiremiSkill {
-    return this.agents.archiveSkill(id);
+    return this.guardOrdinaryResource('skill', id, () => this.agents.archiveSkill(id));
   }
 
   listSkills(workspaceId?: string | null, options: { includeArchived?: boolean; includeFiles?: boolean } = {}): MultiremiSkill[] {
@@ -1264,11 +1264,11 @@ runMigrations(this.db);
   }
 
   upsertSkillFile(skillId: string, file: MultiremiSkillFile): MultiremiSkillFile {
-    return this.agents.upsertSkillFile(skillId, file);
+    return this.guardOrdinaryResource('skill', skillId, () => this.agents.upsertSkillFile(skillId, file));
   }
 
   deleteSkillFile(skillId: string, fileId: string): boolean {
-    return this.agents.deleteSkillFile(skillId, fileId);
+    return this.guardOrdinaryResource('skill', skillId, () => this.agents.deleteSkillFile(skillId, fileId));
   }
 
   listAgentSkills(agentId: string, options: { includeFiles?: boolean } = {}): MultiremiSkill[] {
@@ -3085,6 +3085,10 @@ runMigrations(this.db);
   }
 
   registerRuntime(input: RegisterRuntimeInput): MultiremiRuntime {
+    return input.id ? this.guardOrdinaryResource('runtime',input.id,()=>this.registerRuntimeWithLifecycle(input)) : this.registerRuntimeWithLifecycle(input);
+  }
+
+  private registerRuntimeWithLifecycle(input: RegisterRuntimeInput): MultiremiRuntime {
     const daemonId = String(input.daemonId ?? input.daemon_id ?? "").trim();
     if (!daemonId) {
       const runtime = this.runtimes.registerRuntime(input);
@@ -3134,7 +3138,7 @@ runMigrations(this.db);
       }
     }
 
-    const runtimes = this.db.transaction(() => {
+    const register = this.db.transaction(() => {
       this.daemonRetirement.lockLifecycle(workspaceId, daemonId);
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       this.agentPlugins.lockAgentPluginWorkspace(workspaceId);
@@ -3159,7 +3163,20 @@ runMigrations(this.db);
       }));
       this.agentPlugins.reconcileAgentPluginDesiredStateWithinLock(workspaceId);
       return runtimes;
-    })();
+    });
+    const ids = [...new Set(inputs.map(input=>input.id).filter((id): id is string=>!!id))].sort();
+    const runtimes = ids.length && this.jwtMaterials.isActive() ? this.withSecurityWrite(undefined,{
+      expectedRevision:this.rootManagement.readContext(null,'open_local').security_revision,workspaceIds:[workspaceId],numberKeys:[],
+      domainTargets:ids.map(id=>`management:runtime:${id}`),
+    },tx=>{
+      const before = ids.map(id=>this.runtimeDependencyDigest(id));
+      const result = register();
+      ids.forEach((id,index)=>{
+        if (before[index]!==this.runtimeDependencyDigest(id)) this.rootManagement.guardProtectedMutation(tx,null,
+          {action:'protected-resource.write',use:'write',actualTarget:{type:'runtime',id}},NaN);
+      });
+      return result;
+    }) : register();
     for (const runtime of runtimes) this.runtimeProvisions.enqueueRuntimeOnRegister(runtime.id);
     return runtimes;
   }
@@ -3449,9 +3466,22 @@ runMigrations(this.db);
   }
 
   updateRuntime(id: string, input: UpdateRuntimeInput): MultiremiRuntime {
-    const runtime = this.runtimes.updateRuntime(id, input);
-    this.publishDaemonDispatchConditionsChanged(runtime.workspaceId ?? "local");
-    return runtime;
+    return this.guardOrdinaryResource('runtime', id, () => {
+      const runtime = this.runtimes.updateRuntime(id, input);
+      this.publishDaemonDispatchConditionsChanged(runtime.workspaceId ?? "local");
+      return runtime;
+    });
+  }
+
+  recordExternalChatCapabilities(id: string, external_chats: number, external_chat_models: number): void {
+    const existing = this.getRuntimeLite(id);
+    if (!existing || (existing.metadata.external_chats === external_chats && existing.metadata.external_chat_models === external_chat_models)) return;
+    this.guardOrdinaryResource('runtime', id, () => {
+      const runtime = this.getRuntimeLite(id);
+      if (runtime && (runtime.metadata.external_chats !== external_chats || runtime.metadata.external_chat_models !== external_chat_models)) {
+        this.updateRuntime(id, {metadata: {...runtime.metadata, external_chats, external_chat_models}});
+      }
+    });
   }
 
   setRuntimeOffline(id: string): MultiremiRuntime | null {
@@ -3541,7 +3571,7 @@ runMigrations(this.db);
   }
 
   updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[], modelProfile?: RuntimeConnectionProfile | null): MultiremiRuntimeModel[] {
-    return this.runtimes.updateRuntimeModels(runtimeId, models, modelProfile);
+    return this.guardOrdinaryResource('runtime',runtimeId,()=>this.runtimes.updateRuntimeModels(runtimeId, models, modelProfile));
   }
 
   createRuntimeModelListRequest(runtimeId: string): MultiremiRuntimeModelListRequest {
@@ -3557,7 +3587,7 @@ runMigrations(this.db);
   }
 
   reportRuntimeModelListResult(runtimeId: string, requestId: string, input: ReportRuntimeModelListInput): MultiremiRuntimeModelListRequest {
-    return this.runtimes.reportRuntimeModelListResult(runtimeId, requestId, input);
+    return this.guardOrdinaryResource('runtime',runtimeId,()=>this.runtimes.reportRuntimeModelListResult(runtimeId, requestId, input));
   }
 
   createRuntimeDirectoryScanRequest(runtimeId: string, params: { root?: string; maxDepth?: number; mode?: "scan" | "browse" } = {}): MultiremiRuntimeDirectoryScanRequest {
@@ -5832,6 +5862,44 @@ runMigrations(this.db);
 
   withSecurityWrite<T>(fence:string|undefined, plan:SecurityLockPlan, operation:(tx:SecurityTx)=>T):T {
     return withSecurityWrite(this.db,fence,plan,operation);
+  }
+
+  private readonly observedResources = new Set<string>();
+
+  private guardOrdinaryResource<T>(type: 'runtime'|'skill', id: string, operation: () => T): T {
+    const target = `management:${type}:${id}`;
+    if (this.observedResources.has(target) || !this.jwtMaterials.isActive()) return operation();
+    const workspace = type === 'runtime' ? this.getRuntimeLite(id)?.workspaceId : this.agents.getSkill(id)?.workspaceId;
+    const use: AuthorityUse = {action:'protected-resource.write', use:'write', actualTarget:{type,id}};
+    const expectedRevision = this.rootManagement.readContext(null,'open_local').security_revision;
+    return this.withSecurityWrite(undefined,{expectedRevision,workspaceIds:[workspace ?? 'local'],domainTargets:[target],numberKeys:[]},
+      tx=>this.mutateProtectedResource(tx,null,use,NaN,operation));
+  }
+
+  private runtimeDependencyDigest(id: string) {
+    const runtime=this.runtimes.getRuntimeForDispatch(id,true);
+    return runtime && agentDependencyDigest(runtimeExecutionFields(runtime));
+  }
+
+  mutateProtectedResource<T>(tx:SecurityTx, actor:ReturnType<AuthorityKernel['authorizeWrite']>|null, use:AuthorityUse,
+    version:number, operation:()=>T, forceGuard=false, fileVersions?: ReadonlyMap<string,number>):T {
+    const {type,id} = use.actualTarget;
+    const target = `management:${type}:${id}`;
+    return withSecurityTarget(this.db,tx,target,()=>{
+      const run = () => {
+        this.observedResources.add(target);
+        try { return operation(); } finally { this.observedResources.delete(target); }
+      };
+      if (type==='skill') return this.rootManagement.mutateSkill(tx,actor,use,version,run,fileVersions);
+      if (type==='runtime' && !forceGuard) {
+        const before=this.runtimeDependencyDigest(id);
+        const result=run();
+        if (before!==this.runtimeDependencyDigest(id)) this.rootManagement.guardProtectedMutation(tx,actor,use,version);
+        return result;
+      }
+      this.rootManagement.guardProtectedMutation(tx,actor,use,version);
+      return operation();
+    });
   }
 
   withAuthorizedMutation<T>(proof:CredentialProof, use:AuthorityUse, plan:SecurityLockPlan,

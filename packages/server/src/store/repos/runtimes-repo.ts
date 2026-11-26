@@ -529,8 +529,8 @@ export class RuntimesRepo {
   }
 
   /** Dispatch needs current capabilities and group/protocol state, without historical accounting. */
-  getRuntimeForDispatch(id: string): MultiremiRuntime | null {
-    const row = this.readRuntimeRow(id);
+  getRuntimeForDispatch(id: string, refresh = false): MultiremiRuntime | null {
+    const row = this.readRuntimeRow(id, refresh);
     return row ? withRuntimeLiveness(this.hydrateRuntime(toRuntime(row), false)) : null;
   }
 

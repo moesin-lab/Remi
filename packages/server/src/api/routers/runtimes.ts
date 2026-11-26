@@ -58,7 +58,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<{ profile?: unknown; api_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      return c.json({ profile: writeRuntime(c, loaded.runtime, () => store.setRuntimeCodexProfile(loaded.runtime.id, body.profile, body.api_key)) });
+      return c.json({ profile: guardRootResourceWrite(c, store, runtimeWorkspaceId(loaded.runtime), 'runtime', loaded.runtime.id,
+        () => store.setRuntimeCodexProfile(loaded.runtime.id, body.profile, body.api_key), { forceGuard: true }) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Invalid Codex profile" }, 400);
     }
@@ -90,7 +91,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<{ profile?: unknown; api_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      return c.json({ profile: writeRuntime(c, loaded.runtime, () => store.setRuntimeClaudeProfile(loaded.runtime.id, body.profile, body.api_key)) });
+      return c.json({ profile: guardRootResourceWrite(c, store, runtimeWorkspaceId(loaded.runtime), 'runtime', loaded.runtime.id,
+        () => store.setRuntimeClaudeProfile(loaded.runtime.id, body.profile, body.api_key), { forceGuard: true }) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Invalid Claude profile" }, 400);
     }

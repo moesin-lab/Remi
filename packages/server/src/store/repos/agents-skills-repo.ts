@@ -925,8 +925,14 @@ export class AgentsSkillsRepo {
   }
 
   private replaceSkillFiles(skillId: string, files: MultiremiSkillFile[], now = nowIso()): void {
-    this.ctx.db.run("DELETE FROM multiremi_skill_files WHERE skill_id = ?", [skillId]);
-    for (const file of files) {
+    const replacements = new Map(files.map(file => [file.path, file]));
+    const existing = this.ctx.db.query('SELECT path,content,encoding FROM multiremi_skill_files WHERE skill_id=?').all(skillId);
+    for (const row of existing) {
+      const file = replacements.get(row.path);
+      if (!file) this.ctx.db.run('DELETE FROM multiremi_skill_files WHERE skill_id=? AND path=?', [skillId, row.path]);
+      else if (row.content === file.content && row.encoding === (file.encoding ?? 'utf8')) replacements.delete(row.path);
+    }
+    for (const file of replacements.values()) {
       this.ctx.db.run(
         `INSERT INTO multiremi_skill_files (
           id, skill_id, path, content, encoding, created_at, updated_at

@@ -1,3 +1,8 @@
+import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connection.js';
+import { readWorkspacePromptSettings } from '@multiremi/prompts/workspace-settings.js';
+import { agentDependencyDigest, runtimeExecutionFields } from '@multiremi/store/agent-dependencies.js';
+import type { MultiremiAgent, MultiremiSkillFile } from '@multiremi/contracts/types.js';
+import type { AgentConfigurationApproval } from '@multiremi/store/agent-source-approvals.js';
 import { createHash } from 'node:crypto';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { bootstrapAuthorizationDigest, RootManagement } from '@multiremi/store/root-management.js';
@@ -6,6 +11,31 @@ import { createMultiremiApp } from '@multiremi/api.js';
 import type { MultiremiStore } from '@multiremi/store/store.js';
 
 const hash=(input:string)=>createHash('sha256').update(input).digest('hex');
+
+export function agentApproval(store: MultiremiStore, agent: MultiremiAgent, file?: MultiremiSkillFile) {
+  const sources: AgentConfigurationApproval['sources'][number][] = [];
+  function approve(kind: string, id: string, use: string, value: unknown) {
+    const ref = { kind, id, use, version: 1, digest: agentDependencyDigest(value) };
+    sources.push({ ref, content: JSON.stringify(value), dependencies: [] });
+    return ref;
+  }
+  const { root: _projection, skills, ...configuration } = store.getAgent(agent.id, {includeFiles: true})!;
+  const workspace = store.getWorkspace(agent.workspaceId ?? 'local')!;
+  approve('agent', agent.id, 'configuration', configuration);
+  approve('agent', agent.id, 'instructions', agent.instructions);
+  const instruction = sources[sources.length - 1]!;
+  if (file?.id) instruction.dependencies = [approve('skill-file', file.id, 'materialize', file)];
+  approve('agent', agent.id, 'skills', skills);
+  approve('agent', agent.id, 'plugins', store.resolveAgentPluginSnapshot(agent.id));
+  approve('workspace', workspace.id, 'configuration', {context: workspace.context, settings: workspace.settings, repos: workspace.repos});
+  approve('workspace', workspace.id, 'prompt', readWorkspacePromptSettings(workspace));
+  const host = store.getRuntime(agent.runtimeId!)!;
+  approve('runtime', host.id, 'execute', {...runtimeExecutionFields(host), incarnation: 'inc'});
+  const profile = approve('runtime', host.id, 'effective-profile', runtimeConnectionSnapshot(store.getAgentExecutionProfile(host.id, agent), agent.model));
+  const execution = { trustId: 'trust', profileDigest: profile.digest, provider: approve('provider-trust','provider','execute','test provider'),
+    checkpointPolicy: approve('checkpoint-policy','checkpoint','restore','test checkpoint policy'), inputPolicy: approve('input-policy','inputs','accept','test input policy') };
+  return { sources, executions: [execution] };
+}
 
 export function rootClient(store: MultiremiStore, signing: { domainId: string; keyEpoch: string; secret: string }) {
   const master = 'isolated-master-token';

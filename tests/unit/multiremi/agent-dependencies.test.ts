@@ -2,7 +2,7 @@ import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { expect, it } from 'bun:test';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { AgentDependencies, agentDependencyDigest, type AgentDependencyRef } from '@multiremi/store/agent-dependencies.js';
+import { AgentDependencies, agentDependencyDigest, runtimeExecutionFields, type AgentDependencyRef } from '@multiremi/store/agent-dependencies.js';
 import { getGroupExecutionProfile } from '@multiremi/store/execution-groups.js';
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { executionTrustNodeId } from '@multiremi/store/agent-source-approvals.js';
@@ -76,7 +76,7 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     record('execution-group',group.id,'route',digest(store.getExecutionGroup(group.id)));
     record('profile',profile.id,'configure',digest(getGroupExecutionProfile(db,group.id,'local')),profile.revision);
     const host = store.getRuntime(runtime.id)!;
-    record('runtime',host.id,'execute',digest({daemonId:host.daemonId,incarnation:'inc',provider:host.provider,runtimeMode:host.runtimeMode,metadata:host.metadata,models:host.models}));
+    record('runtime',host.id,'execute',digest({...runtimeExecutionFields(host),incarnation:'inc'}));
     const profileDigest = digest(runtimeConnectionSnapshot(store.getAgentExecutionProfile(host.id,agent),agent.model));
     record('runtime',host.id,'effective-profile',profileDigest);
     record('runtime-env',JSON.stringify([host.id,profile.profile.env_key]),'connect',digest('protected host setting'));

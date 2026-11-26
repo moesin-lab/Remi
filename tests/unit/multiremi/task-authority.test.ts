@@ -20,7 +20,7 @@ import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js'
 import { planVerifiedAttemptWrite } from '@multiremi/store/attempt-admission.js';
 
 import { PreparedAgentPat } from '@multiremi/store/durable-delegation.js';
-import { bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
+import { agentApproval, bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
 import { prepareRunInstallation, acknowledgeRunEnvironment } from '@multiremi/worker/root-run-installation.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
@@ -568,6 +568,37 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
         return;
       }
       const sourceFamily=db.query('SELECT family_id FROM multiremi_credential_materials WHERE credential_id=?').get(token.id).family_id;
+      let peerId: string | undefined;
+      if (failure === 'durable upstream grant') {
+        const peer = store.createAgent({name:'HTTP delegation target',provider:'codex',runtimeId:runtime.id});
+        peerId = peer.id;
+        const approval = agentApproval(store,peer);
+        const path = `/api/root/agents/${peer.id}`;
+        const approve = async (epoch: number|null) => {
+          const result = await api(`${path}/configuration/approve`,humanBearer,{...approval,expected_epoch:epoch});
+          const data = await result.json();
+          expect(result.status,JSON.stringify(data)).toBe(200);
+          return data;
+        };
+        const first = await approve(null);
+        const preview = async () => (await (await api(`${path}/grant-preview?runtime_trust_id=trust`,humanBearer)).json());
+        expect((await preview()).digest).toBe(first.digest);
+        await approve(0);
+        const current = await preview();
+        const grantRequest = {subject:{type:'agent',id:peer.id},runtime_trust_ids:['trust'],expires_at:patRequest.expires_at,
+          reason:'peer delegation',expected_revision:current.expected_revision,idempotency_key:'peer-grant'};
+        const counts = () => ['authority_nodes','authority_edges','root_grants','durable_delegations','root_management_events','agent_grant_dependencies',
+          'agent_grant_protected_refs','root_subject_state'].map(table=>Number(db.query(`SELECT COUNT(*) AS n FROM multiremi_${table}`).get().n));
+        const before = counts();
+        const stale = await api('/api/root/grants',token.token,{...grantRequest,accepted_dependency_digest:first.digest});
+        expect(stale.status,await stale.text()).toBe(409);
+        expect(counts()).toEqual(before);
+        const response = await api('/api/root/grants',token.token,{...grantRequest,accepted_dependency_digest:current.digest});
+        const result = await response.json();
+        expect(response.status,JSON.stringify(result)).toBe(200);
+        expect(result.grant).toMatchObject({subject:grantRequest.subject,issuer:beneficiary,origin_attempt_id:task.id,origin_family_id:sourceFamily,effective:true});
+        expect(await (await api(`/api/root/grants?subject_id=${peer.id}`,humanBearer)).json()).toMatchObject({grants:[{id:result.grant.id,effective:true}]});
+      }
       const upstreamRoute = failure === 'durable upstream grant' ? '/api/root/grants/grant-agent/revoke'
         : failure === 'durable runtime trust' ? '/api/root/runtime-trust/trust/revoke'
         : failure === 'durable source family' ? `/api/root/credential-families/${sourceFamily}/revoke` : null;
@@ -582,6 +613,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
         expect(revocation.status, await revocation.text()).toBe(200);
         expect((await api('/api/root/context', issuedPat.token)).status).toBe(401);
         expect((await api('/api/root/context', raw)).status).toBe(401);
+        if (peerId) expect(await (await api(`/api/root/grants?subject_id=${peerId}`,humanBearer)).json()).toMatchObject({grants:[{effective:false}]});
         expect(await (await api('/api/root/grants?subject_id=usr_delegated', humanBearer)).json()).toMatchObject({
           grants: [{ id: delegatedGrant.grant.id, effective: false }],
         });

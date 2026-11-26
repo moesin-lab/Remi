@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connection.js';
+import type { MultiremiRuntime } from '@multiremi/contracts/types.js';
 import { readWorkspacePromptSettings } from '../prompts/workspace-settings.js';
 import type { StoreContext } from './context.js';
 import { getExecutionGroup, getGroupExecutionProfile } from './execution-groups.js';
@@ -75,6 +76,16 @@ export function agentDependencyDigest(value: unknown): string {
   const json = JSON.stringify(value, (_name, item) => item && typeof item === 'object' && !Array.isArray(item)
     ? Object.fromEntries(Object.keys(item).sort().map(name => [name, item[name]])) : item);
   return `sha256:${createHash('sha256').update(json).digest('hex')}`;
+}
+
+export function runtimeExecutionFields(runtime: MultiremiRuntime) {
+  const { external_chats, external_chat_models, ...metadata } = runtime.metadata;
+  const models = runtime.models.map(({ createdAt, updatedAt, ...model }) => model)
+    .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  return { daemonId: runtime.daemonId, legacyDaemonId: runtime.legacyDaemonId, provider: runtime.provider, runtimeMode: runtime.runtimeMode,
+    workspaceId: runtime.workspaceId, ownerId: runtime.ownerId, visibility: runtime.visibility,
+    executionGroupIds: [...(runtime.executionGroupIds ?? [])].sort(), maxConcurrency: runtime.maxConcurrency,
+    deviceInfo: runtime.deviceInfo, metadata, models };
 }
 
 export function planFrozenAgentDependencies(db: SqlDatabase, grantId: string, generation: number, agentId: string) {
@@ -199,8 +210,7 @@ export class AgentDependencies {
           || !grantAncestryIsCurrent(ctx.db, tx, runtime.id, {nodeId: row.authority_node_id, generation: version}, 'runtime')) {
           throw new SecurityAbort('root_runtime_untrusted');
         }
-        observe('runtime', runtime.id, 'execute', { daemonId: runtime.daemonId, incarnation: row.incarnation, provider: runtime.provider,
-          runtimeMode: runtime.runtimeMode, metadata: runtime.metadata, models: runtime.models });
+        observe('runtime', runtime.id, 'execute', { ...runtimeExecutionFields(runtime), incarnation: row.incarnation });
         const configured = ctx.runtimes().getAgentExecutionProfile(runtime.id, agent);
         if (configured && !configured.model && !agent.model) reject();
         const profile = runtimeConnectionSnapshot(configured, agent.model);

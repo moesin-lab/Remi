@@ -92,17 +92,28 @@ export function runRootMutation<T>(store: MultiremiStore, proof: RegisteredProof
 
 export function guardRootResourceWrite<T>(c: Context, store: MultiremiStore, workspaceId: string,
   type: string, id: string, operation: () => T,
-  options?: { version?: number; proof?: RegisteredProof | null; didWrite?: (result: T) => boolean }): T {
+  options?: { version?: number; proof?: RegisteredProof | null; didWrite?: (result: T) => boolean; forceGuard?: boolean }): T {
   if (!options?.proof && !store.jwtMaterials.isActive()) return operation();
   const root = store.rootManagement;
   const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type, id } };
   const proof = c.req.method === 'GET' ? null : options?.proof ?? effectiveRootProof(c, store, use);
   const match = c.req.header('If-Match')?.match(/^"(0|[1-9]\d*)"$/);
   const expectedVersion = options?.version ?? (match ? Number(match[1]) : Number.NaN);
+  let fileVersions: Map<string,number> | undefined;
+  const header = type==='skill' && c.req.header('X-Skill-File-Versions');
+  if (header) {
+    try {
+      const versions: unknown = JSON.parse(header);
+      if (!versions || typeof versions!=='object' || Array.isArray(versions)) throw new Error();
+      fileVersions = new Map(Object.entries(versions).map(([key,value])=>{
+        if (!key || typeof value!=='number' || !Number.isSafeInteger(value) || value<0) throw new Error();
+        return [key,value];
+      }));
+    } catch { throw new RootManagementRequestError(400,'Invalid X-Skill-File-Versions'); }
+  }
   const skipped: { result?: T } = {};
   const mutate = (tx: SecurityTx, actor: ReturnType<AuthorityKernel['authorizeWrite']> | null) => {
-    root.guardProtectedMutation(tx, actor, use, expectedVersion);
-    const result = operation();
+    const result = store.mutateProtectedResource(tx, actor, use, expectedVersion, operation, options?.forceGuard, fileVersions);
     if (options?.didWrite && !options.didWrite(result)) {
       skipped.result = result;
       throw skipped;

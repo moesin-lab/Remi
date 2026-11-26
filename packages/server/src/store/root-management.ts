@@ -587,18 +587,41 @@ export class RootManagement {
   }
 
   guardProtectedMutation(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number): void {
+    this.guardMutationSet(tx,actor,request,expectedVersion,[]);
+  }
+
+  mutateSkill<T>(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, version: number, operation: () => T, fileVersions?: ReadonlyMap<string,number>): T {
+    const {type,id} = request.actualTarget;
+    if (type !== 'skill') throw new SecurityAbort('security_target_unplanned');
+    return withSecurityTarget(this.db,tx,`management:skill:${id}`,()=>{
+      const files = () => new Map(this.db.query(`SELECT f.id,f.path,f.content,f.encoding,f.updated_at FROM multiremi_skill_files f
+        JOIN multiremi_skills s ON s.id=f.skill_id WHERE s.id=? AND s.archived_at IS NULL`).all(id)
+        .map(row => [String(row.id), JSON.stringify([row.path,row.content,row.encoding,row.updated_at])] as const));
+      const before = files();
+      const result = operation();
+      const after = files();
+      const changed = [...new Set([...before.keys(),...after.keys()])].filter(key => before.get(key)!==after.get(key));
+      this.guardMutationSet(tx,actor,request,version,changed,fileVersions);
+      return result;
+    });
+  }
+
+  private guardMutationSet(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number, fileIds: string[], fileVersions?: ReadonlyMap<string,number>): void {
     const {type,id} = request.actualTarget;
     withSecurityTarget(this.db,tx,`management:${type}:${id}`,()=>{
-      const affected = this.db.query(`SELECT DISTINCT g.grant_id,g.subject_id,g.authority_node_id,g.generation,r.resource_version FROM multiremi_agent_grant_protected_refs r
+      const ids = this.db.dialect === 'postgres' ? 'SELECT jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB))' : 'SELECT value FROM json_each(?)';
+      const matches = fileIds.length ? `(r.kind=? AND r.resource_id=?) OR (r.kind='skill-file' AND r.resource_id IN (${ids}))` : 'r.kind=? AND r.resource_id=?';
+      const params = fileIds.length ? [type,id,JSON.stringify(fileIds)] : [type,id];
+      const affected = this.db.query(`SELECT DISTINCT g.grant_id,g.subject_id,g.authority_node_id,g.generation,r.kind,r.resource_id,r.resource_version FROM multiremi_agent_grant_protected_refs r
         JOIN multiremi_agent_grant_dependencies d ON d.grant_id=r.grant_id AND d.invalidated_revision IS NULL
         JOIN multiremi_root_grants g ON g.grant_id=d.grant_id AND g.generation=d.grant_generation AND g.revoked_at_ms IS NULL
         JOIN multiremi_root_subject_state s ON s.active_grant_id=g.grant_id AND s.generation_counter=g.generation
-        WHERE r.kind=? AND r.resource_id=? ORDER BY g.grant_id`).all(type,id);
-      const snapshots=this.db.query(`SELECT DISTINCT agent_id,resource_version FROM multiremi_current_agent_source_snapshots WHERE kind=? AND resource_id=?`).all(type,id);
+        WHERE ${matches} ORDER BY g.grant_id`).all(...params);
+      const snapshots=this.db.query(`SELECT DISTINCT agent_id,kind,resource_id,resource_version FROM multiremi_current_agent_source_snapshots r WHERE ${matches}`).all(...params);
       if (!affected.length && !snapshots.length) return;
       if (!actor || request.use!=='write') throw new SecurityAbort('root_required');
       this.requireMutationActor(tx,actor,request);
-      if (!Number.isSafeInteger(expectedVersion) || [...affected,...snapshots].some(row=>Number(row.resource_version)!==expectedVersion)) {
+      if ([...affected,...snapshots].some(row=>Number(row.resource_version)!==(row.kind==='skill-file' ? fileVersions?.get(row.resource_id) ?? expectedVersion : expectedVersion))) {
         throw new SecurityAbort('authority_revision_conflict');
       }
       const revision = this.advanceSecurityRevision();
@@ -606,7 +629,7 @@ export class RootManagement {
         const invalidated=this.db.query(`UPDATE multiremi_agent_config_epochs SET config_epoch=config_epoch+1 WHERE agent_id=? RETURNING approval_node_id`).get(agentId);
         if (invalidated) this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=COALESCE(revoked_at_ms,?),revision=? WHERE node_id=?`).run(Date.now(),revision,invalidated.approval_node_id);
       }
-      for (const row of affected) {
+      for (const row of new Map(affected.map(row=>[row.grant_id,row])).values()) {
         this.db.query(`UPDATE multiremi_agent_grant_dependencies SET invalidated_revision=?,config_epoch=config_epoch+1 WHERE grant_id=? AND invalidated_revision IS NULL`).run(revision,row.grant_id);
         this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=COALESCE(revoked_at_ms,?),revision=? WHERE node_id=? AND generation=?`).run(Date.now(),revision,row.authority_node_id,row.generation);
       }

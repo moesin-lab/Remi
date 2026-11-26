@@ -4,7 +4,7 @@ import { machineEnrollmentPayload } from '@multiremi/store/machine-enrollment.js
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
 import type { StoreContext } from '@multiremi/store/context.js';
 import { beginMachineChallenge, verifyMachineChallenge } from '@multiremi/store/machine-proof.js';
-import { agentDependencyDigest } from '@multiremi/store/agent-dependencies.js';
+import { agentDependencyDigest, runtimeExecutionFields } from '@multiremi/store/agent-dependencies.js';
 import type { AgentConfigurationApproval } from '@multiremi/store/agent-source-approvals.js';
 import { readWorkspacePromptSettings } from '@multiremi/prompts/workspace-settings.js';
 import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connection.js';
@@ -87,7 +87,7 @@ export async function prepareRecoveryAdmission(fixture: PendingTurnTestFixture, 
     record('workspace','local','configuration',{context:workspace.context,settings:workspace.settings,repos:workspace.repos});
     record('workspace','local','prompt',readWorkspacePromptSettings(workspace));
     const host = store.getRuntime(runtime.id)!;
-    record('runtime',runtime.id,'execute',{daemonId:host.daemonId,incarnation:'inc',provider:host.provider,runtimeMode:host.runtimeMode,metadata:host.metadata,models:host.models});
+    record('runtime',runtime.id,'execute',{...runtimeExecutionFields(host),incarnation:'inc'});
     const profile = runtimeConnectionSnapshot(store.getAgentExecutionProfile(runtime.id,agent),agent.model);
     const {digest:profileDigest} = record('runtime',runtime.id,'effective-profile',profile);
     const provider = record('provider-trust','provider','execute','provider');

@@ -494,9 +494,7 @@ export class DaemonProtocolLayer {
   private recordExternalChatCapabilities(runtimeId: string, capabilities: DaemonRuntimeCapabilities | undefined): void {
     const version = capabilities?.external_chats === 1 ? 1 : 0;
     const modelsVersion = capabilities?.external_chat_models === 1 ? 1 : 0;
-    const runtime = this.store.getRuntimeLite(runtimeId);
-    if (!runtime || (runtime.metadata.external_chats === version && runtime.metadata.external_chat_models === modelsVersion)) return;
-    this.store.updateRuntime(runtimeId, { metadata: { ...runtime.metadata, external_chats: version, external_chat_models: modelsVersion } });
+    this.store.recordExternalChatCapabilities(runtimeId, version, modelsVersion);
   }
 
   /**

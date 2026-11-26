@@ -10,23 +10,26 @@ import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js'
 import { RootReceiptClient } from '@multiremi/worker/root-receipt-client.js';
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connection.js';
-import { readWorkspacePromptSettings } from '@multiremi/prompts/workspace-settings.js';
-import { agentDependencyDigest } from '@multiremi/store/agent-dependencies.js';
-import { executionTrustNodeId, type AgentConfigurationApproval } from '@multiremi/store/agent-source-approvals.js';
+import { executionTrustNodeId } from '@multiremi/store/agent-source-approvals.js';
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
-import { bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
+import { agentApproval, bootstrap, rootClient } from './fixtures/root-kernel-bootstrap.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 pendingTurnBackendTests('production root attempt inputs', fixture => {
-  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch','protected writes'])('admits frozen inputs for %s', async scenario => {
+  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch','protected writes','runtime reports','shared skill files'])('admits frozen inputs for %s', async scenario => {
     const { store, createIssue } = fixture();
     const { db } = store as unknown as { db: SqlDatabase };
     const runtime = store.registerRuntime({ name: 'worker', provider: 'codex', workspaceId: 'local', daemonId: 'worker' });
     const agent = store.createAgent({ name: 'reviewer', provider: 'codex', runtimeId: runtime.id });
+    const models = [{id:'first',label:'First',provider:'codex',default:true}];
+    if (scenario==='runtime reports') store.updateRuntimeModels(runtime.id,models);
+    const skill = scenario==='shared skill files' ? store.createSkill({workspaceId:'local',name:'shared',content:'instructions',
+      files:[{path:'source',content:'shared'},{path:'sibling',content:'independent'}]}) : null;
+    const sourceFile = skill?.files?.find(file=>file.path==='source');
+    const siblingFile = skill?.files?.find(file=>file.path==='sibling');
     const issue = createIssue({ title: 'inputs', assigneeType: 'agent', assigneeId: agent.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const { input: login, signing: jwtSigning } = await bootstrap(db, store.resolveAgentDependencies);
@@ -35,7 +38,7 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     const bearer = service.issueIndependentDashboardSession(proof, (Math.floor(Date.now() / 1000) + 300) * 1000,
       (tx, source, claims) => new JwtMaterials(db).issue(tx, source, claims, jwtSigning));
     const api = rootClient(store, jwtSigning);
-    const http = scenario === 'retry WS offer' || scenario === 'protected writes';
+    const http = ['retry WS offer','protected writes','runtime reports','shared skill files'].includes(scenario);
     if (http) store.createWorkspaceMember({ workspaceId: 'local', userId: login.userId, name: 'Root reviewer', role: 'admin' });
     const expiry = Date.now() + 3_600_000;
     const hash = createHash('sha256').update('test-daemon').digest('hex');
@@ -56,25 +59,8 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     db.query('UPDATE multiremi_machine_challenges SET consumed_at_ms=1,proof_digest=? WHERE challenge_id=?').run('fixture', challenge.id);
     db.query("INSERT INTO multiremi_runtime_trusts VALUES('trust',?,1,'inc',?,'trust-node','{}',NULL)").run(runtime.id, challenge.id);
 
-    const sources: AgentConfigurationApproval['sources'][number][] = [];
-    function approve(kind: string, id: string, use: string, value: unknown) {
-      const ref = { kind, id, use, version: 1, digest: agentDependencyDigest(value) };
-      sources.push({ ref, content: JSON.stringify(value), dependencies: [] });
-      return ref;
-    }
-    const { root: _projection, skills, ...configuration } = store.getAgent(agent.id, {includeFiles: true})!;
+    const {sources, executions: [execution]} = agentApproval(store, agent, sourceFile);
     const workspace = store.getWorkspace('local')!;
-    approve('agent', agent.id, 'configuration', configuration);
-    approve('agent', agent.id, 'instructions', agent.instructions);
-    approve('agent', agent.id, 'skills', skills);
-    approve('agent', agent.id, 'plugins', store.resolveAgentPluginSnapshot(agent.id));
-    approve('workspace', workspace.id, 'configuration', {context: workspace.context, settings: workspace.settings, repos: workspace.repos});
-    approve('workspace', workspace.id, 'prompt', readWorkspacePromptSettings(workspace));
-    const host = store.getRuntime(runtime.id)!;
-    approve('runtime', host.id, 'execute', {daemonId: host.daemonId, incarnation: 'inc', provider: host.provider, runtimeMode: host.runtimeMode, metadata: host.metadata, models: host.models});
-    const profile = approve('runtime', host.id, 'effective-profile', runtimeConnectionSnapshot(store.getAgentExecutionProfile(host.id, agent), agent.model));
-    const execution = { trustId: 'trust', profileDigest: profile.digest, provider: approve('provider-trust','provider','execute','test provider'),
-      checkpointPolicy: approve('checkpoint-policy','checkpoint','restore','test checkpoint policy'), inputPolicy: approve('input-policy','inputs','accept','test input policy') };
     const scope = {type:'agent', id:agent.id};
     const action = { action:'root.agent-configuration.approve', use:'write', actualTarget:scope };
     const configPlan = service.planAgentGrant(proof, agent.id, ['trust']);
@@ -96,6 +82,64 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     }
     const grant = http ? await (await api('/api/root/grants', bearer, grantInput)).json() :
       withSecurityWrite(db, undefined, plan, tx => service.grant(tx,service.authorizeWrite(tx,proof,{action:'root.grant.create',use:'management',actualTarget:scope}),grantInput));
+    const effective = async (id: string) => (await (await api(`/api/root/grants?subject_id=${id}`,bearer)).json()).grants[0].effective;
+    const epoch = (id: string) => Number(db.query('SELECT config_epoch FROM multiremi_agent_config_epochs WHERE agent_id=?').get(id).config_epoch);
+    if (scenario==='runtime reports') {
+      const request = store.createRuntimeModelListRequest(runtime.id);
+      const changed = [{...models[0]!,id:'second'}];
+      store.updateRuntimeModels(runtime.id,models);
+      store.recordExternalChatCapabilities(runtime.id,1,1);
+      expect(store.getRuntimeLite(runtime.id)?.metadata.external_chats).toBe(1);
+      expect((await (await api(previewPath,bearer)).json()).digest).toBe(approved.digest);
+      expect(()=>store.updateRuntime(runtime.id,{metadata:{unrecognized_execution_setting:true}})).toThrow('root_required');
+      expect(()=>store.reportRuntimeModelListResult(runtime.id,request.id,{status:'completed',models:changed})).toThrow('root_required');
+      expect(store.getRuntimeModelListRequest(runtime.id,request.id)?.status).toBe(request.status);
+      expect(store.getRuntimeLite(runtime.id)?.metadata.unrecognized_execution_setting).toBeUndefined();
+      store.reportRuntimeModelListResult(runtime.id,request.id,{status:'completed',models});
+      expect(store.getRuntimeModelListRequest(runtime.id,request.id)?.status).toBe('completed');
+      const path=`/api/runtimes/${runtime.id}/models`;
+      expect((await api(path,bearer,{models:changed},'PUT',{'If-Match':'"0"'})).status).toBe(409);
+      expect(store.listRuntimeModels(runtime.id).map(model=>model.id)).toEqual(['first']);
+      expect(epoch(agent.id)).toBe(0);
+      expect(await effective(agent.id)).toBe(true);
+      const response=await api(path,bearer,{models:changed},'PUT',{'If-Match':'"1"'});
+      expect(response.status,await response.text()).toBe(200);
+      expect(store.listRuntimeModels(runtime.id).map(model=>model.id)).toEqual(['second']);
+      expect(epoch(agent.id)).toBe(1);
+      expect(await effective(agent.id)).toBe(false);
+      return;
+    }
+    if (scenario==='shared skill files') {
+      if (!skill || !sourceFile || !siblingFile) throw new Error('Missing skill file fixture');
+      const additional = async (file: typeof sourceFile) => {
+        const target = store.createAgent({name:`consumer-${file.path}`,provider:'codex',runtimeId:runtime.id});
+        const approval = agentApproval(store,target,file);
+        const response=await api(`/api/root/agents/${target.id}/configuration/approve`,bearer,{...approval,expected_epoch:null});
+        const data=await response.json();
+        expect(response.status,JSON.stringify(data)).toBe(200);
+        const created=await api('/api/root/grants',bearer,{...grantInput,subject:{type:'agent',id:target.id},accepted_dependency_digest:data.digest,
+          expected_revision:(await (await api('/api/root/context',bearer)).json()).security_revision,idempotency_key:target.id});
+        expect(created.status,await created.text()).toBe(200);
+        return target.id;
+      };
+      const shared = await additional(sourceFile), independent = await additional(siblingFile);
+      const body={files:[{path:'new',content:'new source'},siblingFile]};
+      expect(db.query("SELECT 1 FROM multiremi_agent_grant_protected_refs WHERE kind='skill' AND resource_id=?").get(skill.id)).toBeNull();
+      expect(()=>store.updateSkill(skill.id!,body)).toThrow('root_required');
+      const path=`/api/skills/${skill.id}`;
+      expect((await api(path,bearer,body,'PUT',{'If-Match':'"0"'})).status).toBe(409);
+      expect(store.getSkill(skill.id!,{includeFiles:true})?.files).toEqual(skill.files);
+      for (const id of [agent.id,shared,independent]) { expect(await effective(id)).toBe(true); expect(epoch(id)).toBe(0); }
+      const committed=await api(path,bearer,body,'PUT',{'X-Skill-File-Versions':JSON.stringify({[sourceFile.id!]:1})});
+      expect(committed.status,await committed.text()).toBe(200);
+      const files=store.getSkill(skill.id!,{includeFiles:true})!.files!;
+      expect(files.map(file=>file.path)).toEqual(['new','sibling']);
+      expect(files.find(file=>file.path==='sibling')).toEqual(siblingFile);
+      for (const id of [agent.id,shared]) { expect(await effective(id)).toBe(false); expect(epoch(id)).toBe(1); }
+      expect(await effective(independent)).toBe(true);
+      expect(epoch(independent)).toBe(0);
+      return;
+    }
     if (scenario === 'protected writes') {
       const prompt = store.getSystemPrompt(workspace.id);
       const update = { expectedRevision: prompt.document.revision, requestId: 'protected-reset' };

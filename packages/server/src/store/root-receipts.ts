@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { assertFrozenBusinessPayloadHasNoTransportSecrets } from '@multiremi/contracts/root-delivery.js';
 import type { RootDeliveryEnvelopePayload, RootDeliveryTuple, RootDeliveryExecutionKey, RootDeliveryStatusResponse, RootDeliveryInstallAckResponse,
@@ -10,7 +10,7 @@ import { persistIssuedMaterialBinding } from './credential-version-bindings.js';
 import { readCurrentTaskLease, writeCurrentTaskLease } from './task-authority.js';
 import { RootManagement } from './root-management.js';
 import { beginMachineChallenge, bindMachineConnection, releaseMachineConnection, requireCurrentMachine, verifyConnectionChallenge, verifyMachineChallenge, type MachineConnection } from './machine-proof.js';
-import { withSecurityTarget, type SecurityTx } from './security-write.js';
+import { abortSecurityWrite, withSecurityTarget, type SecurityTx } from './security-write.js';
 import { prepareMachineConnection, attachMachineConnection, sessionMachineConnection } from './machine-proof.js';
 
 type Lease = { start_deadline: string; lease_id: string; fence_term: string };
@@ -62,8 +62,19 @@ export function rootBusinessPayloadDigest(payload: Readonly<Record<string, unkno
 }
 
 const preparedDeliveries = new WeakSet<PreparedRootDelivery>();
+const activatingDeliveries = new WeakMap<SecurityTx, { db: SqlDatabase; candidate: PreparedRootDelivery }>();
+
+export function requireActivatingDelivery(db: SqlDatabase, tx: SecurityTx, input: unknown): PreparedRootDelivery {
+  const activation = activatingDeliveries.get(tx);
+  if (!activation || activation.db !== db || activation.candidate !== input) return abortSecurityWrite(db, tx, 'credential_version_conflict');
+  return activation.candidate;
+}
 
 export class PreparedRootDelivery {
+  readonly credentialId = randomUUID();
+  readonly familyId = randomUUID();
+  readonly familyNodeId = randomUUID();
+  readonly materialNodeId = randomUUID();
   private constructor(readonly tuple: RootDeliveryTuple, readonly businessJson: string, readonly envelope: string,
     readonly envelopeDigest: string, readonly tokenHash: string, readonly tokenPrefix: string) { Object.freeze(this); }
 
@@ -219,7 +230,13 @@ export class RootReceiptStore {
         .get(tuple.receipt_id, tuple.attempt_id, tuple.run_generation)) throw new Error('receipt_conflict');
       if (!(Date.parse(lease.start_deadline) > Date.now()) || !lease.lease_id || !lease.fence_term ||
           !(Date.parse(tuple.material_expires_at) > Date.now())) throw new Error('stale_execution');
-      const issued = issueAndActivateRun(tx, candidate);
+      if (activatingDeliveries.has(tx)) throw new Error('receipt_conflict');
+      activatingDeliveries.set(tx, { db: this.db, candidate });
+      let issued: IssuedCredential;
+      try { issued = issueAndActivateRun(tx, candidate); }
+      finally { activatingDeliveries.delete(tx); }
+      if (issued.material !== candidate || issued.credential.id !== candidate.credentialId || issued.familyId !== candidate.familyId ||
+          issued.node.nodeId !== candidate.materialNodeId) throw new Error('credential_version_conflict');
       if (issued.subject.type !== 'agent' || issued.credential.version !== tuple.material_version ||
           issued.expiresAtMs !== Date.parse(tuple.material_expires_at) || issued.expiresAtMs <= Date.now()) throw new Error('credential_version_conflict');
       if (!this.db.query(`SELECT 1 FROM multiremi_usage_task_scopes s JOIN multiremi_usage_runs r

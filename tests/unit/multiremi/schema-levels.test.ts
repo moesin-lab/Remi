@@ -57,7 +57,9 @@ describe('schema compatibility protocol', () => {
     expect(database.query('SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover').all()).toEqual([{ cursor_id: '', complete: 1 }]);
     expect(readSchemaLevels(database)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     runMigrations(database);
-    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(19);
+    const steps = database.query('SELECT id FROM multiremi_schema_steps').all();
+    expect(steps).toHaveLength(20);
+    expect(steps).toContainEqual({ id: '20261126_machine_deployment_roots' });
     expect(database.query('SELECT attempt_id FROM multiremi_attempt_eligibility').all()).toEqual([]);
     expect(database.query('SELECT attempt_id FROM multiremi_current_task_leases').all()).toEqual([]);
     expect(database.query('SELECT domain_id FROM multiremi_jwt_signing_domains').all()).toEqual([]);

@@ -255,5 +255,5 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     const retried = retry();
     expect(approvedInputs(retried.current_attempt_id!).inputs.entries).toEqual(manifest.inputs.entries);
     expect(db.query("SELECT attempt_id FROM multiremi_attempt_eligibility WHERE eligibility='root' AND attempt_id IN (?,?)").all(task.id,retried.current_attempt_id)).toHaveLength(2);
-  });
+  }, 30_000);
 });

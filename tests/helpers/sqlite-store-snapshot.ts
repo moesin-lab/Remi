@@ -82,7 +82,7 @@ export function createSqliteStoreSnapshotFactory() {
     }
   }
 
-  function create(): { db: Database; store: MultiremiStore } {
+  function create(): { db: ReturnType<typeof openSqliteDatabase>; store: MultiremiStore } {
     const started = performance.now();
     try {
       if (!normalClockAndRandom()) {

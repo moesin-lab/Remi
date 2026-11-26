@@ -144,15 +144,20 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     expect(resolve).toThrow('root_runtime_untrusted');
     db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=NULL WHERE node_id='machine'");
     expect(resolve().digest).toBe(manifest.digest);
-    store.upsertSkillFile(skill.id!, {path:file.path,content:'changed'});
+    expect(()=>store.upsertSkillFile(skill.id!, {path:file.path,content:'changed'})).toThrow('root_required');
+    expect(resolve().digest).toBe(manifest.digest);
+    db.query('UPDATE multiremi_skill_files SET content=? WHERE id=?').run('historical drift',file.id);
     expect(resolve).toThrow('root_required');
+    db.query('UPDATE multiremi_skill_files SET content=? WHERE id=?').run(file.content,file.id);
     const write={action:'skill-file.update',use:'write',actualTarget:{type:'skill-file',id:file.id!}};
     const writePlan=service.plan(registered,write);
     expect(()=>withSecurityWrite(db,undefined,writePlan,tx=>service.guardProtectedMutation(tx,null,write,0))).toThrow('root_required');
     expect(()=>withSecurityWrite(db,undefined,writePlan,tx=>service.guardProtectedMutation(tx,service.authorizeWrite(tx,registered,write),write,1))).toThrow('authority_revision_conflict');
-    withSecurityWrite(db,undefined,writePlan,tx=>{
-      service.guardProtectedMutation(tx,service.authorizeWrite(tx,registered,write),write,0);
-      store.upsertSkillFile(skill.id!,{path:file.path,content:'approved change'});
+    const replacement={action:'protected-resource.write',use:'write',actualTarget:{type:'skill',id:skill.id!}};
+    const writeProof=store.rootManagement.registeredCredentials.verifyJwt(compact,signing);
+    store.withAuthorizedMutation(writeProof,replacement,store.rootManagement.plan(writeProof,replacement),(tx,actor)=>{
+      store.mutateProtectedResource(tx,actor,replacement,0,
+        ()=>store.upsertSkillFile(skill.id!,{path:file.path,content:'approved change'}));
     });
     expect(Number(db.query('SELECT config_epoch FROM multiremi_current_agent_config_epochs WHERE agent_id=?').get(agent.id).config_epoch)).toBe(1);
     expect(db.query('SELECT revoked_at_ms FROM multiremi_authority_nodes WHERE node_id=?').get(result.grant.authority_node_id).revoked_at_ms).toBeTruthy();

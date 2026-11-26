@@ -125,6 +125,8 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 ### Agent grant 的依赖绑定
 
+生产 Store 通过 `AgentDependencies.resolveAgentDependencies` 读取真实 Agent、工作区、指令、运行时/profile、插件、技能、执行来源与间接引用。受保护的配置先由已验证 root 在 `root.agent-configuration.approve` 写事务调用 `approveAgentConfiguration(tx,actor,agentId,expectedEpoch,approval)`；首次传 `null`，后续使用当前 epoch。输入为版本化的 `sources` 和 `executions`，不接受调用方指定的 authority 父节点。服务器校验材料摘要，并在同一事务用实际解析器复查。审批或读源失败回滚全部材料。`previewAgentGrant(proof,agentId,trustIds)` 返回实际摘要，客户端只提交明确选择的 trust IDs 与该摘要。审批来源撤销或配置代际变化会使旧来源失效。
+
 `new RootManagement(db, resolveAgentDependencies)` 在服务端注入与 admission 共用的依赖解析器。未装配解析器时 Agent grant 拒绝签发。人类 root 使用 `planAgentGrant(proof, agentId, trustIds)` 并在同一事务传入 `grant(tx, actor, {subject:{type:'agent',id:agentId}, runtime_trust_ids, accepted_dependency_digest, expected_revision, idempotency_key, reason})`。内核验证当前 trust，原子记录 grant 代际、配置 epoch、信任版本和逐项引用。新 attempt 从该快照复核实际选择的 runtime trust。
 
 配置与共享资源写入器使用 `guardProtectedMutation(tx, actor, request, expectedVersion)`，`request.actualTarget` 为真实资源的种类和 ID。写入与守卫共用事务。命中引用时必须使用已绑定该写动作的 root actor，版本不符回滚；核验成功同步推进 epoch 并撤销旧授权节点，需要重新批准才能使用新配置。

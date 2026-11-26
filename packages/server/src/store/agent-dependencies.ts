@@ -34,9 +34,11 @@ class StoredAgentDependencyAuthority implements AgentDependencyAuthority {
   readConfigEpoch(tx: SecurityTx, agentId: string, workspaceId: string) {
     return withSecurityTarget(this.db, tx, `management:agent:${agentId}`, () => {
       if (!hasAuthorityView(this.db, 'multiremi_current_agent_config_epochs')) return null;
-      const rows = this.db.query(`SELECT config_epoch FROM multiremi_current_agent_config_epochs
-        WHERE agent_id=? AND workspace_id=? LIMIT 2`).all(agentId,workspaceId);
-      return rows.length === 1 ? rows[0].config_epoch : null;
+      const rows = this.db.query(`SELECT e.config_epoch,e.approval_node_id,n.generation FROM multiremi_current_agent_config_epochs e
+        JOIN multiremi_authority_nodes n ON n.node_id=e.approval_node_id AND n.kind='agent_configuration' AND n.subject_type='agent' AND n.subject_id=e.agent_id
+        WHERE e.agent_id=? AND e.workspace_id=? LIMIT 2`).all(agentId,workspaceId);
+      if (rows.length!==1 || !grantAncestryIsCurrent(this.db,tx,agentId,{nodeId:rows[0].approval_node_id,generation:Number(rows[0].generation)},'agent')) return null;
+      return Number(rows[0].config_epoch);
     });
   }
 

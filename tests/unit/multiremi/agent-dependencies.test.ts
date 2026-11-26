@@ -1,6 +1,8 @@
+import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
+import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { expect, it } from 'bun:test';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { AgentDependencies, agentDependencyDigest as digest, type AgentDependencyRef } from '@multiremi/store/agent-dependencies.js';
+import { AgentDependencies, agentDependencyDigest, type AgentDependencyRef } from '@multiremi/store/agent-dependencies.js';
 import { getGroupExecutionProfile } from '@multiremi/store/execution-groups.js';
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { withSecurityWrite, type SecurityTx } from '@multiremi/store/security-write.js';
@@ -10,7 +12,7 @@ import { runtimeConnectionSnapshot } from '@multiremi/contracts/runtime-connecti
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 pendingTurnBackendTests('agent dependency resolution', fixture => {
-  it('resolves the execution configuration and rejects stale, incomplete or cyclic protected sources', () => {
+  it('resolves the execution configuration and rejects stale, incomplete or cyclic protected sources', async () => {
     const {store} = fixture();
     const ctx = (store as unknown as {ctx: StoreContext}).ctx;
     const db = ctx.db;
@@ -24,7 +26,7 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     store.createAgentPluginBinding(agent.id, {pluginId: plugin.id});
     const targets = [`management:agent:${agent.id}`, `management:runtime:${runtime.id}`, `machine:${runtime.id}`, 'authority:machine'].sort();
     function transaction<T>(run: (tx: SecurityTx) => T) {
-      return withSecurityWrite(db, undefined, {expectedRevision: 0, workspaceIds: ['local'], numberKeys: [], domainTargets: targets}, run);
+      return withSecurityWrite(db, undefined, {expectedRevision: Number(db.query('SELECT security_revision FROM multiremi_security_state').get().security_revision), workspaceIds: ['local'], numberKeys: [], domainTargets: targets}, run);
     }
     const expiry = Date.now() + 3_600_000;
     const tokenHash = createHash('sha256').update('test-daemon').digest('hex');
@@ -40,6 +42,12 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     db.query('UPDATE multiremi_machine_challenges SET consumed_at_ms=1,proof_digest=? WHERE challenge_id=?').run('verified',challenge.id);
     db.query("INSERT INTO multiremi_runtime_trusts VALUES('trust',?,1,'inc',?,'trust-node','{}',NULL)").run(runtime.id,challenge.id);
 
+    const contents=new Map<string,string>();
+    const digest=(value:unknown)=>{
+      const fingerprint=agentDependencyDigest(value);
+      contents.set(fingerprint,JSON.stringify(value));
+      return fingerprint;
+    };
     const entries = new Map<string,{ref: AgentDependencyRef; dependencies: AgentDependencyRef[]}>();
     function record(kind: string, id: string, use: string, hash: string, version = 0) {
       const ref = {kind,id,use,digest:hash,version};
@@ -80,22 +88,28 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     const {resolveAgentDependencies} = new AgentDependencies(ctx);
     const resolve = (ids = ['trust']) => transaction(tx => { current = tx; return resolveAgentDependencies(tx,agent.id,ids); });
     expect(resolve).toThrow('root_required');
-    db.exec(`CREATE TABLE fixture_epochs(agent_id TEXT,workspace_id TEXT,config_epoch INTEGER);
-      CREATE TABLE fixture_snapshots(agent_id TEXT,workspace_id TEXT,config_epoch INTEGER,kind TEXT,resource_id TEXT,use_kind TEXT,
-        resource_version INTEGER,digest TEXT,dependencies_json TEXT);
-      CREATE TABLE fixture_sources(agent_id TEXT,workspace_id TEXT,config_epoch INTEGER,runtime_id TEXT,trust_id TEXT,trust_generation INTEGER,
-        incarnation TEXT,provider TEXT,profile_digest TEXT,provider_ref TEXT,checkpoint_policy_ref TEXT,input_policy_ref TEXT);
-      CREATE VIEW multiremi_current_agent_config_epochs AS SELECT * FROM fixture_epochs;
-      CREATE VIEW multiremi_current_agent_source_snapshots AS SELECT * FROM fixture_snapshots;
-      CREATE VIEW multiremi_current_agent_execution_sources AS SELECT * FROM fixture_sources`);
-    db.query("INSERT INTO fixture_epochs VALUES(?,'local',0)").run(agent.id);
-    for (const {ref,dependencies} of entries.values()) {
-      if (['profile','system-prompt'].includes(ref.kind)) continue;
-      db.query("INSERT INTO fixture_snapshots VALUES(?,'local',0,?,?,?,?,?,?)").run(agent.id,ref.kind,ref.id,ref.use,ref.version,ref.digest,JSON.stringify(dependencies));
-    }
-    expect(resolve).toThrow('root_required');
-    db.query("INSERT INTO fixture_sources VALUES(?,'local',0,?,'trust',1,'inc','claude',?,?,?,?)")
-      .run(agent.id,runtime.id,profileDigest,JSON.stringify(provider),JSON.stringify(checkpointPolicy),JSON.stringify(inputPolicy));
+    const {service,passwordProof,signing}=await bootstrap(db,store.resolveAgentDependencies);
+    const compact=service.issueIndependentDashboardSession(passwordProof,(Math.floor(Date.now()/1000)+300)*1000,
+      (tx,source,claims)=>new JwtMaterials(db).issue(tx,source,claims,signing));
+    const registered=service.registeredCredentials.verifyJwt(compact,signing);
+    const sources=[...entries.values()].filter(({ref})=>!['profile','system-prompt'].includes(ref.kind)).map(({ref,dependencies})=>({ref,dependencies,
+      content:ref.kind==='plugin-version' ? db.query('SELECT artifact_json FROM multiremi_agent_plugin_versions WHERE id=?').get(ref.id).artifact_json : contents.get(ref.digest)!}));
+    const executions=[{trustId:'trust',profileDigest,provider,checkpointPolicy,inputPolicy}];
+    const action={action:'root.agent-configuration.approve',use:'write',actualTarget:{type:'agent',id:agent.id}};
+    const approve=(complete:boolean)=>{
+      const plan=service.planAgentGrant(passwordProof,agent.id,['trust']);
+      return withSecurityWrite(db,undefined,plan,tx=>service.approveAgentConfiguration(tx,service.authorizeWrite(tx,passwordProof,action),agent.id,null,
+        {sources:complete?sources:sources.filter(source=>source.ref.kind!=='provider-trust'),executions}));
+    };
+    expect(()=>approve(false)).toThrow('root_required');
+    expect(db.query('SELECT agent_id FROM multiremi_agent_config_epochs').all()).toEqual([]);
+    const approved=approve(true);
+    expect(service.previewAgentGrant(registered,agent.id,['trust'])).toEqual(approved);
+    const grantPlan=service.planAgentGrant(registered,agent.id,['trust']);
+    const grantUse={action:'root.grant.create',use:'management',actualTarget:action.actualTarget};
+    const result=withSecurityWrite(db,undefined,grantPlan,tx=>service.grant(tx,service.authorizeWrite(tx,registered,grantUse),{
+      subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,expected_revision:grantPlan.expectedRevision,idempotency_key:'grant',reason:'reviewed'}));
+    expect(result.grant.subject.id).toBe(agent.id);
     const manifest = resolve();
     expect(manifest.trustVersions).toEqual([{id:'trust',version:1}]);
     expect(manifest.refs).toContainEqual(indirect);
@@ -104,18 +118,18 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     expect(() => resolveAgentDependencies(current,agent.id,['trust'])).toThrow('security_tx_invalid');
     expect(() => resolve(['unknown'])).toThrow('root_runtime_untrusted');
     expect(() => resolve(['trust','trust'])).toThrow();
-    db.run("UPDATE fixture_sources SET incarnation='retired'");
+    db.run("UPDATE multiremi_agent_execution_sources SET incarnation='retired'");
     expect(resolve).toThrow('root_required');
-    db.run("UPDATE fixture_sources SET incarnation='inc'");
-    db.run("UPDATE fixture_epochs SET config_epoch=1");
+    db.run("UPDATE multiremi_agent_execution_sources SET incarnation='inc'");
+    db.run("UPDATE multiremi_agent_config_epochs SET config_epoch=1");
     expect(resolve).toThrow('root_required');
-    db.run("UPDATE fixture_epochs SET config_epoch=0");
-    db.query("UPDATE fixture_snapshots SET dependencies_json=? WHERE kind='input-policy'").run(JSON.stringify([inputPolicy]));
+    db.run("UPDATE multiremi_agent_config_epochs SET config_epoch=0");
+    db.query("UPDATE multiremi_agent_source_snapshots SET dependencies_json=? WHERE kind='input-policy'").run(JSON.stringify([inputPolicy]));
     expect(resolve).toThrow('root_required');
-    db.query("UPDATE fixture_snapshots SET dependencies_json=? WHERE kind='input-policy'").run(JSON.stringify([indirect]));
-    db.run("UPDATE fixture_snapshots SET resource_version=1 WHERE kind='shared-source'");
+    db.query("UPDATE multiremi_agent_source_snapshots SET dependencies_json=? WHERE kind='input-policy'").run(JSON.stringify([indirect]));
+    db.run("UPDATE multiremi_agent_source_snapshots SET resource_version=1 WHERE kind='shared-source'");
     expect(resolve).toThrow('root_required');
-    db.run("UPDATE fixture_snapshots SET resource_version=0 WHERE kind='shared-source'");
+    db.run("UPDATE multiremi_agent_source_snapshots SET resource_version=0 WHERE kind='shared-source'");
     db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='machine'");
     expect(resolve).toThrow('root_runtime_untrusted');
     db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=NULL WHERE node_id='machine'");

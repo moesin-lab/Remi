@@ -12,6 +12,7 @@ import { expandCredentialVersionBindings, expandRootReceipts } from './root-rece
 import { expandTaskAuthority } from './task-authority-schema.js';
 import { expandAgentGrantDependencies } from './agent-grant-dependencies.js';
 import { expandDurableDelegations } from './durable-delegation.js';
+import { expandAgentSourceApprovals } from './agent-source-approvals.js';
 import { expandJwtMaterials } from './jwt-material-schema.js';
 import type { SchemaMigration } from './schema-migration-runner.js';
 
@@ -180,4 +181,7 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
 }, {
   id: '20261126_durable_delegations', phase: 'expand', level: 10,
   expandRelease: '0.2.95', release: '0.2.95', run: expandDurableDelegations,
+}, {
+  id: '20261126_agent_source_approvals', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandAgentSourceApprovals,
 }];

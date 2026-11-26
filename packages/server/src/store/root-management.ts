@@ -10,6 +10,7 @@ import { machineRetirementPayload, requireEnrollmentBinding, requireMachineDeplo
 import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-provenance.js';
 import type { AdmissionTicket, AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority, FinalExecution, InputManifest, VersionedRef } from './root-authority-contract.js';
 import { requireAgentDependencySnapshot, type ResolveAgentDependencies } from './agent-grant-dependencies.js';
+import { storeAgentConfigurationApproval, type AgentConfigurationApproval } from './agent-source-approvals.js';
 import { releasePatAfterCommit, type DelegatedPatInput, type DelegationUse } from './durable-delegation.js';
 import { persistIssuedMaterialBinding } from './credential-version-bindings.js';
 import type { AuthorityNodeRef } from './authority-provenance.js';
@@ -196,6 +197,41 @@ export class RootManagement {
     });
   }
 
+  previewAgentGrant(proof: CredentialProof, agentId: string, trustIds: readonly string[]) {
+    return onPrimary(()=>{
+      const plan=this.planAgentGrant(proof,agentId,trustIds);
+      return withSecurityWrite(this.db,plan.fenceTerm,plan,tx=>{
+        if (!this.check(tx,proof,{action:'root.grant.preview',use:'read',actualTarget:{type:'agent',id:agentId}}).effectiveRoot || !this.resolveAgentDependencies) throw new SecurityAbort('root_required');
+        return this.resolveAgentDependencies(tx,agentId,trustIds);
+      });
+    });
+  }
+
+  approveAgentConfiguration(tx: SecurityTx, actor: Actor, agentId: string, expectedEpoch: number | null, approval: AgentConfigurationApproval) {
+    const use={action:'root.agent-configuration.approve',use:'write',actualTarget:{type:'agent',id:agentId}};
+    return withSecurityTarget(this.db,tx,`management:agent:${agentId}`,()=>{
+      const current=this.requireMutationActor(tx,actor,use);
+      const agent=this.db.query('SELECT workspace_id FROM multiremi_agents WHERE id=? AND archived_at IS NULL').get(agentId);
+      if (!agent || !current.recordedGrant || !this.resolveAgentDependencies) throw new SecurityAbort('root_required');
+      if (expectedEpoch!==null && (!Number.isSafeInteger(expectedEpoch) || expectedEpoch<0)) throw new SecurityAbort('authority_revision_conflict');
+      const epoch=expectedEpoch===null?0:expectedEpoch+1;
+      const source=current.credentialOrigin?.node ?? this.passwordOrigin(this.actors.get(actor)!.proof);
+      const revision=this.advanceSecurityRevision();
+      const node=this.newNode('agent_configuration','agent',agentId,epoch+1,revision,null,[current.recordedGrant.authorityNodeId,source.nodeId]);
+      const prior=this.db.query('SELECT approval_node_id FROM multiremi_agent_config_epochs WHERE agent_id=?').get(agentId);
+      const changed=expectedEpoch===null ? this.db.query(`INSERT INTO multiremi_agent_config_epochs(agent_id,workspace_id,config_epoch,approval_node_id) VALUES(?,?,?,?)
+        ON CONFLICT(agent_id) DO NOTHING RETURNING agent_id`).get(agentId,agent.workspace_id,epoch,node) : this.db.query(`UPDATE multiremi_agent_config_epochs SET config_epoch=?,approval_node_id=?
+        WHERE agent_id=? AND workspace_id=? AND config_epoch=? RETURNING agent_id`).get(epoch,node,agentId,agent.workspace_id,expectedEpoch);
+      if (!changed) throw new SecurityAbort('authority_revision_conflict');
+      if (prior) this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=COALESCE(revoked_at_ms,?),revision=? WHERE node_id=?`).run(Date.now(),revision,prior.approval_node_id);
+      storeAgentConfigurationApproval(this.db,agentId,agent.workspace_id,epoch,approval);
+      const resolved=this.resolveAgentDependencies(tx,agentId,approval.executions.map(execution=>execution.trustId));
+      if (resolved.configEpoch!==epoch || resolved.agentId!==agentId || !approval.sources.every(({ref})=>resolved.refs.some(live=>
+        live.kind===ref.kind && live.id===ref.id && live.use===ref.use && live.version===ref.version && live.digest===ref.digest))) throw new SecurityAbort('authority_revision_conflict');
+      return resolved;
+    });
+  }
+
   reviewAgentGrantRuntimeTrusts(proof: CredentialProof, agentId: string, runtimeTrustIds: readonly string[]): AgentGrantRuntimeReview {
     const request = { action: 'root.grant.review-runtime-trusts', use: 'read', actualTarget: { type: 'agent', id: agentId } };
     const ids = [...new Set(runtimeTrustIds)].sort();
@@ -272,7 +308,7 @@ export class RootManagement {
       const exists = generic || (retry ? this.db.query('SELECT id FROM multiremi_turns WHERE id=?').get(target.id)
         : request.action === trustAction ? this.db.query('SELECT id FROM multiremi_runtimes WHERE id=?').get(target.id)
         : request.action === untrustAction ? this.db.query('SELECT trust_id FROM multiremi_runtime_trusts WHERE trust_id=?').get(target.id)
-        : request.action === createAction ? this.db.query('SELECT id FROM multiremi_users WHERE id=?').get(target.id) : request.action === grantAction
+        : request.action === createAction ? (target.type==='agent' ? this.db.query('SELECT id FROM multiremi_agents WHERE id=? AND archived_at IS NULL') : this.db.query('SELECT id FROM multiremi_users WHERE id=?')).get(target.id) : request.action === grantAction
         ? this.db.query('SELECT grant_id FROM multiremi_root_grants WHERE grant_id=?').get(target.id)
         : this.db.query('SELECT family_id FROM multiremi_credential_families WHERE family_id=?').get(target.id));
       if (!exists) throw new RootManagementRequestError(404, 'Management target not found');
@@ -543,18 +579,23 @@ export class RootManagement {
   guardProtectedMutation(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number): void {
     const {type,id} = request.actualTarget;
     withSecurityTarget(this.db,tx,`management:${type}:${id}`,()=>{
-      const affected = this.db.query(`SELECT DISTINCT g.grant_id,g.authority_node_id,g.generation,r.resource_version FROM multiremi_agent_grant_protected_refs r
+      const affected = this.db.query(`SELECT DISTINCT g.grant_id,g.subject_id,g.authority_node_id,g.generation,r.resource_version FROM multiremi_agent_grant_protected_refs r
         JOIN multiremi_agent_grant_dependencies d ON d.grant_id=r.grant_id AND d.invalidated_revision IS NULL
         JOIN multiremi_root_grants g ON g.grant_id=d.grant_id AND g.generation=d.grant_generation AND g.revoked_at_ms IS NULL
         JOIN multiremi_root_subject_state s ON s.active_grant_id=g.grant_id AND s.generation_counter=g.generation
         WHERE r.kind=? AND r.resource_id=? ORDER BY g.grant_id`).all(type,id);
-      if (!affected.length) return;
+      const snapshots=this.db.query(`SELECT DISTINCT agent_id,resource_version FROM multiremi_current_agent_source_snapshots WHERE kind=? AND resource_id=?`).all(type,id);
+      if (!affected.length && !snapshots.length) return;
       if (!actor || request.use!=='write') throw new SecurityAbort('root_required');
       this.requireMutationActor(tx,actor,request);
-      if (!Number.isSafeInteger(expectedVersion) || affected.some(row=>Number(row.resource_version)!==expectedVersion)) {
+      if (!Number.isSafeInteger(expectedVersion) || [...affected,...snapshots].some(row=>Number(row.resource_version)!==expectedVersion)) {
         throw new SecurityAbort('authority_revision_conflict');
       }
       const revision = this.advanceSecurityRevision();
+      for (const agentId of new Set([...affected.map(row=>row.subject_id),...snapshots.map(row=>row.agent_id)])) {
+        const invalidated=this.db.query(`UPDATE multiremi_agent_config_epochs SET config_epoch=config_epoch+1 WHERE agent_id=? RETURNING approval_node_id`).get(agentId);
+        if (invalidated) this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=COALESCE(revoked_at_ms,?),revision=? WHERE node_id=?`).run(Date.now(),revision,invalidated.approval_node_id);
+      }
       for (const row of affected) {
         this.db.query(`UPDATE multiremi_agent_grant_dependencies SET invalidated_revision=?,config_epoch=config_epoch+1 WHERE grant_id=? AND invalidated_revision IS NULL`).run(revision,row.grant_id);
         this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=COALESCE(revoked_at_ms,?),revision=? WHERE node_id=? AND generation=?`).run(Date.now(),revision,row.authority_node_id,row.generation);
@@ -707,7 +748,15 @@ export class RootManagement {
       WHERE s.subject_type='agent' AND s.subject_id=?`).get(agent.agent_id);
     const trust = this.db.query(`SELECT authority_node_id FROM multiremi_runtime_trusts WHERE runtime_id=? AND incarnation=? AND revoked_at_ms IS NULL`)
       .get(execution.runtimeId,execution.incarnation);
-    const targets = [...base.domainTargets,`attempt:${execution.attemptId}`,`management:attempt:${execution.attemptId}`,`management:runtime:${execution.runtimeId}`,`grant:agent:${agent.agent_id}`];
+    const targets = [...base.domainTargets,`attempt:${execution.attemptId}`,`management:attempt:${execution.attemptId}`,`management:runtime:${execution.runtimeId}`,`management:agent:${agent.agent_id}`,`grant:agent:${agent.agent_id}`];
+    if (subject) {
+      const dependencies=this.db.query(`SELECT d.trust_versions_json FROM multiremi_agent_grant_dependencies d JOIN multiremi_root_grants g ON g.grant_id=d.grant_id
+        WHERE g.authority_node_id=?`).get(subject.authority_node_id);
+      for (const ref of JSON.parse(dependencies?.trust_versions_json??'[]')) {
+        const runtime=this.db.query('SELECT runtime_id FROM multiremi_runtime_trusts WHERE trust_id=? AND generation=?').get(ref.id,ref.version);
+        if (runtime) targets.push(`management:runtime:${runtime.runtime_id}`);
+      }
+    }
     for (const node of [subject?.authority_node_id,trust?.authority_node_id,execution.providerTrust.id,execution.checkpointTrust?.id]) {
       if (node) targets.push(`authority:${node}`);
     }
@@ -1178,6 +1227,8 @@ export class RootManagement {
       const parents = [current.recordedGrant.authorityNodeId,parent.nodeId];
       const snapshot = target.type==='agent' ? requireAgentDependencySnapshot(this.resolveAgentDependencies,tx,target.id,input.runtime_trust_ids??[],input.accepted_dependency_digest??'') : null;
       if (snapshot) {
+        const approval=this.db.query(`SELECT approval_node_id FROM multiremi_agent_config_epochs WHERE agent_id=? AND config_epoch=?`).get(target.id,snapshot.configEpoch);
+        if (approval) parents.push(approval.approval_node_id);
         if (!this.db.query('SELECT id FROM multiremi_agents WHERE id=? AND archived_at IS NULL').get(target.id)) throw new SecurityAbort('root_required');
         for (const trust of snapshot.trustVersions) {
           const row = this.db.query(`SELECT authority_node_id,runtime_id,challenge_id FROM multiremi_runtime_trusts WHERE trust_id=? AND generation=? AND revoked_at_ms IS NULL`).get(trust.id,trust.version);

@@ -678,7 +678,7 @@ export class MultiremiStore {
     this.issueWorkspaces = new IssueWorkspacesRepo(this.ctx);
     this.storage = new StorageRepo(this.ctx, this.issueWorkspaces);
     this.taskTraces = new TaskTracesRepo(this.ctx, options.taskTraceQuery);
-    this.runtimes = new RuntimesRepo(this.ctx);
+    this.runtimes = new RuntimesRepo(this.ctx, (runtimeId, write) => this.guardOrdinaryResource('runtime', runtimeId, write));
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
     this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
     this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
@@ -3910,8 +3910,7 @@ runMigrations(this.db);
     supportsDecisionCard?: boolean;
     supportsIssueDecisionCard?: boolean;
   } = {}): MultiremiDaemonHeartbeatAck {
-    const heartbeat = () => this.runtimes.heartbeatRuntime(runtimeId, options);
-    return Object.keys(options).some(key => key !== 'claimPending') ? this.guardOrdinaryResource('runtime',runtimeId,heartbeat) : heartbeat();
+    return this.runtimes.heartbeatRuntime(runtimeId, options);
   }
 
   pendingRuntimeRequests(runtimeId: string) { return this.runtimes.pendingRuntimeRequests(runtimeId); }

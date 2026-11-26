@@ -3474,8 +3474,6 @@ runMigrations(this.db);
   }
 
   recordExternalChatCapabilities(id: string, external_chats: number, external_chat_models: number): void {
-    const existing = this.getRuntimeLite(id);
-    if (!existing || (existing.metadata.external_chats === external_chats && existing.metadata.external_chat_models === external_chat_models)) return;
     this.guardOrdinaryResource('runtime', id, () => {
       const runtime = this.getRuntimeLite(id);
       if (runtime && (runtime.metadata.external_chats !== external_chats || runtime.metadata.external_chat_models !== external_chat_models)) {

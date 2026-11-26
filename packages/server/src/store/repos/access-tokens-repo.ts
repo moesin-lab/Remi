@@ -65,7 +65,7 @@ const LAST_USED_AT_WRITE_INTERVAL_MS = 60_000;
 const LAST_USED_AT_MAP_MAX_ENTRIES = 4_096;
 
 export class AccessTokensRepo {
-  constructor(private db: SqlDatabase) {}
+  constructor(private db: SqlDatabase, private readonly authority = new RootManagement(db)) {}
 
   async createAccessToken(
     input: CreateAccessTokenInput,
@@ -327,12 +327,11 @@ export class AccessTokensRepo {
     if (!accessTokenIsValid(accessToken, nowMs)) return null;
     if (accessToken.type === 'pat' && row.agent_id != null || row.root_attempt && !row.registered) return null;
     if (row.registered) {
-      const authority = new RootManagement(this.db);
-      const proof = authority.registeredCredentials.verify(token);
+      const proof = this.authority.registeredCredentials.verify(token);
       if (proof.kind!=='dependent') return null;
       if (row.root_attempt) {
         try {
-          if (!authority.resolveCurrent(proof,{action:'task.authenticate',use:'read',actualTarget:{type:'attempt',id:accessToken.taskId!}}).effectiveRoot) return null;
+          if (!this.authority.resolveCurrent(proof,{action:'task.authenticate',use:'read',actualTarget:{type:'attempt',id:accessToken.taskId!}}).effectiveRoot) return null;
         } catch (error) {
           if (error instanceof SecurityAbort && error.code==='root_authority_revoked') return null;
           throw error;

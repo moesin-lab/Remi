@@ -625,9 +625,9 @@ export class MultiremiStore {
     this.db = liveTermDatabase(this.fenceDatabase);
     this.ctx = new StoreContext(this.db, () => this);
     this.feedback = new FeedbackRepo(this.db);
-    this.accessTokens = new AccessTokensRepo(this.db);
     this.jwtMaterials = new JwtMaterials(this.db);
     this.rootManagement = new RootManagement(this.db);
+    this.accessTokens = new AccessTokensRepo(this.db,this.rootManagement);
     this.rootReceipts = new RootReceiptStore(this.db,this.rootManagement);
     this.issueShares = new IssueSharesRepo(this.db);
     this.notificationChannels = new NotificationChannelsRepo(this.ctx);

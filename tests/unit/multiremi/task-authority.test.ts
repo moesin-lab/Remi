@@ -93,6 +93,8 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     db.query(`INSERT INTO multiremi_root_grants(grant_id,subject_type,subject_id,generation,scope,authority_node_id,issuer_type,issuer_id,revision,reason,created_at_ms)
       VALUES('grant-agent','agent',?,1,'system','grant-agent','user','usr_auth',2,'fixture',1)`).run(agent.id);
     db.query("INSERT INTO multiremi_root_subject_state VALUES('agent',?,1,'grant-agent')").run(agent.id);
+    expect(()=>store.createTask({id:'tsk_unadmitted',agentId:agent.id,prompt:'ordinary entry'})).toThrow('root_invoker_untrusted');
+    expect(store.getTask('tsk_unadmitted')).toBeNull();
     db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,proof_node_id,actor_grant_id,actor_generation,action,target_id,idempotency_key,
       payload_digest,reason,revision_before,revision_after,created_at_ms,result_json) VALUES('usr_auth','password',?,1,'root.grant.create',?,'fixture','fixture','fixture',1,2,1,'{}')`).run(created.grant.id,agent.id);
     nodes('machine','machine_registration','daemon','daemon',[]);

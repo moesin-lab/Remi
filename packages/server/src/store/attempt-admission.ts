@@ -18,14 +18,15 @@ export interface AttemptWrite {
 const activeInsert = new WeakMap<SqlDatabase, (row: AttemptRow, insert: () => void) => void>();
 
 function saveOrdinaryEligibility(db:SqlDatabase, attemptId:unknown):void {
-  const saved = db.query(`INSERT INTO multiremi_attempt_eligibility(attempt_id,eligibility)
+  const saveWithoutActiveGrant = db.query(`INSERT INTO multiremi_attempt_eligibility(attempt_id,eligibility)
     SELECT a.id,'none' FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id
-    WHERE a.id=? AND NOT EXISTS (SELECT 1 FROM multiremi_root_subject_state subject
+    JOIN multiremi_security_state s ON s.singleton=1
+    WHERE a.id=? AND (s.feature_activation=0 OR NOT EXISTS (SELECT 1 FROM multiremi_root_subject_state subject
       JOIN multiremi_root_grants g ON g.grant_id=subject.active_grant_id AND g.generation=subject.generation_counter
-      JOIN multiremi_security_state s ON s.singleton=1 AND s.feature_activation=1
       WHERE subject.subject_type='agent' AND subject.subject_id=t.agent_id AND g.revoked_at_ms IS NULL
-        AND (g.expires_at_ms IS NULL OR g.expires_at_ms>?)) RETURNING attempt_id`).get(attemptId,Date.now());
-  if (!saved) throw new Error('root_invoker_untrusted');
+        AND (g.expires_at_ms IS NULL OR g.expires_at_ms>?))) RETURNING attempt_id`);
+  if (saveWithoutActiveGrant.get(attemptId,0)) return;
+  if (!saveWithoutActiveGrant.get(attemptId,Date.now())) throw new Error('root_invoker_untrusted');
 }
 
 function readExecutionRow(db:SqlDatabase, attemptId:string) {

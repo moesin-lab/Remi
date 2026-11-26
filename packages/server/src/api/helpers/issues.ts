@@ -39,6 +39,17 @@ export function restrictedTaskIssueCreationAgent(c: Context, store: MultiremiSto
   return store.getAgent(token.agentId);
 }
 
+/**
+ * Lightweight boolean equivalent of `Boolean(restrictedTaskIssueCreationAgent(c, store))`:
+ * requires both an active restriction code and an existing `multiremi_agents` row in one query.
+ */
+export function hasRestrictedTaskIssueCreationAgent(c: Context, store: MultiremiStore): boolean {
+  const token = currentTaskAccessToken(c);
+  if (!token?.agentId) return false;
+  const state = store.getTaskIssueCreationRestrictionState(token.taskId, token.agentId);
+  return state.code !== null && state.agentExists;
+}
+
 export function currentTaskIssueCreationRestricted(c: Context, store: MultiremiStore): boolean {
   return currentTaskIssueCreationRestrictionCode(c, store) !== null;
 }
@@ -46,13 +57,7 @@ export function currentTaskIssueCreationRestricted(c: Context, store: MultiremiS
 function currentTaskIssueCreationRestrictionCode(c: Context, store: MultiremiStore): string | null {
   const token = currentTaskAccessToken(c);
   if (!token?.agentId) return null;
-  if (
-    (token.taskId ? store.getTask(token.taskId)?.issueCreationRestricted : false)
-    || store.getAgent(token.agentId)?.issueCreationRequiresProposal
-  ) return ISSUE_CREATION_REQUIRES_PROPOSAL_CODE;
-  return token.taskId && store.isFeishuBotTaskIssueCreationRestricted(token.taskId)
-    ? FEISHU_SENDER_APPROVAL_REQUIRED_CODE
-    : null;
+  return store.getTaskIssueCreationRestrictionCode(token.taskId, token.agentId);
 }
 
 /** Trusted parent lineage for server-created descendants. Request bodies must

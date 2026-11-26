@@ -6032,6 +6032,18 @@ runMigrations(this.db);
     return this.tasks.listWorkspaceAgentTaskSnapshot(...args);
   }
 
+  getTaskIssueCreationRestrictionState(
+    ...args: Parameters<TasksRepo["getTaskIssueCreationRestrictionState"]>
+  ): ReturnType<TasksRepo["getTaskIssueCreationRestrictionState"]> {
+    return this.tasks.getTaskIssueCreationRestrictionState(...args);
+  }
+
+  getTaskIssueCreationRestrictionCode(
+    ...args: Parameters<TasksRepo["getTaskIssueCreationRestrictionCode"]>
+  ): ReturnType<TasksRepo["getTaskIssueCreationRestrictionCode"]> {
+    return this.tasks.getTaskIssueCreationRestrictionCode(...args);
+  }
+
   listWorkspaceAgentRunCounts(workspaceId = "local", days = 30): MultiremiAgentRunCount[] {
     return this.tasks.listWorkspaceAgentRunCounts(workspaceId, days);
   }

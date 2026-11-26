@@ -3265,7 +3265,6 @@ export class TasksRepo {
   }
 
   listWorkspaceAgentTaskSnapshot(workspaceId = "local", access?: TaskSnapshotAccess): MultiremiTask[] {
-    const activePlaceholders = ACTIVE_TASK_STATUSES.map(() => "?").join(", ");
     const identityParams: Array<string | null> = [];
     let chatAccess = "";
     if (access) {
@@ -3282,28 +3281,160 @@ export class TasksRepo {
       ))`;
     }
     const columns = access ? SNAPSHOT_PUBLIC_COLUMNS.map((column) => `task.${column}`).join(", ") : "task.*";
+    // Compute candidate attempt IDs directly on normalized base tables so the
+    // read-projection view is joined only once by primary key for matched rows.
+    // Attempt status mapping matches multiremi_turn_execution_records:
+    // - current attempt of an awaiting_human turn projects to 'awaiting_human'
+    //   (active, never ranked as a completed/failed outcome);
+    // - offered/accepted/running/waiting_local_directory project to active;
+    // - completed/failed/lost (without awaiting_human override) project to
+    //   completed/failed with COALESCE(completed_at, failed_at, updated_at,
+    //   created_at) == COALESCE(a.ended_at, a.updated_at, a.created_at).
     const rows = this.ctx.db.query(
       `WITH ranked_outcomes AS (
-         SELECT id,
+         SELECT a.id,
                 ROW_NUMBER() OVER (
-                  PARTITION BY agent_id
-                  ORDER BY COALESCE(completed_at, failed_at, updated_at, created_at) DESC
+                  PARTITION BY t.agent_id
+                  ORDER BY COALESCE(a.ended_at, a.updated_at, a.created_at) DESC
                 ) AS outcome_rank
-         FROM multiremi_turn_execution_records
-         WHERE workspace_id = ? AND status IN ('completed', 'failed')
-       ), candidates AS (
-         SELECT id FROM multiremi_turn_execution_records
-         WHERE workspace_id = ? AND status IN (${activePlaceholders})
-         UNION SELECT id FROM ranked_outcomes WHERE outcome_rank = 1
+         FROM multiremi_turns t
+         JOIN multiremi_turn_attempts a ON a.turn_id = t.id
+         WHERE t.workspace_id = ?
+           AND a.status IN ('completed', 'failed', 'lost')
+           AND (t.status <> 'awaiting_human' OR t.current_attempt_id IS NULL OR t.current_attempt_id <> a.id)
+       ), candidates AS MATERIALIZED (
+         SELECT a.id
+         FROM multiremi_turn_attempts a
+         WHERE a.status IN ('offered', 'accepted', 'running', 'waiting_local_directory')
+           AND EXISTS (
+             SELECT 1 FROM multiremi_turns t
+             WHERE t.id = a.turn_id AND t.workspace_id = ?
+           )
+         UNION
+         SELECT a.id
+         FROM multiremi_turns t
+         JOIN multiremi_turn_attempts a ON a.id = t.current_attempt_id AND a.turn_id = t.id
+         WHERE t.workspace_id = ?
+           AND t.status = 'awaiting_human'
+         UNION
+         SELECT id FROM ranked_outcomes WHERE outcome_rank = 1
        )
-       SELECT ${columns} FROM multiremi_turn_execution_records task
-       JOIN candidates ON candidates.id = task.id
+       SELECT ${columns}
+       FROM candidates
+       JOIN multiremi_turn_execution_records task ON task.id = candidates.id
        WHERE 1 = 1${chatAccess}
        ORDER BY task.updated_at DESC`,
-    ).all(workspaceId, workspaceId, ...ACTIVE_TASK_STATUSES, ...identityParams) as Row[];
+    ).all(workspaceId, workspaceId, workspaceId, ...identityParams) as Row[];
     // Visibility is applied after ranking: an invisible newest outcome must not
     // promote an older outcome that the old route would have filtered out.
     return this.withTaskAutopilotRuns(this.toTasks(rows));
+  }
+
+  /**
+   * Single lightweight query for task Issue-creation restriction semantics.
+   * Preserves exact precedence of `task.issue_creation_restricted` and
+   * `agent.issue_creation_requires_proposal` over Feishu sender allowlist
+   * restriction, while also reporting whether the token's `multiremi_agents`
+   * row exists so `/api/cli/capabilities` matches `Boolean(restrictedTaskIssueCreationAgent)`
+   * without an extra query or full task/agent/skills/autopilot hydration.
+   */
+  getTaskIssueCreationRestrictionState(
+    taskId: string | null | undefined,
+    agentId: string | null | undefined,
+  ): {
+    code: "issue_creation_requires_proposal" | "feishu_sender_approval_required" | null;
+    agentExists: boolean;
+  } {
+    const normalizedAgentId = agentId || null;
+    if (!normalizedAgentId) return { code: null, agentExists: false };
+    const normalizedTaskId = taskId || null;
+    if (!normalizedTaskId) {
+      const row = this.ctx.db.query(
+        `SELECT
+           1 AS agent_exists,
+           CASE WHEN issue_creation_requires_proposal <> 0 THEN 'issue_creation_requires_proposal' ELSE NULL END AS restriction_code
+         FROM multiremi_agents
+         WHERE id = ?
+         LIMIT 1`,
+      ).get(normalizedAgentId) as Row | null;
+      const code = nullableString(row?.restriction_code);
+      return {
+        code: code === "issue_creation_requires_proposal" ? code : null,
+        agentExists: Number(row?.agent_exists ?? 0) !== 0,
+      };
+    }
+    const deliveryTurnIdExpr = this.ctx.db.dialect === "postgres"
+      ? "request.metadata::jsonb->>'delivery_turn_id'"
+      : "json_extract(request.metadata,'$.delivery_turn_id')";
+    const row = this.ctx.db.query(
+      `SELECT
+         CASE WHEN ag.id IS NOT NULL THEN 1 ELSE 0 END AS agent_exists,
+         CASE
+           WHEN COALESCE(ag.issue_creation_requires_proposal, 0) <> 0
+             OR EXISTS (
+               SELECT 1
+               FROM multiremi_turn_attempts a
+               JOIN multiremi_turns t ON t.id = a.turn_id
+               WHERE a.id = ? AND t.issue_creation_restricted <> 0
+             ) THEN 'issue_creation_requires_proposal'
+           WHEN EXISTS (
+             SELECT 1
+             FROM multiremi_feishu_bot_deliveries d
+             JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
+             JOIN multiremi_feishu_bot_configs c
+               ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id
+             LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id
+             WHERE d.workspace_id = (
+                 SELECT t.workspace_id
+                 FROM multiremi_turn_attempts a
+                 JOIN multiremi_turns t ON t.id = a.turn_id
+                 WHERE a.id = ?
+               )
+               AND c.sender_access_policy = 'allowlist' AND d.sender_recorded = 1
+               AND (s.id IS NULL OR s.allowed = 0)
+           ) AND EXISTS (
+             WITH RECURSIVE lineage AS (
+               SELECT t.id, t.workspace_id, t.session_id AS chat_session_id
+               FROM multiremi_turns t
+               JOIN multiremi_turn_attempts a ON a.turn_id = t.id
+               WHERE a.id = ?
+               UNION
+               SELECT p.id, p.workspace_id, p.session_id AS chat_session_id
+               FROM multiremi_turns p
+               JOIN multiremi_conversation_log request ON request.task_id = p.id
+               JOIN lineage child ON child.workspace_id = p.workspace_id
+                 AND (${deliveryTurnIdExpr}) = child.id
+             )
+             SELECT 1
+             FROM multiremi_feishu_bot_deliveries d
+             JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
+             JOIN multiremi_feishu_bot_configs c
+               ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id
+             LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id
+             WHERE c.sender_access_policy = 'allowlist' AND d.sender_recorded = 1
+               AND (d.task_id IN (SELECT a.id FROM multiremi_turn_attempts a JOIN lineage l ON l.id = a.turn_id)
+                 OR b.chat_session_id IN (SELECT chat_session_id FROM lineage))
+               AND (s.id IS NULL OR s.allowed = 0)
+           ) THEN 'feishu_sender_approval_required'
+           ELSE NULL
+         END AS restriction_code
+       FROM (SELECT 1 AS anchor) _anchor
+       LEFT JOIN multiremi_agents ag ON ag.id = ?`,
+    ).get(normalizedTaskId, normalizedTaskId, normalizedTaskId, normalizedAgentId) as Row | null;
+    const code = nullableString(row?.restriction_code);
+    return {
+      code: code === "issue_creation_requires_proposal" || code === "feishu_sender_approval_required"
+        ? code
+        : null,
+      agentExists: Number(row?.agent_exists ?? 0) !== 0,
+    };
+  }
+
+  getTaskIssueCreationRestrictionCode(
+    taskId: string | null | undefined,
+    agentId: string | null | undefined,
+  ): "issue_creation_requires_proposal" | "feishu_sender_approval_required" | null {
+    return this.getTaskIssueCreationRestrictionState(taskId, agentId).code;
   }
 
   listWorkspaceAgentRunCounts(workspaceId = "local", days = 30): MultiremiAgentRunCount[] {

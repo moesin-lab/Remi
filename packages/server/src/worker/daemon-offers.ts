@@ -5,7 +5,7 @@ import type { DaemonTurnInput } from "@multiremi/contracts/daemon-protocol.js";
 import { samePolicyOffer, type PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
 import { hashSystemPromptContent, LEGACY_BASELINE_DEFAULT_REVISION } from '@shared/system-prompt-policy-hash.js';
 import type { MultiremiTaskReportOutbox } from './outbox.js';
-import { classifyDaemonTaskOfferPayload, classifyDaemonRestartResumeReply } from '@multiremi/contracts/root-delivery.js';
+import { classifyDaemonTaskOfferPayload, classifyDaemonRestartResumeReply, type RootDeliveryEnvelopePayload } from '@multiremi/contracts/root-delivery.js';
 
 export type DaemonTurnTask = NonNullable<ReturnType<typeof normalizeDaemonClaimTask>> & DaemonTurnInput;
 
@@ -43,6 +43,7 @@ export type OfferRejection = "disk_critical" | "capacity" | "claims_paused" | "d
 
 export function registerDaemonOfferHandler(client: DaemonProtocolClient, options: {
   runtimeId(): string | null;
+  receiveRoot?(delivery: RootDeliveryEnvelopePayload, preparing: number): Promise<void>;
   stopSignal?(): AbortSignal;
   adoption?: { workspace(): string; daemon(): string; lane(): string; outbox(): MultiremiTaskReportOutbox; held(attemptId:string): boolean };
   /** Why this offer is refused, or null; it sees the task (PR 6 §2.5: a parked lane's offer skips `capacity`). */
@@ -54,6 +55,20 @@ export function registerDaemonOfferHandler(client: DaemonProtocolClient, options
   client.onWelcome(() => { connection++; pending.clear(); });
   client.registerFrameHandler("task.offer", async (frame: DaemonParsedFrame) => {
     if (!frame.rt || frame.rt !== options.runtimeId() || frame.seq === null) return;
+    const delivery = classifyDaemonTaskOfferPayload(frame.payload);
+    if (delivery.kind === 'root' && options.receiveRoot) {
+      const owner = connection;
+      try {
+        if (options.stopSignal?.().aborted) return;
+        await options.receiveRoot(delivery.payload.root_delivery, pending.size);
+        if (connection === owner) client.send({ t: 'res', re: String(frame.seq), p: { ok: true } });
+      } catch (error) {
+        if (connection === owner) client.send({ t: 'res', re: String(frame.seq), p: { ok: false,
+          code: error instanceof DaemonProtocolRpcError ? error.code : 'stale_execution',
+          retryable: error instanceof DaemonProtocolRpcError && error.retryable } });
+      }
+      return;
+    }
     let task: DaemonTurnTask;
     try { task = normalizeDaemonTurnOffer(frame.payload); }
     catch (error) {

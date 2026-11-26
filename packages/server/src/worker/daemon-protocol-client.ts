@@ -291,8 +291,8 @@ export class DaemonProtocolClient {
   }
 
   /** Reliable uplink acknowledgements address the durable outbox id. */
-  event(frame: DaemonOutboundFrame & { seq: number }): Promise<Record<string, unknown>> {
-    return this.exchange(frame, String(frame.seq), DAEMON_ACK_TIMEOUT_MS);
+  event(frame: DaemonOutboundFrame & ({ seq: number } | { id: string })): Promise<Record<string, unknown>> {
+    return this.exchange(frame, frame.seq === undefined ? frame.id! : String(frame.seq), DAEMON_ACK_TIMEOUT_MS);
   }
 
   private exchange(frame: DaemonOutboundFrame, key: string, timeoutMs: number): Promise<Record<string, unknown>> {

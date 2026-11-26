@@ -1,4 +1,6 @@
 import { foldStoredTrace } from "./trace-pages.js";
+import { openRootRunConsumer } from './root-run-consumer.js';
+import { classifyDaemonRestartResumeReply, ROOT_DELIVERY_PROTOCOL_VERSION, type RootDeliveryEnvelopePayload } from '@multiremi/contracts/root-delivery.js';
 import type { FeishuBotCommandRequest, FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution, type RestartJournalEntry } from "./planned-restart-journal.js";
 import { samePolicyOffer } from '@multiremi/contracts/system-prompt-policy.js';
@@ -1297,6 +1299,7 @@ export class MultiremiDaemon {
   private readonly restartDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly resumedRestartIds = new Set<string>();
   private restartJournal: PlannedRestartJournal | null = null;
+  private rootReceiver: Awaited<ReturnType<typeof openRootRunConsumer>> = null;
   private restartTransfer: PlannedRestartTransfer | null = null;
   private claimsPaused = false;
   /**
@@ -1503,9 +1506,9 @@ export class MultiremiDaemon {
     this.onRestartRequested = options.onRestartRequested ?? null;
     this.cliUpdateCoordinator?.register({
       provider: this.options.provider,
-      activeTaskCount: () => this.activeTaskCount,
-      activeTaskIds: () => [...this.activeTaskIds],
-      pendingClaimCount: () => this.pendingClaimCount,
+      activeTaskCount: () => this.runningCount(),
+      activeTaskIds: () => this.runningIds(),
+      pendingClaimCount: () => this.pendingClaimCount + this.rootReservations(),
       claimsPaused: () => this.claimsPaused,
       pauseClaims: () => { this.claimsPaused = true; },
       releaseClaims: () => this.releaseLocalUpdateClaimPause(),
@@ -1677,12 +1680,13 @@ export class MultiremiDaemon {
     });
     this.drainRuntimeDownlinks = registerDaemonRuntimeDownlinks(this.protocolClient, () => this.options.runtimeId,
       (rt, input) => this.handleHeartbeatAck(rt, input), (rt, revision) => this.reconcileRuntimeAgentPlugins(rt, revision));
+    let deferredReadyGeneration: number | null = null;
     this.protocolLane = {
       runtime: () => this.options.runtimeId && !this.stopped ? {
         runtime_id: this.options.runtimeId,
         provider: this.options.provider,
         max_concurrency: this.options.maxConcurrency,
-        active_task_ids: [...new Set([...this.activeTaskIds, ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId).filter(id => !this.outbox?.isHeld(id)) ?? [])])],
+        active_task_ids: [...new Set([...this.runningIds(), ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId).filter(id => !this.outbox?.isHeld(id)) ?? [])])],
         held_restart_attempts: [...(this.outbox?.mappedHandoffs(this.restartJournalPath()) ?? []), ...(this.restartJournal?.entries().filter(entry => entry.execution.runtime_id === this.options.runtimeId &&
           this.restartRecoveryCandidates.has(entry.execution.handoff_id) && !this.resumedRestartIds.has(entry.execution.handoff_id))
           .map(({execution}) => ({attempt_id:execution.attempt_id,handoff_id:execution.handoff_id})) ?? [])],
@@ -1692,7 +1696,7 @@ export class MultiremiDaemon {
         ...(this.options.asyncTasks ? { parked_lanes: this.parkedLanes.helloLanes() } : {}),
       } : null,
       heartbeat: () => ({
-        active_task_count: this.activeTaskCount,
+        active_task_count: this.runningCount(),
         health: this.diskMonitor.health(),
         outbox: { pending: this.outboxStats()?.pending ?? 0, unacked: 0 },
         drain_ack_generation: this.appliedDrainGeneration,
@@ -1703,7 +1707,14 @@ export class MultiremiDaemon {
         if (this.stopped || ack.runtime_id !== this.options.runtimeId) return;
         // A v2 runtime ack is not a full HTTP configuration snapshot.
         if (ack.status === "runtime_gone" || ack.runtime_gone) await this.handleHeartbeatAck(ack.runtime_id, ack);
-        else this.tickFeishuConcierge();
+        else {
+          this.tickFeishuConcierge();
+          if (ack.status === 'ok' && this.rootReceiver && this.protocolClient.sharesCap('root.delivery')) {
+            await this.rootReceiver.consumer.recover(attempt => log.warn(`Root receiver retry deferred for ${attempt}`), true);
+            if (deferredReadyGeneration === this.protocolClient.connectionGeneration() && !this.rootReservations()) await sendRuntimeReady();
+            if (this.options.once && this.onceTaskAccepted && !this.runningCount() && !this.rootReservations() && !this.inflight.size) this.stop();
+          }
+        }
         this.wakeClaim();
       },
       probeUpgrade: async () => {
@@ -1712,7 +1723,7 @@ export class MultiremiDaemon {
           const capabilities = this.runtimeCapabilities();
           const ack = await this.client.heartbeatRuntime(
             this.options.runtimeId, this.sshMeshManager.getHeartbeatStatus(),
-            { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: [...this.activeTaskIds] },
+            { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: this.runningIds() },
             capabilities.supports_bot_menu === true,
             Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal, [], capabilities.planned_restart,
           );
@@ -1743,14 +1754,22 @@ export class MultiremiDaemon {
         }).finally(() => { this.updateConfirmation = null; });
         for (const reporter of this.activityReporters) reporter.resend();
         this.parkedLanes?.resendAll();
-        if (!this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
+        if (!this.rootReceiver && !this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
       },
       onRuntimeConfirmed: async () => {
-        if (this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
+        if (this.rootReceiver && this.rootReceiver.consumer.runtimeId === this.options.runtimeId && this.protocolClient.sharesCap('root.delivery')) {
+          await this.rootReceiver.consumer.recover(attempt => log.warn(`Root receiver recovery deferred for ${attempt}`));
+        }
+        if (this.rootReceiver || this.protocolClient.sharesCap('prompt.policy.adopt.v1')) await sendRuntimeReady();
       },
     };
     const sendRuntimeReady = async () => {
         const generation = this.protocolClient.connectionGeneration();
+        if (this.rootReservations()) {
+          deferredReadyGeneration = generation;
+          return;
+        }
+        deferredReadyGeneration = null;
         const runtime = this.protocolLane.runtime();
         if (runtime) {
           const outbox = this.ensureOutbox();
@@ -1784,7 +1803,7 @@ export class MultiremiDaemon {
         if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
           const stopWhenIdle = () => {
             this.onceOfferTimer = null;
-            if (hasPendingOffer()) this.onceOfferTimer = setTimeout(stopWhenIdle,this.options.onceOfferTimeoutMs);
+            if (hasPendingOffer() || this.rootReservations()) this.onceOfferTimer = setTimeout(stopWhenIdle,this.options.onceOfferTimeoutMs);
             else this.stop();
           };
           this.onceOfferTimer = setTimeout(stopWhenIdle,this.options.onceOfferTimeoutMs);
@@ -1822,20 +1841,16 @@ export class MultiremiDaemon {
     });
     this.protocolClient.addLane(this.protocolLane);
     const hasPendingOffer = registerDaemonOfferHandler(this.protocolClient, {
+      receiveRoot: (delivery, preparing) => this.receiveRootDelivery(delivery, preparing),
       stopSignal: () => this.pollAbort.signal,
       runtimeId: () => this.options.runtimeId,
       adoption: { workspace: () => this.options.workspaceId ?? 'local', daemon: () => this.options.daemonId ?? this.options.runtimeName,lane: () => this.restartJournalPath(),
         outbox: () => this.ensureOutbox(), held: id => this.ensureOutbox().isHeld(id) || Boolean(this.restartJournal?.entries().some(entry => entry.execution.attempt_id === id)) },
       rejection: (task, preparing) => {
-        if (this.diskMonitor.critical) return "disk_critical";
-        if (this.options.once && this.onceTaskAccepted) return "draining";
-        if (this.serverDrainActive) return "draining";
-        if (this.stopped || !this.ready || !this.supervisorReady() || this.claimsPaused || this.runtimeGoneInflight.size) return "claims_paused";
         // PR 6 D5: an offer for a parked lane takes no new slot's worth of work; its process already runs.
         const lane = this.backgroundLaneOf(task as MultiremiTaskWithAgent);
         const parked = lane !== null && this.parkedLanes.isParked(laneKeyOf(lane));
-        if ((!parked && this.activeTaskCount + preparing >= this.options.maxConcurrency) || (this.options.once && (this.onceTaskAccepted || preparing > 0))) return "capacity";
-        return null;
+        return this.offerRejection(preparing, parked);
       },
       run: task => {
         this.taskDownlinks.bindTurn(task);
@@ -1999,6 +2014,7 @@ export class MultiremiDaemon {
     const concierge = this.feishuConcierge !== null;
     return {
       planned_restart: 1,
+      ...(this.rootReceiver && { root_delivery_protocol: ROOT_DELIVERY_PROTOCOL_VERSION, root_carrier_modes: ['immutable_run_env'] as const }),
       supports_batch_import: true,
       supports_directory_scan: true,
       supports_skill_directory: true,
@@ -2085,6 +2101,7 @@ export class MultiremiDaemon {
     this.pollAbort = new AbortController();
     this.claimsPaused = false;
     this.serverDrainActive = false;
+    this.onceTaskAccepted = false;
     this.appliedDrainGeneration = 0;
     this.terminalAuthorityMode = false;
     this.terminalAuthorityCleanupAttempts = 0;
@@ -2142,7 +2159,6 @@ export class MultiremiDaemon {
       this.protocolClient?.startLane(this.protocolLane);
       await this.resumePlannedRestarts();
       this.nextPluginDesiredAt = Date.now() + PLUGIN_DESIRED_FORCED_REFRESH_MS;
-      this.onceTaskAccepted = false;
       while (!this.stopped) {
         try {
           this.assertWorkspaceRootOwner();
@@ -2226,6 +2242,8 @@ export class MultiremiDaemon {
         this.traceTransport = null;
         await releaseDaemonTrace(this.protocolClient);
       }
+      this.rootReceiver?.close();
+      this.rootReceiver = null;
       this.restartJournal?.close();
       this.restartJournal = null;
       this.restartTransfer = null;
@@ -2327,6 +2345,7 @@ export class MultiremiDaemon {
       this.runtimeRegistrationGeneration++;
       this.clearDesiredAgentPlugins();
       log.info(`Runtime registered: ${this.options.runtimeId} (${this.options.provider})`);
+      await this.configureRootReceiver();
       this.protocolClient.runtimesChanged();
       this.startReportReplay();
       return this.options.runtimeId;
@@ -2336,9 +2355,49 @@ export class MultiremiDaemon {
     this.runtimeRegistrationGeneration++;
     this.clearDesiredAgentPlugins();
     log.info(`Runtime registered: ${this.options.runtimeId} (${this.options.provider})`);
+    await this.configureRootReceiver();
     this.protocolClient.runtimesChanged();
     this.startReportReplay();
     return this.options.runtimeId;
+  }
+
+  private async configureRootReceiver() {
+    const runtime = this.options.runtimeId;
+    if (!runtime || this.rootReceiver?.consumer.runtimeId === runtime) return;
+    this.rootReceiver?.close();
+    this.rootReceiver = null;
+    this.rootReceiver = await openRootRunConsumer(runtime, this.options.daemonId ?? this.options.runtimeName,
+      () => this.restartJournal ??= new PlannedRestartJournal(this.restartJournalPath()), this.protocolClient);
+    if (this.rootReceiver) this.protocolClient.advertiseCaps(['root.delivery']);
+  }
+
+  private offerRejection(preparing: number, parked: boolean) {
+    if (this.diskMonitor.critical) return 'disk_critical';
+    if (this.serverDrainActive || (this.options.once && this.onceTaskAccepted)) return 'draining';
+    if (this.stopped || !this.ready || !this.supervisorReady() || this.claimsPaused || this.runtimeGoneInflight.size) return 'claims_paused';
+    const pending = preparing + this.rootReservations();
+    if ((!parked && this.runningCount() + pending >= this.options.maxConcurrency) || (this.options.once && pending > 0)) return 'capacity';
+    return null;
+  }
+
+  private async receiveRootDelivery(delivery: RootDeliveryEnvelopePayload, preparing?: number) {
+    if (this.stopped || !this.rootReceiver || !this.protocolClient.sharesCap('root.delivery')) {
+      throw new DaemonProtocolRpcError('root_delivery_unsupported', false);
+    }
+    if (delivery.tuple.runtime_id !== this.options.runtimeId || delivery.tuple.daemon_id !== (this.options.daemonId ?? this.options.runtimeName)) {
+      throw new DaemonProtocolRpcError('stale_execution', false);
+    }
+    const receiver = this.rootReceiver.consumer;
+    if (preparing !== undefined && !receiver.hasReceipt(delivery.tuple, delivery.envelope_digest)) {
+      const rejection = this.offerRejection(preparing, false);
+      if (rejection) throw new DaemonProtocolRpcError(rejection, true);
+    }
+    await receiver.receive(delivery.tuple, delivery.envelope_digest);
+    if (this.options.once) {
+      this.onceTaskAccepted = true;
+      if (this.onceOfferTimer !== null) clearTimeout(this.onceOfferTimer);
+      this.onceOfferTimer = null;
+    }
   }
 
   private startReportReplay(): void {
@@ -2348,7 +2407,23 @@ export class MultiremiDaemon {
     outbox.pumpAll();
   }
 
+  private runningIds() {
+    return [...this.activeTaskIds, ...(this.rootReceiver?.consumer.activeAttempts() ?? [])];
+  }
+
+  private runningCount() {
+    return this.activeTaskCount + (this.rootReceiver?.consumer.activeAttempts().length ?? 0);
+  }
+
+  private rootReservations() {
+    const receiver = this.rootReceiver?.consumer;
+    if (!receiver) return 0;
+    const active = new Set(receiver.activeAttempts());
+    return receiver.reservedAttempts().filter(attempt => !active.has(attempt)).length;
+  }
+
   private async canRecoverOrphans(outbox: MultiremiTaskReportOutbox): Promise<boolean> {
+    if (this.rootReceiver?.consumer.hasRecoveryCandidate()) return false;
     if (this.restartRecoveryCandidates.size || outbox.hasRestartIncident() || outbox.preparedOffers(this.options.runtimeId ?? '').length) return false;
     const pending = outbox.taskIdsWithPendingTerminal(this.options.runtimeId ?? undefined);
     if (!pending.length) return true;
@@ -4002,9 +4077,9 @@ export class MultiremiDaemon {
     const coordinator = this.cliUpdateCoordinator ?? new MultiremiCliUpdateCoordinator();
     if (!this.cliUpdateCoordinator) coordinator.register({
       provider: this.options.provider,
-      activeTaskCount: () => this.activeTaskCount,
-      activeTaskIds: () => [...this.activeTaskIds],
-      pendingClaimCount: () => this.pendingClaimCount,
+      activeTaskCount: () => this.runningCount(),
+      activeTaskIds: () => this.runningIds(),
+      pendingClaimCount: () => this.pendingClaimCount + this.rootReservations(),
       claimsPaused: () => this.claimsPaused,
       pauseClaims: () => { this.claimsPaused = true; },
       releaseClaims: () => this.releaseLocalUpdateClaimPause(),
@@ -4016,7 +4091,7 @@ export class MultiremiDaemon {
   }
 
   private tryPauseLocalClaimsForUpdate(): MultiremiCliUpdatePauseResult {
-    if (this.claimsPaused || this.activeTaskCount > 0) {
+    if (this.claimsPaused || this.runningCount() > 0 || this.rootReservations() > 0) {
       return { ok: false, error: "daemon is busy; retry update when idle" };
     }
     this.claimsPaused = true;
@@ -4547,7 +4622,7 @@ export class MultiremiDaemon {
     }
   }
 
-  private readonly pendingResumedTasks = new Map<string, () => ReturnType<typeof normalizeDaemonTurnOffer>>();
+  private readonly pendingResumedTasks = new Map<string, 'root' | (() => ReturnType<typeof normalizeDaemonTurnOffer>)>();
 
   private async preflightRestart(entry: RestartJournalEntry): Promise<boolean> {
     const scope = entry.execution;
@@ -4591,6 +4666,7 @@ export class MultiremiDaemon {
         this.resumedRestartIds.add(entry.execution.handoff_id);
         if (!activate || this.ensureOutbox().hasIndependentHold(entry.execution.attempt_id,entry.execution.handoff_id) || !this.restartJournal!.claimLaunch(resumed)) continue;
         this.ensureOutbox().releaseRestartGrant(entry.execution.attempt_id,entry.execution.handoff_id);
+        if (activate === 'root') continue;
         const task = activate();
         const run = this.handleTask(task).finally(() => this.inflight.delete(run));
         this.inflight.add(run);
@@ -4625,6 +4701,17 @@ export class MultiremiDaemon {
         const identities = this.restartJournal!.traceIdentities(entry, reason => log.warn(`Task ${entry.execution.attempt_id}: ${reason}; using trace fold only`));
         const proof = entry.checkpoint.policy_receipt!;
         const result = await this.taskDownlinks.rpc("turn.restart.resume_bound", { ...entry.execution, ...proof, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
+        const delivery = classifyDaemonRestartResumeReply(result);
+        if (delivery.kind === 'root') {
+          const reply = delivery.payload;
+          if (reply.generation !== entry.execution.generation + 1 || reply.attempt_id !== entry.execution.attempt_id ||
+              reply.turn_id !== entry.execution.turn_id || reply.handoff_id !== entry.execution.handoff_id ||
+              reply.root_delivery.tuple.consumer_id !== entry.consumer_id ||
+              this.ensureOutbox().hasIndependentHold(entry.execution.attempt_id,entry.execution.handoff_id)) throw new Error('stale_execution');
+          await this.receiveRootDelivery(reply.root_delivery);
+          this.pendingResumedTasks.set(entry.execution.handoff_id, 'root');
+          return { generation: reply.generation };
+        }
         const task = normalizeStandardResumeTask(result);
         const echoed = result.policy_receipt as typeof proof | undefined;
         if (!echoed || !samePolicyOffer(proof,echoed) || echoed.handoff_id !== proof.handoff_id || echoed.turn_id !== proof.turn_id
@@ -6556,7 +6643,7 @@ export class MultiremiDaemon {
       cli_version: multiremiVersion,
       ...(BUILD_COMMIT ? { cli_commit: BUILD_COMMIT } : {}),
       supervisor_ready: this.supervisorReady(),
-      active_task_count: this.activeTaskCount,
+      active_task_count: this.runningCount(),
       draining_task_count: this.drainingTaskCount,
       daemon_port: this.repoServerPort,
       workspace_cleanup_capability: cleanupSupport.capability,

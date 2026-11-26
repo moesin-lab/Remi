@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { DaemonProtocolClient, type DaemonProtocolSocketLike } from "@multiremi/worker/daemon-protocol-client.js";
 import { normalizeDaemonTurnOffer, normalizeStandardResumeTask, registerDaemonOfferHandler, type OfferRejection } from "@multiremi/worker/daemon-offers.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
+import { fixtureRootTaskOfferPayload } from '../../fixtures/root-authority.js';
+import type { RootDeliveryEnvelopePayload } from '@multiremi/contracts/root-delivery.js';
 
 class OfferSocket implements DaemonProtocolSocketLike {
   bufferedAmount = 0;
@@ -22,7 +24,7 @@ class OfferSocket implements DaemonProtocolSocketLike {
 const clients: DaemonProtocolClient[] = [];
 afterEach(async () => { for (const client of clients.splice(0)) { client.close(); await client.drain(); } });
 
-function fixture() {
+function fixture(receiveRoot?: (delivery: RootDeliveryEnvelopePayload) => Promise<void>) {
   const socket = new OfferSocket();
   const client = new DaemonProtocolClient({ serverUrl: "http://fixture", daemonId: "dmn_unit", cliVersion: DAEMON_MIN_CLI_VERSION,
     clock: new ManualDaemonProtocolClock(), connect: () => socket });
@@ -35,7 +37,7 @@ function fixture() {
   socket.frame({ t: "res", re: hb.id, p: { ok: true, runtime_acks: [] } });
   let rejection: OfferRejection | null = null;
   const handled: string[] = [];
-  registerDaemonOfferHandler(client, { runtimeId: () => "rt_unit", rejection: () => rejection, run: task => { handled.push(task.id); } });
+  registerDaemonOfferHandler(client, { receiveRoot, runtimeId: () => "rt_unit", rejection: () => rejection, run: task => { handled.push(task.id); } });
   let seq = 0;
   const offer = async (id: string, rt = "rt_unit") => {
     socket.frame({ t: "task.offer", seq: ++seq, rt, p: { attempt_id: id, turn_id: "turn_unit",
@@ -44,10 +46,22 @@ function fixture() {
     await client.drain();
     return socket.sent.findLast(frame => frame.t === "res" && frame.re === String(seq));
   };
-  return { handled, offer, reject: (code: OfferRejection | null) => { rejection = code; } };
+  return { client, socket, handled, offer, reject: (code: OfferRejection | null) => { rejection = code; } };
 }
 
 describe("daemon task offers", () => {
+  it('routes typed root offers to the receiver and rejects malformed root offers before ordinary execution', async () => {
+    const received: RootDeliveryEnvelopePayload[] = [];
+    const {client, socket, handled} = fixture(async delivery => { received.push(delivery); });
+    const payload = fixtureRootTaskOfferPayload;
+    socket.frame({t:'task.offer', seq:1, rt:'rt_unit', p:payload});
+    socket.frame({t:'task.offer', seq:2, rt:'rt_unit', p:{...payload, prompt:'legacy'}});
+    await client.drain();
+    expect(received).toEqual([payload.root_delivery]);
+    expect(handled).toEqual([]);
+    expect(socket.sent.find(frame => frame.re === '1')?.p).toEqual({ok:true});
+    expect(socket.sent.find(frame => frame.re === '2')?.p.code).toBe('root_delivery_invalid');
+  });
   it("constructs input only from the ordered message range and keeps attempts as local keys", () => {
     const payload = { turn_id: "turn_distinct", attempt_id: "tsk_attempt", input_from_seq: 2, input_to_seq: 5,
       input_messages: [{ id: "m3", kind: "message", seq: 3, body_md: "first" }, { id: "m5", kind: "message", seq: 5, body_md: "second" }] };

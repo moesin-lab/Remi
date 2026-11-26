@@ -98,6 +98,21 @@ export class PlannedRestartJournal {
       );`);
   }
 
+  rootExecutions(runtimeId: string) {
+    return this.db.query<{ binding: string; digest: string }, [string]>(`SELECT binding,envelope_digest AS digest
+      FROM root_execution_receivers current WHERE json_extract(binding,'$.runtime_id')=? AND NOT EXISTS
+      (SELECT 1 FROM root_execution_receivers newer WHERE newer.attempt_id=current.attempt_id AND newer.generation>current.generation)`)
+      .all(runtimeId).map(row => ({tuple: JSON.parse(row.binding) as RootDeliveryTuple, digest: row.digest}));
+  }
+
+  rootEnvelopeDigest(tuple: RootDeliveryTuple): string {
+    const row = this.db.query<{digest:string}, [string,string]>(`SELECT envelope_digest AS digest FROM root_execution_receivers current
+      WHERE receipt_id=? AND binding=? AND NOT EXISTS (SELECT 1 FROM root_execution_receivers newer
+      WHERE newer.attempt_id=current.attempt_id AND newer.generation>current.generation)`).get(tuple.receipt_id, serializeRootDeliveryTuple(tuple));
+    if (!row) throw new Error('stale_execution');
+    return row.digest;
+  }
+
   receiveRootExecution(tuple: RootDeliveryTuple, envelopeDigest: string): {
     launchIdentity: string; state: RootDeliveryReceiverState; locator: RootExecutionLocator | null;
   } {
@@ -129,18 +144,18 @@ export class PlannedRestartJournal {
     const binding = serializeRootDeliveryTuple(tuple);
     if (locator.runtime_id !== tuple.runtime_id || locator.daemon_id !== tuple.daemon_id || locator.incarnation !== tuple.incarnation ||
         locator.carrier_mode !== 'immutable_run_env' || !locator.execution_id || !locator.birth_token_id ||
-        [locator.execution_id, locator.birth_token_id, locator.launch_identity].some(value => typeof value !== 'string' || value.length > 512)) {
+        [locator.execution_id, locator.birth_token_id, locator.launch_identity].some(value => typeof value !== 'string' || !value || value.length > 512)) {
       throw new Error('stale_execution');
     }
     const identity = JSON.stringify([locator.execution_id, locator.birth_token_id, locator.launch_identity]);
     const previous = ROOT_DELIVERY_RECEIVER_STATES[ROOT_DELIVERY_RECEIVER_STATES.indexOf(next) - 1];
     if (!previous || (next === 'started' ? !Number.isFinite(Date.parse(locator.started_at ?? '')) : locator.started_at !== null)) throw new Error('Invalid receiver transition');
-    const result = this.db.run(`UPDATE root_execution_receivers SET locator=?,state=?,started_at=?
-      WHERE receipt_id=? AND binding=? AND envelope_digest=? AND launch_identity=? AND state IN (?,?)
+    const result = this.db.run(`UPDATE root_execution_receivers SET locator=?,state=?,started_at=?,launch_identity=?
+      WHERE receipt_id=? AND binding=? AND envelope_digest=? AND (launch_identity=? OR (state='received' AND locator IS NULL)) AND state IN (?,?)
         AND NOT EXISTS (SELECT 1 FROM root_execution_receivers newer WHERE newer.attempt_id=root_execution_receivers.attempt_id
           AND newer.generation>root_execution_receivers.generation)
         AND (locator IS NULL OR locator=?) AND (started_at IS NULL OR started_at=?)`,
-      [identity, next, locator.started_at, tuple.receipt_id, binding, envelopeDigest, locator.launch_identity, previous, next, identity, locator.started_at]);
+      [identity, next, locator.started_at, locator.launch_identity, tuple.receipt_id, binding, envelopeDigest, locator.launch_identity, previous, next, identity, locator.started_at]);
     if (result.changes !== 1) throw new Error('receipt_conflict');
   }
 

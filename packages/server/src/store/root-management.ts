@@ -37,6 +37,12 @@ export interface ApprovedExecutionInputs {
   readonly entries: readonly { readonly source:VersionedRef; readonly snapshot:string; readonly purpose:'instruction'|'business_data'|'tool_result'|'answer'|'checkpoint_context'; readonly author:GrantSubject }[];
   readonly providerState: { readonly sessionId:string|null; readonly securityDomainId:string; readonly checkpointDigest:string|null };
 }
+export interface AgentGrantRuntimeReview {
+  readonly agentId: string;
+  readonly workspaceId: string;
+  readonly checkedRevision: number;
+  readonly runtimeTrusts: readonly (VersionedRef & { runtimeId: string; daemonId: string; incarnation: string })[];
+}
 type Response = RevokeRootGrantResponse | RevokeCredentialFamilyResponse;
 interface PasswordEvidence { userId: string; verifier: string; version: number; node: string; deadline: number }
 
@@ -163,6 +169,47 @@ export class RootManagement {
     const source = this.versionRow(evidence.userId, evidence.verifier);
     if (!source || source.password_node_id !== evidence.node || Number(source.version) !== evidence.version) throw new SecurityAbort('credential_version_conflict');
     assertUnrevokedAncestry(this.db, tx, { nodeId: evidence.node, generation: evidence.version });
+  }
+
+  reviewAgentGrantRuntimeTrusts(proof: CredentialProof, agentId: string, runtimeTrustIds: readonly string[]): AgentGrantRuntimeReview {
+    const request = { action: 'root.grant.review-runtime-trusts', use: 'read', actualTarget: { type: 'agent', id: agentId } };
+    const ids = [...new Set(runtimeTrustIds)].sort();
+    if (!agentId || !ids.length || ids.length !== runtimeTrustIds.length || ids.some(id => typeof id !== 'string' || !id.trim())) {
+      throw new RootManagementRequestError(400, 'Expected distinct runtime trust IDs');
+    }
+    return onPrimary(() => {
+      const plan = this.plan(proof, request);
+      const agent = this.db.query('SELECT workspace_id FROM multiremi_agents WHERE id=? AND archived_at IS NULL').get(agentId);
+      const lookup = this.db.query('SELECT runtime_id FROM multiremi_runtime_trusts WHERE trust_id=?');
+      const runtimeIds: (string | undefined)[] = ids.map(id => lookup.get(id)?.runtime_id);
+      const targets = [...new Set([...plan.domainTargets, ...runtimeIds.filter(Boolean).map(id => `management:runtime:${id}`)])].sort();
+      return withSecurityWrite(this.db, plan.fenceTerm, { ...plan, workspaceIds: agent ? [agent.workspace_id] : [], domainTargets: targets }, tx => {
+        const actor = this.check(tx, proof, request);
+        if (!actor.effectiveRoot) throw new SecurityAbort('root_required');
+        if (!agent || !this.db.query('SELECT id FROM multiremi_agents WHERE id=? AND workspace_id=? AND archived_at IS NULL').get(agentId, agent.workspace_id)) {
+          throw new RootManagementRequestError(404, 'Agent not found');
+        }
+        const eligible = this.db.query(`SELECT t.trust_id,t.generation,t.runtime_id,t.incarnation,t.authority_node_id,t.challenge_id,r.daemon_id
+          FROM multiremi_agents a JOIN multiremi_runtimes r ON r.workspace_id=a.workspace_id
+          JOIN multiremi_runtime_trusts t ON t.runtime_id=r.id AND t.revoked_at_ms IS NULL
+          JOIN multiremi_machine_enrollments e ON e.runtime_id=r.id AND e.daemon_id=r.daemon_id AND e.incarnation=t.incarnation AND e.retired_at_ms IS NULL
+          WHERE a.id=? AND a.workspace_id=? AND a.archived_at IS NULL AND t.trust_id=? AND r.id=?
+            AND ((a.execution_group_id IS NULL AND a.runtime_id=r.id AND r.provider=a.provider) OR EXISTS (
+              SELECT 1 FROM multiremi_execution_group_members m WHERE m.workspace_id=a.workspace_id AND m.provider=a.provider
+                AND m.group_id=a.execution_group_id AND m.runtime_id=r.id))`);
+        const runtimeTrusts = ids.map((id, index) => {
+          const runtimeId = runtimeIds[index];
+          if (!runtimeId) throw new SecurityAbort('root_runtime_untrusted');
+          const row = eligible.get(agentId, agent.workspace_id, id, runtimeId);
+          if (!row || !recordedMachineBindingIsCurrent(this.db, tx, runtimeId, row.challenge_id)
+            || !grantAncestryIsCurrent(this.db, tx, runtimeId, {nodeId: row.authority_node_id, generation: Number(row.generation)}, 'runtime')) {
+            throw new SecurityAbort('root_runtime_untrusted');
+          }
+          return { id, version: Number(row.generation), runtimeId, daemonId: String(row.daemon_id), incarnation: String(row.incarnation) };
+        });
+        return {agentId, workspaceId: String(agent.workspace_id), checkedRevision: actor.checkedRevision, runtimeTrusts};
+      });
+    });
   }
 
   private check(tx: SecurityTx, proof: CredentialProof, request: AuthorityUse, directRetry = false): CurrentAuthority {

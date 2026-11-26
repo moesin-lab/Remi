@@ -127,10 +127,20 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>grant('wrong')).toThrow('root_authority_revoked');
     const result=grant('verified');
     expect(result.trust.issuer).toEqual({type:'user',id:'usr_auth'});
+    const candidate=store.createAgent({name:'grant review',provider:'codex',runtimeId:'rt_management'});
+    const review=()=>service.reviewAgentGrantRuntimeTrusts(proof,candidate.id,[result.trust.id]);
+    expect(review()).toMatchObject({agentId:candidate.id,workspaceId:'local',checkedRevision:result.security_revision,
+      runtimeTrusts:[{id:result.trust.id,version:result.trust.generation,runtimeId:'rt_management',daemonId:'daemon',incarnation:'inc'}]});
+    expect(()=>service.reviewAgentGrantRuntimeTrusts(proof,candidate.id,[])).toThrow('Expected distinct runtime trust IDs');
+    expect(()=>service.reviewAgentGrantRuntimeTrusts(proof,candidate.id,['unknown'])).toThrow('root_runtime_untrusted');
+    const unrelated=store.createAgent({name:'different provider',provider:'claude'});
+    expect(()=>service.reviewAgentGrantRuntimeTrusts(proof,unrelated.id,[result.trust.id])).toThrow('root_runtime_untrusted');
+    expect(()=>service.reviewAgentGrantRuntimeTrusts({kind:'invalid'},candidate.id,[result.trust.id])).toThrow();
     const revokeUse={action:'root.runtime-trust.revoke',use:'management',actualTarget:{type:'runtime_trust',id:result.trust.id}};
     const revoked=withSecurityWrite(db,undefined,service.plan(proof,revokeUse),tx=>service.revokeRuntimeTrust(tx,service.authorizeWrite(tx,proof,revokeUse),
       result.trust.id,{reason:'retire',expected_revision:result.security_revision,idempotency_key:'revoke',reason_code:'operator_security_revoke'}));
     expect(revoked.trust.status).toBe('revoked');
+    expect(review).toThrow('root_runtime_untrusted');
     const origin=service.resolveCurrent(proof,revokeUse).credentialOrigin!;
     expect(db.query('SELECT proof_node_id FROM multiremi_root_management_events WHERE action IN (?,?)').all(grantUse.action,revokeUse.action))
       .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);

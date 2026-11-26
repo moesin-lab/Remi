@@ -38,6 +38,7 @@ export type RootAttemptEligibility = (typeof ROOT_ATTEMPT_ELIGIBILITIES)[number]
 export const ROOT_TRANSPORT_IDENTITIES = [
   "human",
   "task",
+  "agent_pat",
   "daemon",
   "share",
   "master",

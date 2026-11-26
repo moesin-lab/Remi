@@ -13,7 +13,7 @@ export interface SecurityLockPlan {
 
 type Failure = 'security_lock_order' | 'security_tx_invalid' | 'security_target_unplanned'
   | 'security_state_unavailable' | 'authority_revision_conflict' | 'root_authority_revoked' | 'authority_depth_exceeded'
-  | 'root_required' | 'credential_version_conflict';
+  | 'root_required' | 'root_runtime_untrusted' | 'credential_version_conflict';
 
 export class SecurityAbort extends Error {
   constructor(readonly code: Failure) { super(code); }

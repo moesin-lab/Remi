@@ -21,6 +21,7 @@ export type DaemonProtocolWebSocketData = {
   accessToken: MultiremiAccessToken | null;
   /** True when the upgrade presented the deployment master daemon credential. */
   masterToken: boolean;
+  machineConnection?: import('../../store/machine-proof.js').MachineConnection;
   /** The session, once the socket is open. Assigned by the `open` handler. */
   session: DaemonProtocolSession | null;
 }

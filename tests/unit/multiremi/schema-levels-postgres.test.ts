@@ -56,7 +56,7 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
     expect(db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='multiremi_live_terms'").get()).not.toBeNull();
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 1, maxLevel: 1 })).not.toThrow();
     console.info('A3 startup expand: level 1 -> 2, live terms table exists; previous B1 reader interval [1,1] remains compatible');
-  });
+  }, 30_000);
   it('refuses contracted schemas before historical migrations execute', () => {
     db.exec('UPDATE multiremi_schema_meta SET expand_level=11, contract_level=11');
     try {

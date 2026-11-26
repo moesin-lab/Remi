@@ -15,11 +15,11 @@ interface Ancestor {
 const maxDepth = 32;
 const maxNodes = 1024;
 
-export function assertUnrevokedAncestry(db: SqlDatabase, tx: SecurityTx, ref: AuthorityNodeRef): void {
-  withSecurityTarget(db, tx, `authority:${ref.nodeId}`, () => checkAncestry(db, ref));
+export function assertUnrevokedAncestry(db: SqlDatabase, tx: SecurityTx, ref: AuthorityNodeRef): number {
+  return withSecurityTarget(db, tx, `authority:${ref.nodeId}`, () => checkAncestry(db, ref));
 }
 
-export function grantAncestryIsCurrent(db: SqlDatabase, tx: SecurityTx, targetId: string, ref: AuthorityNodeRef, type: 'user' | 'runtime' = 'user'): boolean {
+export function grantAncestryIsCurrent(db: SqlDatabase, tx: SecurityTx, targetId: string, ref: AuthorityNodeRef, type: 'user' | 'agent' | 'runtime' = 'user'): boolean {
   return withSecurityTarget(db, tx, `management:${type}:${targetId}`, () => {
     try { checkAncestry(db, ref); return true; } catch (error) {
       if (error instanceof SecurityAbort && error.code === 'root_authority_revoked') return false;
@@ -28,7 +28,7 @@ export function grantAncestryIsCurrent(db: SqlDatabase, tx: SecurityTx, targetId
   });
 }
 
-function checkAncestry(db: SqlDatabase, ref: AuthorityNodeRef): void {
+function checkAncestry(db: SqlDatabase, ref: AuthorityNodeRef): number {
     const completed = new Map<string, Ancestor>();
     let remaining = maxNodes;
     let earliestExpiry = Infinity;
@@ -75,4 +75,5 @@ function checkAncestry(db: SqlDatabase, ref: AuthorityNodeRef): void {
       throw new SecurityAbort('security_state_unavailable');
     }
     if (earliestExpiry <= Date.now()) throw new SecurityAbort('root_authority_revoked');
+    return earliestExpiry;
 }

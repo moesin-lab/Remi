@@ -12,13 +12,14 @@ export interface MaterialIdentity {
   subject: GrantSubject;
 }
 
+const tokenSubjectType = `CASE WHEN t.type='task' OR (t.type='pat' AND t.agent_id IS NOT NULL) THEN 'agent' WHEN t.type='pat' THEN 'user' END`;
+const tokenSubjectId = `CASE WHEN t.type='task' OR t.agent_id IS NOT NULL THEN t.agent_id ELSE t.user_id END`;
+
 export function persistIssuedMaterialBinding(db: SqlDatabase, tx: SecurityTx, issued: IssuedCredential, identity: MaterialIdentity): void {
   withSecurityTarget(db, tx, `credential:${identity.credentialId}`, () => {
     if (identity.credentialId !== issued.credential.id || identity.materialVersion !== issued.credential.version ||
         identity.subject.type !== issued.subject.type || identity.subject.id !== issued.subject.id || !/^[0-9a-f]{64}$/.test(identity.materialDigest) ||
         !Number.isSafeInteger(issued.expiresAtMs) || issued.expiresAtMs <= Date.now()) throw new Error('credential_version_conflict');
-    const actualSubject = identity.credentialType === 'task' ? 'agent' : 'user';
-    if (actualSubject !== identity.subject.type || !['task','pat'].includes(identity.credentialType)) throw new Error('credential_version_conflict');
     const result = db.query(`INSERT INTO multiremi_credential_version_bindings(credential_id,material_version,material_digest,credential_type,purpose,
       subject_type,subject_id,family_id,authority_node_id,authority_generation,authority_seq,expires_at_ms)
       SELECT t.id,?,t.token_hash,t.type,t.purpose,n.subject_type,n.subject_id,f.family_id,n.node_id,n.generation,n.issued_seq,?
@@ -27,7 +28,7 @@ export function persistIssuedMaterialBinding(db: SqlDatabase, tx: SecurityTx, is
       JOIN multiremi_authority_edges e ON e.child_id=n.node_id AND e.child_generation=n.generation AND e.child_seq=n.issued_seq
         AND e.parent_id=f.authority_node_id AND e.dependency='continuous'
       WHERE t.id=? AND t.token_hash=? AND t.type=? AND t.purpose=? AND t.revoked_at IS NULL AND t.expires_at=?
-        AND n.subject_type=? AND n.subject_id=? AND (CASE WHEN t.type='task' THEN t.agent_id ELSE t.user_id END)=n.subject_id
+        AND n.subject_type=? AND n.subject_id=? AND (${tokenSubjectType})=n.subject_type AND (${tokenSubjectId})=n.subject_id
         AND NOT EXISTS(SELECT 1 FROM multiremi_credential_version_bindings newer WHERE newer.credential_id=t.id AND newer.material_version>=?)
       RETURNING credential_id`).get(identity.materialVersion, issued.expiresAtMs, issued.familyId, issued.expiresAtMs, issued.node.nodeId,
       issued.node.generation, issued.expiresAtMs, identity.credentialId, identity.materialDigest, identity.credentialType, identity.purpose,
@@ -40,7 +41,7 @@ export function readCurrentMaterialBinding(db: SqlDatabase, tx: SecurityTx, iden
   return withSecurityTarget(db, tx, `credential:${identity.credentialId}`, () => {
     const row = db.query(`SELECT b.family_id,b.authority_node_id,b.authority_generation,b.expires_at_ms,t.expires_at FROM multiremi_credential_version_bindings b
       JOIN multiremi_access_tokens t ON t.id=b.credential_id AND t.token_hash=b.material_digest AND t.type=b.credential_type AND t.purpose=b.purpose
-        AND t.revoked_at IS NULL AND (CASE WHEN t.type='task' THEN t.agent_id ELSE t.user_id END)=b.subject_id
+        AND t.revoked_at IS NULL AND (${tokenSubjectType})=b.subject_type AND (${tokenSubjectId})=b.subject_id
       JOIN multiremi_credential_families f ON f.family_id=b.family_id AND f.revoked_at_ms IS NULL AND f.max_expires_at_ms>=b.expires_at_ms
       JOIN multiremi_authority_nodes n ON n.node_id=b.authority_node_id AND n.generation=b.authority_generation AND n.issued_seq=b.authority_seq
         AND n.subject_type=b.subject_type AND n.subject_id=b.subject_id AND n.expires_at_ms>=b.expires_at_ms AND n.revoked_at_ms IS NULL

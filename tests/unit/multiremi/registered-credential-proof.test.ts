@@ -47,6 +47,10 @@ test('registered PAT proves only its current material and true human origin', as
     expect(()=>service.resolveCurrent(new RegisteredCredentialProofs(db).verify(raw),request)).toThrow('root_authority_revoked');
     const check = () => withSecurityWrite(db,undefined,proofs.plan(proof),tx=>proofs.requireCurrent(tx,proof));
     expect(check()).toMatchObject({subject:{type:'user',id:'usr_fixture'},type:'pat',purpose:'personal',attemptId:null,credential:{id:'token',version:1},familyId:'family'});
+    db.run("UPDATE multiremi_access_tokens SET agent_id=user_id WHERE id='token'");
+    expect(proofs.verify(raw).kind).toBe('invalid');
+    expect(await tokens.verifyAccessToken(raw)).toBeNull();
+    db.run("UPDATE multiremi_access_tokens SET agent_id=NULL WHERE id='token'");
     db.run("UPDATE multiremi_access_tokens SET daemon_id='synthetic-daemon' WHERE id='token'");
     expect(check).toThrow('root_authority_revoked');
     db.run("UPDATE multiremi_access_tokens SET daemon_id=NULL,purpose='daemon' WHERE id='token'");
@@ -65,6 +69,20 @@ test('registered PAT proves only its current material and true human origin', as
 });
 
 pendingTurnBackendTests('registered supervisor task management',fixture=>{
+  test('Agent PAT without a registered origin cannot use human or legacy machine paths',async()=>{
+    const {db} = fixture();
+    const tokens = new AccessTokensRepo(db);
+    const raw = 'fixture-unregistered-agent-pat';
+    const hash = createHash('sha256').update(raw).digest('hex');
+    db.query(`INSERT INTO multiremi_access_tokens(id,name,agent_id,user_id,type,purpose,token_prefix,token_hash,created_at)
+      VALUES('unregistered','fixture','same-id','same-id','pat','personal','fixture',?,'now')`).run(hash);
+    expect(await tokens.verifyAccessToken(raw)).toBeNull();
+    expect(tokens.listPersonalAccessTokens('local','same-id')).toHaveLength(0);
+    expect(await tokens.renewAccessTokenExpiry('unregistered')).toBeNull();
+    db.run("UPDATE multiremi_access_tokens SET purpose='cli' WHERE id='unregistered'");
+    expect(tokens.promoteCliAccessTokenToDaemon('unregistered','local','fixture-machine')).toBeNull();
+    expect(tokens.getAccessToken('unregistered')?.type).toBe('pat');
+  });
   test('resolves the current agent and rejects self-assigned management authority and a replaced attempt',async()=>{
     const {db,store} = fixture();
     const agent = store.createAgent({name:'fixture supervisor',provider:'codex',role:'supervisor'});

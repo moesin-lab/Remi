@@ -1,5 +1,12 @@
 import type { SqlDatabase } from './db/postgres.js';
 
+export function expandMachineDeploymentRoots(db: SqlDatabase): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS multiremi_machine_deployment_roots (
+    deployment_id TEXT PRIMARY KEY NOT NULL, authority_node_id TEXT NOT NULL UNIQUE REFERENCES multiremi_authority_nodes(node_id),
+    deployment_spki TEXT NOT NULL, attestor_spki TEXT NOT NULL
+  )`);
+}
+
 export function expandRuntimeTrust(db: SqlDatabase): void {
   db.exec(`CREATE TABLE IF NOT EXISTS multiremi_machine_enrollments (
     incarnation TEXT PRIMARY KEY NOT NULL, deployment_id TEXT NOT NULL, consumer_id TEXT NOT NULL,

@@ -1,6 +1,7 @@
 import { claimWithCurrentRuntime } from "../../helpers/claim-with-current-runtime.js";
 import { CONVERSATION_LOG_BACKFILL_MIGRATION } from "@multiremi/store/conversation-log-backfill.js";
 import { expect } from "bun:test";
+import { createHash, randomBytes } from 'node:crypto';
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
@@ -362,17 +363,19 @@ export function assertLegacyChatWakeRollback(db: SqlDatabase, migrate = bootstra
 
 interface MigrationTokenFixture { token: string; taskId: string; id: string }
 
-export async function mintLegacyWakeTokens(db: SqlDatabase, verify = true): Promise<MigrationTokenFixture[]> {
-  const tokens = new AccessTokensRepo(db);
+export function mintLegacyWakeTokens(db: SqlDatabase): MigrationTokenFixture[] {
   const result: MigrationTokenFixture[] = [];
   const tasks = db.query(`SELECT id, agent_id, workspace_id FROM multiremi_tasks
     WHERE id LIKE 'wake_%' AND status IN ('queued', 'dispatched')`).all() as Array<{
       id: string; agent_id: string; workspace_id: string;
     }>;
   for (const task of tasks) {
-    const token = await tokens.createTaskAccessToken({ id: task.id, agentId: task.agent_id, workspaceId: task.workspace_id }, "local");
-    if(verify)expect(await tokens.verifyAccessToken(token.token)).not.toBeNull();
-    result.push({ token: token.token, taskId: task.id, id: token.id });
+    const token = `mat_${randomBytes(20).toString('hex')}`;
+    const id = `atk_${task.id}`;
+    db.query(`INSERT INTO multiremi_access_tokens(id,workspace_id,task_id,agent_id,user_id,name,type,purpose,token_hash,token_prefix,expires_at,created_at)
+      VALUES(?,?,?,?,'local',?,'task','task',?,?,?,?)`).run(id,task.workspace_id,task.id,task.agent_id,`Task ${task.id}`,
+      createHash('sha256').update(token).digest('hex'),token.slice(0,12),new Date(Date.now()+86_400_000).toISOString(),new Date().toISOString());
+    result.push({token,taskId:task.id,id});
   }
   return result;
 }
@@ -380,6 +383,8 @@ export async function mintLegacyWakeTokens(db: SqlDatabase, verify = true): Prom
 export async function assertLegacyWakeTokens(db: SqlDatabase, tokens: MigrationTokenFixture[], rolledBack = false, verify = true): Promise<void> {
   const repo = new AccessTokensRepo(db);
   for (const token of tokens) {
+    expect(db.query(`SELECT task_id FROM multiremi_access_tokens WHERE id=? AND token_hash=? AND type='task' AND purpose='task'`)
+      .get(token.id,createHash('sha256').update(token.token).digest('hex'))?.task_id).toBe(token.taskId);
     const cancelled = db.query("SELECT status FROM multiremi_tasks WHERE id = ?").get(token.taskId).status === "cancelled";
     if (cancelled && !rolledBack) {
       if(verify)expect(await repo.verifyAccessToken(token.token)).toBeNull();

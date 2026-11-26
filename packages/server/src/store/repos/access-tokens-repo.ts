@@ -2,7 +2,8 @@
 import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { JwtMaterialUnavailable } from "@multiremi/store/jwt-materials.js";
 import { markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
-import { RegisteredCredentialProofs } from "@multiremi/store/registered-credential-proof.js";
+import { RootManagement } from "@multiremi/store/root-management.js";
+import { SecurityAbort } from "@multiremi/store/security-write.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import type {
@@ -64,7 +65,7 @@ const LAST_USED_AT_WRITE_INTERVAL_MS = 60_000;
 const LAST_USED_AT_MAP_MAX_ENTRIES = 4_096;
 
 export class AccessTokensRepo {
-  constructor(private db: SqlDatabase) {}
+  constructor(private db: SqlDatabase, private readonly authority = new RootManagement(db)) {}
 
   async createAccessToken(
     input: CreateAccessTokenInput,
@@ -92,12 +93,14 @@ export class AccessTokensRepo {
     const insert = (): MultiremiCreatedAccessToken => {
       if (type !== "task") this.requireLegacyIssuer();
       beforeInsert?.();
-      this.db.run(
+      const inserted = this.db.run(
         `INSERT INTO multiremi_access_tokens (
           id, workspace_id, daemon_id, task_id, agent_id, user_id, name, type, purpose, scopes, token_hash, token_prefix, expires_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, workspaceId, daemonId, taskId, agentId, userId, name, type, purpose, toJson(scopes), hash, token.slice(0, 12), expiresAt, now],
+        ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (
+          SELECT 1 FROM multiremi_attempt_eligibility WHERE attempt_id=? AND eligibility='root')`,
+        [id, workspaceId, daemonId, taskId, agentId, userId, name, type, purpose, toJson(scopes), hash, token.slice(0, 12), expiresAt, now, taskId],
       );
+      if (inserted.changes!==1) throw new SecurityAbort('root_authority_revoked');
       return {
         ...this.getAccessToken(id)!,
         token,
@@ -149,6 +152,7 @@ export class AccessTokensRepo {
          AND user_id = ?
          AND type = 'pat'
          AND purpose = 'personal'
+         AND agent_id IS NULL
          AND revoked_at IS NULL
          AND (expires_at IS NULL OR expires_at > ?)
        ORDER BY created_at DESC`,
@@ -230,6 +234,8 @@ export class AccessTokensRepo {
          AND workspace_id = ?
          AND type = 'pat'
          AND purpose = 'cli'
+         AND agent_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM multiremi_credential_version_bindings WHERE credential_id=multiremi_access_tokens.id)
          AND daemon_id IS NULL
          AND expires_at IS NULL
          AND revoked_at IS NULL
@@ -272,7 +278,7 @@ export class AccessTokensRepo {
     const extensionDays = options.extensionDays ?? 90;
     const renewThresholdAt = new Date(nowMs + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
     const newExpiresAt = new Date(nowMs + extensionDays * 24 * 60 * 60 * 1000).toISOString();
-    const observed = this.db.query(`SELECT * FROM multiremi_access_tokens WHERE id=? AND NOT EXISTS (
+    const observed = this.db.query(`SELECT * FROM multiremi_access_tokens WHERE id=? AND (type<>'pat' OR agent_id IS NULL) AND NOT EXISTS (
       SELECT 1 FROM multiremi_credential_version_bindings WHERE credential_id=multiremi_access_tokens.id)`).get(id);
     if (!observed) return null;
     const current = toAccessToken(observed);
@@ -290,14 +296,14 @@ export class AccessTokensRepo {
         `UPDATE multiremi_access_tokens
          SET token_hash = ?, token_prefix = ?, expires_at = ?
          WHERE id = ?
-           AND token_hash = ? AND expires_at = ? AND type = ?
+           AND token_hash = ? AND expires_at = ? AND type = ? AND (type<>'pat' OR agent_id IS NULL)
            AND revoked_at IS NULL
            AND expires_at > ?
          RETURNING *`,
       ).get(hash, rawToken.slice(0, 12), newExpiresAt, id, observed.token_hash, current.expiresAt, current.type, nowIso());
       if (updated) return { token: toAccessToken(updated), renewed: true, rawToken };
       const token = this.getAccessToken(id);
-      return token && accessTokenIsValid(token, Date.now()) ? { token, renewed: false } : null;
+      return token && !(token.type === 'pat' && token.agentId !== null) && accessTokenIsValid(token, Date.now()) ? { token, renewed: false } : null;
     })();
   }
 
@@ -307,7 +313,8 @@ export class AccessTokensRepo {
     const hash = await hashAccessToken(token);
     const row = this.db.query(`SELECT token.*, EXISTS (
       SELECT 1 FROM multiremi_credential_version_bindings binding WHERE binding.credential_id=token.id
-    ) AS registered FROM multiremi_access_tokens token
+    ) AS registered, EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e WHERE e.attempt_id=token.task_id AND e.eligibility='root') AS root_attempt
+      FROM multiremi_access_tokens token
       WHERE token.token_hash = ? AND (token.type != 'daemon' OR EXISTS (
         SELECT 1 FROM multiremi_workspaces workspace WHERE workspace.id = token.workspace_id
       ))`).get(hash) as Row | null;
@@ -318,7 +325,19 @@ export class AccessTokensRepo {
     // must not disagree because the clock moved between them.
     const nowMs = Date.now();
     if (!accessTokenIsValid(accessToken, nowMs)) return null;
-    if (row.registered && new RegisteredCredentialProofs(this.db).verify(token).kind !== 'dependent') return null;
+    if (accessToken.type === 'pat' && row.agent_id != null || row.root_attempt && !row.registered) return null;
+    if (row.registered) {
+      const proof = this.authority.registeredCredentials.verify(token);
+      if (proof.kind!=='dependent') return null;
+      if (row.root_attempt) {
+        try {
+          if (!this.authority.resolveCurrent(proof,{action:'task.authenticate',use:'read',actualTarget:{type:'attempt',id:accessToken.taskId!}}).effectiveRoot) return null;
+        } catch (error) {
+          if (error instanceof SecurityAbort && error.code==='root_authority_revoked') return null;
+          throw error;
+        }
+      }
+    }
     if (accessToken.type === "task" && !this.db.query(`SELECT 1 FROM multiremi_turns t
       JOIN multiremi_turn_attempts a ON a.turn_id=t.id AND a.id=t.current_attempt_id
       WHERE a.id=? AND t.agent_id=? AND t.workspace_id=?`).get(

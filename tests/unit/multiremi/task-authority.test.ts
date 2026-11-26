@@ -317,7 +317,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>withSecurityWrite(db,'1',offerPlan,tx=>service.issue(tx,candidate))).toThrow('credential_version_conflict');
     const receipts=new RootReceiptStore(db,service);
     expect(()=>receipts.commitFirstOffer(candidate,offerLease)).toThrow('stale_execution');
-    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:'test-offer'})?.id).toBe(task.id);
+    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true})?.id).toBe(task.id);
     const initialIssue=fixture().createIssue({title:'direct creation',assigneeType:'agent',assigneeId:agent.id});
     const initialSession=store.getOrCreateDefaultIssueSession(initialIssue.id);
     const initialExecution={...execution,attemptId:'tsk_initial'};

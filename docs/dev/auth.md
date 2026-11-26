@@ -129,6 +129,14 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 配置与共享资源写入器使用 `guardProtectedMutation(tx, actor, request, expectedVersion)`，`request.actualTarget` 为真实资源的种类和 ID。写入与守卫共用事务。命中引用时必须使用已绑定该写动作的 root actor，版本不符回滚；核验成功同步推进 epoch 并撤销旧授权节点，需要重新批准才能使用新配置。
 
+### Agent 来源的持久委派
+
+`resolveDurableDelegation(tx, actor, use, beneficiary)` 只接受已准入、当前运行中的 task。`use` 绑定 `action`、`actualTarget`、`use`、`idempotencyKey`、`requestDigest` 与 `expiresAtMs`。内核存储真实 Agent、grant generation、attempt、run、lease/fence、credential version 和 family。原 task 材料是 evidence，持续来源包含当前 grant、trust 和输入批准的来源。正常 run 结束后子项仍可通过自身来源验证。
+
+签发 `personal` PAT 时先 `const candidate = PreparedAgentPat.prepare()`，将 `credential:<candidate.credentialId>` 加入真实操作的锁计划。事务内执行 `root.issue(tx, {kind:'delegated-pat', actor, use, beneficiary, candidate})`。最外层提交后 `candidate.takeCommittedToken()` 才能取出 raw，且只能取一次。读写管理入口用 `root.registeredCredentials.verify(raw)` 与 `resolveCurrent` / `authorizeWrite` 核验，返回 `transport='agent_pat'`、真实 Agent subject 和凭证来源。历史 `verifyAccessToken` 的 PAT 消费者会走 human/local 分支，因此这一入口拒绝 Agent PAT。接入方应将已验证的 Agent subject 传给相应的身份与路由守卫。
+
+子 grant 仍使用 `grant(tx,actor,input)`，Agent 来源必须指定有限 `expires_at`。`revokeDurableDelegation(tx,actor,nodeId,input)` 单独撤销一条来源；`revokeAttemptDelegations(tx,attemptId,reason)` 供执行安全终止事务调用，对应 attempt 的已签发后代随即失效。正常终态不调用安全撤销接口。
+
 ### 已准入 attempt 的首次 offer
 
 机器投递使用 `await PreparedRootDelivery.prepare(tuple, payload, publicKey)` 生成不可替换的候选。调用方先用 `rootManagement.planFirstOffer(candidate)` 合并自己的 run/Q 锁计划，再在带当前 fence 的 `withSecurityWrite` 中调用 `rootReceipts.activate(tx, candidate, lease, callback)`。`callback(activeTx, prepared)` 在同一事务完成 run/Q CAS 后返回 `rootManagement.issue(activeTx, prepared)`。只有实际 `activate` 回调中的原始对象能签发。发送方在最外层事务提交后才能交付 envelope。

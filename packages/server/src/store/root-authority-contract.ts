@@ -2,6 +2,7 @@ import type { AuthorityNodeRef } from './authority-provenance.js';
 import type { GrantSubject, RecordedGrant } from './root-grants.js';
 import type { SecurityTx } from './security-write.js';
 import type { PreparedRootDelivery } from './root-receipts.js';
+import type { DelegatedPatInput, PreparedAgentPat } from './durable-delegation.js';
 import type * as Public from '@multiremi/contracts/root-authority.js';
 import type * as Delivery from '@multiremi/contracts/root-delivery.js';
 
@@ -64,7 +65,7 @@ export interface AdmissionTicket extends Verified<'admission'> {
   readonly admissionRevision: number;
 }
 
-export type IssueCredentialInput = PreparedRootDelivery | RegisteredIssueCredentialInput;
+export type IssueCredentialInput = PreparedRootDelivery | RegisteredIssueCredentialInput | DelegatedPatInput;
 
 export interface RegisteredIssueCredentialInput {
   readonly actor: Verified<'actor'>;
@@ -82,7 +83,7 @@ export interface IssuedCredential extends CredentialOrigin {
   readonly continuousParents: readonly AuthorityNodeRef[];
   readonly evidenceParents: readonly AuthorityNodeRef[];
   readonly expiresAtMs: number;
-  readonly material: Verified<'issued-material'> | PreparedRootDelivery;
+  readonly material: Verified<'issued-material'> | PreparedRootDelivery | PreparedAgentPat;
 }
 
 export interface AuthorityKernel {

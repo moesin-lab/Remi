@@ -163,7 +163,7 @@ export class DaemonTaskOffers {
         this.hellos.set(session, hello);
         this.rootSent.set(session, new Set());
         for (const rt of session.runtimeIds) {
-          options.store.reconcileQuestionWaits(rt, hello.runtimes.find(r => r.runtimeId === rt)?.activeQuestionWaits ?? []);
+          options.store.reconcileQuestionWaits(rt, hello.runtimes.find(r => r.runtimeId === rt)?.activeQuestionWaits ?? [], this.rootCredential(session,rt));
           for (const retry of options.store.taskOfferRetryDeadlines(rt)) {
             if (Date.parse(retry.at) > this.clock.now()) this.scheduleRetry(retry.taskId, retry.runtimeId, Date.parse(retry.at));
           }
@@ -623,7 +623,7 @@ export class DaemonTaskOffers {
     }
     const waits = Array.isArray(frame.payload.active_question_waits) ? frame.payload.active_question_waits.filter((value): value is import('@multiremi/contracts/daemon-protocol.js').DaemonQuestionWait =>
       !!value && typeof value === 'object' && typeof value.message_id === 'string' && typeof value.attempt_id === 'string' && typeof value.wait_id === 'string' && value.wait_id.length >= 16) : [];
-    this.options.store.reconcileQuestionWaits(runtimeId, waits);
+    this.options.store.reconcileQuestionWaits(runtimeId, waits, this.rootCredential(session,runtimeId));
     if (this.options.onRuntimeReady) this.options.onRuntimeReady(runtimeId, ids as string[]);
     else {
       for (const id of ids as string[]) {

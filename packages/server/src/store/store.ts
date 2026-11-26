@@ -5920,7 +5920,35 @@ runMigrations(this.db);
   enqueueQuestionPresentationWithinTransaction(id: string) { return this.feishuBot.enqueueQuestionPresentationWithinTransaction(id); }
   continueQuestion(...args: Parameters<Questions['continue']>) { return new Questions(this.ctx).continue(...args); }
   closeQuestion(...args: Parameters<Questions['close']>) { return new Questions(this.ctx).close(...args); }
-  reconcileQuestionWaits(...args: Parameters<Questions['reconcileRuntimeWaits']>) { return new Questions(this.ctx).reconcileRuntimeWaits(...args); }
+  reconcileQuestionWaits(runtimeId: string, reported: Parameters<Questions['reconcileRuntimeWaits']>[1], machineCredentialId?: string | null) {
+    const questions = new Questions(this.ctx);
+    if (!machineCredentialId) return questions.reconcileRuntimeWaits(runtimeId, reported);
+    const waits = [...reported];
+    const receipts = this.db.query(`SELECT r.receipt_id,r.attempt_id FROM multiremi_delivery_receipts r
+      JOIN multiremi_attempt_eligibility e ON e.attempt_id=r.attempt_id AND e.eligibility='root'
+      JOIN multiremi_machine_enrollments m ON m.incarnation=e.incarnation AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id
+      JOIN multiremi_turn_attempts a ON a.id=r.attempt_id AND a.status='running'
+      WHERE e.runtime_id=? AND m.credential_id=? AND m.retired_at_ms IS NULL AND r.run_state='running' AND r.ack_state='confirmed'
+        AND r.execution_locator_json IS NOT NULL AND EXISTS(SELECT 1 FROM multiremi_conversation_log q
+          WHERE q.task_id=a.turn_id AND q.message_kind='decision' AND q.deleted_at IS NULL)`).all(runtimeId,machineCredentialId);
+    for (const receipt of receipts) {
+      try {
+        const plan = this.rootReceipts.planRecovery(receipt.receipt_id);
+        const live = this.withSecurityWrite(plan.fenceTerm,plan,tx => {
+          this.rootManagement.requireReceiptAuthority(tx,receipt.receipt_id);
+          return questions.plannedRestartWaits(receipt.attempt_id).flatMap(message => {
+            const record = message.metadata.question as {wait?: {wait_id?: string; runtime_id?: string}} | undefined;
+            const wait = record?.wait;
+            return wait?.runtime_id === runtimeId && wait.wait_id ? [{message_id:message.id,attempt_id:String(receipt.attempt_id),wait_id:wait.wait_id}] : [];
+          });
+        });
+        waits.push(...live);
+      } catch (error) {
+        if (!(error instanceof SecurityAbort && ['root_authority_revoked','root_runtime_untrusted','credential_version_conflict'].includes(error.code))) throw error;
+      }
+    }
+    return questions.reconcileRuntimeWaits(runtimeId, waits);
+  }
   getMessage(...args: Parameters<InboxRepo["getMessage"]>) { return this.inbox.getMessage(...args); }
   /** `getMessage` for many ids in bounded batches; ids without a message are absent. */
   getMessages(...args: Parameters<InboxRepo["getMessages"]>) { return this.inbox.getMessages(...args); }

@@ -5,6 +5,11 @@ import { authenticateBrowserWebSocket, nextWebSocketMessage } from './helpers.js
 import { deltaTraceEvent } from '../../helpers/turn-trace.js';
 import type { MultiremiStore } from '@multiremi/store/store.js';
 import { expect, it } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
+import type { RaceInput } from './fixtures/root-issuer-race.js';
 import { createHash, createPublicKey, generateKeyPairSync, privateDecrypt, sign } from 'node:crypto';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { beginMachineChallenge, machineSignaturePayload } from '@multiremi/store/machine-proof.js';
@@ -25,6 +30,25 @@ import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease } f
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 const hash = (input:string) => createHash('sha256').update(input).digest('hex');
+
+async function raceIssuers(db:SqlDatabase,databaseUrl:string|undefined,inputs:[RaceInput,RaceInput],verify:(result:string[],database:SqlDatabase)=>void) {
+  const directory=mkdtempSync(join(tmpdir(),'root-issuer-race-'));
+  const database=databaseUrl??join(directory,'fixture.sqlite');
+  const workers:Worker[]=[];
+  try {
+    if (!databaseUrl) db.query('VACUUM INTO ?').run(database);
+    const barrier=new SharedArrayBuffer(4);
+    const results=await Promise.all(inputs.map(input=>new Promise<string>((resolve,reject)=>{
+      const worker=new Worker(new URL('./fixtures/root-issuer-race.ts',import.meta.url).href);
+      workers.push(worker);
+      worker.onmessage=event=>resolve(event.data);
+      worker.onerror=event=>reject(new Error(event.message));
+      worker.postMessage({database,backend:db.dialect,barrier,input});
+    })));
+    const copy=databaseUrl?null:openSqliteDatabase(database);
+    try { verify(results,copy ? copy as unknown as SqlDatabase : db); } finally { copy?.close(); }
+  } finally { await Promise.all(workers.map(worker=>worker.terminate())); rmSync(directory,{recursive:true,force:true}); }
+}
 
 function rootClient(store: MultiremiStore, signing: { domainId: string; keyEpoch: string; secret: string }) {
   const master = 'isolated-master-token';
@@ -247,7 +271,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);
   });
 
-  it.each(['expired lease','preempted fence','revoked source','durable delegation'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
+  it.each(['expired lease','preempted fence','revoked source','durable delegation','concurrent first offer','concurrent security termination'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
     const {db,store}=fixture();
     const dependency=hash('protected instructions');
     const trustVersions=[{id:'trust',version:1}];
@@ -324,6 +348,18 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const lease={...execution,leaseId:'one',fenceTerm:'1',consumerId:'consumer',runGeneration:1,expiresAtMs:Date.now()+60000,state:'dispatched' as const};
     const offerLease={lease_id:'one',fence_term:'1',start_deadline:new Date(lease.expiresAtMs).toISOString()};
     const offerPlan=service.planFirstOffer(candidate);
+    if (failure==='concurrent first offer') {
+      const offer={action:'offer' as const,tuple,business,publicKey:recipientKeys.publicKey.export({format:'jwk'})};
+      await raceIssuers(db,fixture().databaseUrl,[offer,offer],(results,database)=>{
+        expect(results.sort()).toEqual(['committed','receipt_conflict']);
+        for (const table of ['multiremi_current_task_leases','multiremi_delivery_receipts','multiremi_credential_materials','multiremi_credential_version_bindings']) {
+          expect(Number(database.query(`SELECT COUNT(*) AS total FROM ${table}`).get().total)).toBe(1);
+        }
+        expect(Number(database.query('SELECT COUNT(*) AS total FROM multiremi_access_tokens WHERE task_id=?').get(task.id).total)).toBe(1);
+        expect(Number(database.query('SELECT COUNT(*) AS total FROM multiremi_usage_runs WHERE task_id=?').get(task.id).total)).toBe(1);
+      });
+      return;
+    }
     expect(()=>withSecurityWrite(db,'1',offerPlan,tx=>service.issue(tx,candidate))).toThrow('credential_version_conflict');
     const receipts=new RootReceiptStore(db,service);
     const activate=(expectedLeaseVersion:number)=>withSecurityWrite(db,'1',offerPlan,tx=>receipts.activate(tx,candidate,offerLease,(activeTx,prepared)=>{
@@ -433,6 +469,24 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>start('different')).toThrow('stale_execution');
     expect(start('birth')).toBe('started');
     expect(start('birth')).toBe('replayed');
+    if (failure==='concurrent security termination') {
+      const use={action:'credential.pat.create' as const,actualTarget:{type:'agent',id:agent.id},use:'write',requestDigest:hash('race'),expiresAtMs:Date.now()+120000,idempotencyKey:'race'};
+      const input={agentId:agent.id,attemptId:task.id,raw:token.token,use};
+      await raceIssuers(db,fixture().databaseUrl,[{...input,action:'pat'},{...input,action:'revoke'}],(results,database)=>{
+        expect([...results].sort()).toEqual(['authority_revision_conflict','committed']);
+        const committedPat=results[0]==='committed';
+        expect(Number(database.query('SELECT COUNT(*) AS total FROM multiremi_delegated_pats').get().total)).toBe(Number(committedPat));
+        if (committedPat) {
+          const root=new RootManagement(database);
+          const revision=Number(database.query('SELECT security_revision FROM multiremi_security_state').get().security_revision);
+          withSecurityWrite(database,undefined,{expectedRevision:revision,workspaceIds:['local'],numberKeys:[],domainTargets:[`attempt:${task.id}`]},
+            tx=>root.revokeAttemptDelegations(tx,task.id,'security_compromised'));
+        }
+        expect(database.query('SELECT attempt_id FROM multiremi_attempt_security_revocations').all()).toEqual([{attempt_id:task.id}]);
+        expect(database.query(`SELECT d.node_id FROM multiremi_durable_delegations d JOIN multiremi_authority_nodes n ON n.node_id=d.node_id WHERE n.revoked_at_ms IS NULL`).all()).toEqual([]);
+      });
+      return;
+    }
     if (failure==='durable delegation') {
       const beneficiary={type:'agent' as const,id:agent.id};
       const use={action:'credential.pat.create' as const,use:'write',actualTarget:beneficiary,idempotencyKey:'issue-pat',requestDigest:hash('personal'),expiresAtMs:Date.now()+60000};

@@ -3,7 +3,8 @@ import { open } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { type MachineChallenge, type MachinePublicBinding } from '@shared/machine-challenge.js';
-import type { RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
+import type { RootDeliveryMachineProof, RootDeliveryStatusResponse, RootDeliveryEnvelopePayload } from '@multiremi/contracts/root-delivery.js';
+import type { RootRunTarget } from './root-run-supervisor.mjs';
 
 export class RootMachineClient {
   constructor(private readonly directory: string, private readonly serviceUid: number) {
@@ -17,6 +18,10 @@ export class RootMachineClient {
     return this.request({method:'answerChallenge', challenge});
   }
 
+  installEnvelope(delivery: RootDeliveryEnvelopePayload, status: RootDeliveryStatusResponse, target: RootRunTarget): Promise<{envelope:string; verificationId:string}> {
+    return this.request({method:'installEnvelope',delivery,status,target});
+  }
+
   private async request<Result>(operation: object): Promise<Result> {
     const directory = await open(this.directory, constants.O_DIRECTORY | constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
@@ -27,7 +32,7 @@ export class RootMachineClient {
         const timer = setTimeout(() => socket.destroy(new Error('Machine request timed out')), 5500);
         const chunks: Buffer[] = [];
         let size = 0;
-        socket.once('connect', () => socket.end(JSON.stringify(operation)));
+        socket.once('connect', () => socket.write(`${JSON.stringify(operation)}\n`));
         socket.on('data', (chunk: Buffer) => {
           size += chunk.length;
           if (size > 16384) socket.destroy(new Error('Oversized machine reply'));
@@ -35,6 +40,7 @@ export class RootMachineClient {
         });
         socket.once('error', reject);
         socket.once('end', () => {
+          socket.end();
           try {
             const reply = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             if (reply?.ok !== true || !reply.result) throw new Error('Machine operation denied');

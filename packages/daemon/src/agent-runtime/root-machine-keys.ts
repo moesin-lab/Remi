@@ -1,6 +1,12 @@
 import { constants, createHash, createPublicKey, privateDecrypt, sign, type KeyObject } from 'node:crypto';
 import { ROOT_DELIVERY_MIN_RSA_BITS, type RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
 import { challengeEncryptionLabel, machineSignaturePayload, type MachineChallenge, type MachinePublicBinding } from '@shared/machine-challenge.js';
+import { isDeepStrictEqual } from 'node:util';
+import { CompactEncrypt } from 'jose';
+import type { RootDeliveryEnvelopePayload, RootDeliveryStatusResponse } from '@multiremi/contracts/root-delivery.js';
+import { acknowledgeRunEnvironment, prepareRunInstallation } from '@multiremi/worker/root-run-installation.js';
+import type { RootRunTarget } from './root-run-supervisor.mjs';
+import { verifyRootRunTarget, type RootRunEndpoint } from './root-run-endpoint.mjs';
 
 type MachineIdentity = Omit<MachinePublicBinding, 'signingSpki' | 'recipientSpki'>;
 
@@ -28,6 +34,30 @@ export class RootMachineKeys {
   }
 
   publicBinding() { return this.#binding; }
+
+  async installEnvelope(delivery: RootDeliveryEnvelopePayload, status: RootDeliveryStatusResponse, target: RootRunTarget,
+    endpoint: RootRunEndpoint, executionUid: number) {
+    const { locator, publicKey } = target;
+    if (this.#binding.keyExpiresAtMs <= Date.now() || target.uid !== executionUid || !isDeepStrictEqual(target.tuple,delivery.tuple) ||
+        locator.carrier_mode !== 'immutable_run_env' || locator.started_at !== null || !locator.birth_token_id ||
+        locator.incarnation !== this.#target.incarnation || locator.runtime_id !== this.#target.runtime_id ||
+        locator.daemon_id !== this.#target.daemon_id || publicKey.kty !== 'RSA' || 'd' in publicKey) throw new Error('Invalid run target');
+    await verifyRootRunTarget(endpoint,target,status);
+    const algorithm = {name:'RSA-OAEP',hash:'SHA-256'};
+    const receiver = await crypto.subtle.importKey('jwk',publicKey,algorithm,false,['encrypt']);
+    if ((receiver.algorithm as RsaHashedKeyAlgorithm).modulusLength < ROOT_DELIVERY_MIN_RSA_BITS) throw new Error('Invalid receiver key');
+    const pkcs8 = this.#recipient.export({type:'pkcs8',format:'der'});
+    let recipient: CryptoKey;
+    try { recipient = await crypto.subtle.importKey('pkcs8',pkcs8,algorithm,false,['decrypt']); }
+    finally { pkcs8.fill(0); }
+    const { env, challenge } = await prepareRunInstallation(delivery,status,this.#target,recipient,locator.launch_identity,{});
+    const verificationId = createHash('sha256').update(acknowledgeRunEnvironment(challenge,env)).digest('hex');
+    const bytes = Buffer.from(JSON.stringify({target,raw:env.MULTIREMI_TOKEN,turnId:env.MULTIREMI_TURN_ID,nonce:challenge.nonce}));
+    try {
+      const envelope = await new CompactEncrypt(bytes).setProtectedHeader({alg:'RSA-OAEP-256',enc:'A256GCM',kid:locator.birth_token_id}).encrypt(receiver);
+      return {envelope,verificationId};
+    } finally { bytes.fill(0); }
+  }
 
   answerChallenge(challenge: MachineChallenge): RootDeliveryMachineProof {
     const now = Date.now();

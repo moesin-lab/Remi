@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { assertFrozenBusinessPayloadHasNoTransportSecrets } from '@multiremi/contracts/root-delivery.js';
+import { frozenPayload, rootBusinessPayloadDigest } from '@shared/root-business-payload.js';
+export { rootBusinessPayloadDigest } from '@shared/root-business-payload.js';
 import type { RootDeliveryEnvelopePayload, RootDeliveryTuple, RootDeliveryExecutionKey, RootDeliveryStatusResponse, RootDeliveryInstallAckResponse,
   RootDeliveryReplayRequest, RootDeliveryInstallAckRequest, RootExecutionLocator } from '@multiremi/contracts/root-delivery.js';
 import { sealRootDelivery, serializeRootDeliveryTuple } from '../worker/root-delivery-envelope.js';
@@ -21,45 +22,6 @@ function receiptPurpose(action: Parameters<CheckReceipt>[3]): string {
 }
 type StoredReceipt = Lease & { binding_json: string; envelope_digest: string; run_state: 'pending_start' | 'running';
   ack_state: 'pending' | 'confirmed'; execution_locator_json: string | null };
-
-function frozenPayload(value: Readonly<Record<string, unknown>>): string {
-  assertFrozenBusinessPayloadHasNoTransportSecrets(value);
-  const projected: Record<string, unknown> = {};
-  for (const [field, member] of Object.entries(value)) {
-    switch (field) {
-      case 'turn_id': case 'attempt_id': case 'task': case 'prompt':
-        if (typeof member !== 'string') throw new Error(`Invalid receipt payload field ${field}`);
-        break;
-      case 'input_revision': case 'input_from_seq': case 'input_to_seq':
-        if (!Number.isSafeInteger(member)) throw new Error(`Invalid receipt payload field ${field}`);
-        break;
-      case 'input_messages': case 'recovered_questions':
-        if (!Array.isArray(member)) throw new Error(`Invalid receipt payload field ${field}`);
-        break;
-      case 'input':
-        if (!member || typeof member !== 'object' || Array.isArray(member)) throw new Error(`Invalid receipt payload field ${field}`);
-        break;
-      default: throw new Error(`Unknown receipt payload field ${field}`);
-    }
-    projected[field] = member;
-  }
-  function sorted(input: unknown): unknown {
-    if (Array.isArray(input)) return input.map(sorted);
-    if (input !== null && typeof input === 'object') {
-      return Object.fromEntries(Object.entries(input).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-        .map(([field, member]) => [field, sorted(member)]));
-    }
-    if (input !== null && typeof input !== 'string' && typeof input !== 'boolean' && !Number.isFinite(input)) throw new Error('Invalid receipt payload');
-    return input;
-  }
-  const snapshot = sorted(projected);
-  assertFrozenBusinessPayloadHasNoTransportSecrets(snapshot);
-  return JSON.stringify(snapshot);
-}
-
-export function rootBusinessPayloadDigest(payload: Readonly<Record<string, unknown>>): string {
-  return `sha256:${createHash('sha256').update(frozenPayload(payload)).digest('hex')}`;
-}
 
 const preparedDeliveries = new WeakSet<PreparedRootDelivery>();
 const activatingDeliveries = new WeakMap<SecurityTx, { db: SqlDatabase; candidate: PreparedRootDelivery }>();

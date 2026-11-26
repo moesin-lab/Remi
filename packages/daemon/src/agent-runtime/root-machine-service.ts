@@ -3,7 +3,7 @@ import { createPrivateKey } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, writeSync } from 'node:fs';
 import { RootMachineKeys } from './root-machine-keys.js';
 
-const maxRequestSize = 8192;
+const maxRequestSize = 256 * 1024;
 
 export function unixPeerUid(fd: number): number {
   if (process.platform !== 'linux') throw new Error('Linux peer credentials required');
@@ -24,7 +24,7 @@ export function unixPeerUid(fd: number): number {
   } finally { libc.close(); }
 }
 
-function servePeer(directory: string, owner: number, peer: number, request: Buffer) {
+async function servePeer(directory: string, owner: number, peer: number, request: Buffer) {
   const dir = openSync(directory, constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_RDONLY);
   try {
     const stat = fstatSync(dir);
@@ -44,17 +44,22 @@ function servePeer(directory: string, owner: number, peer: number, request: Buff
     if (new Set(uids).size !== 3 || uids.some(uid => !Number.isSafeInteger(uid) || uid < 1 || uid >= 0xffffffff || uid === 65534) ||
         config.daemonUid !== peer) throw new Error('Unauthorized machine peer');
     const operation = JSON.parse(request.toString('utf8'));
-    if (operation.method !== 'publicBinding' && operation.method !== 'answerChallenge') throw new Error('Unknown machine operation');
+    if (!['publicBinding','answerChallenge','installEnvelope'].includes(operation.method)) throw new Error('Unknown machine operation');
     const readKey = (file: string) => {
       const bytes = read(file);
       try { return createPrivateKey(bytes); } finally { bytes.fill(0); }
     };
     const keys = new RootMachineKeys(config.identity, readKey('recipient.pem'), readKey('signing.pem'));
+    if (operation.method === 'installEnvelope') {
+      if (!config.supervisorTargetSocket?.startsWith('/')) throw new Error('Missing supervisor endpoint');
+      return keys.installEnvelope(operation.delivery,operation.status,operation.target,
+        {endpoint:config.supervisorTargetSocket,supervisorUid:0},config.executionUid);
+    }
     return operation.method === 'publicBinding' ? keys.publicBinding() : keys.answerChallenge(operation.challenge);
   } finally { closeSync(dir); }
 }
 
-export function serveMachineConnection(fd: number, directory: string): void {
+export async function serveMachineConnection(fd: number, directory: string): Promise<void> {
   const peer = unixPeerUid(fd);
   const libc = dlopen('libc.so.6', {poll:{args:['ptr','usize','int'],returns:'int'}});
   const pollfd = new Int32Array(2);
@@ -73,8 +78,9 @@ export function serveMachineConnection(fd: number, directory: string): void {
       if (count === 0) break;
       length += count;
       if (length > maxRequestSize) throw new Error('Machine request too large');
+      if (buffer.subarray(length - count,length).includes(10)) break;
     }
-    const result = servePeer(directory, process.geteuid!(), peer, buffer.subarray(0, length));
+    const result = await servePeer(directory, process.geteuid!(), peer, buffer.subarray(0, length));
     reply = JSON.stringify({ok:true,result});
   } catch { reply = JSON.stringify({ok:false}); }
   finally { libc.close(); }
@@ -89,5 +95,5 @@ export function serveMachineConnection(fd: number, directory: string): void {
 if (import.meta.main) {
   const directory = process.argv[2];
   if (!directory?.startsWith('/')) throw new Error('Expected private machine key directory');
-  serveMachineConnection(0, directory);
+  await serveMachineConnection(0, directory);
 }

@@ -1,3 +1,4 @@
+import type { AgentTask } from "../../types/agent";
 import type { QueryClient } from "@tanstack/react-query";
 import { createLogger } from "../../logger";
 import { getCurrentWsId } from "../../platform/workspace-storage";
@@ -103,11 +104,15 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
     void qc.invalidateQueries({ queryKey: ["question", wsId] });
   };
   // Helpers reused by chat lifecycle handlers.
+  let unifiedTimer: ReturnType<typeof setTimeout> | undefined;
   const invalidateUnified = () => {
     const wsId = getCurrentWsId();
-    if (!wsId) return;
-    void qc.invalidateQueries({ queryKey: ["turns", wsId] });
-    void qc.invalidateQueries({ queryKey: ["inbox", wsId] });
+    if (!wsId || unifiedTimer !== undefined) return;
+    unifiedTimer = setTimeout(() => {
+      unifiedTimer = undefined;
+      void qc.invalidateQueries({ queryKey: ["turns", wsId] });
+      void qc.invalidateQueries({ queryKey: ["inbox", wsId] });
+    }, 100);
   };
   const invalidatePendingAggregate = () => {
     const id = getCurrentWsId();
@@ -153,6 +158,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
   };
 
   return {
+    dispose: () => clearTimeout(unifiedTimer),
     handlers: {
       // Every follow-up queue change (enqueue, edit, delete, steer, release,
       // pause) arrives here. Released rows come in through the log stream.
@@ -239,7 +245,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         // pending_decision_count. The task event only identifies the source
         // Issue, so invalidate active detail/decision surfaces in this
         // workspace and let their authoritative endpoints resolve ancestry.
-        invalidateIssueDecisionSurfaces();
+        if (payload.issue_id) invalidateIssueDecisionSurfaces();
         if (invalidateWorkSessionTask(payload)) {
           void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
           return;
@@ -260,10 +266,17 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
 
       "task:progress": (p) => {
         if (!p || typeof p !== "object") return;
-        const payload = p as TaskProgressPayload;
+        const payload = p as TaskProgressPayload & { issue_id?: string };
+        const summary = payload.progress_summary;
+        if (typeof payload.task_id !== "string" || (typeof summary !== "string" && summary !== null)) return;
+        if (typeof payload.issue_id === "string" && payload.issue_id) {
+          qc.setQueryData<AgentTask[]>(issueKeys.tasks(payload.issue_id), tasks => {
+            if (!tasks?.some(task => task.id === payload.task_id && task.progress_summary !== summary)) return tasks;
+            return tasks.map(task => task.id === payload.task_id ? { ...task, progress_summary: summary } : task);
+          });
+        }
         if (invalidateWorkSessionTask(payload)) return;
-        if (typeof payload.chat_session_id !== "string" || typeof payload.task_id !== "string"
-          || (typeof payload.progress_summary !== "string" && payload.progress_summary !== null)) return;
+        if (typeof payload.chat_session_id !== "string") return;
         refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -331,7 +344,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         invalidateUnified();
         const payload = p as TaskAwaitingHumanPayload;
         void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
-        invalidateIssueDecisionSurfaces();
+        if (payload.issue_id) invalidateIssueDecisionSurfaces();
         if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         refetchUnheldPendingTask(qc, payload.chat_session_id);

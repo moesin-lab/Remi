@@ -17,11 +17,12 @@ const session: ChatSession = {
   last_message: null, created_at: "2026-09-11T00:00:00Z", updated_at: "2026-09-11T00:00:00Z",
 };
 let qc: QueryClient;
+let dispose: (() => void) | undefined;
 let handlers: ReturnType<typeof createChatHandlers>["handlers"];
 beforeEach(() => {
   vi.clearAllMocks();
   qc = new QueryClient();
-  handlers = createChatHandlers({ qc } as Parameters<typeof createChatHandlers>[0]).handlers;
+  ({ handlers, dispose } = createChatHandlers({ qc } as Parameters<typeof createChatHandlers>[0]));
   qc.setQueryData(chatKeys.pendingTask("chat-1"), { task_id: "task-1", status: "running", supports_queue: true });
   qc.setQueryData(chatKeys.sessions("ws-1"), [session]);
   qc.setQueryData(chatKeys.sessionList("ws-1", "active"), [session]);
@@ -29,9 +30,47 @@ beforeEach(() => {
   qc.setQueryData(chatKeys.session("ws-1", "chat-1"), session);
   qc.setQueryData(chatKeys.sessions("ws-2"), [{ ...session, workspace_id: "ws-2" }]);
 });
-afterEach(() => qc.clear());
+afterEach(() => {
+  dispose?.();
+  qc.clear();
+  vi.useRealTimers();
+});
 
 describe("chat queue realtime", () => {
+  it("patches only the matching Issue task without scheduling prefix refreshes", () => {
+    vi.useFakeTimers();
+    const tasks = [{ id: "task-1" }, { id: "task-2" }];
+    qc.setQueryData(issueKeys.tasks("issue-1"), tasks);
+    qc.setQueryData(issueKeys.tasks("issue-2"), tasks);
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const prefix = createPrefixRefresh({ qc } as Parameters<typeof createPrefixRefresh>[0]);
+    for (const summary of ["working", null]) {
+      const payload = { task_id: "task-1", issue_id: "issue-1", issue_session_id: "session-1", progress_summary: summary };
+      handlers["task:progress"]?.(payload);
+      prefix.onAny({ type: "task:progress", payload });
+      expect(qc.getQueryData(issueKeys.tasks("issue-1"))).toEqual([{ id: "task-1", progress_summary: summary }, tasks[1]]);
+    }
+    vi.advanceTimersByTime(4000);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(qc.getQueryData(issueKeys.tasks("issue-2"))).toBe(tasks);
+    prefix.dispose();
+  });
+
+  it("coalesces Chat lifecycle refreshes and leaves Issue decision surfaces fresh", () => {
+    vi.useFakeTimers();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const payload = { task_id: "task-1", chat_session_id: "chat-1" };
+    for (const event of ["task:running", "task:awaiting_human", "task:running"] as const) handlers[event]?.(payload);
+    vi.advanceTimersByTime(100);
+    expect(invalidate.mock.calls.map(([filter]) => filter?.queryKey).filter(key =>
+      ["turns", "inbox", "issues", "question"].includes(String(key?.[0])))).toEqual([["turns", "ws-1"], ["inbox", "ws-1"]]);
+    invalidate.mockClear();
+    handlers["task:dispatch"]?.(payload);
+    dispose?.();
+    vi.advanceTimersByTime(100);
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["turns", "ws-1"] });
+  });
+
   it.each([
     "task:queued", "task:dispatch", "task:running", "task:progress",
     "task:waiting_local_directory", "task:awaiting_human",

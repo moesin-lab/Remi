@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { replaceEqualDeep, useQueryClient } from "@tanstack/react-query";
 import { issueKeys } from "@multiremi/core/issues/queries";
 import { Bot, ChevronDown, Clock, Loader2, Square } from "lucide-react";
 import { api } from "@multiremi/core/api";
@@ -30,10 +30,6 @@ import { TaskSteerActions } from "./task-steer-actions";
 // Trace events drive the compact tool count and the transcript.
 
 
-interface TaskState {
-  task: AgentTask;
-}
-
 interface AgentLiveCardProps {
   issueId: string;
   issueSessionId?: string;
@@ -45,12 +41,11 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
   const qc = useQueryClient();
   const { t } = useT("issues");
   const { getActorName } = useActorName();
-  const [taskStates, setTaskStates] = useState<Map<string, TaskState>>(() => new Map(
+  const [taskStates, setTaskStates] = useState<AgentTask[]>(() =>
     (qc.getQueryData<AgentTask[]>(issueKeys.tasks(issueId)) ?? [])
       .filter(task => (!issueSessionId || task.issue_session_id === issueSessionId)
-        && ["queued", "dispatched", "waiting_local_directory", "running", "awaiting_human"].includes(task.status))
-      .map(task => [task.id, { task }] as const),
-  ));
+        && ["queued", "dispatched", "waiting_local_directory", "running", "awaiting_human"].includes(task.status)),
+  );
   // AskUser requests belong to the Issue, not to whichever product Session is
   // currently selected in the right panel. Keep this issue-wide view separate
   // from the Session-filtered activity banner. A task that asked keeps its
@@ -107,8 +102,9 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
       // resolve in B-then-A order and A re-adds tasks B already cleared.
       if (mySeq !== reconcileSeq.current) return;
       for (const task of issueTasks) if (task.status === "awaiting_human") askedTaskIds.current.add(task.id);
-      setHumanRequestTasks(issueTasks.filter((task) => askedTaskIds.current.has(task.id)));
-      setTaskStates(new Map(tasks.map((task) => [task.id, { task }])));
+      const asked = issueTasks.filter(task => askedTaskIds.current.has(task.id));
+      setHumanRequestTasks(previous => replaceEqualDeep(previous, asked));
+      setTaskStates(previous => replaceEqualDeep(previous, tasks));
       onInitialReconcile?.();
     }).catch(error => {
       if (!mountedRef.current || mySeq !== reconcileSeq.current) return;
@@ -134,12 +130,7 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
   const handleTaskEnd = useCallback((payload: unknown) => {
     const p = payload as { task_id: string; issue_id: string };
     if (p.issue_id !== issueId) return;
-    setTaskStates((prev) => {
-      if (!prev.has(p.task_id)) return prev;
-      const next = new Map(prev);
-      next.delete(p.task_id);
-      return next;
-    });
+    setTaskStates(prev => prev.some(task => task.id === p.task_id) ? prev.filter(task => task.id !== p.task_id) : prev);
     askedTaskIds.current.delete(p.task_id);
     setHumanRequestTasks((prev) => prev.filter((task) => task.id !== p.task_id));
     reconcile();
@@ -157,7 +148,7 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
   // stale tasks, so it's safe to fire once per event.
   const handleTaskActive = useCallback((payload: unknown) => {
     const p = payload as { issue_id?: string };
-    if (p.issue_id && p.issue_id !== issueId) return;
+    if (!p.issue_id || p.issue_id !== issueId) return;
     reconcile();
   }, [issueId, reconcile]);
 
@@ -195,7 +186,7 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
     }
   }, [cancelTarget, issueId, t]);
 
-  if (taskStates.size === 0 && humanRequestTasks.length === 0) return null;
+  if (taskStates.length === 0 && humanRequestTasks.length === 0) return null;
 
   // Order: running → awaiting human → dispatched → waiting → queued.
   // The most-active task takes the sticky slot; parked / queued tasks sit below so the
@@ -213,8 +204,8 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
     failed: 5,
     cancelled: 5,
   };
-  const entries = Array.from(taskStates.values()).sort(
-    (a, b) => statusRank[a.task.status] - statusRank[b.task.status],
+  const entries = [...taskStates].sort(
+    (a, b) => statusRank[a.status] - statusRank[b.status],
   );
   const firstEntry = entries[0];
 
@@ -229,11 +220,11 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
   const isMulti = entries.length > 1;
   const agentIds = [
     ...new Set(
-      entries.map((e) => e.task.agent_id).filter((id): id is string => !!id),
+      entries.map((e) => e.agent_id).filter((id): id is string => !!id),
     ),
   ];
-  const anyRunning = entries.some((e) => e.task.status === "running");
-  const countStatus = (status: AgentTask["status"]) => entries.filter((e) => e.task.status === status).length;
+  const anyRunning = entries.some((e) => e.status === "running");
+  const countStatus = (status: AgentTask["status"]) => entries.filter((e) => e.status === status).length;
   const activitySummary = [
     countStatus("running") ? t(($) => $.agent_activity.count_running, { count: countStatus("running") }) : null,
     countStatus("dispatched") ? t(($) => $.agent_activity.count_starting, { count: countStatus("dispatched") }) : null,
@@ -275,7 +266,7 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
             </button>
             {expanded && (
               <div className="max-h-[50vh] overflow-y-auto divide-y divide-info/15 border-t border-info/15">
-                {entries.map(({ task }) => (
+                {entries.map((task) => (
                   <AgentLiveRow
                     key={task.id}
                     task={task}
@@ -289,10 +280,10 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, rec
           </>
         ) : (
           <AgentLiveRow
-            task={firstEntry.task}
-            agentName={resolveName(firstEntry.task.agent_id)}
-            onRequestCancel={() => setCancelTarget(firstEntry.task)}
-            cancelling={cancellingIds.has(firstEntry.task.id)}
+            task={firstEntry}
+            agentName={resolveName(firstEntry.agent_id)}
+            onRequestCancel={() => setCancelTarget(firstEntry)}
+            cancelling={cancellingIds.has(firstEntry.id)}
           />
         ))}
         {humanRequestTasks.map((task) => (

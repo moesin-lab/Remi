@@ -4,7 +4,7 @@ import { challengeEncryptionLabel, machineSignaturePayload, type MachineChalleng
 import { isDeepStrictEqual } from 'node:util';
 import { CompactEncrypt } from 'jose';
 import type { RootDeliveryEnvelopePayload, RootDeliveryStatusResponse } from '@multiremi/contracts/root-delivery.js';
-import { acknowledgeRunEnvironment, prepareRunInstallation } from '@multiremi/worker/root-run-installation.js';
+import { acknowledgeRunEnvironment, prepareRunInstallation } from '@shared/root-run-installation.js';
 import type { RootRunTarget } from './root-run-supervisor.mjs';
 import { verifyRootRunTarget, type RootRunEndpoint } from './root-run-endpoint.mjs';
 

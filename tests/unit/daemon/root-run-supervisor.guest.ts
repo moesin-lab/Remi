@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test';
 import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { connect, createServer } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RootDeliveryTuple } from '@multiremi/contracts/root-delivery.js';
 
@@ -59,10 +59,24 @@ test('multi-UID guest uses production supervisor, authenticated control and reen
   writeFileSync(join(root, 'plans'), JSON.stringify({ plans: [] }));
   writeFileSync(join(root, 'config'), JSON.stringify(config)); save();
   try {
-    const denied = (path: string, reason: string) => {
-      const result = spawnSync(node, [service, path], { timeout: 10000, encoding: 'utf8' });
+    const denied = (path: string, reason: string, entry = service) => {
+      const result = spawnSync(node, [entry, path], { timeout: 10000, encoding: 'utf8' });
       expect(result.status).toBe(1); expect(result.stderr).toContain(reason);
     };
+    const installDir = join(root, 'installation');
+    const workspace = join(installDir, 'workspace');
+    mkdirSync(workspace, { recursive: true });
+    for (const name of readdirSync(dirname(service)).filter(name => /^root-run-.*\.mjs$/.test(name))) {
+      copyFileSync(join(dirname(service), name), join(installDir, name));
+    }
+    const probe = join(workspace, 'process-birth.mjs');
+    copyFileSync(join(dirname(service), 'workspace/process-birth.mjs'), probe);
+    const copiedService = join(installDir, 'root-run-service.mjs');
+    chmodSync(workspace, 0o777);
+    denied(join(root, 'config'), 'untrusted supervisor path', copiedService);
+    chmodSync(workspace, 0o755);
+    chownSync(probe, daemon, daemon);
+    denied(join(root, 'config'), 'untrusted supervisor path', copiedService);
     const bad = join(root, 'bad-config');
     writeFileSync(bad, JSON.stringify({ ...config, hostModule: '/tmp/override.mjs' })); denied(bad, 'host module override forbidden');
     chmodSync(bad, 0o666); denied(bad, 'untrusted supervisor path');

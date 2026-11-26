@@ -17,6 +17,7 @@ for (const module of ['approved', 'endpoint', 'supervisor', 'relay', 'controller
   if (stat.uid !== 0 || !stat.isFile() || (stat.mode & 0o022)) throw Error('untrusted supervisor module');
 }
 const { approvedJson, trustedPath } = await import('./root-run-approved.mjs');
+trustedPath(join(dirname(entry), 'workspace', 'process-birth.mjs'));
 const { RootRunSupervisor, birth, readFrame } = await import('./root-run-supervisor.mjs');
 const config = approvedJson(process.argv[2]);
 if ('hostModule' in config) throw Error('host module override forbidden');

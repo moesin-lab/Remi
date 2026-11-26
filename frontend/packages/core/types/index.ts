@@ -268,6 +268,7 @@ export type {
 } from "./feishu-bot";
 export type {
   Autopilot,
+  AutopilotDeliveryTarget,
   AutopilotStatus,
   AutopilotExecutionMode,
   AutopilotSessionPolicy,

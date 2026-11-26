@@ -25,7 +25,7 @@ import {
   getCompatibleConfigurableTriggerKinds,
   type ConfigurableAutopilotTriggerKind,
 } from "@multiremi/core/autopilots";
-import { api } from "@multiremi/core/api";
+import { api, ApiError } from "@multiremi/core/api";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { useActorName } from "@multiremi/core/workspace/hooks";
@@ -70,6 +70,7 @@ import type {
   ScheduleTargets,
 } from "@multiremi/core/types";
 import { ReadonlyContent } from "../../editor";
+import { DeliveryTarget } from "./delivery-target";
 import { AutopilotDialog } from "./autopilot-dialog";
 import { RunRow, formatDate } from "./run-row";
 import { WebhookDeliveriesSection } from "./webhook-deliveries-section";
@@ -641,7 +642,7 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
   const router = useNavigation();
   const { getActorName } = useActorName();
 
-  const { data, isLoading } = useQuery(autopilotDetailOptions(wsId, autopilotId));
+  const { data, isLoading, error, refetch } = useQuery(autopilotDetailOptions(wsId, autopilotId));
   const [runOffset, setRunOffset] = useState(0);
   const { data: runs = [], isLoading: runsLoading } = useQuery(autopilotRunsOptions(wsId, autopilotId, runOffset));
   const { data: projects = [] } = useQuery(projectListOptions(wsId));
@@ -700,8 +701,9 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
 
   if (!data) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground">
-        {t(($) => $.detail.not_found)}
+      <div role="alert" className="flex items-center justify-center h-full gap-2 text-muted-foreground">
+        {error instanceof ApiError && error.status === 404 ? t(($) => $.detail.not_found) : t(($) => $.delivery.configuration_error)}
+        <Button variant="outline" onClick={() => void refetch()}>{t(($) => $.delivery.retry)}</Button>
       </div>
     );
   }
@@ -869,6 +871,10 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
                   {t(($) => $.execution_mode[autopilot.execution_mode as AutopilotExecutionMode])}
                 </div>
               </div>
+              {autopilot.execution_mode === "run_only" && <div className="col-span-2">
+                <div className="text-xs text-muted-foreground">{t(($) => $.delivery.heading)}</div>
+                <DeliveryTarget value={autopilot.delivery_chat_session_id} />
+              </div>}
               {autopilot.execution_mode === "trigger_issue" && (
                 <>
                   <div>
@@ -1030,6 +1036,7 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
             project_id: autopilot.project_id ?? null,
             assignee_type: autopilot.assignee_type,
             assignee_id: autopilot.assignee_id,
+            delivery_chat_session_id: autopilot.delivery_chat_session_id,
             execution_mode: autopilot.execution_mode as AutopilotExecutionMode,
             session_policy: autopilot.session_policy ?? "new",
             workspace_policy: autopilot.workspace_policy ?? "reuse_issue",

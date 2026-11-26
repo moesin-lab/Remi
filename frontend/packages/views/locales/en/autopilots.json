@@ -1,4 +1,26 @@
 {
+  "delivery": {
+    "create_unknown": "Could not confirm whether this autopilot was created. Check the autopilot list before trying again.",
+    "committed": "Autopilot created. Verify delivery and continue configuring this autopilot.",
+    "resume": "Verify and continue",
+    "inspect": "Creation was accepted. Check the autopilot list before making further changes.",
+    "configuration_error": "Could not load Autopilot configuration.",
+    "denied": "You do not have permission to access delivery targets.",
+    "heading": "Report delivery",
+    "unbound": "Reports are saved only in the internal session. No report is sent to a user Chat.",
+    "unknown": "Delivery configuration unknown",
+    "unavailable": "Target unavailable",
+    "read_error": "Could not read delivery targets",
+    "loading": "Loading delivery targets",
+    "choose": "Choose delivery Chat",
+    "clear": "Clear delivery target",
+    "empty": "No matching Chats",
+    "retry": "Retry",
+    "clear_first": "Clear the delivery target before switching modes.",
+    "web_chat": "Web Chat",
+    "feishu": "Feishu",
+    "unknown_channel": "Unknown channel"
+  },
   "schedule_targets": {
     "previous": "Previous runs",
     "next": "Next runs",

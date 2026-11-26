@@ -56,6 +56,7 @@ export type WSEventType =
   | "inbox:batch-read"
   | "inbox:batch-archived"
   | "workspace:updated"
+  | "autopilot:delivery_targets_changed"
   | "workspace:deleted"
   | "member:added"
   | "member:updated"

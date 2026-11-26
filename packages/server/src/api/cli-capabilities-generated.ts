@@ -4949,6 +4949,18 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "autopilot.delivery-targets": {
+      "command": "remi autopilot delivery-targets",
+      "auth": [
+        "human"
+      ],
+      "capability": "autopilot.delivery-targets",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "autopilot.list": {
       "command": "remi autopilot list",
       "auth": [

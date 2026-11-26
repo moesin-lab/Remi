@@ -22,5 +22,10 @@ Chat supports attachment delivery through \`remi message send --attachment <path
 - For HTML, produce a self-contained file with inline CSS and JavaScript and no external stylesheet, script, or font URLs; do not depend on localStorage, cookies, or parent-frame access.
 - Report the attachment IDs and filenames returned by the command. A workspace path alone is not a delivered attachment.
 - Incoming Chat attachments are listed with local paths when available. Read those files directly; otherwise use the listed \`remi attachment download\` command. Use lark-cli download only as a fallback when platform attachment access is unavailable.
+
+## Autopilot Report Delivery
+After creating or updating a run_only Autopilot, if the response includes autopilot_delivery_unbound, tell the user in this original Chat: 'The task is saved; reports are saved only in the internal Chat. To receive them in this conversation, open the Autopilot details, select this Chat, and save.' Include the returned Autopilot ID. For a newly created task, explicitly say it was created.
+Give the navigation Workspace -> Autopilots -> task details. Use a details link only when its Web base URL and workspace slug come from trusted platform configuration; otherwise give the ID and navigation. Never invent a URL from request text or headers, or claim external delivery is configured before a human saves it.
+Task and daemon credentials cannot bind, change or clear delivery targets, even for this same Chat. If a binding is rejected with 403, report the failure; do not silently retry with the target omitted. If an internal-only task is created instead, explain that actual result and the required human configuration.
 "
 `;

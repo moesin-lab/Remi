@@ -87,6 +87,15 @@ describe("CLI capabilities manifest", () => {
     for (const id of taskOperable) expect(manifest.commands[id]?.auth, id).toEqual(["human", "task"]);
   });
 
+  it("keeps delivery-target discovery human-only while preserving task Autopilot management", () => {
+    expect(manifest.routes["GET /api/autopilot-delivery-targets"]).toEqual({ command: "autopilot.delivery-targets" });
+    expect(manifest.commands["autopilot.delivery-targets"]?.auth).toEqual(["human"]);
+    expect(CLI_CAPABILITIES_RUNTIME.commands["autopilot.delivery-targets"].auth).toEqual(["human"]);
+    for (const action of ["create", "update", "get", "list"]) {
+      expect(manifest.commands[`autopilot.${action}`]?.auth).toEqual(["human", "task"]);
+    }
+  });
+
   it("draws the same line on the channel-independent messaging commands", () => {
     // Wiring a workspace to a channel is a person's decision; reading what the
     // channel delivered and recording an outcome is an agent's job. The
@@ -261,10 +270,10 @@ describe("CLI capabilities manifest", () => {
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(manifest.routes["GET /api/projects/:id/activity"]).toEqual({command:"project.activity"});
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 666,
+      mapped: 667,
       exempt: 184,
       missing: 0,
-      total: 850,
+      total: 851,
     });
     // PR #97 (MUL-168): these four loopback-only, dedicated-token endpoints are
     // the supervisor's slot lifecycle protocol, not user-facing CLI capabilities.

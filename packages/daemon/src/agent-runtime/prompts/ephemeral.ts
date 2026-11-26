@@ -192,6 +192,10 @@ export function buildAgentInstructions(task: AgentTask, opts: BuildTaskPromptOpt
   }
   variable(task.chatSessionId ? policy.chat_delivery : policy.issue_delivery, policyRest);
   fixed(task.chatSessionId ? CHAT_ARTIFACT_DELIVERY_PROTOCOL : ISSUE_ARTIFACT_DELIVERY_PROTOCOL);
+  if (task.chatSessionId) fixed("", "## Autopilot Report Delivery",
+    "After creating or updating a run_only Autopilot, if the response includes autopilot_delivery_unbound, tell the user in this original Chat: 'The task is saved; reports are saved only in the internal Chat. To receive them in this conversation, open the Autopilot details, select this Chat, and save.' Include the returned Autopilot ID. For a newly created task, explicitly say it was created.",
+    "Give the navigation Workspace -> Autopilots -> task details. Use a details link only when its Web base URL and workspace slug come from trusted platform configuration; otherwise give the ID and navigation. Never invent a URL from request text or headers, or claim external delivery is configured before a human saves it.",
+    "Task and daemon credentials cannot bind, change or clear delivery targets, even for this same Chat. If a binding is rejected with 403, report the failure; do not silently retry with the target omitted. If an internal-only task is created instead, explain that actual result and the required human configuration.");
 
   // Workspace.
   const workspacePrompt = typeof (task.workspacePrompt ?? task.workspace_prompt) === "string"

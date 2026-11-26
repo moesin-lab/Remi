@@ -1,3 +1,4 @@
+import { deliveryTargetsOptions } from "../../autopilots/queries";
 import type { QueryClient } from "@tanstack/react-query";
 import { createLogger } from "../../logger";
 import { clearWorkspaceStorage } from "../../platform/storage-cleanup";
@@ -12,6 +13,7 @@ import type {
   WorkspaceDeletedPayload,
   WorkspaceUpdatedPayload,
   MemberRemovedPayload,
+  MemberUpdatedPayload,
   InvitationCreatedPayload,
 } from "../../types";
 import type { SyncContext, SyncModule } from "./types";
@@ -84,11 +86,16 @@ export function createWorkspaceHandlers({
   return {
     handlers: {
       "workspace:updated": (p) => {
-        applyWorkspaceUpdatedToCache(qc, p as WorkspaceUpdatedPayload);
+        const payload = p as WorkspaceUpdatedPayload;
+        if ("workspace" in payload && payload.workspace?.id) {
+          void qc.resetQueries(deliveryTargetsOptions(payload.workspace.id));
+        }
+        applyWorkspaceUpdatedToCache(qc, payload);
       },
 
       "workspace:deleted": (p) => {
         const { workspace_id } = p as WorkspaceDeletedPayload;
+        if (workspace_id) void qc.resetQueries(deliveryTargetsOptions(workspace_id));
         // Event payload has UUID; look up slug from cached workspace list
         // since clearWorkspaceStorage keys are namespaced by slug.
         const wsList = qc.getQueryData<{ id: string; slug: string }[]>(workspaceKeys.list()) ?? [];
@@ -101,10 +108,15 @@ export function createWorkspaceHandlers({
         }
       },
 
+      "member:updated": (p) => {
+        const { member } = p as MemberUpdatedPayload;
+        if (member?.workspace_id) void qc.resetQueries(deliveryTargetsOptions(member.workspace_id));
+      },
       "member:removed": (p) => {
-        const { user_id } = p as MemberRemovedPayload;
+        const { workspace_id, user_id } = p as MemberRemovedPayload;
         const myUserId = authStore.getState().user?.id;
-        if (user_id === myUserId) {
+        if (workspace_id) void qc.resetQueries(deliveryTargetsOptions(workspace_id));
+        if (user_id === myUserId && workspace_id === getCurrentWsId()) {
           const slug = getCurrentSlug();
           const wsId = getCurrentWsId();
           if (slug && wsId) {

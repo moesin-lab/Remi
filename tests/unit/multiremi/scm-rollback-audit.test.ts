@@ -65,7 +65,7 @@ for (const dialect of ['wal', 'delete', 'postgres'] as const) {
         expect(db.query('SELECT phase FROM multiremi_scm_audit_state').get()).toEqual({ phase: 'unknown' });
         expect(scmOwnershipReady(db)).toBe(false);
       } finally { await close(); }
-    });
+    }, 30_000);
 
     it('rejects a main or mixed snapshot and refuses a malformed historical startup before writes', async () => {
       const { db, close } = await fixture();

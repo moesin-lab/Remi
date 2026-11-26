@@ -265,6 +265,11 @@ describe("Multiremi API — authentication and token scoping", () => {
     expect(meMaster.status).toBe(200);
     expect(meMaster.headers.get("set-cookie") ?? "").not.toContain("multimira_auth");
 
+    const personal = await store.createAccessToken({ name: "Personal", type: "pat", purpose: "personal", workspaceId: "local", userId: "local" });
+    const mePersonal = await app.request("/api/me", { headers: { Authorization: `Bearer ${personal.token}` } });
+    expect(mePersonal.status).toBe(200);
+    expect(mePersonal.headers.get("set-cookie")).toBeNull();
+
     // Logout clears the cookie.
     const logout = await app.request("/auth/logout", { method: "POST", headers: cookie });
     expect(logout.headers.get("set-cookie") ?? "").toContain("multimira_auth=;");

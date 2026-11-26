@@ -74,7 +74,7 @@ daemon 的 HTTP token 校验同时验证工作区仍存在，工作区删除后�
 
 收藏按工作区合并，同一目标只显示一次，读取不删除历史行；重排同步同目标旧行，明确取消收藏时才删除这些行。通知配置由工作区共同管理，历史个人通知渠道参与共享路由，task 凭据仍不能配置外部目的地。通知偏好优先使用 operator 已保存值，再用旧工作区默认值，最后使用最近一次历史设置；首次保存后统一生效，原历史设置保留。
 
-`/api/me`、密码/SSO 登录、PAT 签发与撤销仍绑定实际账号。共享工作区不授予其他登录账号的凭据管理权，也不把 task/daemon 变成人类操作者。CLI 使用 `remi account get|update|onboarding` 管理入口账号，`remi workspace operator` 查看内部操作身份；详见[CLI 契约](../cli-command-migration.md)。
+`/api/me`、密码/SSO 登录、PAT 签发与撤销仍绑定实际账号。`GET /api/me` 只为已验证的登录 JWT 或兼容人类会话凭据补发浏览器 Cookie，个人 PAT 仍可查询账号。共享工作区不授予其他登录账号的凭据管理权，也不把 task/daemon 变成人类操作者。CLI 使用 `remi account get|update|onboarding` 管理入口账号，`remi workspace operator` 查看内部操作身份；详见[CLI 契约](../cli-command-migration.md)。
 
 ## Issue 关系与跨工作区移动
 

@@ -27,10 +27,11 @@ export function expandAgentSourceApprovals(db: SqlDatabase): void {
     incarnation TEXT NOT NULL,provider TEXT NOT NULL,profile_digest TEXT NOT NULL,provider_ref TEXT NOT NULL,checkpoint_policy_ref TEXT NOT NULL,input_policy_ref TEXT NOT NULL,
     PRIMARY KEY(agent_id,config_epoch,trust_id)
   )`);
-  db.exec(`CREATE VIEW multiremi_current_agent_config_epochs AS SELECT agent_id,workspace_id,config_epoch,approval_node_id FROM multiremi_agent_config_epochs`);
-  db.exec(`CREATE VIEW multiremi_current_agent_source_snapshots AS SELECT s.* FROM multiremi_agent_source_snapshots s JOIN multiremi_agent_config_epochs e
+  const view=db.dialect==='postgres'?'CREATE OR REPLACE VIEW':'CREATE VIEW IF NOT EXISTS';
+  db.exec(`${view} multiremi_current_agent_config_epochs AS SELECT agent_id,workspace_id,config_epoch,approval_node_id FROM multiremi_agent_config_epochs`);
+  db.exec(`${view} multiremi_current_agent_source_snapshots AS SELECT s.* FROM multiremi_agent_source_snapshots s JOIN multiremi_agent_config_epochs e
     ON e.agent_id=s.agent_id AND e.workspace_id=s.workspace_id AND e.config_epoch=s.config_epoch`);
-  db.exec(`CREATE VIEW multiremi_current_agent_execution_sources AS SELECT s.* FROM multiremi_agent_execution_sources s JOIN multiremi_agent_config_epochs e
+  db.exec(`${view} multiremi_current_agent_execution_sources AS SELECT s.* FROM multiremi_agent_execution_sources s JOIN multiremi_agent_config_epochs e
     ON e.agent_id=s.agent_id AND e.workspace_id=s.workspace_id AND e.config_epoch=s.config_epoch`);
 }
 

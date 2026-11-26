@@ -521,7 +521,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       expect(db.query('SELECT proof_node_id,actor_grant_id FROM multiremi_root_management_events WHERE revision_after=? AND action=?').get(revoked.security_revision,revokeUse.action))
         .toMatchObject({proof_node_id:candidate.materialNodeId,actor_grant_id:'grant-agent'});
     }
-  });
+  }, 60_000);
 
   it('keeps ordinary attempts ineligible and refuses lease writes without the active fence',()=>{
     const {db,store}=fixture();

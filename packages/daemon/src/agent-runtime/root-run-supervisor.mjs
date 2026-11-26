@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { serviceRequest } from './root-run-endpoint.mjs';
+import { linuxProcessBirth } from './workspace/process-birth.mjs';
 
 export function runPaths(directory, tuple) {
   const stat = lstatSync(directory);
@@ -16,12 +17,8 @@ export function runPaths(directory, tuple) {
 }
 
 export function birth(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw Error('invalid pid');
-  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-  const ticks = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[19];
-  const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-  if (!/^[0-9a-f-]{36}$/.test(boot) || !/^\d+$/.test(ticks)) throw Error('unknown process birth');
-  return `${boot}:${pid}:${ticks}`;
+  const {bootId,startTicks} = linuxProcessBirth(pid,true);
+  return `${bootId}:${pid}:${startTicks}`;
 }
 
 export function readFrame(socket) {

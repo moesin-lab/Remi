@@ -15,7 +15,7 @@ const drop = 'import os,sys; uid=int(sys.argv[1]); os.setgroups([]); os.setgid(u
 if (!process.env.MULTIREMI_TEST_POSTGRES_URL || process.env.MULTIREMI_TEST_LOCK_ORDER_SENTINEL !== '1') throw Error('Dual database and sentinel required');
 
 pendingTurnBackendTests('multi-UID root consumer with one authority database', (fixture, backend) => {
-  it.each(['before disconnect','after reconnect'] as const)('recovers interrupted ACKs and a lost start reply with one model, run and Q created %s', async questionTiming => {
+  it.each(['consumed','pending'] as const)('recovers interrupted ACKs and a lost start reply with one model and run while the original Q is %s', async questionState => {
     const {db,store} = fixture();
     if (backend === 'PostgreSQL') expect(Number(db.query("SELECT current_setting('server_version_num') AS version").get().version)).toBe(170012);
     const root = mkdtempSync('/srv/a2-');
@@ -99,19 +99,27 @@ pendingTurnBackendTests('multi-UID root consumer with one authority database', (
       expect(await ask({name:'Before daemon loss'})).toEqual({pid:model.pid,status:200});
       const copy = await ask({copy:true,name:'Replica before loss'}); expect(copy.status).toBe(200); expect(copy.pid).not.toBe(model.pid);
       expect(Number.isSafeInteger(copy.pid) && copy.pid > 1).toBe(true);
-      const createQuestion = async (daemon: typeof original) => {
-        daemon.child.stdin.write(JSON.stringify(await ask({question:true}))+'\n');
-        const {question} = JSON.parse(await daemon.next('GUEST '));
-        expect(question).toMatch(/\S/);
-        expect(store.getQuestion(question)).toMatchObject({id:question,status:'pending',wait_status:'waiting',source_attempt_id:tuple.attempt_id});
-        return question;
-      };
-      let questionId = questionTiming === 'before disconnect' ? await createQuestion(original) : undefined;
+      original.child.stdin.write(JSON.stringify(await ask({question:true}))+'\n');
+      const {question:questionId} = JSON.parse(await original.next('GUEST '));
+      expect(questionId).toMatch(/\S/);
+      const pendingQuestion = store.getQuestion(questionId)!;
+      expect(pendingQuestion).toMatchObject({id:questionId,status:'pending',wait_status:'waiting',source_attempt_id:tuple.attempt_id});
+      if (questionState === 'consumed') {
+        const answer = await fetch(`${origin}/api/messages/${questionId}/question/answer`,{method:'POST',
+          headers:{authorization:`Bearer ${human}`,'content-type':'application/json'},
+          body:JSON.stringify({expected_route_revision:pendingQuestion.route_revision,response:{answer:'Yes'}})});
+        expect(answer.status).toBe(200);
+        const {message} = await answer.json();
+        original.child.stdin.write(JSON.stringify(await ask({consume:questionId,reply:message.id}))+'\n');
+        expect(JSON.parse(await original.next('GUEST '))).toEqual({consumed:true});
+      }
+      const expectedQuestion = {id:questionId,source_attempt_id:tuple.attempt_id,status:questionState==='consumed'?'answered':'pending',
+        wait_status:questionState==='consumed'?'consumed':'waiting'};
+      expect(store.getQuestion(questionId)).toMatchObject(expectedQuestion);
       original.child.kill('SIGKILL'); await original.exited;
       const restored = controller('resume'); expect(JSON.parse(await restored.next('GUEST '))).toEqual({ready:true,uid:1101});
       expect(await ask({name:'After daemon recovery'})).toEqual({pid:model.pid,status:200});
-      if (questionTiming === 'after reconnect') questionId = await createQuestion(restored);
-      expect(store.getQuestion(questionId)).toMatchObject({id:questionId,status:'pending',wait_status:'waiting',source_attempt_id:tuple.attempt_id});
+      expect(store.getQuestion(questionId)).toMatchObject(expectedQuestion);
       expect(store.getWorkspace(workspace.id)?.name).toBe('After daemon recovery');
       expect(readFileSync(`${root}/execution/launches`,'utf8').trim().split('\n')).toEqual([String(model.pid)]);
       const task = store.getTask(tuple.attempt_id)!;

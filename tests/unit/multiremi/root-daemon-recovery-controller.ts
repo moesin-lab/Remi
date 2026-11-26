@@ -89,6 +89,14 @@ try {
   console.log('GUEST ' + JSON.stringify({ready:true,uid:process.geteuid!()}));
   for await (const line of createInterface({input:process.stdin})) {
     const question = JSON.parse(line);
+    if (question.reply_message_id) {
+      const payload = {...question,...reportPolicy};
+      const saved = await client.rpc('turn.decision.get',payload,tuple.runtime_id);
+      if ((saved.reply as {id?:string} | null)?.id !== question.reply_message_id) throw Error('Original answer was not delivered');
+      const consumed = await client.rpc('turn.decision.consume',payload,tuple.runtime_id);
+      console.log('GUEST ' + JSON.stringify({consumed:consumed.ok}));
+      continue;
+    }
     const result = await client.rpc('turn.decision',{...question,...reportPolicy},tuple.runtime_id);
     console.log('GUEST ' + JSON.stringify({question:result.message_id}));
   }

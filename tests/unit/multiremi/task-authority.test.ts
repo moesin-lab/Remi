@@ -230,7 +230,11 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);
   }, 60_000);
 
-  it.each(['expired lease','preempted fence','revoked source','durable delegation','concurrent first offer','concurrent security termination'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
+  it.each([
+    'expired lease','preempted fence','revoked source','durable delegation',
+    'durable upstream grant','durable runtime trust','durable source family','durable child regrant',
+    'concurrent first offer','concurrent security termination',
+  ] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
     const {store}=fixture();
     const db=(store as unknown as {db:SqlDatabase}).db;
     const dependency=hash('protected instructions');
@@ -488,7 +492,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       });
       return;
     }
-    if (failure==='durable delegation') {
+    if (failure.startsWith('durable ')) {
       const beneficiary={type:'agent' as const,id:agent.id};
       const use={action:'credential.pat.create' as const,use:'write',actualTarget:beneficiary,idempotencyKey:'issue-pat',requestDigest:hash('personal'),expiresAtMs:Date.now()+60000};
       const issuePat=(candidate:PreparedAgentPat,rollback:boolean)=>{
@@ -540,6 +544,49 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       const delegatedGrant = await delegated.json();
       expect(delegated.status, JSON.stringify(delegatedGrant)).toBe(200);
       expect(delegatedGrant.grant).toMatchObject({ issuer: beneficiary, origin_attempt_id: task.id, origin_family_id: issuedPat.family_id, effective: true });
+      if (failure === 'durable child regrant') {
+        const revision = async () => (await (await api('/api/root/context', humanBearer)).json()).security_revision;
+        const revokeChild = await api(`/api/root/grants/${delegatedGrant.grant.id}/revoke`, humanBearer, {
+          expected_revision: await revision(), idempotency_key: 'retire-child', reason: 'retire child grant',
+        });
+        expect(revokeChild.status, await revokeChild.text()).toBe(200);
+        expect((await api('/api/root/context', issuedPat.token)).status).toBe(200);
+        expect((await api('/api/root/context', raw)).status).toBe(200);
+        const regrant = await api('/api/root/grants', humanBearer, {
+          subject: { type: 'user', id: 'usr_delegated' }, expires_at: patRequest.expires_at, idempotency_key: 'replace-child',
+          expected_revision: await revision(), reason: 'direct replacement grant',
+        });
+        const replacement = await regrant.json();
+        expect(regrant.status, JSON.stringify(replacement)).toBe(200);
+        expect(replacement.grant.generation).toBe(delegatedGrant.grant.generation + 1);
+        expect(await (await api('/api/root/grants?subject_id=usr_delegated', humanBearer)).json()).toMatchObject({
+          grants: expect.arrayContaining([
+            expect.objectContaining({ id: delegatedGrant.grant.id, effective: false }),
+            expect.objectContaining({ id: replacement.grant.id, effective: true }),
+          ]),
+        });
+        return;
+      }
+      const sourceFamily=db.query('SELECT family_id FROM multiremi_credential_materials WHERE credential_id=?').get(token.id).family_id;
+      const upstreamRoute = failure === 'durable upstream grant' ? '/api/root/grants/grant-agent/revoke'
+        : failure === 'durable runtime trust' ? '/api/root/runtime-trust/trust/revoke'
+        : failure === 'durable source family' ? `/api/root/credential-families/${sourceFamily}/revoke` : null;
+      if (upstreamRoute) {
+        db.query('UPDATE multiremi_usage_runs SET complete=1 WHERE task_id=? AND run_id=?').run(task.id,tuple.consumer_id);
+        expect((await api('/api/root/context', issuedPat.token)).status).toBe(200);
+        expect((await api('/api/root/context', raw)).status).toBe(200);
+        const revocation = await api(upstreamRoute, humanBearer, {
+          expected_revision: (await (await api('/api/root/context', humanBearer)).json()).security_revision,
+          idempotency_key: 'revoke-upstream', reason: 'retire source', reason_code: 'operator_security_revoke',
+        });
+        expect(revocation.status, await revocation.text()).toBe(200);
+        expect((await api('/api/root/context', issuedPat.token)).status).toBe(401);
+        expect((await api('/api/root/context', raw)).status).toBe(401);
+        expect(await (await api('/api/root/grants?subject_id=usr_delegated', humanBearer)).json()).toMatchObject({
+          grants: [{ id: delegatedGrant.grant.id, effective: false }],
+        });
+        return;
+      }
       const peer=store.createAgent({name:'delegation target',provider:'codex',runtimeId:execution.runtimeId});
       const childDigest=hash('shared fixture for child grant');
       const childKernel=new RootManagement(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:childDigest,trustVersions:[{id:'trust',version:1}],
@@ -551,7 +598,6 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       const child=withSecurityWrite(db,childPlan.fenceTerm,childPlan,tx=>childKernel.grant(tx,childKernel.authorizeWrite(tx,childProof,childUse),{
         subject:target,runtime_trust_ids:['trust'],accepted_dependency_digest:childDigest,expires_at:new Date(use.expiresAtMs).toISOString(),
         idempotency_key:'child',expected_revision:childPlan.expectedRevision,reason:'shared config'})).grant;
-      const sourceFamily=db.query('SELECT family_id FROM multiremi_credential_materials WHERE credential_id=?').get(token.id).family_id;
       expect(child).toMatchObject({issuer:beneficiary,origin_attempt_id:task.id,origin_family_id:sourceFamily});
       db.query('UPDATE multiremi_usage_runs SET complete=1 WHERE task_id=? AND run_id=?').run(task.id,tuple.consumer_id);
       expect(service.registeredCredentials.verify(token.token).kind).toBe('invalid');

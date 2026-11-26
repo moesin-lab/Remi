@@ -1990,6 +1990,17 @@ flow("pins", async (rec, refs) => {
 });
 
 // -- tokens -----------------------------------------------------------------
+flow("root-management", async (rec) => {
+  const routes = ["/api/root/grants", "/api/root/grants/grant_snapshot/revoke", "/api/root/runtime-trust",
+    "/api/root/runtime-trust/trust_snapshot/revoke", "/api/root/credential-families/family_snapshot/revoke"];
+  for (const path of routes) {
+    const response = await rec.json("POST", path, {});
+    if (response.status !== 403 || response.body?.error?.code !== "root_required") {
+      throw new Error("Root management requires a registered credential");
+    }
+  }
+});
+
 flow("tokens", async (rec, refs) => {
   const compat = await rec.json("POST", "/api/tokens", { name: "compat token", type: "pat" });
   await rec.json("POST", "/api/tokens/current/renew", {});

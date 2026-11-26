@@ -11,6 +11,7 @@ import {
 } from "../helpers.js";
 import {
   authenticatedRequestUserId,
+  currentAuth,
 } from "../wire/index.js";
 import type { RouterDeps } from "./deps.js";
 
@@ -31,12 +32,17 @@ export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
     // Sessions that predate cookie auth carry only the localStorage token.
     // The app calls /api/me on boot with the Bearer header (already verified
     // by the auth gate), so mirror it into the cookie — existing logins get
-    // working <img> loads without re-authenticating. Never mirror the master
-    // token: it is a non-expiring deployment-wide admin secret, and an
-    // ambient host-wide cookie would broaden its exposure for no benefit.
+    // working <img> loads without re-authenticating.
     const header = c.req.header("Authorization") ?? "";
     const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
-    if (bearer && bearer !== authToken) setAuthCookie(c, bearer);
+    const { jwtUserId, accessToken } = currentAuth(c);
+    const loginSession = jwtUserId !== null || (
+      accessToken?.type === "pat" && accessToken.purpose === "session"
+      && accessToken.agentId === null && accessToken.taskId === null && accessToken.daemonId === null
+      && !accessToken.isAgentOrigin && !accessToken.is_agent_origin
+      && accessToken.authenticatedSubject?.type !== "agent" && accessToken.authenticated_subject?.type !== "agent"
+    );
+    if (bearer && bearer !== authToken && loginSession) setAuthCookie(c, bearer);
     return c.json(user);
   });
   app.patch("/api/me", async (c) => {

@@ -24,6 +24,14 @@ pendingTurnBackendTests('root delivery prepare and abort', fixture => {
     expect(() => rootBusinessPayloadDigest({ ...business, auth_token: 'test' })).toThrow('auth_token');
     const repo = new RootReceiptStore(db);
     const plan = { expectedRevision: 0, workspaceIds: ['local'], numberKeys: [], domainTargets: [`receipt:${tuple.receipt_id}`] };
+    expect(() => withSecurityWrite(db, undefined, plan, tx => {
+      db.run('INSERT INTO multiremi_usage_runs(task_id,run_id,revision,complete) VALUES(?,?,0,0)', [task.id, tuple.consumer_id]);
+      try {
+        repo.activate(tx, { ...candidate }, { lease_id: 'test', fence_term: 'test', start_deadline: tuple.material_expires_at },
+          () => { throw new Error('unexpected issuer invocation'); });
+      } catch (error) { expect(String(error)).toContain('receipt_conflict'); }
+    })).toThrow('security_tx_invalid');
+    expect(db.query('SELECT run_id FROM multiremi_usage_runs WHERE task_id=?').get(task.id)).toBeNull();
     expect(() => withSecurityWrite(db, undefined, plan, tx => repo.activate(tx, candidate,
       { lease_id: 'test', fence_term: 'test', start_deadline: tuple.material_expires_at }, () => {
         db.run('INSERT INTO multiremi_usage_runs(task_id,run_id,revision,complete) VALUES(?,?,0,0)', [task.id, tuple.consumer_id]);

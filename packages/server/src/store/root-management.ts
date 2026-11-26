@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ROOT_SECURITY_REVOKE_REASONS, type RevokeCredentialFamilyRequest, type RevokeCredentialFamilyResponse,
   type RevokeRootGrantRequest, type RevokeRootGrantResponse, type CreateRootGrantRequest, type CreateRootGrantResponse } from '@multiremi/contracts/root-authority.js';
 import type { SqlDatabase } from './db/postgres.js';
-import type { GrantRootRuntimeTrustRequest, GrantRootRuntimeTrustResponse, RevokeRootRuntimeTrustRequest, RevokeRootRuntimeTrustResponse, RootRuntimeTrustRecord } from '@multiremi/contracts/root-authority.js';
+import type { GrantRootRuntimeTrustRequest, GrantRootRuntimeTrustResponse, RevokeRootRuntimeTrustRequest, RevokeRootRuntimeTrustResponse, RootRuntimeTrustRecord,
+  RootContextResponse, RootTransportIdentity, RootGrantRecord, ListRootGrantsResponse, GetRootRuntimeTrustResponse,
+  ListRootRuntimeTrustResponse, ListRootAuditResponse } from '@multiremi/contracts/root-authority.js';
 import { readVerifiedTrustChallenge, recordedMachineBindingIsCurrent } from './machine-proof.js';
 import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-provenance.js';
 import type { AdmissionTicket, AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority, FinalExecution, InputManifest, VersionedRef } from './root-authority-contract.js';
@@ -14,6 +16,7 @@ import { RegisteredCredentialProofs } from './registered-credential-proof.js';
 import { abortSecurityWrite, SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
+const isoTime = (value: number | string | null) => value === null ? null : new Date(Number(value)).toISOString();
 const grantAction = 'root.grant.revoke';
 const familyAction = 'root.credential-family.revoke';
 const createAction = 'root.grant.create';
@@ -36,6 +39,12 @@ export interface ApprovedExecutionInputs {
   readonly sourcePolicy: VersionedRef;
   readonly entries: readonly { readonly source:VersionedRef; readonly snapshot:string; readonly purpose:'instruction'|'business_data'|'tool_result'|'answer'|'checkpoint_context'; readonly author:GrantSubject }[];
   readonly providerState: { readonly sessionId:string|null; readonly securityDomainId:string; readonly checkpointDigest:string|null };
+}
+export interface AgentGrantRuntimeReview {
+  readonly agentId: string;
+  readonly workspaceId: string;
+  readonly checkedRevision: number;
+  readonly runtimeTrusts: readonly (VersionedRef & { runtimeId: string; daemonId: string; incarnation: string })[];
 }
 type Response = RevokeRootGrantResponse | RevokeCredentialFamilyResponse;
 interface PasswordEvidence { userId: string; verifier: string; version: number; node: string; deadline: number }
@@ -140,9 +149,11 @@ export class RootManagement {
   }
 
   plan(proof: CredentialProof, request: AuthorityUse) {
+    const machine = request.action === trustAction && this.db.query('SELECT authority_node_id FROM multiremi_machine_enrollments WHERE runtime_id=? AND retired_at_ms IS NULL').get(request.actualTarget.id);
+    const machineTargets = machine ? [`authority:${machine.authority_node_id}`] : [];
     if (proof.kind==='dependent') {
       const plan = onPrimary(() => this.registeredCredentials.plan(proof));
-      return {...plan,domainTargets:[...new Set([...plan.domainTargets,`management:${request.actualTarget.type}:${request.actualTarget.id}`])].sort()};
+      return {...plan,domainTargets:[...new Set([...plan.domainTargets,...machineTargets,`management:${request.actualTarget.type}:${request.actualTarget.id}`])].sort()};
     }
     const evidence = this.evidence(proof);
     const state = onPrimary(() => this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get());
@@ -151,10 +162,7 @@ export class RootManagement {
       ON g.grant_id=s.active_grant_id WHERE s.subject_type='user' AND s.subject_id=?`).get(evidence.userId));
     const targets = [`authority:${evidence.node}`, `grant:user:${evidence.userId}`, `management:${request.actualTarget.type}:${request.actualTarget.id}`];
     if (grant) targets.push(`authority:${grant.authority_node_id}`);
-    if (request.action === trustAction) {
-      const machine = this.db.query('SELECT authority_node_id FROM multiremi_machine_enrollments WHERE runtime_id=? AND retired_at_ms IS NULL').get(request.actualTarget.id);
-      if (machine) targets.push(`authority:${machine.authority_node_id}`);
-    }
+    targets.push(...machineTargets);
     return { fenceTerm:undefined, expectedRevision: Number(state.security_revision), workspaceIds: [], numberKeys: [], domainTargets: [...new Set(targets)].sort() };
   }
 
@@ -164,6 +172,47 @@ export class RootManagement {
     const source = this.versionRow(evidence.userId, evidence.verifier);
     if (!source || source.password_node_id !== evidence.node || Number(source.version) !== evidence.version) throw new SecurityAbort('credential_version_conflict');
     assertUnrevokedAncestry(this.db, tx, { nodeId: evidence.node, generation: evidence.version });
+  }
+
+  reviewAgentGrantRuntimeTrusts(proof: CredentialProof, agentId: string, runtimeTrustIds: readonly string[]): AgentGrantRuntimeReview {
+    const request = { action: 'root.grant.review-runtime-trusts', use: 'read', actualTarget: { type: 'agent', id: agentId } };
+    const ids = [...new Set(runtimeTrustIds)].sort();
+    if (!agentId || !ids.length || ids.length !== runtimeTrustIds.length || ids.some(id => typeof id !== 'string' || !id.trim())) {
+      throw new RootManagementRequestError(400, 'Expected distinct runtime trust IDs');
+    }
+    return onPrimary(() => {
+      const plan = this.plan(proof, request);
+      const agent = this.db.query('SELECT workspace_id FROM multiremi_agents WHERE id=? AND archived_at IS NULL').get(agentId);
+      const lookup = this.db.query('SELECT runtime_id FROM multiremi_runtime_trusts WHERE trust_id=?');
+      const runtimeIds: (string | undefined)[] = ids.map(id => lookup.get(id)?.runtime_id);
+      const targets = [...new Set([...plan.domainTargets, ...runtimeIds.filter(Boolean).map(id => `management:runtime:${id}`)])].sort();
+      return withSecurityWrite(this.db, plan.fenceTerm, { ...plan, workspaceIds: agent ? [agent.workspace_id] : [], domainTargets: targets }, tx => {
+        const actor = this.check(tx, proof, request);
+        if (!actor.effectiveRoot) throw new SecurityAbort('root_required');
+        if (!agent || !this.db.query('SELECT id FROM multiremi_agents WHERE id=? AND workspace_id=? AND archived_at IS NULL').get(agentId, agent.workspace_id)) {
+          throw new RootManagementRequestError(404, 'Agent not found');
+        }
+        const eligible = this.db.query(`SELECT t.trust_id,t.generation,t.runtime_id,t.incarnation,t.authority_node_id,t.challenge_id,r.daemon_id
+          FROM multiremi_agents a JOIN multiremi_runtimes r ON r.workspace_id=a.workspace_id
+          JOIN multiremi_runtime_trusts t ON t.runtime_id=r.id AND t.revoked_at_ms IS NULL
+          JOIN multiremi_machine_enrollments e ON e.runtime_id=r.id AND e.daemon_id=r.daemon_id AND e.incarnation=t.incarnation AND e.retired_at_ms IS NULL
+          WHERE a.id=? AND a.workspace_id=? AND a.archived_at IS NULL AND t.trust_id=? AND r.id=?
+            AND ((a.execution_group_id IS NULL AND a.runtime_id=r.id AND r.provider=a.provider) OR EXISTS (
+              SELECT 1 FROM multiremi_execution_group_members m WHERE m.workspace_id=a.workspace_id AND m.provider=a.provider
+                AND m.group_id=a.execution_group_id AND m.runtime_id=r.id))`);
+        const runtimeTrusts = ids.map((id, index) => {
+          const runtimeId = runtimeIds[index];
+          if (!runtimeId) throw new SecurityAbort('root_runtime_untrusted');
+          const row = eligible.get(agentId, agent.workspace_id, id, runtimeId);
+          if (!row || !recordedMachineBindingIsCurrent(this.db, tx, runtimeId, row.challenge_id)
+            || !grantAncestryIsCurrent(this.db, tx, runtimeId, {nodeId: row.authority_node_id, generation: Number(row.generation)}, 'runtime')) {
+            throw new SecurityAbort('root_runtime_untrusted');
+          }
+          return { id, version: Number(row.generation), runtimeId, daemonId: String(row.daemon_id), incarnation: String(row.incarnation) };
+        });
+        return {agentId, workspaceId: String(agent.workspace_id), checkedRevision: actor.checkedRevision, runtimeTrusts};
+      });
+    });
   }
 
   private check(tx: SecurityTx, proof: CredentialProof, request: AuthorityUse, directRetry = false): CurrentAuthority {
@@ -236,6 +285,145 @@ export class RootManagement {
     assertUnrevokedAncestry(this.db,tx,{nodeId:grant.authorityNodeId,generation:grant.generation});
   }
 
+  readContext(proof: CredentialProof | null, transport: RootTransportIdentity): RootContextResponse {
+    return onPrimary(() => {
+      const use: AuthorityUse = { action: 'root.context', actualTarget: { type: 'system', id: 'root' }, use: 'read' };
+      const read = (current: CurrentAuthority | null): RootContextResponse => {
+        const state = this.db.query('SELECT feature_activation,bootstrap_completed,security_revision FROM multiremi_security_state WHERE singleton=1').get();
+        if (!state) throw new SecurityAbort('security_state_unavailable');
+        const active = Number(state.feature_activation) === 1;
+        const effective = current?.effectiveRoot ?? false;
+        const human = effective && current?.subject?.type === 'user';
+        return {
+          security_revision: Number(state.security_revision), feature_activation: active, bootstrap_completed: Number(state.bootstrap_completed) === 1,
+          transport_identity: current?.transport ?? transport, authenticated_subject: current?.subject ?? null,
+          beneficiary_user_id: current?.subject?.type === 'user' ? current.subject.id : null,
+          is_agent_origin: current?.subject?.type === 'agent', credential_id: current?.credentialOrigin?.credential.id ?? null,
+          family_id: current?.credentialOrigin?.familyId ?? null, origin_attempt_id: current?.attemptId ?? null,
+          current_attempt_id: current?.attemptId ?? null, agent_granted_root: current?.subject?.type === 'agent' && !!current.recordedGrant,
+          current_attempt_effective_root: current?.transport === 'task' && effective,
+          effective_root: effective, effective_reason_code: current?.reason ?? (active ? 'unverified_human_auth' : 'feature_disabled'),
+          grant_id: current?.recordedGrant?.grantId ?? null, grant_generation: current?.recordedGrant?.generation ?? null,
+          capabilities: { can_manage_root: effective, can_edit_root_execution: false, can_manage_runtime_trust: human,
+            can_revoke_credential_family: effective, can_read_root_audit: effective },
+          allowed_operations: [...(effective ? ['root.grant.list', 'root.grant.revoke', 'root.runtime-trust.list',
+            'root.runtime-trust.get', 'root.credential-family.revoke', 'root.audit.list'] : []),
+            ...(human ? ['root.grant.create', 'root.runtime-trust.grant', 'root.runtime-trust.revoke'] : [])],
+        };
+      };
+      if (!proof) return read(null);
+      const plan = this.plan(proof, use);
+      return withSecurityWrite(this.db, plan.fenceTerm, plan, tx => read(this.check(tx, proof, use)));
+    });
+  }
+
+  private readControl<T, Result>(proof: CredentialProof, action: string, load: () => T[],
+    target: (row: T) => string | null, project: (tx: SecurityTx, current: CurrentAuthority, rows: T[]) => Result): Result {
+    return onPrimary(() => {
+      const use: AuthorityUse = { action, actualTarget: { type: 'system', id: 'root' }, use: 'read' };
+      const plan = this.plan(proof, use);
+      const domainTargets = new Set(plan.domainTargets);
+      for (const row of load()) {
+        const key = target(row);
+        if (key) domainTargets.add(key);
+      }
+      return withSecurityWrite(this.db, plan.fenceTerm, { ...plan, domainTargets: [...domainTargets].sort() }, tx => {
+        const current = this.check(tx, proof, use);
+        if (!current.effectiveRoot) throw new SecurityAbort('root_required');
+        return project(tx, current, load());
+      });
+    });
+  }
+
+  listRootGrants(proof: CredentialProof, options: { cursor: string; limit: number; subjectType: string; subjectId: string; status: string }): ListRootGrantsResponse {
+    const { cursor, limit, subjectType, subjectId, status } = options;
+    const stamp = Date.now();
+    const load = () => this.db.query(`SELECT g.*, s.active_grant_id FROM multiremi_root_grants g
+      LEFT JOIN multiremi_root_subject_state s ON s.subject_type=g.subject_type AND s.subject_id=g.subject_id
+      WHERE g.grant_id>? AND (?='' OR g.subject_type=?) AND (?='' OR g.subject_id=?)
+      AND (?='' OR ?=CASE WHEN g.revoked_at_ms IS NOT NULL THEN 'revoked'
+        WHEN g.expires_at_ms<=? THEN 'expired' ELSE 'active' END) ORDER BY g.grant_id LIMIT ?`)
+      .all(cursor, subjectType, subjectType, subjectId, subjectId, status, status, stamp, limit + 1);
+    return this.readControl(proof, 'root.grant.list', load, row => `management:user:${row.subject_id}`, (tx, current, rows) => ({
+      security_revision: current.checkedRevision, next_cursor: rows.length > limit ? rows[limit - 1].grant_id : null,
+      grants: rows.slice(0, limit).map((row): RootGrantRecord => {
+        const revoked = row.revoked_at_ms !== null;
+        const expired = row.expires_at_ms !== null && Number(row.expires_at_ms) <= stamp;
+        const effective = !revoked && !expired && row.active_grant_id === row.grant_id
+          && this.hasHumanGrantOrigins(row.authority_node_id)
+          && grantAncestryIsCurrent(this.db, tx, row.subject_id, { nodeId: row.authority_node_id, generation: Number(row.generation) });
+        return {
+          id: row.grant_id, subject: { type: row.subject_type, id: row.subject_id }, generation: Number(row.generation), scope: 'system',
+          status: revoked ? 'revoked' : expired ? 'expired' : 'active', effective,
+          effective_reason_code: revoked ? 'grant_revoked' : expired ? 'grant_expired' : effective ? 'active' : 'ancestor_revoked',
+          authority_node_id: row.authority_node_id, issuer: { type: row.issuer_type, id: row.issuer_id },
+          origin_family_id: row.origin_family_id, origin_attempt_id: row.issuer_attempt_id, reason: row.reason, revocation_reason: row.revoke_reason,
+          created_at: new Date(Number(row.created_at_ms)).toISOString(), expires_at: isoTime(row.expires_at_ms),
+          revoked_at: isoTime(row.revoked_at_ms), revision: Number(row.revision),
+        };
+      }),
+    }));
+  }
+
+  listRootRuntimeTrust(proof: CredentialProof, options: { cursor: string; limit: number; runtimeId: string; status: string }): ListRootRuntimeTrustResponse {
+    const { cursor, limit, runtimeId, status } = options;
+    const stamp = Date.now();
+    const load = () => this.db.query(`SELECT t.*, n.expires_at_ms FROM multiremi_runtime_trusts t
+      JOIN multiremi_authority_nodes n ON n.node_id=t.authority_node_id WHERE t.trust_id>? AND (?='' OR t.runtime_id=?)
+      AND (?='' OR ?=CASE WHEN t.revoked_at_ms IS NOT NULL THEN 'revoked' WHEN n.expires_at_ms<=? THEN 'expired' ELSE 'active' END)
+      ORDER BY t.trust_id LIMIT ?`).all(cursor, runtimeId, runtimeId, status, status, stamp, limit + 1);
+    return this.readControl(proof, 'root.runtime-trust.list', load, row => `management:runtime:${row.runtime_id}`, (tx, current, rows) => ({
+      security_revision: current.checkedRevision, next_cursor: rows.length > limit ? rows[limit - 1].trust_id : null,
+      trusts: rows.slice(0, limit).map(row => this.projectRuntimeTrust(tx, row, stamp)),
+    }));
+  }
+
+  readRootRuntimeTrust(proof: CredentialProof, runtimeId: string): GetRootRuntimeTrustResponse {
+    const load = () => this.db.query('SELECT * FROM multiremi_runtime_trusts WHERE runtime_id=? ORDER BY generation DESC').all(runtimeId);
+    return this.readControl(proof, 'root.runtime-trust.get', load, () => `management:runtime:${runtimeId}`, (tx, current, rows) => {
+      if (!this.db.query('SELECT id FROM multiremi_runtimes WHERE id=?').get(runtimeId)) throw new RootManagementRequestError(404, 'Runtime not found');
+      const history = rows.map(row => this.projectRuntimeTrust(tx, row, Date.now()));
+      return { runtime_id: runtimeId, security_revision: current.checkedRevision, history, active_trust: history.find(trust => trust.effective) ?? null };
+    });
+  }
+
+  private projectRuntimeTrust(tx: SecurityTx, row: { record_json: string; challenge_id: string; authority_node_id: string }, stamp: number): RootRuntimeTrustRecord {
+    const trust = JSON.parse(row.record_json) as RootRuntimeTrustRecord;
+    const expired = trust.expires_at !== null && Date.parse(trust.expires_at) <= stamp;
+    const effective = trust.status === 'active' && !expired
+      && recordedMachineBindingIsCurrent(this.db, tx, trust.runtime_id, row.challenge_id)
+      && grantAncestryIsCurrent(this.db, tx, trust.runtime_id, { nodeId: row.authority_node_id, generation: trust.generation }, 'runtime');
+    return { ...trust, effective, status: trust.status === 'active' && expired ? 'expired' : trust.status,
+      effective_reason_code: effective ? 'active' : trust.status === 'revoked' ? 'trust_revoked' : expired ? 'trust_expired' : 'runtime_untrusted' };
+  }
+
+  listRootAudit(proof: CredentialProof, options: { cursor: number; limit: number; action: string; targetId: string; actorId: string }): ListRootAuditResponse {
+    const { cursor, limit, action, targetId, actorId } = options;
+    const load = () => this.db.query(`SELECT e.*, n.subject_type, COALESCE(j.credential_id,b.credential_id) AS credential_id,
+      COALESCE(j.family_id,b.family_id) AS family_id, t.task_id FROM multiremi_root_management_events e
+      LEFT JOIN multiremi_authority_nodes n ON n.node_id=e.proof_node_id
+      LEFT JOIN multiremi_jwt_materials j ON j.authority_node_id=e.proof_node_id
+      LEFT JOIN multiremi_credential_version_bindings b ON b.authority_node_id=e.proof_node_id
+      LEFT JOIN multiremi_access_tokens t ON t.id=b.credential_id WHERE e.revision_after<?
+      AND (?='' OR e.action=?) AND (?='' OR e.target_id=?) AND (?='' OR e.actor_user_id=?) ORDER BY e.revision_after DESC LIMIT ?`)
+      .all(cursor, action, action, targetId, targetId, actorId, actorId, limit + 1);
+    return this.readControl(proof, 'root.audit.list', load, () => null, (_tx, current, rows) => ({
+      security_revision: current.checkedRevision, next_cursor: rows.length > limit ? String(rows[limit - 1].revision_after) : null,
+      entries: rows.slice(0, limit).map(row => {
+        const result = JSON.parse(row.result_json);
+        const targetType = row.action === 'bootstrap.jwt-domain.register' ? 'jwt_signing_domain' : row.action === 'root.grant.create' ? 'user'
+          : row.action === 'root.grant.revoke' ? 'grant' : row.action === 'root.runtime-trust.grant' ? 'runtime'
+          : row.action === 'root.runtime-trust.revoke' ? 'runtime_trust' : 'credential_family';
+        return { id: String(row.revision_after), action: row.action, actor: { type: row.subject_type === 'agent' ? 'agent' : 'user', id: row.actor_user_id },
+          credential_id: row.credential_id, family_id: row.family_id, origin_attempt_id: row.task_id,
+          grant_id: row.actor_grant_id, grant_generation: Number(row.actor_generation), target_type: targetType, target_id: row.target_id,
+          scope: 'system', before_revision: Number(row.revision_before), after_revision: Number(row.revision_after), reason_code: row.reason_code,
+          reason: row.reason, outcome: 'allowed', cleanup_batch_id: result.cleanup_batch_id ?? null,
+          created_at: new Date(Number(row.created_at_ms)).toISOString() };
+      }),
+    }));
+  }
+
   private taskIsEligible(tx: SecurityTx, material: ReturnType<RegisteredCredentialProofs['requireCurrent']>, grant: NonNullable<CurrentAuthority['recordedGrant']>): boolean {
     if (!material.attemptId) return false;
     const entry = readAttemptEligibility(this.db,tx,material.attemptId);
@@ -281,8 +469,14 @@ export class RootManagement {
             AND issuer.subject_type='user' AND issuer.subject_id=g.issuer_id
           JOIN multiremi_authority_edges parent ON parent.child_id=n.node_id AND parent.parent_id=issuer.authority_node_id AND parent.dependency='continuous'
           JOIN multiremi_authority_edges proof ON proof.child_id=n.node_id AND proof.parent_id=audit.proof_node_id AND proof.dependency='continuous'
-          JOIN multiremi_authority_nodes password ON password.node_id=proof.parent_id AND password.kind='password' AND password.subject_type='user'
-            AND password.subject_id=g.issuer_id
+          JOIN multiremi_authority_nodes source ON source.node_id=proof.parent_id AND source.subject_type='user' AND source.subject_id=g.issuer_id
+            AND ((source.kind='password' AND g.issuer_credential_id IS NULL AND g.origin_family_id IS NULL)
+              OR EXISTS (SELECT 1 FROM multiremi_jwt_materials material WHERE material.authority_node_id=source.node_id
+                AND material.credential_id=g.issuer_credential_id AND material.family_id=g.origin_family_id AND material.subject_type='user'
+                AND material.subject_id=g.issuer_id AND material.purpose='dashboard' AND material.authority_generation=source.generation)
+              OR EXISTS (SELECT 1 FROM multiremi_credential_version_bindings binding WHERE binding.authority_node_id=source.node_id
+                AND binding.credential_id=g.issuer_credential_id AND binding.family_id=g.origin_family_id AND binding.subject_type='user'
+                AND binding.subject_id=g.issuer_id AND binding.credential_type='pat' AND binding.authority_generation=source.generation))
           WHERE audit.action='root.grant.create' AND audit.target_id=g.subject_id AND audit.actor_user_id=g.issuer_id AND audit.revision_after=n.revision))
       )) LIMIT 1`).get(nodeId);
     return !invalid;
@@ -595,7 +789,7 @@ export class RootManagement {
   }
 
   private insertHumanGrant(tx: SecurityTx, userId: string, reason: string, expiry: number | null, before: number,
-    issuer: { type: 'deployment' | 'user'; id: string }, parents: string[]): CreateRootGrantResponse {
+    issuer: { type: 'deployment' | 'user'; id: string }, parents: string[], origin: CurrentAuthority['credentialOrigin'] = null): CreateRootGrantResponse {
     const state = this.db.query("SELECT generation_counter,active_grant_id FROM multiremi_root_subject_state WHERE subject_type='user' AND subject_id=?").get(userId);
     const generation = Number(state?.generation_counter ?? 0)+1;
     const revision = before+1;
@@ -618,8 +812,8 @@ export class RootManagement {
     const node = this.newNode('grant', 'user', userId, generation, revision, expiry, parents);
     if (!grantAncestryIsCurrent(this.db, tx, userId, { nodeId: node, generation })) throw new SecurityAbort('root_authority_revoked');
     const id = randomUUID();
-    this.db.query(`INSERT INTO multiremi_root_grants(grant_id,subject_type,subject_id,generation,scope,authority_node_id,issuer_type,issuer_id,revision,reason,created_at_ms,expires_at_ms)
-      VALUES(?,'user',?,?,'system',?,?,?,?,?,?,?)`).run(id,userId,generation,node,issuer.type,issuer.id,revision,reason,now,expiry);
+    this.db.query(`INSERT INTO multiremi_root_grants(grant_id,subject_type,subject_id,generation,scope,authority_node_id,issuer_type,issuer_id,revision,reason,created_at_ms,expires_at_ms,issuer_credential_id,origin_family_id)
+      VALUES(?,'user',?,?,'system',?,?,?,?,?,?,?,?,?)`).run(id,userId,generation,node,issuer.type,issuer.id,revision,reason,now,expiry,origin?.credential.id??null,origin?.familyId??null);
     if (!this.db.query(`INSERT INTO multiremi_root_subject_state(subject_type,subject_id,generation_counter,active_grant_id) VALUES('user',?,?,?)
       ON CONFLICT(subject_type,subject_id) DO UPDATE SET generation_counter=excluded.generation_counter,active_grant_id=excluded.active_grant_id
       WHERE multiremi_root_subject_state.active_grant_id IS NOT DISTINCT FROM ? AND multiremi_root_subject_state.generation_counter=? RETURNING generation_counter`)
@@ -627,7 +821,7 @@ export class RootManagement {
     if (!this.db.query('UPDATE multiremi_security_state SET security_revision=? WHERE singleton=1 AND security_revision=? RETURNING singleton')
       .get(revision,before)) throw new SecurityAbort('authority_revision_conflict');
     return { security_revision: revision, grant: { id, subject: { type: 'user', id: userId }, scope: 'system', generation, status: 'active', effective: true,
-      effective_reason_code: 'active', authority_node_id: node, issuer, origin_attempt_id: null, origin_family_id: null, reason, revocation_reason: null,
+      effective_reason_code: 'active', authority_node_id: node, issuer, origin_attempt_id: null, origin_family_id: origin?.familyId??null, reason, revocation_reason: null,
       created_at: new Date(now).toISOString(), expires_at: expiry === null ? null : new Date(expiry).toISOString(), revoked_at: null, revision } };
   }
 
@@ -636,7 +830,7 @@ export class RootManagement {
     if (target.type !== 'user' || !target.id.startsWith('usr_')) return abortSecurityWrite(this.db,tx,'root_required');
     return withSecurityTarget(this.db, tx, `management:user:${target.id}`, () => onPrimary(() => {
       const bound = this.actors.get(actor as Actor);
-      if (!bound || bound.tx !== tx || bound.target !== target.id || bound.action !== createAction) throw new SecurityAbort('root_required');
+      if (!bound || bound.tx !== tx || bound.target !== target.id || bound.targetType !== target.type || bound.use !== 'management' || bound.action !== createAction) throw new SecurityAbort('root_required');
       const current = this.check(tx, bound.proof, { action: createAction, actualTarget: target, use: 'management' });
       if (!current.effectiveRoot || !current.recordedGrant || !current.subject) throw new SecurityAbort('root_required');
       const previous = actor as Actor;
@@ -669,12 +863,13 @@ export class RootManagement {
       const targetProof = targetPassword && this.versionRow(target.id, digest(targetPassword.password_hash));
       if (!targetProof || !grantAncestryIsCurrent(this.db, tx, target.id, { nodeId: targetProof.password_node_id,
         generation: Number(targetProof.version) })) throw new SecurityAbort('root_required');
-      const evidence = this.evidence(bound.proof);
-      const result = this.insertHumanGrant(tx,target.id,input.reason,expiry,current.checkedRevision,{ type: 'user', id: current.subject.id },
-        [current.recordedGrant.authorityNodeId,evidence.node]);
+      if (current.subject.type!=='user') throw new SecurityAbort('root_required');
+      const source = current.credentialOrigin?.node ?? this.passwordOrigin(bound.proof);
+      const result = this.insertHumanGrant(tx,target.id,input.reason,expiry,current.checkedRevision,{type:current.subject.type,id:current.subject.id},
+        [current.recordedGrant.authorityNodeId,source.nodeId],current.credentialOrigin);
       this.db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,action,target_id,idempotency_key,payload_digest,proof_node_id,actor_grant_id,
         actor_generation,reason,revision_before,revision_after,created_at_ms,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(...key,payload,evidence.node,current.recordedGrant.grantId,current.recordedGrant.generation,input.reason,current.checkedRevision,result.security_revision,Date.now(),JSON.stringify(result));
+        .run(...key,payload,source.nodeId,current.recordedGrant.grantId,current.recordedGrant.generation,input.reason,current.checkedRevision,result.security_revision,Date.now(),JSON.stringify(result));
       return result;
     }));
   }
@@ -699,7 +894,7 @@ export class RootManagement {
     const type = creating ? 'runtime' : 'runtime_trust';
     return withSecurityTarget(this.db,tx,`management:${type}:${targetId}`,() => onPrimary(() => {
       const bound = this.actors.get(actor as Actor);
-      if (!bound || bound.tx !== tx || bound.action !== action || bound.target !== targetId) throw new SecurityAbort('root_required');
+      if (!bound || bound.tx !== tx || bound.action !== action || bound.target !== targetId || bound.targetType !== type || bound.use !== 'management') throw new SecurityAbort('root_required');
       const current = this.check(tx,bound.proof,{ action,actualTarget: { type,id: targetId },use: 'management' });
       if (!current.effectiveRoot || !current.subject || !current.recordedGrant) throw new SecurityAbort('root_required');
       if ((actor as Actor).checkedRevision !== current.checkedRevision || (actor as Actor).recordedGrant?.grantId !== current.recordedGrant.grantId) throw new SecurityAbort('authority_revision_conflict');
@@ -724,7 +919,7 @@ export class RootManagement {
       const revision = before+1;
       if (before !== input.expected_revision || !Number.isSafeInteger(revision)) throw new SecurityAbort('authority_revision_conflict');
       const now = Date.now();
-      const evidence = this.evidence(bound.proof);
+      const source = current.credentialOrigin?.node ?? this.passwordOrigin(bound.proof);
       let result: GrantRootRuntimeTrustResponse | RevokeRootRuntimeTrustResponse;
       if (creating) {
         const request = change.grant;
@@ -737,7 +932,7 @@ export class RootManagement {
         if (!(expiry>now && expiry<=ceiling)) throw new RootManagementRequestError(400,'Invalid trust expiry');
         if (this.db.query(`SELECT trust_id FROM multiremi_runtime_trusts WHERE (runtime_id=? AND revoked_at_ms IS NULL) OR challenge_id=?`).get(targetId,request.challenge_id)) throw new SecurityAbort('authority_revision_conflict');
         const generation = Number(this.db.query('SELECT COALESCE(MAX(generation),0) AS generation FROM multiremi_runtime_trusts WHERE runtime_id=?').get(targetId).generation)+1;
-        const node = this.newNode('runtime_trust','runtime',targetId,generation,revision,expiry,[current.recordedGrant.authorityNodeId,evidence.node,machine.authorityNodeId]);
+        const node = this.newNode('runtime_trust','runtime',targetId,generation,revision,expiry,[current.recordedGrant.authorityNodeId,source.nodeId,machine.authorityNodeId]);
         if (!grantAncestryIsCurrent(this.db,tx,targetId,{ nodeId: node,generation },'runtime')) throw new SecurityAbort('root_authority_revoked');
         const trust: RootRuntimeTrustRecord = { id: randomUUID(),generation,runtime_id: targetId,daemon_id: machine.daemonId,incarnation: machine.incarnation,
           workspace_id: machine.workspaceId,recipient_key_id: machine.keyId,recipient_key_fingerprint: machine.fingerprint,recipient_key_expires_at: new Date(machine.expires).toISOString(),
@@ -760,7 +955,7 @@ export class RootManagement {
       if (!this.db.query('UPDATE multiremi_security_state SET security_revision=? WHERE singleton=1 AND security_revision=? RETURNING singleton').get(revision,before)) throw new SecurityAbort('authority_revision_conflict');
       this.db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,action,target_id,idempotency_key,payload_digest,proof_node_id,actor_grant_id,
         actor_generation,reason,reason_code,revision_before,revision_after,created_at_ms,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(...key,payload,evidence.node,current.recordedGrant.grantId,current.recordedGrant.generation,input.reason,creating?null:change.revoke.reason_code??null,before,revision,now,JSON.stringify(result));
+        .run(...key,payload,source.nodeId,current.recordedGrant.grantId,current.recordedGrant.generation,input.reason,creating?null:change.revoke.reason_code??null,before,revision,now,JSON.stringify(result));
       return result;
     }));
   }
@@ -770,7 +965,7 @@ export class RootManagement {
     const type = action === grantAction ? 'grant' : 'credential_family';
     return withSecurityTarget(this.db, tx, `management:${type}:${targetId}`, () => {
       const bound = this.actors.get(actor as Actor);
-      if (!bound || bound.tx !== tx || bound.target !== targetId || bound.action !== action) throw new SecurityAbort('root_required');
+      if (!bound || bound.tx !== tx || bound.target !== targetId || bound.targetType !== type || bound.use !== 'management' || bound.action !== action) throw new SecurityAbort('root_required');
       const current = this.check(tx, bound.proof, { action, actualTarget: { type, id: targetId }, use: 'management' });
       if (!current.effectiveRoot || !current.recordedGrant || !current.subject) throw new SecurityAbort('root_required');
       const previous = actor as Actor;
@@ -818,7 +1013,7 @@ export class RootManagement {
         .get(revision, before)) throw new SecurityAbort('authority_revision_conflict');
       this.db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,action,target_id,idempotency_key,payload_digest,proof_node_id,
         actor_grant_id,actor_generation,reason,reason_code,revision_before,revision_after,created_at_ms,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(...key, payload, this.evidence(bound.proof).node, current.recordedGrant.grantId, current.recordedGrant.generation,
+        .run(...key, payload, current.credentialOrigin?.node.nodeId ?? this.passwordOrigin(bound.proof).nodeId, current.recordedGrant.grantId, current.recordedGrant.generation,
           input.reason, input.reason_code ?? null, before, revision, now, JSON.stringify(result));
       return result;
     });

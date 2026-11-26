@@ -508,7 +508,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     seedLegacyChatWakeFixture(db);
     seedWakeInvariantMatrix(db);
     seedLegacyProactiveRetryMatrix(db);
-    const tokens = await mintLegacyWakeTokens(db,false);
+    const tokens = mintLegacyWakeTokens(db);
     assertLegacyChatWakeRollback(db,bootstrapPreUnifiedSchema);
     await assertLegacyWakeTokens(db, tokens, true,false);
     bootstrapPreUnifiedSchema(db);

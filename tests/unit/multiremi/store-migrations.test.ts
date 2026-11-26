@@ -1568,7 +1568,7 @@ describe("store migrations", () => {
       seedLegacyChatWakeFixture(database);
     seedWakeInvariantMatrix(database);
     seedLegacyProactiveRetryMatrix(database);
-    const tokens = await mintLegacyWakeTokens(database, false);
+    const tokens = mintLegacyWakeTokens(database);
       assertLegacyChatWakeRollback(database);
     await assertLegacyWakeTokens(database, tokens, true, false);
       migrate(database);

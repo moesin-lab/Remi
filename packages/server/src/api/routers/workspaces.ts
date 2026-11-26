@@ -1,3 +1,5 @@
+import { effectiveRootProof, requestHasRootRead, runRootMutation } from '../helpers/root-access.js';
+import { rootError } from './root.js';
 import { STORAGE_SETTINGS_DEFAULTS, storageThresholdErrors, validateStorageSettingsPatch } from "@multiremi/contracts/storage.js";
 import { MultiremiApiError } from "../helpers.js";
 import { validateCoAuthoredByName, validateCoAuthoredByEmail } from "@multiremi/contracts/co-authored-by";
@@ -205,9 +207,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/workspaces/:id", (c) => {
     const workspaceId = c.req.param("id");
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
-    if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (denied && !requestHasRootRead(c, store, 'workspace.read', 'workspace', workspace.id)) return denied;
     return c.json(workspaceResponse(workspace));
   });
   app.get("/api/workspaces/:id/runtime-provisions", (c) => {
@@ -511,43 +513,34 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       return c.json({ error: message }, 400);
     }
   });
-  app.put("/api/workspaces/:id", async (c) => {
-    const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"))
-      ?? requireWorkspaceAdmin(c, store, c.req.param("id"));
-    if (denied) return denied;
-    const body = sanitizeWorkspaceSettingsInput(
-      await readJson<Partial<CreateWorkspaceInput>>(c),
-    );
+  app.on(["PUT", "PATCH"], "/api/workspaces/:id", async (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId) ?? requireWorkspaceAdmin(c, store, workspaceId);
+    const proof = denied && store.hasWorkspace(workspaceId) ? c.get('multiremiRootProof')?.() : null;
+    if (denied && !proof) return denied;
+    const body = sanitizeWorkspaceSettingsInput(await readJson<Partial<CreateWorkspaceInput>>(c));
     if (hasOwn(body, "settings")) {
-      if(body.settings && hasOwn(body.settings,'issueTopics')) {
-        const humanDenied=requireHumanWorkspaceAdmin(c,store,c.req.param('id'));if(humanDenied)return humanDenied;
+      if (denied) return denied;
+      if (body.settings && hasOwn(body.settings, 'issueTopics')) {
+        const humanDenied = requireHumanWorkspaceAdmin(c, store, workspaceId);
+        if (humanDenied) return humanDenied;
       }
-      const adminDenied = requireWorkspaceAdmin(c, store, c.req.param("id"));
+      const adminDenied = requireWorkspaceAdmin(c, store, workspaceId);
       if (adminDenied) return adminDenied;
     }
     if (hasOwn(body, "repos")) {
       return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
     }
-    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
-  });
-  app.patch("/api/workspaces/:id", async (c) => {
-    const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"))
-      ?? requireWorkspaceAdmin(c, store, c.req.param("id"));
-    if (denied) return denied;
-    const body = sanitizeWorkspaceSettingsInput(
-      await readJson<Partial<CreateWorkspaceInput>>(c),
-    );
-    if (hasOwn(body, "settings")) {
-      if(body.settings && hasOwn(body.settings,'issueTopics')) {
-        const humanDenied=requireHumanWorkspaceAdmin(c,store,c.req.param('id'));if(humanDenied)return humanDenied;
-      }
-      const adminDenied = requireWorkspaceAdmin(c, store, c.req.param("id"));
-      if (adminDenied) return adminDenied;
+    if (!proof) return c.json(workspaceResponse(store.updateWorkspace(workspaceId, body)));
+    const use = { action: 'workspace.update', actualTarget: { type: 'workspace', id: workspaceId }, use: 'write' };
+    try {
+      const updated = runRootMutation(store, proof, use, () => store.updateWorkspace(workspaceId, body), [workspaceId]);
+      return c.json(workspaceResponse(updated));
+    } catch (error) {
+      const response = rootError(c, error);
+      if (response) return response;
+      throw error;
     }
-    if (hasOwn(body, "repos")) {
-      return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
-    }
-    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
   });
   app.get("/api/workspaces/:id/repos", async (c) => {
     const workspaceId = c.req.param("id");
@@ -1082,7 +1075,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.delete("/api/workspaces/:id", (c) => {
     const workspaceId = c.req.param("id");
     const actorToken = currentAccessToken(c);
-    if (actorToken?.type === "task") {
+    const use = { action: 'workspace.delete', actualTarget: { type: 'workspace', id: workspaceId }, use: 'write' };
+    const proof = effectiveRootProof(c, store, use);
+    if (actorToken?.type === "task" && !proof) {
       return c.json({
         error: "forbidden for task token",
         code: "task_token_hard_denied",
@@ -1096,9 +1091,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     }
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireWorkspaceAdmin(c, store, workspaceId);
-    if (denied) return denied;
+    if (denied && !proof) return denied;
     try {
-      const deleted = store.deleteWorkspace(workspaceId);
+      if (!store.hasWorkspace(workspaceId)) return c.json({ error: 'workspace not found' }, 404);
+      const deleted = proof ? runRootMutation(store, proof, use, () => store.deleteWorkspace(workspaceId), [workspaceId])
+        : store.deleteWorkspace(workspaceId);
       if (!deleted) return c.json({ error: "workspace not found" }, 404);
       return c.body(null, 204);
     } catch (error) {
@@ -1120,6 +1117,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
           },
         }, 409);
       }
+      const response = rootError(c, error);
+      if (response) return response;
       throw error;
     }
   });

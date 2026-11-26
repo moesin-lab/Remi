@@ -1,5 +1,6 @@
 // WebSocket payload and registry types shared by api/server.ts, api/realtime.ts and the routers
 // that publish to live clients. Types only — the registries themselves live in api/realtime.ts.
+import type { RegisteredProof } from "./root-access.js";
 import type { MultiremiAccessToken } from "@multiremi/contracts/types.js";
 import type { DaemonProtocolSession } from "../daemon-protocol/session.js";
 
@@ -33,6 +34,7 @@ export type BrowserWebSocketData = {
   userId: string | null;
   /** Compact digest only; current material and ancestry are re-read before sends. */
   jwtDigest?: string;
+  rootProof?: RegisteredProof;
   accessToken: MultiremiAccessToken | null;
   /**
    * Which v2 stream kind this socket serves (MUL-438): `/ws` carries `log:*`,

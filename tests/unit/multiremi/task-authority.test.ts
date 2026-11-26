@@ -5,20 +5,21 @@ import { authenticateBrowserWebSocket, nextWebSocketMessage } from './helpers.js
 import { deltaTraceEvent } from '../../helpers/turn-trace.js';
 import type { MultiremiStore } from '@multiremi/store/store.js';
 import { expect, it } from 'bun:test';
+import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
+import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
+import { RootReceiptClient } from '@multiremi/worker/root-receipt-client.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 import type { RaceInput } from './fixtures/root-issuer-race.js';
-import { createHash, createPublicKey, generateKeyPairSync, privateDecrypt, sign } from 'node:crypto';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
-import { beginMachineChallenge, machineSignaturePayload } from '@multiremi/store/machine-proof.js';
+import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { PreparedRootDelivery, RootReceiptStore, rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
-import { createReplacementAttemptWithinTransaction } from '@multiremi/store/turn-attempts.js';
-import { withAttemptAdmission } from '@multiremi/store/attempt-admission.js';
-import type { InputManifest } from '@multiremi/store/root-authority-contract.js';
+import { planVerifiedAttemptWrite } from '@multiremi/store/attempt-admission.js';
+
 import { PreparedAgentPat } from '@multiremi/store/durable-delegation.js';
 import { bootstrap } from './fixtures/root-kernel-bootstrap.js';
 import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
@@ -248,18 +249,20 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     const origin=service.resolveCurrent(proof,revokeUse).credentialOrigin!;
     expect(db.query('SELECT proof_node_id FROM multiremi_root_management_events WHERE action IN (?,?)').all(grantUse.action,revokeUse.action))
       .toEqual([{proof_node_id:origin.node.nodeId},{proof_node_id:origin.node.nodeId}]);
-  });
+  }, 60_000);
 
   it.each(['expired lease','preempted fence','revoked source','durable delegation','concurrent first offer','concurrent security termination'] as const)('recovers one admitted run and rejects copies after %s', async(failure)=>{
-    const {db,store}=fixture();
+    const {store}=fixture();
+    const db=(store as unknown as {db:SqlDatabase}).db;
     const dependency=hash('protected instructions');
     const trustVersions=[{id:'trust',version:1}];
     const {service,passwordProof,created,signing}=await bootstrap(db,(_tx,agentId)=>({agentId,configEpoch:1,digest:dependency,trustVersions,
       refs:[{kind:'instructions',id:'policy',version:1,digest:dependency,use:'instruction'}]}));
     const api = rootClient(store, signing);
-    const agent=store.createAgent({name:'admitted',provider:'codex'});
+    const runtime=store.registerRuntime({id:'rt_auth',name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
+    const agent=store.createAgent({name:'admitted',provider:'codex',runtimeId:runtime.id});
     const issue=fixture().createIssue({title:'admission',assigneeType:'agent',assigneeId:agent.id});
-    const previous=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'previous'});
+    const previous=store.createTask({agentId:agent.id,issueId:issue.id,prompt:'previous',runtimeId:runtime.id});
     const turnId=db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(previous.id).turn_id;
     const target={turnId,previousAttemptId:previous.id,attemptId:'tsk_admitted'};
     const execution={attemptId:target.attemptId,runtimeId:'rt_auth',daemonId:'daemon',incarnation:'inc',configEpoch:1,executionDigest:hash('execution'),
@@ -284,7 +287,6 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     nodes('machine','machine_registration','daemon','daemon',[]);
     nodes('runtime-trust','runtime_trust','runtime',execution.runtimeId,['machine',parent]);
     nodes('provider','provider_trust','agent',agent.id,['runtime-trust','grant-agent']);
-    store.registerRuntime({id:execution.runtimeId,name:'test',provider:'codex',workspaceId:'local',daemonId:'daemon'});
     const signingKeys=generateKeyPairSync('ed25519');
     const signer=signingKeys.publicKey.export({type:'spki',format:'pem'});
     const recipientKeys=generateKeyPairSync('rsa',{modulusLength:3072});
@@ -296,17 +298,18 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       tx=>beginMachineChallenge(db,tx,'machine-token','rt_auth','root.runtime-trust.grant','rt_auth'));
     db.query('UPDATE multiremi_machine_challenges SET consumed_at_ms=1 WHERE challenge_id=?').run(challenge.id);
     db.query(`INSERT INTO multiremi_runtime_trusts VALUES('trust','rt_auth',1,'inc',?,'runtime-trust','{}',NULL)`).run(challenge.id);
+    const inputs={manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
+      entries:[],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}};
+    const retry=()=>{
+      const {plan,write}=planVerifiedAttemptWrite(service,passwordProof,{...target,agentId:agent.id},execution,()=>({execution,inputs}));
+      return store.withAttemptAdmission(plan.fenceTerm,plan,write,()=>store.retryTurnAsMember(turnId));
+    };
+    expect(retry).toThrow('authority_revision_conflict');
     db.query("UPDATE multiremi_turn_attempts SET status='lost' WHERE id=?").run(previous.id);
-    const plan=service.planAttemptAdmission(passwordProof,target,execution);
-    let manifest!:InputManifest;
-    withAttemptAdmission(db,undefined,plan,{attemptId:target.attemptId,kernel:service,resolveInvocation(tx){
-      const invocation=service.verifyDirectRetryInvocation(tx,passwordProof,target);
-      const actor=service.authorizeWrite(tx,passwordProof,{action:'attempt.inputs.approve',use:'write',actualTarget:{type:'attempt',id:target.attemptId}});
-      manifest=service.approveAttemptInputs(tx,actor,invocation,execution,{manifest:{id:'manifest',version:1},sourcePolicy:{id:'explicit',version:1},
-        entries:[],providerState:{sessionId:null,securityDomainId:'domain',checkpointDigest:null}});
-      return {subject:{type:'agent',id:agent.id},invocation};
-    },resolveExecution(){return {execution,manifest};}},()=>createReplacementAttemptWithinTransaction(db,turnId,{id:target.attemptId,
-      previousStatus:'lost',reason:'trusted retry',execution:{runtimeId:'rt_auth'}}));
+    db.query("UPDATE multiremi_turns SET status='failed' WHERE id=?").run(turnId);
+    expect(retry().current_attempt_id).toBe(target.attemptId);
+
+    const manifest=JSON.parse(db.query('SELECT manifest_json FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(target.attemptId).manifest_json);
 
     const task=store.getTask(target.attemptId)!;
     await expect(store.createTaskAccessToken(task,'local')).rejects.toThrow('root_authority_revoked');
@@ -344,7 +347,14 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     expect(()=>withSecurityWrite(db,'1',offerPlan,tx=>service.issue(tx,candidate))).toThrow('credential_version_conflict');
     const receipts=new RootReceiptStore(db,service);
     expect(()=>receipts.commitFirstOffer(candidate,offerLease)).toThrow('stale_execution');
-    db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(task.id);
+    expect(store.claimTask(execution.runtimeId,{supportsPromptPolicy:true,rootMachineCredentialId:'machine-token'})?.id).toBe(task.id);
+    const initialIssue=fixture().createIssue({title:'direct creation',assigneeType:'agent',assigneeId:agent.id});
+    const initialSession=store.getOrCreateDefaultIssueSession(initialIssue.id);
+    const initialExecution={...execution,attemptId:'tsk_initial'};
+    const initialTarget={turnId:initialExecution.attemptId,attemptId:initialExecution.attemptId,previousAttemptId:null,agentId:agent.id,workspaceId:agent.workspaceId,sessionId:initialSession.id};
+    const initial=planVerifiedAttemptWrite(service,passwordProof,initialTarget,initialExecution,()=>({execution:initialExecution,inputs:{...inputs,manifest:{id:'initial_manifest',version:1}}}));
+    const createdTask=store.withAttemptAdmission(initial.plan.fenceTerm,initial.plan,initial.write,()=>store.createTask({id:initialExecution.attemptId,agentId:agent.id,issueId:initialIssue.id,issueSessionId:initialSession.id,runtimeId:runtime.id,prompt:'direct'}));
+    expect(db.query('SELECT eligibility FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(createdTask.id)?.eligibility).toBe('root');
     const wrongRecipient=await PreparedRootDelivery.prepare({...tuple,recipient_key_id:'retired'},business,enc);
     expect(()=>receipts.commitFirstOffer(wrongRecipient,offerLease)).toThrow();
     expect(db.query('SELECT run_id FROM multiremi_usage_runs WHERE task_id=?').get(task.id)).toBeNull();
@@ -369,11 +379,13 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       const challenge=store.withSecurityWrite('1',recoveryPlan,tx=>repo.challenge(tx,connection,tuple.runtime_id,action,tuple.receipt_id));
       return signChallenge(challenge);
     }
+    const machineKeys = new RootMachineKeys({runtimeId:local.runtime_id, daemonId:local.daemon_id, consumerId:local.consumer_id,
+      incarnation:local.incarnation, recipientKeyId:local.recipient_key_id, deploymentId:'test', credentialId:'daemon-token',
+      credentialDigest:createHash('sha256').update('machine-token').digest('hex'), keyExpiresAtMs:Date.parse(expiresAt)}, recipientKeys.privateKey, signingKeys.privateKey);
+    expect(machineKeys.publicBinding().recipientSpki).toBe(recipient);
     function signChallenge(challenge: ReturnType<typeof repo.challenge>) {
-      const nonce=privateDecrypt({key:recipientKeys.privateKey,oaepHash:'sha256'},Buffer.from(challenge.encryptedNonce,'base64url')).toString('base64url');
-      const signed_at=new Date().toISOString();
-      const signature=sign(null,machineSignaturePayload(challenge,nonce,signed_at),signingKeys.privateKey).toString('base64url');
-      return {id:challenge.id,proof:{...local,nonce,signed_at,signature}};
+      expect(()=>machineKeys.answerChallenge({...challenge,targetId:'wrong-target'})).toThrow();
+      return {id:challenge.id,proof:machineKeys.answerChallenge(challenge)};
     }
     function authenticate(action:Parameters<typeof repo.challenge>[3]) {
       const signed=signedChallenge(action);
@@ -405,7 +417,6 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       launch_identity:'launch',carrier_mode:'immutable_run_env' as const,started_at:null};
     const acknowledge=()=>store.withSecurityWrite('1',recoveryPlan,tx=>repo.acknowledge(tx,ackProof,{tuple,envelope_digest:delivery.envelope_digest,
       execution_locator:locator,installed_at:new Date().toISOString()}));
-    expect(acknowledge().idempotent_replay).toBe(false);
     repo.releaseConnection(originalSocket);
     expect(status).toThrow('root_authority_revoked');
     expect(acknowledge).toThrow('root_authority_revoked');
@@ -432,25 +443,53 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       await connect();
       await expect(rpc('status',{execution_key:{attempt_id:task.id},machine_proof:staleProof})).rejects.toMatchObject({code:'authority_revoked'});
       const query={execution_key:{attempt_id:task.id},machine_proof:await wireProof('status')};
-      expect(await rpc('status',query)).toMatchObject({ok:true,ack_state:'confirmed',allowed_recovery_action:'start_execution'});
+      expect(await rpc('status',query)).toMatchObject({ok:true,ack_state:'pending',allowed_recovery_action:'replay_envelope'});
       await expect(rpc('status',query)).rejects.toMatchObject({code:'authority_revoked'});
-      expect(await rpc('replay',{receipt_id:tuple.receipt_id,expected_receipt_version:1,expected_delivery_version:1,
-        run_lease_id:'one',fence_term:'1',machine_proof:await wireProof('replay')})).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
-      expect(await rpc('install_ack',{tuple,envelope_digest:delivery.envelope_digest,installed_at:new Date().toISOString(),execution_locator:locator,
-        machine_proof:await wireProof('install_ack')})).toMatchObject({ok:true,idempotent_replay:true});
+      const recovery = new RootReceiptClient(client, {async answerChallenge(challenge) { return machineKeys.answerChallenge(challenge); }});
+      const pending = await recovery.status(tuple,delivery.envelope_digest);
+      expect(await recovery.replay(tuple,pending)).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
+      let seq = 0;
+      const startEvent = (payload: Record<string, unknown>, runtimeId = local.runtime_id, sequence = ++seq) => client.event({
+        t: 'task.start', seq: sequence, rt: runtimeId, p: {task_id: task.id, usage_run_id: tuple.consumer_id, ...payload},
+      });
+      const rootStart = {root_receipt_id: tuple.receipt_id, execution_locator: locator};
+      await expect(startEvent({...rootStart, machine_proof: await wireProof('start')})).rejects.toMatchObject({code:'stale_execution'});
+      const installAck = () => recovery.acknowledge(tuple,delivery.envelope_digest,locator);
+      expect(await installAck()).toMatchObject({ok:true,idempotent_replay:false});
+      expect(await installAck()).toMatchObject({ok:true,idempotent_replay:true});
+      await expect(startEvent({})).rejects.toMatchObject({code:'authority_revoked'});
+      await expect(startEvent({...rootStart, machine_proof: await wireProof('status')})).rejects.toMatchObject({code:'authority_revoked'});
+      const signedStart = {...rootStart, machine_proof: await wireProof('start')};
+      await expect(startEvent({...signedStart, root_receipt_id:'different-receipt'})).rejects.toMatchObject({code:'authority_revoked'});
+      await expect(startEvent({...signedStart, usage_run_id:'different-consumer'})).rejects.toMatchObject({code:'authority_revoked'});
+      await expect(startEvent({...signedStart, task_id:previous.id})).rejects.toThrow();
+      await expect(startEvent(signedStart, 'other-runtime')).rejects.toThrow();
+      await expect(startEvent({...signedStart, execution_locator:{...locator,birth_token_id:'different'}})).rejects.toMatchObject({code:'stale_execution'});
+      const currentLease = () => db.query('SELECT lease_version,expires_at_ms FROM multiremi_current_task_leases WHERE attempt_id=?').get(task.id);
+      const beforeStart = Date.now();
+      expect(await startEvent({...signedStart, lease_expires_at_ms:1})).toMatchObject({ok:true,execution_authorized:true});
+      const running = currentLease();
+      expect(Number(running.expires_at_ms)).toBeGreaterThan(beforeStart);
+      expect(Number(running.expires_at_ms)).toBeLessThanOrEqual(Date.now()+60_000);
+      await expect(startEvent(signedStart, local.runtime_id, seq)).rejects.toMatchObject({code:'authority_revoked'});
+      expect(await startEvent({...rootStart, machine_proof:await wireProof('start')}, local.runtime_id, seq)).toMatchObject({ok:true,code:'start_replayed'});
+      expect(currentLease()).toEqual(running);
+      const pendingReplay = {...rootStart, machine_proof:await wireProof('start')};
+      db.query('UPDATE multiremi_current_task_leases SET expires_at_ms=1 WHERE attempt_id=?').run(task.id);
+      await expect(startEvent(pendingReplay)).rejects.toMatchObject({code:'authority_revoked'});
+      db.query('UPDATE multiremi_current_task_leases SET expires_at_ms=? WHERE attempt_id=?').run(running.expires_at_ms,task.id);
     } finally {client.stopLane(lane); await server.stop(true);}
     connection=repo.bindConnection({},'machine-token')!;
     statusProof=authenticate('status');
     replayProof=authenticate('replay');
     ackProof=authenticate('install_ack');
-    expect(status().allowed_recovery_action).toBe('start_execution');
+    expect(status().allowed_recovery_action).toBe('reattach_running');
     expect(acknowledge().idempotent_replay).toBe(true);
     const startProof=authenticate('start');
     expect(()=>store.startTaskFromDaemon(task.id,{runtimeId:tuple.runtime_id,daemonId:tuple.daemon_id,workspaceId:'local'},tuple.consumer_id)).toThrow('root_authority_revoked');
     const start=(birthToken:string)=>store.withSecurityWrite('1',recoveryPlan,tx=>store.startRootTaskFromDaemon(tx,startProof,tuple.receipt_id,
       {...locator,birth_token_id:birthToken},lease.expiresAtMs));
     expect(()=>start('different')).toThrow('stale_execution');
-    expect(start('birth')).toBe('started');
     expect(start('birth')).toBe('replayed');
     if (failure==='concurrent security termination') {
       const use={action:'credential.pat.create' as const,actualTarget:{type:'agent',id:agent.id},use:'write',requestDigest:hash('race'),expiresAtMs:Date.now()+120000,idempotencyKey:'race'};
@@ -543,6 +582,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       return;
     }
     expect(Number(db.query('SELECT COUNT(*) AS total FROM multiremi_usage_runs WHERE task_id=?').get(task.id).total)).toBe(1);
+    const plan=receipts.planRecovery(tuple.receipt_id);
     expect(()=>withSecurityWrite(db,'1',plan,tx=>writeCurrentTaskLease(db,tx,1,lease))).toThrow('authority_revision_conflict');
     expect(withSecurityWrite(db,'1',plan,tx=>readCurrentTaskLease(db,tx,target.attemptId)?.state)).toBe('running');
     expect(()=>withSecurityWrite(db,undefined,plan,tx=>readCurrentTaskLease(db,tx,target.attemptId))).toThrow('security_tx_invalid');
@@ -613,7 +653,7 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       expect(db.query('SELECT proof_node_id,actor_grant_id FROM multiremi_root_management_events WHERE revision_after=? AND action=?').get(revoked.security_revision,revokeUse.action))
         .toMatchObject({proof_node_id:candidate.materialNodeId,actor_grant_id:'grant-agent'});
     }
-  }, 20000);
+  }, 60_000);
 
   it('keeps ordinary attempts ineligible and refuses lease writes without the active fence',()=>{
     const {db,store}=fixture();

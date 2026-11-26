@@ -1,5 +1,8 @@
 import type { SqlDatabase } from './db/postgres.js';
-import type { AdmissionTicket, AuthorityKernel, FinalExecution, InputManifest } from './root-authority-contract.js';
+import type { CreateTaskInput } from '@multiremi/contracts/types.js';
+import type { MultiremiStore } from './store.js';
+import type { ApprovedExecutionInputs, RootManagement } from './root-management.js';
+import type { AdmissionTicket, AuthorityKernel, CredentialProof, FinalExecution, InputManifest } from './root-authority-contract.js';
 import { withSecurityTarget, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
 import { tableExists } from './unified-model-migration.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -11,11 +14,69 @@ type AdmissionArgs = Parameters<AdmissionKernel['admitAttempt']>;
 export interface AttemptWrite {
   readonly attemptId: string;
   readonly kernel: AdmissionKernel;
+  beforeOperation?(tx: SecurityTx): void;
   resolveInvocation(tx: SecurityTx): { subject: AdmissionArgs[1]; invocation: AdmissionArgs[2] };
   resolveExecution(tx: SecurityTx, row: AttemptRow): { execution: FinalExecution; manifest: InputManifest };
 }
 
-const activeInsert = new WeakMap<SqlDatabase, (row: AttemptRow, insert: () => void) => void>();
+const activeInsert = new WeakMap<SqlDatabase, { attemptId: string; apply(row: AttemptRow, insert: () => void): void }>();
+
+export function reservedAttemptId(db: SqlDatabase) { return activeInsert.get(db)?.attemptId; }
+
+type VerifiedTarget = Parameters<RootManagement['verifyAttemptInvocation']>[2] & { agentId: string };
+type ResolvedAttempt = { execution: FinalExecution; inputs: ApprovedExecutionInputs };
+type ResolveAttempt = (tx: SecurityTx, row: AttemptRow) => ResolvedAttempt;
+
+export function planVerifiedAttemptWrite(service: RootManagement, proof: CredentialProof, target: VerifiedTarget,
+  preview: FinalExecution, resolve: ResolveAttempt) {
+  const plan = service.planAttemptAdmission(proof, target, preview);
+  let invocation: AdmissionArgs[2] | undefined;
+  let approval: { resolved: ResolvedAttempt; manifest: InputManifest } | undefined;
+  const write: AttemptWrite = {
+    attemptId: target.attemptId, kernel: service,
+    beforeOperation(tx) {
+      invocation = undefined;
+      approval = undefined;
+      if (target.previousAttemptId !== null) invocation = service.verifyDirectRetryInvocation(tx, proof, target);
+    },
+    resolveInvocation(tx) {
+      invocation ??= service.verifyAttemptInvocation(tx, proof, target);
+      return { subject: { type: 'agent', id: target.agentId }, invocation };
+    },
+    resolveExecution(tx, row) {
+      const resolved = resolve(tx, row);
+      if (!invocation || row.id !== target.attemptId || row.turn_id !== target.turnId || row.runtime_id !== resolved.execution.runtimeId ||
+          !isDeepStrictEqual(preview, resolved.execution)) throw new Error('authority_revision_conflict');
+      if (approval) {
+        if (!isDeepStrictEqual(approval.resolved, resolved)) throw new Error('authority_revision_conflict');
+      } else {
+        const actor = service.authorizeWrite(tx, proof, { action: 'attempt.inputs.approve', use: 'write', actualTarget: { type: 'attempt', id: target.attemptId } });
+        const manifest = service.approveAttemptInputs(tx, actor, invocation, resolved.execution, resolved.inputs);
+        approval = { resolved: structuredClone(resolved), manifest };
+      }
+      return { execution: resolved.execution, manifest: approval.manifest };
+    },
+  };
+  return { plan, write };
+}
+
+export function createAdmittedTask(store: MultiremiStore, input: CreateTaskInput, proof: CredentialProof, preview: FinalExecution, resolve: ResolveAttempt) {
+  const agent = store.getAgent(input.agentId);
+  const sessionId = input.conversationSessionId ?? input.issueSessionId ?? input.issue_session_id ?? input.chatSessionId;
+  if (!agent || !sessionId || input.parentTaskId || (input.id && input.id !== preview.attemptId)) throw new Error('authority_revision_conflict');
+  const target = { turnId: preview.attemptId, attemptId: preview.attemptId, previousAttemptId: null, agentId: agent.id, workspaceId: agent.workspaceId, sessionId };
+  const { plan, write } = planVerifiedAttemptWrite(store.rootManagement, proof, target, preview, resolve);
+  return store.withAttemptAdmission(plan.fenceTerm, plan, write, () => store.createTask({ ...input, id: preview.attemptId }));
+}
+
+export function retryAdmittedTurn(store: MultiremiStore, turnId: string, previousAttemptId: string, proof: CredentialProof,
+  preview: FinalExecution, resolve: ResolveAttempt, cold = false, authorizeConversation?: (sessionId: string) => void) {
+  const turn = store.getTurn(turnId);
+  if (!turn || turn.current_attempt_id !== previousAttemptId) throw new Error('authority_revision_conflict');
+  const target = { turnId, previousAttemptId, attemptId: preview.attemptId, agentId: turn.agent_id };
+  const { plan, write } = planVerifiedAttemptWrite(store.rootManagement, proof, target, preview, resolve);
+  return store.withAttemptAdmission(plan.fenceTerm, plan, write, () => store.retryTurnAsMember(turnId, cold, authorizeConversation));
+}
 
 function saveOrdinaryEligibility(db:SqlDatabase, attemptId:unknown):void {
   const saveWithoutActiveGrant = db.query(`INSERT INTO multiremi_attempt_eligibility(attempt_id,eligibility)
@@ -41,7 +102,7 @@ export function withAttemptAdmission<T>(db: SqlDatabase, fence: string | undefin
     let inserted = false;
     let ticket: AdmissionTicket | undefined;
     let executionRow: AttemptRow | undefined;
-    activeInsert.set(db, (row, insert) => withSecurityTarget(db, tx, `attempt:${write.attemptId}`, () => {
+    activeInsert.set(db, { attemptId: write.attemptId, apply: (row, insert) => withSecurityTarget(db, tx, `attempt:${write.attemptId}`, () => {
       if (inserted || row.id !== write.attemptId) throw new Error('Unexpected admission target');
       const { subject, invocation } = write.resolveInvocation(tx);
       const { execution, manifest } = write.resolveExecution(tx, row);
@@ -52,8 +113,9 @@ export function withAttemptAdmission<T>(db: SqlDatabase, fence: string | undefin
       if (ticket) executionRow=readExecutionRow(db,write.attemptId);
       else saveOrdinaryEligibility(db,write.attemptId);
       inserted = true;
-    }));
+    }) });
     try {
+      write.beforeOperation?.(tx);
       const result = operation();
       if (!inserted) throw new Error('Missing admitted attempt');
       if (ticket) {
@@ -76,7 +138,7 @@ export function insertTurnAttempt(db: SqlDatabase, row: AttemptRow): void {
       columns.map(column => row[column] ?? null));
   };
   const admit = activeInsert.get(db);
-  if (admit) admit(row, insert);
+  if (admit) admit.apply(row, insert);
   else {
     const insertOrdinary = () => {
       insert();

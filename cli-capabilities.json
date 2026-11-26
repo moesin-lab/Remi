@@ -58,6 +58,18 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "db.enroll-machine": {
+      "command": "remi db enroll-machine",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "db.prepare": {
       "command": "remi db prepare",
       "aliases": [],

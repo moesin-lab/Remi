@@ -20,6 +20,7 @@ import {
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { assertNotHomeDefaultInTest, multiremiSharedLockPath } from "@shared/home-paths.js";
+import { linuxProcessBirth } from './process-birth.mjs';
 
 const OWNER_LOCK_DIR = "owner.lock";
 const OWNER_FILE = "owner.json";
@@ -420,22 +421,7 @@ function readProcessStartId(pid: number): string | null {
     return null;
   }
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8").trim();
-    // comm (field 2) is parenthesized and may contain spaces or `)`, so split
-    // after its final closing delimiter. field 22 is index 19 from field 3.
-    const commEnd = stat.lastIndexOf(")");
-    if (commEnd < 0) return null;
-    const fields = stat.slice(commEnd + 1).trim().split(/\s+/);
-    const startTicks = fields[19];
-    if (!startTicks || !/^\d+$/.test(startTicks)) return null;
-    let bootId = "unknown-boot";
-    try {
-      const value = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-      if (value) bootId = value;
-    } catch {
-      // start ticks remain timezone-independent; missing boot id only makes
-      // post-reboot PID reuse fail closed when the two IDs happen to match.
-    }
+    const {bootId,startTicks} = linuxProcessBirth(pid,false);
     return `linux:${bootId}:${startTicks}`;
   } catch {
     return null;

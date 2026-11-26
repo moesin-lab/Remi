@@ -12,6 +12,10 @@ export interface AgentConfigurationApproval {
   }[];
 }
 
+export function executionTrustNodeId(grantId: string, trustId: string, reference: AgentDependencyRef): string {
+  return agentDependencyDigest(['execution-trust-v1', grantId, trustId, reference]);
+}
+
 export function expandAgentSourceApprovals(db: SqlDatabase): void {
   db.exec(`CREATE TABLE IF NOT EXISTS multiremi_agent_config_epochs (
     agent_id TEXT PRIMARY KEY NOT NULL, workspace_id TEXT NOT NULL, config_epoch INTEGER NOT NULL CHECK(config_epoch>=0),

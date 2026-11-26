@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { constants, createHash, generateKeyPairSync, privateDecrypt, sign } from 'node:crypto';
+import { challengeEncryptionLabel } from '@shared/machine-challenge.js';
 import { beginMachineChallenge,machineSignaturePayload,verifyMachineChallenge,requireCurrentMachine,bindMachineConnection,releaseMachineConnection,type MachineConnection } from '@multiremi/store/machine-proof.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -190,7 +191,7 @@ test('trust grant binds live daemon credential, enrollment, two key proofs and s
   const connection = bindMachineConnection(db,owner,bearer);
   if (!connection) throw new Error('Fixture daemon connection was not bound');
   const challenge = withSecurityWrite(db,undefined,plan,tx=>beginMachineChallenge(db,tx,connection,'rt_test',action,'rt_test'));
-  const nonce = privateDecrypt({ key:receiver.privateKey,oaepHash:'sha256',padding:constants.RSA_PKCS1_OAEP_PADDING },Buffer.from(challenge.encryptedNonce,'base64url')).toString('base64url');
+  const nonce = privateDecrypt({ key:receiver.privateKey,oaepHash:'sha256',padding:constants.RSA_PKCS1_OAEP_PADDING,oaepLabel:challengeEncryptionLabel(challenge) },Buffer.from(challenge.encryptedNonce,'base64url')).toString('base64url');
   const signedAt = new Date().toISOString();
   const machine = { consumer_id:'consumer',runtime_id:'rt_test',daemon_id:'daemon-test',incarnation:'incarnation',recipient_key_id:'key-id',
     recipient_key_fingerprint:`sha256:${createHash('sha256').update(receiver.publicKey.export({type:'spki',format:'der'})).digest('hex')}`,

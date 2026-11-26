@@ -5,6 +5,8 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { AgentDependencies, agentDependencyDigest, type AgentDependencyRef } from '@multiremi/store/agent-dependencies.js';
 import { getGroupExecutionProfile } from '@multiremi/store/execution-groups.js';
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
+import { executionTrustNodeId } from '@multiremi/store/agent-source-approvals.js';
+import { assertUnrevokedAncestry } from '@multiremi/store/authority-provenance.js';
 import { withSecurityWrite, type SecurityTx } from '@multiremi/store/security-write.js';
 import type { StoreContext } from '@multiremi/store/context.js';
 import { readWorkspacePromptSettings } from '@multiremi/prompts/workspace-settings.js';
@@ -110,6 +112,13 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     const result=withSecurityWrite(db,undefined,grantPlan,tx=>service.grant(tx,service.authorizeWrite(tx,registered,grantUse),{
       subject:{type:'agent',id:agent.id},runtime_trust_ids:['trust'],accepted_dependency_digest:approved.digest,expected_revision:grantPlan.expectedRevision,idempotency_key:'grant',reason:'reviewed'}));
     expect(result.grant.subject.id).toBe(agent.id);
+    const trustSources = [provider,checkpointPolicy].map(ref=>executionTrustNodeId(result.grant.id,'trust',ref));
+    const checkSource = (id:string) => withSecurityWrite(db,undefined,{expectedRevision:result.security_revision,workspaceIds:[],numberKeys:[],domainTargets:[`authority:${id}`]},
+      tx=>assertUnrevokedAncestry(db,tx,{nodeId:id,generation:result.grant.generation}));
+    for (const id of trustSources) {
+      expect(checkSource(id)).toBeGreaterThan(Date.now());
+      expect(db.query('SELECT parent_id FROM multiremi_authority_edges WHERE child_id=? AND dependency=\'continuous\'').all(id).map(row=>row.parent_id).sort()).toEqual([result.grant.authority_node_id,'trust-node'].sort());
+    }
     const manifest = resolve();
     expect(manifest.trustVersions).toEqual([{id:'trust',version:1}]);
     expect(manifest.refs).toContainEqual(indirect);
@@ -131,6 +140,7 @@ pendingTurnBackendTests('agent dependency resolution', fixture => {
     expect(resolve).toThrow('root_required');
     db.run("UPDATE multiremi_agent_source_snapshots SET resource_version=0 WHERE kind='shared-source'");
     db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='machine'");
+    for (const id of trustSources) expect(()=>checkSource(id)).toThrow('root_authority_revoked');
     expect(resolve).toThrow('root_runtime_untrusted');
     db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=NULL WHERE node_id='machine'");
     expect(resolve().digest).toBe(manifest.digest);

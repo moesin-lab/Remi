@@ -5,11 +5,14 @@ import type { DaemonTurnInput } from "@multiremi/contracts/daemon-protocol.js";
 import { samePolicyOffer, type PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
 import { hashSystemPromptContent, LEGACY_BASELINE_DEFAULT_REVISION } from '@shared/system-prompt-policy-hash.js';
 import type { MultiremiTaskReportOutbox } from './outbox.js';
+import { classifyDaemonTaskOfferPayload, classifyDaemonRestartResumeReply, type RootDeliveryEnvelopePayload } from '@multiremi/contracts/root-delivery.js';
 
 export type DaemonTurnTask = NonNullable<ReturnType<typeof normalizeDaemonClaimTask>> & DaemonTurnInput;
 
 /** No prompt/id fallback: old offers cannot enter the execution loop. */
 export function normalizeDaemonTurnOffer(payload: Record<string, unknown>): DaemonTurnTask {
+  const delivery = classifyDaemonTaskOfferPayload(payload);
+  if (delivery.kind !== 'standard') throw new DaemonProtocolRpcError(delivery.kind === 'root' ? 'root_delivery_unsupported' : delivery.code, false);
   const seq = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
   if ("prompt" in payload || typeof payload.turn_id !== "string" || !payload.turn_id
     || typeof payload.attempt_id !== "string" || !payload.attempt_id
@@ -30,10 +33,17 @@ export function normalizeDaemonTurnOffer(payload: Record<string, unknown>): Daem
   return task as DaemonTurnTask;
 }
 
+export function normalizeStandardResumeTask(reply: Record<string, unknown>): DaemonTurnTask {
+  const delivery = classifyDaemonRestartResumeReply(reply);
+  if (delivery.kind !== 'standard') throw new DaemonProtocolRpcError(delivery.kind === 'root' ? 'root_delivery_unsupported' : delivery.code, false);
+  return normalizeDaemonTurnOffer(reply.task as Record<string, unknown>);
+}
+
 export type OfferRejection = "disk_critical" | "capacity" | "claims_paused" | "draining" | "binary_skill_files_unsupported";
 
 export function registerDaemonOfferHandler(client: DaemonProtocolClient, options: {
   runtimeId(): string | null;
+  receiveRoot?(delivery: RootDeliveryEnvelopePayload, preparing: number): Promise<void>;
   stopSignal?(): AbortSignal;
   adoption?: { workspace(): string; daemon(): string; lane(): string; outbox(): MultiremiTaskReportOutbox; held(attemptId:string): boolean };
   /** Why this offer is refused, or null; it sees the task (PR 6 §2.5: a parked lane's offer skips `capacity`). */
@@ -45,10 +55,24 @@ export function registerDaemonOfferHandler(client: DaemonProtocolClient, options
   client.onWelcome(() => { connection++; pending.clear(); });
   client.registerFrameHandler("task.offer", async (frame: DaemonParsedFrame) => {
     if (!frame.rt || frame.rt !== options.runtimeId() || frame.seq === null) return;
+    const delivery = classifyDaemonTaskOfferPayload(frame.payload);
+    if (delivery.kind === 'root' && options.receiveRoot) {
+      const owner = connection;
+      try {
+        if (options.stopSignal?.().aborted) return;
+        await options.receiveRoot(delivery.payload.root_delivery, pending.size);
+        if (connection === owner) client.send({ t: 'res', re: String(frame.seq), p: { ok: true } });
+      } catch (error) {
+        if (connection === owner) client.send({ t: 'res', re: String(frame.seq), p: { ok: false,
+          code: error instanceof DaemonProtocolRpcError ? error.code : 'stale_execution',
+          retryable: error instanceof DaemonProtocolRpcError && error.retryable } });
+      }
+      return;
+    }
     let task: DaemonTurnTask;
     try { task = normalizeDaemonTurnOffer(frame.payload); }
-    catch {
-      client.send({ t: "res", re: String(frame.seq), p: { ok: false, code: "report_shape_retired", retryable: false } });
+    catch (error) {
+      client.send({ t: "res", re: String(frame.seq), p: { ok: false, code: error instanceof DaemonProtocolRpcError ? error.code : "report_shape_retired", retryable: false } });
       return;
     }
     // A replay of an accepted entity stays accepted even after local capacity filled.

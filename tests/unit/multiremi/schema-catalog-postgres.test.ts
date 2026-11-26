@@ -205,7 +205,7 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
       GRANT UPDATE(b) ON ${schema}.acl_atoms TO pg_monitor WITH GRANT OPTION`);
     let replaced = 0;
     const legacy = new Proxy(db, { get(target, key) {
-      if (key === 'query') return (sql: string) => target.query(sql.replace(
+      if (key === 'query') return (sql: string) => target.query(sql.replace(/CASE WHEN a\.attacl IS NULL THEN '\{\}' ELSE (ARRAY\(SELECT atom[\s\S]*?ORDER BY atom\)) END AS acl/, '$1 AS acl').replace(
         /CROSS JOIN LATERAL \(VALUES \(([^\n]+)\),\n      \(CASE ([^\n]+) END\)\) v\(atom\)/g,
         (_match, atom, conditional) => { replaced++; return `CROSS JOIN LATERAL unnest(ARRAY[${atom}, CASE ${conditional} END]) atom`; },
       ));

@@ -1,4 +1,6 @@
 import { constants, createHash, createPublicKey, publicEncrypt, randomBytes, randomUUID, verify } from 'node:crypto';
+import { challengeEncryptionLabel, machineSignaturePayload, type MachineChallenge } from '@shared/machine-challenge.js';
+export { machineSignaturePayload, type MachineChallenge } from '@shared/machine-challenge.js';
 import { ROOT_DELIVERY_MIN_RSA_BITS, type RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
 import type { SqlDatabase } from './db/postgres.js';
 import { assertUnrevokedAncestry } from './authority-provenance.js';
@@ -102,15 +104,6 @@ function enrollment(db: SqlDatabase, runtimeId: string, credentialDigest: string
   return { row,recipientKey,signingKey,fingerprint,binding: hash(binding) };
 }
 
-export interface MachineChallenge {
-  id: string; encryptedNonce: string; binding: string; purpose: string; targetId: string; expiresAtMs: number;
-}
-
-export function machineSignaturePayload(challenge: Omit<MachineChallenge,'encryptedNonce'>, nonce: string, signedAt: string): Buffer {
-  return Buffer.from(JSON.stringify(['remi.machine.challenge.v1',challenge.id,challenge.binding,challenge.purpose,challenge.targetId,
-    challenge.expiresAtMs,nonce,signedAt]));
-}
-
 export function beginMachineChallenge(db: SqlDatabase, tx: SecurityTx, connection: string | MachineConnection, runtimeId: string, purpose: string, targetId: string): MachineChallenge {
   return withSecurityTarget(db,tx,`machine:${runtimeId}`,() => {
     const {row,recipientKey,binding} = enrollment(db,runtimeId,currentConnectionDigest(db,connection));
@@ -118,7 +111,9 @@ export function beginMachineChallenge(db: SqlDatabase, tx: SecurityTx, connectio
     const id = randomUUID();
     const nonce = randomBytes(32);
     const expiresAtMs = Math.min(Date.now()+60_000,Number(row.key_expires_at_ms));
-    const encryptedNonce = publicEncrypt({ key: recipientKey,oaepHash: 'sha256',padding: constants.RSA_PKCS1_OAEP_PADDING },nonce).toString('base64url');
+    const header = { id, binding, purpose, targetId, expiresAtMs };
+    const encryptedNonce = publicEncrypt({ key: recipientKey, oaepHash: 'sha256', padding: constants.RSA_PKCS1_OAEP_PADDING,
+      oaepLabel: challengeEncryptionLabel(header) }, nonce).toString('base64url');
     db.query(`INSERT INTO multiremi_machine_challenges(challenge_id,incarnation,purpose,target_id,nonce_digest,binding_digest,expires_at_ms)
       VALUES(?,?,?,?,?,?,?)`).run(id,row.incarnation,purpose,targetId,nonceDigest(connection,nonce.toString('base64url')),binding,expiresAtMs);
     nonce.fill(0);

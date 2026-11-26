@@ -31,7 +31,10 @@ test('rejects stale, malformed, unreviewed and mismatched declarations', () => {
 });
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
-const schema = { expandLevel: 3, contractLevel: 0 };
+const { expandLevel, contractLevel } = JSON.parse(await readFile(
+  new URL('../packages/server/src/store/schema-compatibility.json', import.meta.url), 'utf8',
+));
+const schema = { expandLevel, contractLevel };
 const target = { ...manifest, dataSchema: sha256(JSON.stringify({ format: 1, ...schema })) };
 const origin = 'https://github.com/moesin-lab/Remi';
 function sealManifest(evidence) {
@@ -246,11 +249,11 @@ test('requires both real core reports and levels matching each other and the tar
       evidence => { evidence.probes[key].task = ''; },
       evidence => { delete evidence.probes[key].cancelled; },
     ]),
-    evidence => { evidence.schemaVerification.expandLevel = 4; },
-    evidence => { evidence.schemaVerification = { ...schema, contractLevel: 1 }; },
-    evidence => { evidence.schema.expandLevel = evidence.schemaVerification.expandLevel = 4; },
-    evidence => { evidence.schema.contractLevel = evidence.schemaVerification.contractLevel = 1; },
-    ...[0, -1, '3', 1.5, Number.MAX_SAFE_INTEGER + 1].map(level => evidence => { evidence.schema.expandLevel = evidence.schemaVerification.expandLevel = level; }),
+    evidence => { evidence.schemaVerification.expandLevel = schema.expandLevel + 1; },
+    evidence => { evidence.schemaVerification = { ...schema, contractLevel: schema.contractLevel + 1 }; },
+    evidence => { evidence.schema.expandLevel = evidence.schemaVerification.expandLevel = schema.expandLevel + 1; },
+    evidence => { evidence.schema.contractLevel = evidence.schemaVerification.contractLevel = schema.contractLevel + 1; },
+    ...[0, -1, String(schema.expandLevel), 1.5, Number.MAX_SAFE_INTEGER + 1].map(level => evidence => { evidence.schema.expandLevel = evidence.schemaVerification.expandLevel = level; }),
     evidence => { evidence.checks = []; },
     evidence => { evidence.rollbackSafeFrom = []; },
   ]);

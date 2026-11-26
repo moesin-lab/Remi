@@ -11,7 +11,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { readRecordedGrant } from './root-grants.js';
 import { approvedAttemptSources, readAttemptEligibility, readCurrentTaskLease } from './task-authority.js';
 import { RegisteredCredentialProofs } from './registered-credential-proof.js';
-import { abortSecurityWrite, requireSecurityFence, SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
+import { abortSecurityWrite, SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 const grantAction = 'root.grant.revoke';
@@ -142,7 +142,7 @@ export class RootManagement {
   plan(proof: CredentialProof, request: AuthorityUse) {
     if (proof.kind==='dependent') {
       const plan = onPrimary(() => this.registeredCredentials.plan(proof));
-      return {...plan,domainTargets:[...plan.domainTargets,`management:${request.actualTarget.type}:${request.actualTarget.id}`].sort()};
+      return {...plan,domainTargets:[...new Set([...plan.domainTargets,`management:${request.actualTarget.type}:${request.actualTarget.id}`])].sort()};
     }
     const evidence = this.evidence(proof);
     const state = onPrimary(() => this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get());
@@ -245,12 +245,15 @@ export class RootManagement {
       AND incarnation=? AND revoked_at_ms IS NULL`).get(entry.runtime_trust_id,entry.runtime_trust_version,entry.runtime_id,entry.incarnation);
     if (!trust || !recordedMachineBindingIsCurrent(this.db,tx,entry.runtime_id,trust.challenge_id,tuple)
       || !grantAncestryIsCurrent(this.db,tx,entry.runtime_id,{nodeId:trust.authority_node_id,generation:Number(entry.runtime_trust_version)},'runtime')) return false;
-    if (receipt.run_state==='pending_start') return Date.parse(receipt.start_deadline)>Date.now();
     const lease = readCurrentTaskLease(this.db,tx,material.attemptId);
-    if (lease) requireSecurityFence(this.db,tx,lease.fence_term);
-    return lease?.state==='running' && lease.consumer_id===receipt.consumer_id && Number(lease.run_generation)===Number(receipt.run_generation)
+    const bound = !!lease && lease.consumer_id===receipt.consumer_id && Number(lease.run_generation)===Number(receipt.run_generation)
       && lease.lease_id===receipt.lease_id && lease.fence_term===receipt.fence_term && lease.runtime_id===entry.runtime_id
       && lease.daemon_id===entry.daemon_id && lease.incarnation===entry.incarnation;
+    if (receipt.run_state==='pending_start') {
+      const issuedLease = this.db.query('SELECT lease_version FROM multiremi_current_task_leases WHERE attempt_id=?').get(material.attemptId);
+      return Date.parse(receipt.start_deadline)>Date.now() && (!issuedLease || (bound && lease?.state==='dispatched'));
+    }
+    return bound && lease?.state==='running';
   }
 
   private hasHumanGrantOrigins(nodeId: string): boolean {

@@ -2,6 +2,9 @@ import type { SqlDatabase } from '../../packages/server/src/store/db/postgres.js
 
 export function removeRootSchema(db: SqlDatabase): void {
   db.exec(`DROP TABLE multiremi_security_state;
+    DROP TABLE multiremi_current_task_leases;
+    DROP TABLE multiremi_attempt_eligibility;
+    DROP TABLE multiremi_attempt_input_approvals;
     DROP TABLE multiremi_jwt_current;
     DROP TABLE multiremi_jwt_materials;
     DROP TABLE multiremi_jwt_signing_domains;

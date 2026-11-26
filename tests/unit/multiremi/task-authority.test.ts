@@ -149,6 +149,8 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
     });
     expect(()=>withSecurityWrite(db,'1',plan,tx=>writeCurrentTaskLease(db,tx,1,lease))).toThrow('authority_revision_conflict');
     expect(withSecurityWrite(db,'1',plan,tx=>readCurrentTaskLease(db,tx,target.attemptId)?.state)).toBe('running');
+    expect(()=>withSecurityWrite(db,undefined,plan,tx=>readCurrentTaskLease(db,tx,target.attemptId))).toThrow('security_tx_invalid');
+    expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(false);
     db.query("UPDATE multiremi_turn_attempts SET status='running' WHERE id=?").run(task.id);
     db.query("UPDATE multiremi_delivery_receipts SET run_state='running',ack_state='confirmed',execution_locator_json='{}',start_deadline='2000-01-01T00:00:00Z' WHERE receipt_id=?").run(tuple.receipt_id);
     expect(service.resolveCurrent(taskProof,use).effectiveRoot).toBe(true);

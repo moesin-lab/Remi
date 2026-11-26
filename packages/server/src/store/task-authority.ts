@@ -50,10 +50,13 @@ export function readAttemptEligibility(db: SqlDatabase, tx: SecurityTx, attemptI
 }
 
 export function readCurrentTaskLease(db: SqlDatabase, tx: SecurityTx, attemptId: string):CurrentTaskLeaseRow|null {
-  return withSecurityTarget(db, tx, `attempt:${attemptId}`, () =>
-    db.query(`SELECT lease.* FROM multiremi_current_task_leases lease JOIN multiremi_live_terms fence
+  return withSecurityTarget(db, tx, `attempt:${attemptId}`, () => {
+    const lease=db.query(`SELECT lease.* FROM multiremi_current_task_leases lease JOIN multiremi_live_terms fence
       ON fence.scope='background_jobs' AND CAST(fence.term AS TEXT)=lease.fence_term AND fence.holder IS NOT NULL
-      WHERE lease.attempt_id=? AND lease.expires_at_ms>?`).get(attemptId, Date.now()) ?? null);
+      WHERE lease.attempt_id=? AND lease.expires_at_ms>?`).get(attemptId, Date.now());
+    if (lease) requireSecurityFence(db,tx,lease.fence_term);
+    return lease ?? null;
+  });
 }
 
 export function writeCurrentTaskLease(db: SqlDatabase, tx: SecurityTx, expectedVersion: number, lease: TaskLease): number {

@@ -179,8 +179,8 @@ export function useStickToBottom(options: UseStickToBottomOptions): UseStickToBo
     if (typeof scrollEl.scrollTo === "function" && !reduceMotion) {
       scrollEl.scrollTo({ top, behavior: "smooth" });
     } else {
-      programmaticTopRef.current = top;
       scrollEl.scrollTop = top;
+      programmaticTopRef.current = scrollEl.scrollTop;
     }
     // The scroll may already be at the anchor, in which case no scroll event
     // follows; the timer also ends the transaction for that case.
@@ -321,8 +321,8 @@ export function useStickToBottom(options: UseStickToBottomOptions): UseStickToBo
       if (modeKind === "bottom") {
         const top = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight - anchorValueRef.current);
         if (top === scrollEl.scrollTop) return;
-        programmaticTopRef.current = top;
         scrollEl.scrollTop = top;
+        programmaticTopRef.current = scrollEl.scrollTop;
         return;
       }
       const offset = targetOffset();
@@ -330,8 +330,8 @@ export function useStickToBottom(options: UseStickToBottomOptions): UseStickToBo
       const delta = offset - anchorValueRef.current;
       if (delta === 0) return;
       const top = Math.max(0, scrollEl.scrollTop + delta);
-      programmaticTopRef.current = top;
       scrollEl.scrollTop = top;
+      programmaticTopRef.current = scrollEl.scrollTop;
     };
 
     const observer = new ResizeObserver(compensate);

@@ -644,6 +644,25 @@ describe("IssuesPage (shared)", () => {
     expect(document.querySelector('[data-perf-scroll="list"]')).not.toBeNull();
   });
 
+  it("keeps cached issues visible during an independent archive count fetch", async () => {
+    mockListIssues.mockImplementation(async (params: any) => ({
+      issues: mockIssues.filter((issue) => issue.status === params?.status), total: 0,
+    }));
+    const { qc } = renderWithQuery(<IssuesPage />);
+    const issue = await screen.findByText("Implement auth");
+    const queryKey = issueKeys.archivedCount("ws-1");
+    let finish!: (count: number) => void;
+    const count = new Promise<number>((resolve) => { finish = resolve; });
+    await act(async () => {
+      await qc.resetQueries({ queryKey, exact: true });
+      void qc.fetchQuery({ queryKey, queryFn: () => count });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(qc.getQueryState(queryKey)).toMatchObject({ status: "pending", fetchStatus: "fetching" });
+    expect(screen.getByText("Implement auth")).toBe(issue);
+    await act(async () => { finish(3); });
+  });
+
   it("keeps the archived pseudo-column hidden and shows its server count", async () => {
     mockListIssues.mockImplementation((params: any) => {
       if (params?.archived_only) return Promise.resolve({ issues: [], total: 18 });

@@ -248,6 +248,12 @@ export function SessionLogList({
     setDegradedCount((count) => count + 1);
     onDegradedRender?.(entry);
   }, [onDegradedRender]);
+  const onScrollRootRef = useRef(onScrollRoot);
+  useLayoutEffect(() => { onScrollRootRef.current = onScrollRoot; }, [onScrollRoot]);
+  const setScrollRoot = useCallback((element: HTMLDivElement | null) => {
+    setScrollEl(element);
+    onScrollRootRef.current?.(element);
+  }, []);
   const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null);
   const [widthPx, setWidthPx] = useState(0);
   const elementRefs = useRef(new Map<number, HTMLElement>());
@@ -421,9 +427,18 @@ export function SessionLogList({
   // fires no window resize at all.
   useEffect(() => {
     if (!contentEl) return;
-    setWidthPx(contentEl.clientWidth);
+    let width = contentEl.clientWidth;
+    setWidthPx(width);
     if (typeof ResizeObserver !== "function") return;
-    const observer = new ResizeObserver(() => setWidthPx(contentEl.clientWidth));
+    let contentWidth: number | undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry || contentWidth === entry.contentRect.width) return;
+      contentWidth = entry.contentRect.width;
+      const nextWidth = Math.round(entry.borderBoxSize?.[0]?.inlineSize ?? contentEl.clientWidth);
+      if (width === nextWidth) return;
+      width = nextWidth;
+      setWidthPx(width);
+    });
     observer.observe(contentEl);
     return () => observer.disconnect();
   }, [contentEl]);
@@ -456,7 +471,7 @@ export function SessionLogList({
     <div className={`relative min-h-0 flex-1 ${className ?? ""}`}>
       <div
         id={scrollId}
-        ref={useCallback((el: HTMLDivElement | null) => { setScrollEl(el); onScrollRoot?.(el); }, [onScrollRoot])}
+        ref={setScrollRoot}
         data-tab-scroll-root=""
         data-session-log-scroll=""
         data-session-log-id={sessionId}

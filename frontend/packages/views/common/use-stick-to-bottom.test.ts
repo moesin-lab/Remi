@@ -391,6 +391,20 @@ describe("useStickToBottom", () => {
     expect(result.current.state).toBe("pinned");
   });
 
+  it("recognizes the browser-clamped compensation until the user scrolls up", () => {
+    const row = fixture.addRow({ id: "comment-42", offset: 100, height: 50 });
+    const { result } = renderStick(baseProps({ mode: { kind: "element", id: row.id } }));
+    row.getBoundingClientRect = () => ({ ...fixture.root.getBoundingClientRect(), top: 900.5 });
+    fire(() => {
+      resize.trigger();
+      fixture.root.dispatchEvent(new Event("scroll"));
+    });
+    expect(fixture.root.scrollTop).toBe(600);
+    expect(result.current.state).toBe("pinned");
+    fire(() => fixture.userScroll(590));
+    expect(result.current.state).toBe("released");
+  });
+
   it("releases in element mode when the user scrolls away from the row", () => {
     fixture.setScrollHeight(2000);
     fixture.addRow({ id: "comment-42", offset: 700, height: 100 });

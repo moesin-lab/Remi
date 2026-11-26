@@ -7,6 +7,7 @@ import type { MultiremiStore } from '@multiremi/store/store.js';
 import { expect, it } from 'bun:test';
 import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { RootMachineKeys } from '@daemon/agent-runtime/root-machine-keys.js';
+import { RootReceiptClient } from '@multiremi/worker/root-receipt-client.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { beginMachineChallenge } from '@multiremi/store/machine-proof.js';
 import { PreparedRootDelivery, RootReceiptStore, rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
@@ -411,10 +412,10 @@ pendingTurnBackendTests('task and mutation authority', fixture=>{
       const query={execution_key:{attempt_id:task.id},machine_proof:await wireProof('status')};
       expect(await rpc('status',query)).toMatchObject({ok:true,ack_state:'confirmed',allowed_recovery_action:'start_execution'});
       await expect(rpc('status',query)).rejects.toMatchObject({code:'authority_revoked'});
-      expect(await rpc('replay',{receipt_id:tuple.receipt_id,expected_receipt_version:1,expected_delivery_version:1,
-        run_lease_id:'one',fence_term:'1',machine_proof:await wireProof('replay')})).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
-      expect(await rpc('install_ack',{tuple,envelope_digest:delivery.envelope_digest,installed_at:new Date().toISOString(),execution_locator:locator,
-        machine_proof:await wireProof('install_ack')})).toMatchObject({ok:true,idempotent_replay:true});
+      const recovery = new RootReceiptClient(client, {async answerChallenge(challenge) { return machineKeys.answerChallenge(challenge); }});
+      const confirmed = await recovery.status(tuple,delivery.envelope_digest);
+      expect(await recovery.replay(tuple,confirmed)).toMatchObject({ok:true,replay:true,envelope:delivery.envelope});
+      expect(await recovery.acknowledge(tuple,delivery.envelope_digest,locator)).toMatchObject({ok:true,idempotent_replay:true});
     } finally {client.stopLane(lane); await server.stop(true);}
     connection=repo.bindConnection({},'machine-token')!;
     statusProof=authenticate('status');

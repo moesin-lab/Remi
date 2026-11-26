@@ -6,6 +6,7 @@ import type { GrantRootRuntimeTrustRequest, GrantRootRuntimeTrustResponse, Revok
   RootContextResponse, RootTransportIdentity, RootGrantRecord, ListRootGrantsResponse, GetRootRuntimeTrustResponse,
   ListRootRuntimeTrustResponse, ListRootAuditResponse } from '@multiremi/contracts/root-authority.js';
 import { readVerifiedTrustChallenge, recordedMachineBindingIsCurrent } from './machine-proof.js';
+import { machineRetirementPayload, requireEnrollmentBinding, requireMachineDeployment, type HostAttestation, type MachinePublicBinding } from './machine-enrollment.js';
 import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-provenance.js';
 import type { AdmissionTicket, AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority, FinalExecution, InputManifest, VersionedRef } from './root-authority-contract.js';
 import type { GrantSubject } from './root-grants.js';
@@ -721,6 +722,58 @@ export class RootManagement {
         WHERE authorization_digest=?`).run(result.grant.id, evidence.node, expectedRevision, result.security_revision, ticket);
       return { ...result, grant: { ...result.grant, effective: false, effective_reason_code: 'feature_disabled' } };
     }));
+  }
+
+  enrollMachine(tx: SecurityTx, deploymentProof: string, verifiedAttestation: HostAttestation, publicBinding: MachinePublicBinding,
+    expectedGeneration: number): { nodeId: string; generation: number } {
+    const binding = publicBinding;
+    return withSecurityTarget(this.db, tx, `machine:${binding.runtimeId}`, () => {
+      const origin = requireEnrollmentBinding(this.db, tx, deploymentProof, verifiedAttestation, binding, expectedGeneration);
+      const prior = this.db.query(`SELECT * FROM multiremi_machine_enrollments WHERE runtime_id=? ORDER BY generation DESC LIMIT 1`).get(binding.runtimeId);
+      if (Number(prior?.generation ?? 0) !== expectedGeneration || prior && prior.deployment_id !== binding.deploymentId) {
+        throw new SecurityAbort('authority_revision_conflict');
+      }
+      if (prior && prior.retired_at_ms === null) this.retireEnrollmentGeneration(tx, prior.incarnation, prior.authority_node_id, expectedGeneration);
+      const generation = expectedGeneration + 1;
+      const revision = this.advanceMachineRevision();
+      const expiry = Math.min(binding.keyExpiresAtMs, verifiedAttestation.expiresAtMs);
+      const nodeId = this.newNode('machine_registration','daemon',binding.daemonId,generation,revision,expiry,[origin]);
+      this.db.query(`INSERT INTO multiremi_machine_enrollments(incarnation,deployment_id,consumer_id,runtime_id,daemon_id,credential_id,
+        credential_digest,authority_node_id,generation,signing_spki,recipient_spki,recipient_key_id,key_expires_at_ms,isolation_verified_at_ms,
+        immutable_carrier_verified_at_ms,attestation_expires_at_ms,attestation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(binding.incarnation,binding.deploymentId,binding.consumerId,binding.runtimeId,binding.daemonId,binding.credentialId,
+          binding.credentialDigest,nodeId,generation,binding.signingSpki,binding.recipientSpki,binding.recipientKeyId,binding.keyExpiresAtMs,
+          verifiedAttestation.isolationVerifiedAtMs,verifiedAttestation.immutableCarrierVerifiedAtMs,verifiedAttestation.expiresAtMs,verifiedAttestation.id);
+      return { nodeId, generation };
+    });
+  }
+
+  retireMachine(tx: SecurityTx, deploymentProof: string, deploymentId: string, runtimeId: string, incarnation: string, expectedGeneration: number): void {
+    withSecurityTarget(this.db, tx, `machine:${runtimeId}`, () => {
+      requireMachineDeployment(this.db, tx, deploymentId, machineRetirementPayload(deploymentId,runtimeId,incarnation,expectedGeneration), deploymentProof);
+      const prior = this.db.query(`SELECT authority_node_id FROM multiremi_machine_enrollments WHERE deployment_id=? AND runtime_id=? AND incarnation=?
+        AND generation=? AND retired_at_ms IS NULL`).get(deploymentId,runtimeId,incarnation,expectedGeneration);
+      if (!prior) throw new SecurityAbort('authority_revision_conflict');
+      this.retireEnrollmentGeneration(tx,incarnation,prior.authority_node_id,expectedGeneration);
+      this.advanceMachineRevision();
+    });
+  }
+
+  private advanceMachineRevision(): number {
+    const state = this.db.query(`UPDATE multiremi_security_state SET security_revision=security_revision+1 WHERE singleton=1 RETURNING security_revision`).get();
+    if (!state) throw new SecurityAbort('security_state_unavailable');
+    return Number(state.security_revision);
+  }
+
+  private retireEnrollmentGeneration(tx: SecurityTx, incarnation: string, nodeId: string, generation: number): void {
+    withSecurityTarget(this.db, tx, `authority:${nodeId}`, () => {
+      const now = Date.now();
+      const retired = this.db.query(`UPDATE multiremi_machine_enrollments SET retired_at_ms=? WHERE incarnation=? AND generation=?
+        AND retired_at_ms IS NULL RETURNING incarnation`).get(now,incarnation,generation);
+      if (!retired) throw new SecurityAbort('authority_revision_conflict');
+      this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=COALESCE(revoked_at_ms,?) WHERE node_id=? AND generation=?`).run(now,nodeId,generation);
+      this.db.query(`UPDATE multiremi_runtime_trusts SET revoked_at_ms=COALESCE(revoked_at_ms,?) WHERE incarnation=?`).run(now,incarnation);
+    });
   }
 
   private newNode(kind: string, subjectType: string, subjectId: string, generation: number, revision: number, expiry: number | null,

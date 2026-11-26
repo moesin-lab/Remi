@@ -14,6 +14,7 @@ export function removeRootSchema(db: SqlDatabase): void {
     DROP TABLE multiremi_runtime_trusts;
     DROP TABLE multiremi_machine_challenges;
     DROP TABLE multiremi_machine_enrollments;
+    DROP TABLE multiremi_machine_deployment_roots;
     DROP TABLE multiremi_root_bootstrap_authorizations;
     DROP TABLE multiremi_root_management_events;
     DROP TABLE multiremi_credential_families;

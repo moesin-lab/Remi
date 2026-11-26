@@ -9,7 +9,6 @@ import { createHash, createPublicKey, generateKeyPairSync, privateDecrypt, sign 
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { beginMachineChallenge, machineSignaturePayload } from '@multiremi/store/machine-proof.js';
 import { rootBusinessPayloadDigest } from '@multiremi/store/root-receipts.js';
-import { startMultiremiServer } from '@multiremi/api/server.js';
 import { DaemonProtocolClient, type DaemonProtocolLane } from '@multiremi/worker/daemon-protocol-client.js';
 import { DAEMON_MIN_CLI_VERSION } from '@multiremi/contracts/daemon-protocol.js';
 import { createReplacementAttemptWithinTransaction } from '@multiremi/store/turn-attempts.js';

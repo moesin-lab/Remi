@@ -77,6 +77,24 @@ export function agentDependencyDigest(value: unknown): string {
   return `sha256:${createHash('sha256').update(json).digest('hex')}`;
 }
 
+export function planFrozenAgentDependencies(db: SqlDatabase, grantId: string, generation: number, agentId: string) {
+  const frozen = db.query(`SELECT d.agent_id,d.grant_generation,d.trust_versions_json,a.workspace_id
+    FROM multiremi_agent_grant_dependencies d LEFT JOIN multiremi_agents a ON a.id=d.agent_id WHERE d.grant_id=?`).get(grantId);
+  if (!frozen) return {workspaceIds:[],domainTargets:[]};
+  if (frozen.agent_id !== agentId || Number(frozen.grant_generation) !== generation || !frozen.workspace_id) throw new SecurityAbort('root_authority_revoked');
+  const trusts = JSON.parse(frozen.trust_versions_json);
+  if (!Array.isArray(trusts) || !trusts.length) throw new SecurityAbort('root_runtime_untrusted');
+  const lookup = db.query('SELECT runtime_id FROM multiremi_runtime_trusts WHERE trust_id=? AND generation=?');
+  const targets = new Set([`management:agent:${agentId}`]);
+  for (const trust of trusts) {
+    if (!trust || typeof trust.id !== 'string' || !Number.isSafeInteger(trust.version)) throw new SecurityAbort('root_runtime_untrusted');
+    const runtime = lookup.get(trust.id,trust.version);
+    if (!runtime?.runtime_id) throw new SecurityAbort('root_runtime_untrusted');
+    targets.add(`management:runtime:${runtime.runtime_id}`);
+  }
+  return {workspaceIds:[String(frozen.workspace_id)],domainTargets:[...targets].sort()};
+}
+
 export class AgentDependencies {
   private readonly authority: StoredAgentDependencyAuthority;
   constructor(private readonly ctx: StoreContext) { this.authority = new StoredAgentDependencyAuthority(ctx.db); }
@@ -92,6 +110,7 @@ export class AgentDependencies {
       if (!versioned(configEpoch)) reject();
       const scope = { agentId, workspaceId: workspace.id, configEpoch };
       const refs = new Map<string, AgentDependencyRef>();
+      const versions = new Map<string, number>();
       const visiting = new Set<string>();
       const edges = new Map<string, string[]>();
       function visit(resource: Resource, expectedDigest?: string, expectedVersion?: number): void {
@@ -103,6 +122,9 @@ export class AgentDependencies {
         const ref = cached ?? entry!.ref;
         if (key(ref) !== identity || !versioned(ref.version) || !/^sha256:[a-f0-9]{64}$/.test(ref.digest)
           || (expectedDigest !== undefined && ref.digest !== expectedDigest) || (expectedVersion !== undefined && ref.version !== expectedVersion)) reject();
+        const resourceKey = JSON.stringify([ref.kind,ref.id]);
+        if (versions.has(resourceKey) && versions.get(resourceKey) !== ref.version) reject();
+        versions.set(resourceKey,ref.version);
         if (!entry) return;
         if (refs.size >= 1024 || !Array.isArray(entry.dependencies)) reject();
         refs.set(identity, { kind: ref.kind, id: ref.id, use: ref.use, version: ref.version, digest: ref.digest });

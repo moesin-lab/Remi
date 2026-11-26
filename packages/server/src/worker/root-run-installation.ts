@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { RootDeliveryEnvelopePayload, RootDeliveryStatusResponse, RootDeliveryTuple } from '@multiremi/contracts/root-delivery.js';
 import { resolveTaskContext, ROOT_CARRIER_IMMUTABLE_ENV, ROOT_CARRIER_MODE_ENV, ROOT_DELIVERY_VERSION_ENV,
   ROOT_RECEIPT_ID_ENV, ROOT_RUN_GENERATION_ENV } from '@shared/task-context-file.js';
-import { rootBusinessPayloadDigest } from '../store/root-receipts.js';
+import { rootBusinessPayloadDigest } from '@shared/root-business-payload.js';
 import { openRootDelivery } from './root-delivery-envelope.js';
 
 type Env = Readonly<Record<string, string | undefined>>;

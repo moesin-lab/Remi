@@ -40,14 +40,18 @@ test('multi-UID guest uses production supervisor, authenticated control and reen
   }
   chmodSync(root, 0o755);
   for (const [name, uid, gid, mode] of [['public', 0, 0, 0o711], ['private', 0, 0, 0o700], ['daemon', daemon, daemon, 0o700],
-    ['key', key, daemon, 0o2710], ['model', execution, execution, 0o700]] as const) {
+    ['key', key, daemon, 0o2710], [`model-${execution}`, execution, execution, 0o700],
+    [`model-${execution + 1}`, execution + 1, execution + 1, 0o700]] as const) {
     const directory = join(root, name); mkdirSync(directory); chownSync(directory, uid, gid); chmodSync(directory, mode);
   }
   const auth = createServer(socket => socket.once('data', data => socket.end(status.run_state === 'running' &&
     data.toString() === 'guest-only-protected-token' ? '200' : '403')));
   auth.listen(join(root, 'protected')); await once(auth, 'listening'); chmodSync(join(root, 'protected'), 0o666);
-  const model = `const net=require('net'),fs=require('fs'),root=${JSON.stringify(root)};fs.appendFileSync(root+'/model/starts','1');net.createServer(s=>{const c=net.connect(root+'/protected',()=>c.write(process.env.MULTIREMI_TOKEN));c.on('data',d=>{s.end(JSON.stringify([process.getuid(),process.pid,d.toString(),fs.existsSync(root+'/daemon/host.sock')]));c.destroy()})}).listen(root+'/model/api',()=>net.connect(root+'/protected').end())`;
-  const plan = { tuple, uid: execution, gid: execution, file: node, args: ['-e', model], cwd: '/srv',
+  const model = `const net=require('net'),fs=require('fs'),root=${JSON.stringify(root)},dir=root+'/model-'+process.getuid();fs.appendFileSync(dir+'/starts','1');net.createServer(s=>{const c=net.connect(root+'/protected',()=>c.write(process.env.MULTIREMI_TOKEN));c.on('data',d=>{s.end(JSON.stringify([process.getuid(),process.pid,d.toString(),fs.existsSync(root+'/daemon/host.sock')]));c.destroy()})}).listen(dir+'/api',()=>net.connect(root+'/protected').end())`;
+  const binding = { grant_id: tuple.grant_id, grant_generation: tuple.grant_generation, execution_digest: tuple.execution_digest,
+    execution_config_epoch: tuple.execution_config_epoch, consumer_id: tuple.consumer_id, runtime_id: tuple.runtime_id, daemon_id: tuple.daemon_id,
+    incarnation: tuple.incarnation, recipient_key_id: tuple.recipient_key_id, recipient_key_fingerprint: tuple.recipient_key_fingerprint };
+  const plan = { binding, identities: [execution, execution + 1].map(uid => ({ uid, gid: uid })), file: node, args: ['-e', model], cwd: '/srv',
     sha256: createHash('sha256').update(readFileSync(node)).digest('hex') };
   const config = { directory: join(root, 'private'), publicDirectory: join(root, 'public'), daemonUid: daemon, daemonGid: daemon,
     keyServiceUid: key, keyServiceGid: key, hostSocket: join(root, 'daemon/host.sock'), approvedPlansFile: join(root, 'plans') };
@@ -73,6 +77,13 @@ test('multi-UID guest uses production supervisor, authenticated control and reen
     writeFileSync(config.approvedPlansFile, JSON.stringify({ plans: [{ ...plan, sha256: '0'.repeat(64) }] }));
     expect((await action(first, { op: 'install' })).ok).toBe(false);
     writeFileSync(config.approvedPlansFile, JSON.stringify({ plans: [plan] }));
+    const approval = readFileSync(config.approvedPlansFile, 'utf8');
+    for (const field of Object.keys(binding) as (keyof typeof binding)[]) {
+      const changed = { ...tuple, [field]: typeof binding[field] === 'string' ? 'other' : 7, receipt_id: crypto.randomUUID() };
+      status.tuple = changed; save();
+      expect((await action(first, { op: 'install', tuple: changed })).ok).toBe(false);
+    }
+    status.tuple = tuple; save();
     writeFileSync(join(root, 'tamper'), '');
     expect((await action(first, { op: 'install' })).ok).toBe(false);
     rmSync(join(root, 'tamper'));
@@ -85,20 +96,35 @@ test('multi-UID guest uses production supervisor, authenticated control and reen
     Object.assign(status, { run_state: 'running', ack_state: 'confirmed', allowed_recovery_action: 'reattach_running' }); save();
     const modelReady = once(auth, 'connection');
     const start = await action(first, { op: 'start', handle }); expect(start.ok).toBe(true); await modelReady;
-    const before = await socketReply(join(root, 'model/api')); expect(before).toEqual([execution, expect.any(Number), '200', false]);
+    const before = await socketReply(join(root, `model-${execution}/api`)); expect(before).toEqual([execution, expect.any(Number), '200', false]);
     const next = await peer('controller'); expect((await action(next, { op: 'attach', locator })).ok).toBe(false);
     status.fence_term = 'two'; save();
     const current = (await action(next, { op: 'attach', locator })).value;
     expect((await action(first, { op: 'start', handle })).ok).toBe(false);
     const exited = once(first, 'exit'); first.kill(); await exited;
     expect((await action(next, { op: 'start', handle: current })).value).toBe(start.value);
-    expect(await socketReply(join(root, 'model/api'))).toEqual(before);
+    expect(await socketReply(join(root, `model-${execution}/api`))).toEqual(before);
     status.run_state = 'revoked'; save();
     expect((await action(next, { op: 'start', handle: current })).ok).toBe(false);
-    expect((await socketReply(join(root, 'model/api')))[2]).toBe('403');
-    expect(readFileSync(join(root, 'model/starts'), 'utf8')).toBe('1');
+    expect((await socketReply(join(root, `model-${execution}/api`)))[2]).toBe('403');
+    expect(readFileSync(join(root, `model-${execution}/starts`), 'utf8')).toBe('1');
     expect(evidence).toContain('forged receiver key rejected');
     console.log(`supervisor=0 daemon=${daemon} key=${key} model=${execution} model_pid=${before[1]} requests=200,200,403 starts=1`);
+    const nextTuple = { ...tuple, receipt_id: crypto.randomUUID(), attempt_id: crypto.randomUUID(), input_digest: 'next-authorized-input' };
+    Object.assign(status, { tuple: nextTuple, run_state: 'pending_start', ack_state: 'pending', allowed_recovery_action: 'replay_envelope' }); save();
+    expect((await action(next, { op: 'install', tuple })).ok).toBe(false);
+    const second = await action(next, { op: 'install', tuple: nextTuple }); expect(second.ok).toBe(true);
+    expect(second.value.execution_id).not.toBe(locator.execution_id);
+    const secondHandle = (await action(next, { op: 'attach', tuple: nextTuple, locator: second.value })).value;
+    Object.assign(status, { run_state: 'running', ack_state: 'confirmed', allowed_recovery_action: 'reattach_running' }); save();
+    const readyAgain = once(auth, 'connection');
+    expect((await action(next, { op: 'start', handle: secondHandle })).ok).toBe(true); await readyAgain;
+    expect((await socketReply(join(root, `model-${execution + 1}/api`)))[0]).toBe(execution + 1);
+    const third = { ...tuple, receipt_id: crypto.randomUUID(), attempt_id: crypto.randomUUID() };
+    Object.assign(status, { tuple: third, run_state: 'pending_start', ack_state: 'pending', allowed_recovery_action: 'replay_envelope' }); save();
+    expect((await action(next, { op: 'install', tuple: third })).ok).toBe(false);
+    expect(readFileSync(config.approvedPlansFile, 'utf8')).toBe(approval);
+    console.log(`registered attempts used UIDs ${execution},${execution + 1}; exhausted pool denied the third attempt`);
   } finally {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
     for (const name of readdirSync(config.directory).filter(name => name.endsWith('.json'))) process.kill(JSON.parse(readFileSync(join(config.directory, name), 'utf8')).pid);

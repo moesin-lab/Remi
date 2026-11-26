@@ -24,7 +24,9 @@ async function authorize(request) {
         status.run_state === 'running' && status.allowed_recovery_action === 'reattach_running' && status.ack_state === 'confirmed')) throw Error();
   return status;
 }
-await authorize({ lease, term });
+const initialStatus = await authorize({ lease, term });
+if (initialStatus.allowed_recovery_action !== 'replay_envelope' || initialStatus.ack_state !== 'pending') throw Error();
+await host.planRun(tuple, initialStatus);
 const signing = generateKeyPairSync('ed25519');
 const execution = randomUUID();
 const locator = { execution_id: execution, launch_identity: randomUUID(), carrier_mode: 'immutable_run_env',
@@ -56,21 +58,34 @@ function requireReceiverUid(pid, uid) {
 }
 async function park(status) {
   const plan = await host.planRun(tuple, status);
-  if (!Number.isSafeInteger(plan.uid) || plan.uid <= 0 || !Number.isSafeInteger(plan.gid) || plan.gid <= 0 ||
-      [daemonUid, keyServiceUid].includes(plan.uid) || [daemonGid, keyServiceGid].includes(plan.gid) ||
-      !plan.file?.startsWith('/') || !plan.cwd?.startsWith('/') || !Array.isArray(plan.args)) throw Error();
-  // The host allocator gives each root run a dedicated execution UID.
-  const uidLock = openSync(join(directory, `uid-${plan.uid}`), 'wx', 0o600);
-  closeSync(uidLock);
-  launch = plan;
-  receiver = fork(fileURLToPath(new URL('./root-run-receiver.mjs', import.meta.url)), [String(plan.uid), String(plan.gid)],
+  if (plan.identities.some(({ uid, gid }) => [daemonUid, keyServiceUid].includes(uid) || [daemonGid, keyServiceGid].includes(gid))) throw Error();
+  const identity = reserveIdentity(plan.identities);
+  launch = { uid: identity.uid, gid: identity.gid, file: plan.file, args: plan.args, cwd: plan.cwd, sha256: plan.sha256 };
+  receiver = fork(fileURLToPath(new URL('./root-run-receiver.mjs', import.meta.url)), [String(identity.uid), String(identity.gid)],
     { execArgv: [], cwd: '/', env: {}, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   receiver.once('exit', () => process.exit());
   const [hello] = await once(receiver, 'message', { signal: AbortSignal.timeout(15000) });
-  requireReceiverUid(receiver.pid, plan.uid);
+  requireReceiverUid(receiver.pid, identity.uid);
   const receiverBirth = birth(receiver.pid);
   locator.birth_token_id = `${receiverBirth}:${randomUUID()}`;
-  target = { tuple, locator, pid: receiver.pid, birth: receiverBirth, uid: plan.uid, publicKey: hello.publicKey };
+  target = { tuple, locator, pid: receiver.pid, birth: receiverBirth, uid: identity.uid, publicKey: hello.publicKey };
+}
+function reserveIdentity(pool) {
+  for (const identity of pool) {
+    const uidPath = join(directory, `uid-${identity.uid}`);
+    try { closeSync(openSync(uidPath, 'wx', 0o600)); }
+    catch (error) { if (error.code === 'EEXIST') continue; throw error; }
+    try { closeSync(openSync(join(directory, `gid-${identity.gid}`), 'wx', 0o600)); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      unlinkSync(uidPath);
+      continue;
+    }
+    const dir = openSync(directory, 'r');
+    try { fsyncSync(dir); } finally { closeSync(dir); }
+    return identity;
+  }
+  throw Error('registered execution identities exhausted');
 }
 async function handle(request) {
   if (!isDeepStrictEqual(request.tuple, tuple)) throw Error();
@@ -78,7 +93,7 @@ async function handle(request) {
   const status = await authorize(request);
   if (request.op === 'install') {
     if (!target) {
-      if (status.allowed_recovery_action !== 'replay_envelope' || status.ack_state !== 'pending') throw Error();
+      if (receiver || status.allowed_recovery_action !== 'replay_envelope' || status.ack_state !== 'pending') throw Error();
       await park(status);
     }
     await probe();
@@ -104,7 +119,9 @@ async function handle(request) {
   const fresh = await authorize(request);
   if (fresh.run_state !== 'running' || fresh.ack_state !== 'confirmed') throw Error();
   return controller.startOnce(request, async () => {
-    if (!isDeepStrictEqual(await host.planRun(tuple, fresh), launch)) throw Error();
+    const { identities, file, args, cwd, sha256 } = await host.planRun(tuple, fresh);
+    if (!identities.some(({ uid, gid }) => launch.uid === uid && launch.gid === gid) || file !== launch.file ||
+        cwd !== launch.cwd || sha256 !== launch.sha256 || !isDeepStrictEqual(args, launch.args)) throw Error();
     if ((await authorize(request)).run_state !== 'running') throw Error();
     const reply = await command({ op: 'start', launch });
     if (reply.started !== true) throw Error();

@@ -6,9 +6,12 @@ import type { GrantRootRuntimeTrustRequest, GrantRootRuntimeTrustResponse, Revok
   RootContextResponse, RootTransportIdentity, RootGrantRecord, ListRootGrantsResponse, GetRootRuntimeTrustResponse,
   ListRootRuntimeTrustResponse, ListRootAuditResponse } from '@multiremi/contracts/root-authority.js';
 import { readVerifiedTrustChallenge, recordedMachineBindingIsCurrent } from './machine-proof.js';
+import { machineRetirementPayload, requireEnrollmentBinding, requireMachineDeployment, type HostAttestation, type MachinePublicBinding } from './machine-enrollment.js';
 import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-provenance.js';
 import type { AdmissionTicket, AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority, FinalExecution, InputManifest, VersionedRef } from './root-authority-contract.js';
 import type { GrantSubject } from './root-grants.js';
+import { requireActivatingDelivery, type PreparedRootDelivery } from './root-receipts.js';
+import type { IssueCredentialInput, IssuedCredential } from './root-authority-contract.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readRecordedGrant } from './root-grants.js';
 import { approvedAttemptSources, matchesDeliveryLease, readAttemptEligibility, readCurrentTaskLease } from './task-authority.js';
@@ -721,6 +724,121 @@ export class RootManagement {
         WHERE authorization_digest=?`).run(result.grant.id, evidence.node, expectedRevision, result.security_revision, ticket);
       return { ...result, grant: { ...result.grant, effective: false, effective_reason_code: 'feature_disabled' } };
     }));
+  }
+
+  planFirstOffer(candidate: PreparedRootDelivery) {
+    return onPrimary(() => {
+      const tuple = candidate.tuple;
+      const row = this.db.query(`SELECT e.subject_id,e.manifest_json,t.workspace_id,g.authority_node_id AS grant_node,
+        trust.authority_node_id AS trust_node FROM multiremi_attempt_eligibility e JOIN multiremi_root_grants g ON g.grant_id=e.grant_id
+        JOIN multiremi_turn_attempts a ON a.id=e.attempt_id JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id
+        JOIN multiremi_runtime_trusts trust ON trust.trust_id=e.runtime_trust_id WHERE e.attempt_id=? AND e.eligibility='root'`).get(tuple.attempt_id);
+      const approval = row && approvedAttemptSources(this.db,JSON.parse(row.manifest_json));
+      const state = this.db.query(`SELECT security_revision FROM multiremi_security_state WHERE singleton=1`).get();
+      if (!row || !approval || !state) throw new SecurityAbort('root_authority_revoked');
+      const targets = [`attempt:${tuple.attempt_id}`,`receipt:${tuple.receipt_id}`,`grant:agent:${row.subject_id}`,`credential:${candidate.credentialId}`,
+        `authority:${candidate.materialNodeId}`,`authority:${row.grant_node}`,`authority:${row.trust_node}`,`management:runtime:${tuple.runtime_id}`,
+        ...approval.sources.map(source=>`authority:${source.id}`)];
+      return { expectedRevision:Number(state.security_revision),workspaceIds:[String(row.workspace_id)],numberKeys:[],domainTargets:[...new Set(targets)].sort() };
+    });
+  }
+
+  issue(tx: SecurityTx, input: IssueCredentialInput): IssuedCredential {
+    const candidate = requireActivatingDelivery(this.db,tx,input);
+    const tuple = candidate.tuple;
+    return withSecurityTarget(this.db,tx,`credential:${candidate.credentialId}`,()=>{
+      const entry = readAttemptEligibility(this.db,tx,tuple.attempt_id);
+      const state = this.db.query(`SELECT feature_activation,security_revision FROM multiremi_security_state WHERE singleton=1`).get();
+      if (Number(state?.feature_activation)!==1 || entry?.eligibility!=='root' || tuple.material_version!==1 || entry.runtime_id!==tuple.runtime_id
+        || entry.daemon_id!==tuple.daemon_id || entry.incarnation!==tuple.incarnation || entry.execution_digest!==tuple.execution_digest
+        || Number(entry.config_epoch)!==tuple.execution_config_epoch || entry.grant_id!==tuple.grant_id || Number(entry.grant_generation)!==tuple.grant_generation
+        || this.db.query('SELECT receipt_id FROM multiremi_delivery_receipts WHERE attempt_id=?').get(tuple.attempt_id)) throw new SecurityAbort('root_authority_revoked');
+      const subject: GrantSubject = {type:'agent',id:entry.subject_id};
+      const grant = readRecordedGrant(this.db,tx,subject);
+      const manifest = JSON.parse(entry.manifest_json);
+      const approval = approvedAttemptSources(this.db,manifest);
+      const trust = this.db.query(`SELECT authority_node_id,challenge_id FROM multiremi_runtime_trusts WHERE trust_id=? AND generation=?
+        AND runtime_id=? AND incarnation=? AND revoked_at_ms IS NULL`).get(entry.runtime_trust_id,entry.runtime_trust_version,tuple.runtime_id,tuple.incarnation);
+      if (grant?.grantId!==entry.grant_id || grant.generation!==Number(entry.grant_generation) || !this.hasHumanGrantOrigins(grant.authorityNodeId)
+        || !approval || approval.row.attempt_id!==tuple.attempt_id || approval.row.grant_id!==grant.grantId || Number(approval.row.grant_generation)!==grant.generation
+        || `sha256:${digest(approval.row.manifest_snapshot)}`!==manifest.digest || manifest.version!==tuple.input_revision || manifest.digest!==tuple.input_digest
+        || JSON.parse(approval.row.manifest_snapshot).inputs.providerState.checkpointDigest!==tuple.checkpoint_digest || !trust
+        || !recordedMachineBindingIsCurrent(this.db,tx,tuple.runtime_id,trust.challenge_id,tuple)) throw new SecurityAbort('root_authority_revoked');
+      const run = this.db.query(`SELECT t.workspace_id FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.current_attempt_id=a.id AND t.id=a.turn_id
+        JOIN multiremi_turn_execution_records e ON e.id=a.id AND e.status='dispatched' JOIN multiremi_usage_task_scopes s ON s.task_id=a.id
+        AND s.workspace_id=t.workspace_id AND s.runtime_id=a.runtime_id AND s.agent_id=t.agent_id
+        JOIN multiremi_usage_runs r ON r.task_id=a.id AND r.run_id=s.active_run_id AND r.complete=0
+        WHERE a.id=? AND a.runtime_id=? AND t.agent_id=? AND r.run_id=? AND a.status='accepted'`).get(tuple.attempt_id,tuple.runtime_id,subject.id,tuple.consumer_id);
+      if (!run) throw new SecurityAbort('root_authority_revoked');
+      const parents = [{id:grant.authorityNodeId,version:grant.generation},{id:trust.authority_node_id,version:Number(entry.runtime_trust_version)},...approval.sources];
+      const expiresAtMs = Date.parse(tuple.material_expires_at);
+      for (const parent of parents) {
+        const ceiling = assertUnrevokedAncestry(this.db,tx,{nodeId:parent.id,generation:parent.version});
+        if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs<=Date.now() || expiresAtMs>ceiling) throw new SecurityAbort('root_authority_revoked');
+      }
+      const revision = Number(state.security_revision);
+      this.newNode('credential_family','agent',subject.id,1,revision,expiresAtMs,[...new Set(parents.map(parent=>parent.id))],candidate.familyNodeId);
+      this.db.query(`INSERT INTO multiremi_credential_families(family_id,authority_node_id,max_expires_at_ms,revision) VALUES(?,?,?,?)`)
+        .run(candidate.familyId,candidate.familyNodeId,expiresAtMs,revision);
+      this.newNode('credential','agent',subject.id,1,revision,expiresAtMs,[candidate.familyNodeId],candidate.materialNodeId);
+      this.db.query(`INSERT INTO multiremi_access_tokens(id,name,type,purpose,task_id,agent_id,workspace_id,token_hash,token_prefix,expires_at,created_at)
+        VALUES(?,'task','task','task',?,?,?,?,?,?,?)`).run(candidate.credentialId,tuple.attempt_id,subject.id,run.workspace_id,candidate.tokenHash,
+          candidate.tokenPrefix,tuple.material_expires_at,new Date().toISOString());
+      return {credential:{id:candidate.credentialId,version:1},subject,familyId:candidate.familyId,node:{nodeId:candidate.materialNodeId,generation:1},
+        continuousParents:[{nodeId:candidate.familyNodeId,generation:1}],evidenceParents:[],expiresAtMs,material:candidate};
+    });
+  }
+
+  enrollMachine(tx: SecurityTx, deploymentProof: string, verifiedAttestation: HostAttestation, publicBinding: MachinePublicBinding,
+    expectedGeneration: number): { nodeId: string; generation: number } {
+    const binding = publicBinding;
+    return withSecurityTarget(this.db, tx, `machine:${binding.runtimeId}`, () => {
+      const origin = requireEnrollmentBinding(this.db, tx, deploymentProof, verifiedAttestation, binding, expectedGeneration);
+      const prior = this.db.query(`SELECT * FROM multiremi_machine_enrollments WHERE runtime_id=? ORDER BY generation DESC LIMIT 1`).get(binding.runtimeId);
+      if (Number(prior?.generation ?? 0) !== expectedGeneration || prior && prior.deployment_id !== binding.deploymentId) {
+        throw new SecurityAbort('authority_revision_conflict');
+      }
+      if (prior && prior.retired_at_ms === null) this.retireEnrollmentGeneration(tx, prior.incarnation, prior.authority_node_id, expectedGeneration);
+      const generation = expectedGeneration + 1;
+      const revision = this.advanceMachineRevision();
+      const expiry = Math.min(binding.keyExpiresAtMs, verifiedAttestation.expiresAtMs);
+      const nodeId = this.newNode('machine_registration','daemon',binding.daemonId,generation,revision,expiry,[origin]);
+      this.db.query(`INSERT INTO multiremi_machine_enrollments(incarnation,deployment_id,consumer_id,runtime_id,daemon_id,credential_id,
+        credential_digest,authority_node_id,generation,signing_spki,recipient_spki,recipient_key_id,key_expires_at_ms,isolation_verified_at_ms,
+        immutable_carrier_verified_at_ms,attestation_expires_at_ms,attestation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(binding.incarnation,binding.deploymentId,binding.consumerId,binding.runtimeId,binding.daemonId,binding.credentialId,
+          binding.credentialDigest,nodeId,generation,binding.signingSpki,binding.recipientSpki,binding.recipientKeyId,binding.keyExpiresAtMs,
+          verifiedAttestation.isolationVerifiedAtMs,verifiedAttestation.immutableCarrierVerifiedAtMs,verifiedAttestation.expiresAtMs,verifiedAttestation.id);
+      return { nodeId, generation };
+    });
+  }
+
+  retireMachine(tx: SecurityTx, deploymentProof: string, deploymentId: string, runtimeId: string, incarnation: string, expectedGeneration: number): void {
+    withSecurityTarget(this.db, tx, `machine:${runtimeId}`, () => {
+      requireMachineDeployment(this.db, tx, deploymentId, machineRetirementPayload(deploymentId,runtimeId,incarnation,expectedGeneration), deploymentProof);
+      const prior = this.db.query(`SELECT authority_node_id FROM multiremi_machine_enrollments WHERE deployment_id=? AND runtime_id=? AND incarnation=?
+        AND generation=? AND retired_at_ms IS NULL`).get(deploymentId,runtimeId,incarnation,expectedGeneration);
+      if (!prior) throw new SecurityAbort('authority_revision_conflict');
+      this.retireEnrollmentGeneration(tx,incarnation,prior.authority_node_id,expectedGeneration);
+      this.advanceMachineRevision();
+    });
+  }
+
+  private advanceMachineRevision(): number {
+    const state = this.db.query(`UPDATE multiremi_security_state SET security_revision=security_revision+1 WHERE singleton=1 RETURNING security_revision`).get();
+    if (!state) throw new SecurityAbort('security_state_unavailable');
+    return Number(state.security_revision);
+  }
+
+  private retireEnrollmentGeneration(tx: SecurityTx, incarnation: string, nodeId: string, generation: number): void {
+    withSecurityTarget(this.db, tx, `authority:${nodeId}`, () => {
+      const now = Date.now();
+      const retired = this.db.query(`UPDATE multiremi_machine_enrollments SET retired_at_ms=? WHERE incarnation=? AND generation=?
+        AND retired_at_ms IS NULL RETURNING incarnation`).get(now,incarnation,generation);
+      if (!retired) throw new SecurityAbort('authority_revision_conflict');
+      this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=COALESCE(revoked_at_ms,?) WHERE node_id=? AND generation=?`).run(now,nodeId,generation);
+      this.db.query(`UPDATE multiremi_runtime_trusts SET revoked_at_ms=COALESCE(revoked_at_ms,?) WHERE incarnation=?`).run(now,incarnation);
+    });
   }
 
   private newNode(kind: string, subjectType: string, subjectId: string, generation: number, revision: number, expiry: number | null,

@@ -123,6 +123,18 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 - HTTP root 后备授权已接入工作区详情、Agent 详情、平台状态等只读路径，以及工作区基础元数据更新、删除和平台操作创建、取消。注册任务使用真实 attempt 与 Agent 权限，保留 daemon、updater、保护配置和维护检查。跨工作区 log/trace 订阅在确认目标存在后校验 root，并在每个受 root 约束的帧发出前重新检查，包括异步日志投影完成后。
 - Agent 目标 grant 仍需授权时固化实际依赖与受保护引用。Agent 来源持久 PAT 与子 grant 仍需独立于正常任务终态、可撤销的委派来源及真实主体绑定。其他业务写入点、B 线生产首次投递及真实浏览器联调仍随整合分支推进。
 
+### 已准入 attempt 的首次 offer
+
+机器投递使用 `await PreparedRootDelivery.prepare(tuple, payload, publicKey)` 生成不可替换的候选。调用方先用 `rootManagement.planFirstOffer(candidate)` 合并自己的 run/Q 锁计划，再在带当前 fence 的 `withSecurityWrite` 中调用 `rootReceipts.activate(tx, candidate, lease, callback)`。`callback(activeTx, prepared)` 在同一事务完成 run/Q CAS 后返回 `rootManagement.issue(activeTx, prepared)`。只有实际 `activate` 回调中的原始对象能签发。发送方在最外层事务提交后才能交付 envelope。
+
+签发器从主库读取 attempt 的 Agent、grant 代际、输入批准与连续来源、运行时 trust 和当前 run。`activate` 写入材料版本、lease 和 receipt，并在提交前重新验证。首次 offer 的材料版本为 1。重复的 offer 由调用方通过已提交 receipt 恢复；重新构造候选不能覆盖原材料。
+
+### 机器登记与退役
+
+部署方离线配置 `multiremi_machine_deployment_roots`，将部署的 `deployment_origin` 节点与部署审批、宿主验证两把 Ed25519 公钥绑定。空表时无法登记。宿主验证方确认执行进程不能访问密钥服务、控制端点或同级进程秘密，并验证 immutable carrier 后，才签署 `machineEnrollmentPayload('attestation', binding, report, expectedGeneration)`。部署方对同一材料的 `deployment` 用途签名。签名使用 base64url。
+
+`RootManagement.enrollMachine(tx, deploymentProof, report, binding, expectedGeneration)` 在同一安全事务中校验双签、运行时、daemon 凭据与有效期，返回 `{ nodeId, generation }`。首次登记传 0。事务预规划工作区、`machine:<runtimeId>`、部署 authority 节点和轮换前的 authority 节点。`retireMachine(tx, deploymentProof, deploymentId, runtimeId, incarnation, expectedGeneration)` 使用 `machineRetirementPayload` 的独立签名。同一代的重复轮换或退役返回冲突。旧代节点撤销后，现有凭证、trust 与 receipt 在下次核验时失效。
+
 ## 验证入口
 
 | 变更 | 已有测试 |

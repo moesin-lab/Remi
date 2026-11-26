@@ -4,6 +4,7 @@ import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
 import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
 import { RootManagement } from './root-management.js';
+import { RootReceiptStore } from './root-receipts.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
 import { SecurityAbort, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
 import type { AuthorityKernel, AuthorityUse, CredentialProof } from './root-authority-contract.js';
@@ -546,6 +547,7 @@ export class MultiremiStore {
   private accessTokens: AccessTokensRepo;
   readonly jwtMaterials: JwtMaterials;
   readonly rootManagement: RootManagement;
+  readonly rootReceipts: RootReceiptStore;
   private passwordAccounts: PasswordAccountsRepo;
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
@@ -626,6 +628,7 @@ export class MultiremiStore {
     this.accessTokens = new AccessTokensRepo(this.db);
     this.jwtMaterials = new JwtMaterials(this.db);
     this.rootManagement = new RootManagement(this.db);
+    this.rootReceipts = new RootReceiptStore(this.db,this.rootManagement);
     this.issueShares = new IssueSharesRepo(this.db);
     this.notificationChannels = new NotificationChannelsRepo(this.ctx);
     this.notificationDispatcher = new OutboundNotificationDispatcher({
@@ -6136,11 +6139,26 @@ runMigrations(this.db);
   }
 
   startTask(taskId: string, usageRunId?: string, expectedRuntimeId?: string): MultiremiTask {
+    this.requireStandardTaskStart(taskId);
     return this.tasks.startTask(taskId, usageRunId, expectedRuntimeId);
   }
 
   startTaskFromDaemon(taskId: string, authority: Parameters<TasksRepo["startTaskFromDaemon"]>[1], usageRunId?: string): "started" | "replayed" {
+    this.requireStandardTaskStart(taskId);
     return this.tasks.startTaskFromDaemon(taskId, authority, usageRunId);
+  }
+
+  private requireStandardTaskStart(taskId: string): void {
+    if (this.db.query("SELECT 1 FROM multiremi_attempt_eligibility WHERE attempt_id=? AND eligibility='root'").get(taskId)) {
+      throw new SecurityAbort('root_authority_revoked');
+    }
+  }
+
+  startRootTaskFromDaemon(tx: SecurityTx, machine: Parameters<RootReceiptStore['start']>[1], receiptId: string,
+    locator: Parameters<RootReceiptStore['start']>[3], leaseExpiresAtMs: number) {
+    return this.rootReceipts.start(tx,machine,receiptId,locator,leaseExpiresAtMs,tuple=>{
+      this.tasks.startTask(tuple.attempt_id,undefined,tuple.runtime_id);
+    });
   }
 
   completeTaskFromDaemon(taskId: string, input: Parameters<TasksRepo["completeTask"]>[1],

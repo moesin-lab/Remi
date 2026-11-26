@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { serializeRootDeliveryTuple } from '../worker/root-delivery-envelope.js';
 import { assertUnrevokedAncestry } from './authority-provenance.js';
 import { JwtMaterials, type JwtSigningDomain } from './jwt-materials.js';
-import { approvedAttemptSources } from './task-authority.js';
+import { approvedAttemptSources, matchesDeliveryLease, readAttemptEligibility, readCurrentTaskLease } from './task-authority.js';
 import { readCurrentMaterialBinding, type MaterialIdentity } from './credential-version-bindings.js';
 import type { SqlDatabase } from './db/postgres.js';
 import type { CredentialOrigin, CredentialProof } from './root-authority-contract.js';
@@ -23,10 +23,12 @@ export interface CurrentMaterial extends CredentialOrigin {
   readonly expiresAtMs: number;
 }
 
+type JwtEvidence = { digest: string; signing: JwtSigningDomain; subjectId: string;
+  locator: { credential_id: string; authority_node_id: string } };
+
 export class RegisteredCredentialProofs {
   private readonly proofs = new WeakMap<CredentialProof, Evidence>();
-  private readonly jwtProofs = new WeakMap<CredentialProof, { digest: string; signing: JwtSigningDomain; subjectId: string;
-    locator: { credential_id: string; authority_node_id: string } }>();
+  private readonly jwtProofs = new WeakMap<CredentialProof, JwtEvidence>();
 
   constructor(private readonly db: SqlDatabase) {}
 
@@ -55,7 +57,8 @@ export class RegisteredCredentialProofs {
           purpose:row.purpose, subject:{type:row.subject_type,id:row.subject_id}}};
       const proof = Object.freeze({kind:'dependent',proofVersion:Object.freeze({id:row.credential_id,version:Number(row.material_version)})}) as CredentialProof;
       this.proofs.set(proof,evidence);
-      withSecurityWrite(this.db,undefined,this.plan(proof),tx=>this.requireCurrent(tx,proof));
+      const plan = this.plan(proof);
+      withSecurityWrite(this.db,plan.fenceTerm,plan,tx=>this.requireCurrent(tx,proof));
       return proof;
     } catch (error) {
       if (error instanceof SecurityAbort && ['root_authority_revoked','credential_version_conflict','authority_depth_exceeded'].includes(error.code)) return {kind:'invalid'};
@@ -65,8 +68,21 @@ export class RegisteredCredentialProofs {
   }
 
   plan(proof: CredentialProof) {
-    const evidence = this.proofs.get(proof);
-    const jwt = this.jwtProofs.get(proof);
+    return this.planMaterial(this.proofs.get(proof),this.jwtProofs.get(proof));
+  }
+
+  planReceipt(receiptId: string) {
+    const plan=this.planMaterial(this.receiptEvidence(receiptId));
+    const owner=this.db.query(`SELECT e.runtime_id,e.authority_node_id,t.workspace_id FROM multiremi_machine_enrollments e
+      JOIN multiremi_attempt_eligibility a ON a.runtime_id=e.runtime_id AND a.incarnation=e.incarnation AND a.daemon_id=e.daemon_id
+      JOIN multiremi_delivery_receipts r ON r.attempt_id=a.attempt_id AND r.consumer_id=e.consumer_id
+      JOIN multiremi_turn_attempts attempt ON attempt.id=r.attempt_id JOIN multiremi_turns t ON t.id=attempt.turn_id AND t.current_attempt_id=attempt.id
+      WHERE r.receipt_id=? AND a.eligibility='root' AND e.retired_at_ms IS NULL`).get(receiptId);
+    if (!owner || !plan.fenceTerm) throw new SecurityAbort('root_authority_revoked');
+    return {...plan,workspaceIds:[String(owner.workspace_id)],domainTargets:[...new Set([...plan.domainTargets,`machine:${owner.runtime_id}`,`authority:${owner.authority_node_id}`,`receipt:${receiptId}`])].sort()};
+  }
+
+  private planMaterial(evidence?: Evidence, jwt?: JwtEvidence) {
     if (!jwt && !evidence) throw new SecurityAbort('root_authority_revoked');
     const row = this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get();
     if (!row) throw new SecurityAbort('security_state_unavailable');
@@ -85,7 +101,8 @@ export class RegisteredCredentialProofs {
       if (entry?.manifest_json) {
         const approval = approvedAttemptSources(this.db,JSON.parse(entry.manifest_json));
         for (const source of approval?.sources ?? []) targets.push(`authority:${source.id}`);
-        const lease = this.db.query('SELECT fence_term FROM multiremi_current_task_leases WHERE attempt_id=?').get(evidence.attemptId);
+        const lease = this.db.query(`SELECT l.fence_term FROM multiremi_current_task_leases l JOIN multiremi_live_terms f
+          ON f.scope='background_jobs' AND CAST(f.term AS TEXT)=l.fence_term AND f.holder IS NOT NULL WHERE l.attempt_id=?`).get(evidence.attemptId);
         if (lease) fenceTerm=String(lease.fence_term);
       }
     }
@@ -102,6 +119,24 @@ export class RegisteredCredentialProofs {
     }
     const evidence = this.proofs.get(proof);
     if (!evidence) return abortSecurityWrite(this.db,tx,'root_authority_revoked');
+    return this.requireBoundMaterial(tx,evidence);
+  }
+
+  requireReceiptMaterial(tx: SecurityTx, receiptId: string): CurrentMaterial {
+    return withSecurityTarget(this.db,tx,`receipt:${receiptId}`,()=>this.requireBoundMaterial(tx,this.receiptEvidence(receiptId)));
+  }
+
+  private receiptEvidence(receiptId: string): Evidence {
+    const row = this.db.query(`SELECT b.*, r.attempt_id FROM multiremi_delivery_receipts r
+      JOIN multiremi_credential_version_bindings b ON b.credential_id=r.credential_id AND b.material_version=r.material_version
+      WHERE r.receipt_id=? AND b.credential_type='task' AND b.subject_type='agent' AND b.purpose='task'`).get(receiptId);
+    if (!row) throw new SecurityAbort('root_authority_revoked');
+    return {nodeId:row.authority_node_id,attemptId:row.attempt_id,
+      identity:{credentialId:row.credential_id,materialVersion:Number(row.material_version),materialDigest:row.material_digest,
+        credentialType:'task',purpose:'task',subject:{type:'agent',id:row.subject_id}}};
+  }
+
+  private requireBoundMaterial(tx: SecurityTx, evidence: Evidence): CurrentMaterial {
     const identity = evidence.identity;
     return withSecurityTarget(this.db,tx,`credential:${identity.credentialId}`,()=>{
       let binding: ReturnType<typeof readCurrentMaterialBinding>;
@@ -132,8 +167,13 @@ export class RegisteredCredentialProofs {
             AND NOT EXISTS(SELECT 1 FROM multiremi_delivery_receipts newer WHERE newer.attempt_id=a.id AND newer.run_generation>receipt.run_generation)`)
           .get(identity.materialVersion,evidence.attemptId,identity.credentialId,identity.subject.id);
         if (!active) throw new SecurityAbort('root_authority_revoked');
+        if (!evidence.attemptId) throw new SecurityAbort('root_authority_revoked');
+        const eligibility = readAttemptEligibility(this.db,tx,evidence.attemptId);
         try {
           const tuple = JSON.parse(active.binding_json);
+          if (eligibility?.eligibility==='root' && !matchesDeliveryLease(readCurrentTaskLease(this.db,tx,eligibility.attempt_id),tuple,active)) {
+            throw new Error('stale_execution');
+          }
           if (serializeRootDeliveryTuple(tuple)!==active.binding_json || tuple.attempt_id!==evidence.attemptId || tuple.runtime_id!==active.runtime_id ||
               tuple.handoff_id!==active.handoff_id || tuple.receipt_id!==active.receipt_id || tuple.consumer_id!==active.consumer_id ||
               tuple.run_generation!==Number(active.run_generation) || tuple.delivery_version!==Number(active.delivery_version) ||

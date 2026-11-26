@@ -7,13 +7,14 @@ import { join } from "node:path";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { mutateExecutionFixture, sentTask } from "./unified-test-paths.js";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { createHash } from "node:crypto";
 import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { seedLegacyChatIssueClassificationFixture } from "./chat-issue-migration-fixture.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
 import { useTaskSessionInput } from "@multiremi/api/daemon-protocol/offer-budget.js";
+import { wakeDaemonWorkspaceEvent } from "@multiremi/api/daemon-protocol/workspace-wakeups.js";
 import { buildTaskPromptArtifact } from "@multiremi/prompt.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import type { MultiremiDaemon } from "@multiremi/daemon.js";
@@ -989,7 +990,7 @@ describe("Feishu bot standard Task bridge", () => {
     });
     try {
       expect(submit("om_kick_2", "add this while running")).toMatchObject({ steered: true, duplicate: false });
-      expect(kicks).toEqual([{ payload: { runtime_id: "rt_bot", task_id: first.taskId }, inTransaction: false }]);
+      expect(kicks).toEqual([{ payload: { runtime_id: "rt_bot", task_id: first.taskId, runtime_only: true }, inTransaction: false }]);
       expect(submit("om_kick_2", "redelivered payload")).toMatchObject({ duplicate: true });
       expect(kicks).toHaveLength(1);
       expect(() => storeDb.transaction(() => {
@@ -1002,6 +1003,21 @@ describe("Feishu bot standard Task bridge", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it("wakes only the task runtime for marked input and the workspace for unmarked input", () => {
+    const downlinks = { kick: mock(), kickWorkspace: mock() };
+    type WakeOptions = Parameters<typeof wakeDaemonWorkspaceEvent>[1];
+    const routes: Pick<WakeOptions["downlinks"], "kick" | "kickWorkspace"> = downlinks;
+    const options = { downlinks: routes as WakeOptions["downlinks"], offers: {} as WakeOptions["offers"], runtimeWorkspace: () => "local" };
+    const event = { type: "daemon:task_input", workspaceId: "local", payload: { runtime_id: "rt_bot", task_id: "tsk_steer" } };
+    wakeDaemonWorkspaceEvent({ ...event, payload: { ...event.payload, runtime_only: true } }, options);
+    expect(downlinks.kick.mock.calls).toEqual([["rt_bot", "pending"]]);
+    expect(downlinks.kickWorkspace).not.toHaveBeenCalled();
+
+    wakeDaemonWorkspaceEvent(event, options);
+    expect(downlinks.kick).toHaveBeenCalledTimes(1);
+    expect(downlinks.kickWorkspace.mock.calls).toEqual([["local", expect.any(Function), "pending"]]);
   });
 
   it("rejects an unknown sender in allowlist mode and checks Issue creation dynamically once approved", () => {

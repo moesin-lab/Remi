@@ -80,23 +80,23 @@ test("joined read reuse invalidates on either source, first lock and rollback", 
 
 test("terminal card batch keeps every revision and discards failed transaction notifications", async () => {
   const db = await database();
-  const changes: Array<[string, boolean, number]> = [];
+  const changes: Array<[string, boolean, number, boolean]> = [];
   registerTurnChangeHook(db, (...change) => changes.push(change));
   db.transaction(() => withTurnChangeBatch(db, () => {
     notifyTurnChanged(db, "turn");
-    notifyTurnChanged(db, "other", true);
+    notifyTurnChanged(db, "other", true, true);
     notifyTurnChanged(db, "turn");
     expect(changes).toHaveLength(0);
     expect(() => db.savepoint!(() => withTurnChangeBatch(db, () => {
-      notifyTurnChanged(db, "turn");
+      notifyTurnChanged(db, "turn",false,true);
       notifyTurnChanged(db, "rolled-back-inner");
       throw new Error("rollback");
     }))).toThrow("rollback");
   }))();
-  expect(changes).toEqual([["turn", false, 2], ["other", true, 1]]);
+  expect(changes).toEqual([["turn", false, 2, false], ["other", true, 1, true]]);
   expect(() => db.transaction(() => withTurnChangeBatch(db, () => {
     notifyTurnChanged(db, "discarded"); throw new Error("rollback");
   }))()).toThrow("rollback");
   notifyTurnChanged(db, "next");
-  expect(changes).toEqual([["turn", false, 2], ["other", true, 1], ["next", false, 1]]);
+  expect(changes).toEqual([["turn", false, 2, false], ["other", true, 1, true], ["next", false, 1, false]]);
 });

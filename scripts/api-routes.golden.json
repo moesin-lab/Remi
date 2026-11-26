@@ -1,14 +1,14 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 844,
+    "routeCount": 845,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 598,
+      "compat": 599,
       "root": 20
     },
-    "getRoutes": 366,
-    "getRoutesWithBody": 362,
+    "getRoutes": 367,
+    "getRoutesWithBody": 363,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
@@ -374,6 +374,7 @@
     "GET /api/project-knowledge/migration",
     "GET /api/projects",
     "GET /api/projects/:id",
+    "GET /api/projects/:id/activity",
     "GET /api/projects/:id/devices",
     "GET /api/projects/:id/docs",
     "GET /api/projects/:id/docs/:ref",
@@ -1198,6 +1199,7 @@
     "GET /api/project-knowledge/migration",
     "GET /api/projects",
     "GET /api/projects/:id",
+    "GET /api/projects/:id/activity",
     "GET /api/projects/:id/devices",
     "GET /api/projects/:id/docs",
     "GET /api/projects/:id/docs/:ref",
@@ -9873,6 +9875,17 @@
             "id": "plugin.version.list",
             "command": "remi plugin version list",
             "capability": "plugin.version.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "project.activity",
+            "command": "remi project activity",
+            "capability": "project.activity",
             "outputs": [
               "table",
               "json",
@@ -21390,6 +21403,97 @@
         "instructions_revision": 0,
         "instructions_updated_at": null,
         "instructions_updated_by": null
+      }
+    },
+    {
+      "key": "get-sweep GET /api/projects/:id/activity",
+      "route": "GET /api/projects/:id/activity",
+      "path": "/api/projects/prj_snapshot/activity",
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "turn_id": "tsk_m21cp1q6gys4",
+            "attempt_id": "tsk_m21cp1q6gys4",
+            "attempt_no": 1,
+            "status": "queued",
+            "issue": {
+              "id": "iss_bbo9f1dxazyr",
+              "key": "MUL-5",
+              "title": "Snapshot {{title}}"
+            },
+            "agent": {
+              "id": "agt_snapshot",
+              "name": "Snapshot Agent"
+            },
+            "issue_session": {
+              "id": "ises_yy6thkeq1n3e",
+              "title": "Main"
+            },
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "started_at": null,
+            "ended_at": null,
+            "public_summary": {
+              "code": "queued"
+            }
+          },
+          {
+            "turn_id": "tsk_9i3epsr6j5hf",
+            "attempt_id": "tsk_9i3epsr6j5hf",
+            "attempt_no": 1,
+            "status": "queued",
+            "issue": {
+              "id": "iss_8rcx9z88woyu",
+              "key": "MUL-4",
+              "title": "snapshot run"
+            },
+            "agent": {
+              "id": "agt_snapshot",
+              "name": "Snapshot Agent"
+            },
+            "issue_session": {
+              "id": "ises_r4ic9doizq3q",
+              "title": "Main"
+            },
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "started_at": null,
+            "ended_at": null,
+            "public_summary": {
+              "code": "queued"
+            }
+          },
+          {
+            "turn_id": "tsk_kn3jgt7c45iv",
+            "attempt_id": "tsk_kn3jgt7c45iv",
+            "attempt_no": 1,
+            "status": "awaiting_human",
+            "issue": {
+              "id": "iss_snapshot",
+              "key": "MUL-1",
+              "title": "Snapshot issue"
+            },
+            "agent": {
+              "id": "agt_snapshot",
+              "name": "Snapshot Agent"
+            },
+            "issue_session": {
+              "id": "ises_0w4ud0f59v1p",
+              "title": "Main"
+            },
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "started_at": null,
+            "ended_at": null,
+            "public_summary": {
+              "code": "needs_human"
+            }
+          }
+        ],
+        "has_more": false,
+        "next_cursor": null,
+        "as_of": "<timestamp>"
       }
     },
     {

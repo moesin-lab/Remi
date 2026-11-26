@@ -9,7 +9,7 @@ import type { AdmissionTicket, AuthorityKernel, AuthorityUse, CredentialProof, C
 import type { GrantSubject } from './root-grants.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readRecordedGrant } from './root-grants.js';
-import { approvedAttemptSources, readAttemptEligibility, readCurrentTaskLease } from './task-authority.js';
+import { approvedAttemptSources, matchesDeliveryLease, readAttemptEligibility, readCurrentTaskLease } from './task-authority.js';
 import { RegisteredCredentialProofs } from './registered-credential-proof.js';
 import { abortSecurityWrite, SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
 
@@ -182,13 +182,7 @@ export class RootManagement {
       const recordedGrant = readRecordedGrant(this.db,tx,material.subject);
       let reason = !active?'feature_disabled':!recordedGrant?'no_grant':'active';
       if (reason==='active' && material.type==='task' && !this.taskIsEligible(tx, material, recordedGrant!)) reason='attempt_not_eligible';
-      if (reason==='active') {
-        const node = this.db.query(`SELECT g.node_id FROM multiremi_authority_nodes g JOIN multiremi_authority_nodes m ON m.node_id=?
-          WHERE g.node_id=? AND g.generation=? AND g.kind='grant' AND g.scope='system' AND g.subject_type=? AND g.subject_id=?
-          AND m.issued_seq>g.issued_seq`).get(material.node.nodeId,recordedGrant!.authorityNodeId,recordedGrant!.generation,material.subject.type,material.subject.id);
-        if (!node || !this.hasHumanGrantOrigins(recordedGrant!.authorityNodeId)) throw new SecurityAbort('root_authority_revoked');
-        assertUnrevokedAncestry(this.db,tx,{nodeId:recordedGrant!.authorityNodeId,generation:recordedGrant!.generation});
-      }
+      if (reason==='active') this.requireMaterialGrant(tx,material,recordedGrant!);
       return {transport:material.type==='task'?'task':'human',subject:material.subject,attemptId:material.attemptId,recordedGrant,
         credentialOrigin:{credential:material.credential,familyId:material.familyId,node:material.node},effectiveRoot:reason==='active',scope:reason==='active'?'system':null,reason,
         checkedRevision:Number(state.security_revision)};
@@ -223,6 +217,24 @@ export class RootManagement {
     });
   }
 
+  requireReceiptAuthority(tx: SecurityTx, receiptId: string): void {
+    const material = this.registeredCredentials.requireReceiptMaterial(tx,receiptId);
+    const grant = readRecordedGrant(this.db,tx,material.subject);
+    const state = this.db.query('SELECT feature_activation FROM multiremi_security_state WHERE singleton=1').get();
+    if (Number(state?.feature_activation)!==1 || !grant || !this.taskIsEligible(tx,material,grant)) {
+      return abortSecurityWrite(this.db,tx,'root_authority_revoked');
+    }
+    this.requireMaterialGrant(tx,material,grant);
+  }
+
+  private requireMaterialGrant(tx: SecurityTx, material: ReturnType<RegisteredCredentialProofs['requireCurrent']>, grant: NonNullable<CurrentAuthority['recordedGrant']>): void {
+    const node = this.db.query(`SELECT g.node_id FROM multiremi_authority_nodes g JOIN multiremi_authority_nodes m ON m.node_id=?
+      WHERE g.node_id=? AND g.generation=? AND g.kind='grant' AND g.scope='system' AND g.subject_type=? AND g.subject_id=?
+      AND m.issued_seq>g.issued_seq`).get(material.node.nodeId,grant.authorityNodeId,grant.generation,material.subject.type,material.subject.id);
+    if (!node || !this.hasHumanGrantOrigins(grant.authorityNodeId)) throw new SecurityAbort('root_authority_revoked');
+    assertUnrevokedAncestry(this.db,tx,{nodeId:grant.authorityNodeId,generation:grant.generation});
+  }
+
   private taskIsEligible(tx: SecurityTx, material: ReturnType<RegisteredCredentialProofs['requireCurrent']>, grant: NonNullable<CurrentAuthority['recordedGrant']>): boolean {
     if (!material.attemptId) return false;
     const entry = readAttemptEligibility(this.db,tx,material.attemptId);
@@ -245,14 +257,7 @@ export class RootManagement {
     if (!trust || !recordedMachineBindingIsCurrent(this.db,tx,entry.runtime_id,trust.challenge_id,tuple)
       || !grantAncestryIsCurrent(this.db,tx,entry.runtime_id,{nodeId:trust.authority_node_id,generation:Number(entry.runtime_trust_version)},'runtime')) return false;
     const lease = readCurrentTaskLease(this.db,tx,material.attemptId);
-    const bound = !!lease && lease.consumer_id===receipt.consumer_id && Number(lease.run_generation)===Number(receipt.run_generation)
-      && lease.lease_id===receipt.lease_id && lease.fence_term===receipt.fence_term && lease.runtime_id===entry.runtime_id
-      && lease.daemon_id===entry.daemon_id && lease.incarnation===entry.incarnation;
-    if (receipt.run_state==='pending_start') {
-      const issuedLease = this.db.query('SELECT lease_version FROM multiremi_current_task_leases WHERE attempt_id=?').get(material.attemptId);
-      return Date.parse(receipt.start_deadline)>Date.now() && (!issuedLease || (bound && lease?.state==='dispatched'));
-    }
-    return bound && lease?.state==='running';
+    return matchesDeliveryLease(lease,tuple,receipt) && (receipt.run_state!=='pending_start' || Date.parse(receipt.start_deadline)>Date.now());
   }
 
   private hasHumanGrantOrigins(nodeId: string): boolean {

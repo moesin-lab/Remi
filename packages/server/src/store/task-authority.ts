@@ -44,6 +44,16 @@ export interface CurrentTaskLeaseRow {
   readonly incarnation:string; readonly expires_at_ms:number|string; readonly state:TaskLease['state'];
 }
 
+export function matchesDeliveryLease(current: CurrentTaskLeaseRow | null, tuple: {
+  attempt_id: string; consumer_id: string; run_generation: number; runtime_id: string; daemon_id: string; incarnation: string;
+}, receipt: { lease_id: string; fence_term: string; run_state: string }): boolean {
+  return current !== null && current.attempt_id === tuple.attempt_id && current.consumer_id === tuple.consumer_id &&
+    Number(current.run_generation) === tuple.run_generation && current.runtime_id === tuple.runtime_id &&
+    current.daemon_id === tuple.daemon_id && current.incarnation === tuple.incarnation && current.lease_id === receipt.lease_id &&
+    current.fence_term === receipt.fence_term && ((receipt.run_state === 'pending_start' && current.state === 'dispatched') ||
+      (receipt.run_state === 'running' && current.state === 'running'));
+}
+
 export function readAttemptEligibility(db: SqlDatabase, tx: SecurityTx, attemptId: string):AttemptEligibilityRow|null {
   return withSecurityTarget(db, tx, `attempt:${attemptId}`, () =>
     db.query('SELECT * FROM multiremi_attempt_eligibility WHERE attempt_id=?').get(attemptId) ?? null);

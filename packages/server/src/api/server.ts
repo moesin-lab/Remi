@@ -6,12 +6,15 @@ import { startHubRoleGuard, locksForRole } from "./hub/hub-role-guard.js";
 import { reconcileCurrentDaemonBuild } from "../releases/current-daemon-build.js";
 import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
-import { Hono, type Handler } from "hono";
+import { Hono, type Context, type Handler } from "hono";
 import { registerDaemonTraceHandlers } from "./daemon-protocol/trace-handlers.js";
 import { resolveRequestWorkspaceId } from "./helpers/workspace-context.js";
 import { createPlatformMaintenanceWriteGate } from "./helpers/platform-maintenance-gate.js";
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
+import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
+import { SecurityAbort } from '@multiremi/store/security-write.js';
+import { createJwtBrowserClientGuard } from './realtime.js';
 import { AgentTemplateError } from "./agent-templates.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
 import { SkillImportError } from "@daemon/agent-runtime/skills/skill-import.js";
@@ -35,6 +38,9 @@ import { registerDaemonRoutes } from "./routers/daemon.js";
 import { registerStorageRoutes } from "./routers/storage.js";
 import { registerCloudRuntimeRoutes } from "./routers/cloud-runtime.js";
 import { registerCloudBillingRoutes } from "./routers/cloud-billing.js";
+import { bindDelegatedPatForRootControl, bindRootProof, requestHasRootRead } from "./helpers/root-access.js";
+import { registerRootRoutes, rootError } from "./routers/root.js";
+import { RootManagementRequestError } from '@multiremi/store/root-management.js';
 import { registerMeRoutes } from "./routers/me.js";
 import { registerWorkspaceRoutes } from "./routers/workspaces.js";
 import { registerSystemPromptRoutes } from "./routers/system-prompts.js";
@@ -199,6 +205,7 @@ import {
 import {
   authorizeBrowserWebSocketAuthFrame,
   authorizeBrowserWebSocketUpgrade,
+  browserRootRead,
   isWebSocketUpgrade,
   parseDaemonWebSocketMessage,
   registerBrowserUserWebSocketClient,
@@ -212,6 +219,7 @@ import type {
   BrowserWebSocketRegistry,
   MultiremiRealtimeState,
   MultiremiWebSocketData,
+  MultiremiWebSocketClient,
   WebhookRateLimitConfig,
 } from "./helpers.js";
 import { broadcastBrowserResync, createBrowserStreamHandler } from "@multiremi/api/hub/browser-stream.js";
@@ -630,6 +638,14 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.get("/", (c) => c.json({ service: "multiremi-api", ui: "frontend/apps/web" }));
   app.get("/favicon.ico", (c) => c.body(null, 204));
 
+  const permitsRootWorkspaceDeletion = (c: Context) => {
+    if (c.req.method !== 'DELETE') return false;
+    const match = /^\/api\/workspaces\/([^/]+)$/.exec(c.req.path);
+    if (!match || !match[1]) return false;
+    let id: string;
+    try { id = decodeURIComponent(match[1]); } catch { return false; }
+    return requestHasRootRead(c, store, 'workspace.delete.authority', 'workspace', id);
+  };
   if (authToken) {
     app.use("*", async (c, next) => {
       // Public routes that must work WITHOUT auth, otherwise enabling
@@ -677,14 +693,20 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         token = getCookie(c, AUTH_COOKIE_NAME) ?? "";
       }
       if (token === authToken) {
+        c.set("multiremiMasterRootTransport", true);
         await next();
         return;
       }
       const accessToken = await store.verifyAccessToken(token);
       if (!accessToken) {
-        const jwt = verifyJwtToken(token);
+        if (header !== undefined && bindDelegatedPatForRootControl(c, store, token)) {
+          await next();
+          return;
+        }
+        const jwt = verifyJwtToken(token, store);
         if (!jwt) return c.json({ error: "unauthorized" }, 401);
         c.set("multiremiAuth", buildRequestAuth(null, jwt.userId));
+        bindRootProof(c, store, token, true);
         await next();
         return;
       }
@@ -692,9 +714,10 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         return c.json({ error: "forbidden for daemon token" }, 403);
       }
       if (accessToken.type === "daemon") c.set("multiremiVerifiedDaemonWorkspaceId", accessToken.workspaceId);
+      else bindRootProof(c, store, token, false);
       if (accessToken.type === "task") {
         const denyCategory = taskTokenHardDenyCategory(c.req.raw);
-        if (denyCategory) {
+        if (denyCategory && !(denyCategory === 'workspace_lifecycle' && permitsRootWorkspaceDeletion(c))) {
           recordTaskTokenWrite(c.req.raw, accessToken, 403, denyCategory);
           return c.json({ error: "forbidden for task token", code: "task_token_hard_denied" }, 403);
         }
@@ -735,15 +758,20 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       const header = c.req.header("Authorization");
       const rawToken = parseBearerToken(header);
       const accessToken = rawToken ? await store.verifyAccessToken(rawToken) : null;
+      if (!accessToken && bindDelegatedPatForRootControl(c, store, rawToken)) {
+        await next();
+        return;
+      }
       if (header !== undefined && !accessToken) return c.json({ error: "unauthorized" }, 401);
       if (accessToken) {
         if (accessToken.type === "daemon" && !isDaemonTokenAllowedRequest(c.req.raw)) {
           return c.json({ error: "forbidden for daemon token" }, 403);
         }
         if (accessToken.type === "daemon") c.set("multiremiVerifiedDaemonWorkspaceId", accessToken.workspaceId);
+        else bindRootProof(c, store, rawToken, false);
         if (accessToken.type === "task") {
           const denyCategory = taskTokenHardDenyCategory(c.req.raw);
-          if (denyCategory) {
+          if (denyCategory && !(denyCategory === 'workspace_lifecycle' && permitsRootWorkspaceDeletion(c))) {
             recordTaskTokenWrite(c.req.raw, accessToken, 403, denyCategory);
             return c.json({ error: "forbidden for task token", code: "task_token_hard_denied" }, 403);
           }
@@ -769,6 +797,11 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
+    if (c.req.path.startsWith("/api/root/") || err instanceof SecurityAbort || err instanceof RootManagementRequestError) {
+      const response = rootError(c, err);
+      if (response) return response;
+    }
+    if (err instanceof JwtMaterialUnavailable) return c.json({ error: 'authentication state unavailable' }, 503);
     if (err instanceof ExecutionModelPolicyError) return c.json({ error: err.message, code: err.code, field: err.field }, 400);
     if (isDatabaseConnectionError(err)) {
       c.header("Retry-After", "1");
@@ -845,6 +878,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.get("/healthz", (c) => c.json(healthBody()));
   app.get("/api/config", (c) => c.json({
     ...(daemonDirectBaseUrl ? { daemon_server_url: daemonDirectBaseUrl } : {}),
+    jwt_registration_required: store.jwtMaterials.isActive(),
     cdn_domain: "",
     allow_signup: true,
     google_client_id: process.env.GOOGLE_CLIENT_ID ?? "",
@@ -963,6 +997,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     }, 201);
   });
   registerMeRoutes(app, deps);
+  registerRootRoutes(app, store);
   registerWorkspaceRoutes(app, deps);
   registerSystemPromptRoutes(app, deps);
   registerScmRoutes(app, deps);
@@ -1264,6 +1299,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     task => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki, false, daemonTurnBridge.offerInput(task), "resumable"));
   registerBackgroundTaskHandlers(daemonProtocol, store, rt => downlinks.kick(rt, "pending"));
   const browserWebSockets: BrowserWebSocketRegistry = new Map();
+  const jwtBrowserClient = createJwtBrowserClientGuard(store);
   const daemonTrace = registerDaemonTraceHandlers(daemonProtocol, store,
     effectiveApiRole !== "ui" && options.liveHub === undefined && options.hub === undefined
       ? createHubTraceSink(liveHub as HubImpl) : undefined);
@@ -1276,13 +1312,17 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     ?? (readPool
       ? createPostgresStreamAuthReader(readPool)
       : createStreamAuthReader(store, { role: effectiveApiRole }));
+  const hasStreamRootAccess = (client: MultiremiWebSocketClient, stream: 'log' | 'trace', id: string) =>
+    client.data.kind === 'browser' && browserRootRead(store, client.data.rootProof, stream === 'log' ? 'session' : 'task', id);
   const browserStreams: BrowserStreamHandler = createBrowserStreamHandler({
+    hasRootAccess: hasStreamRootAccess,
     hub: liveHub,
     auth: streamAuth,
     endpoint: "log",
     projectLogFrames: createBrowserLogProjection(store, readPool),
   });
   const traceStreams: BrowserStreamHandler = createBrowserStreamHandler({
+    hasRootAccess: hasStreamRootAccess,
     hub: liveHub,
     auth: streamAuth,
     endpoint: "trace",
@@ -1493,8 +1533,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
         if (server.upgrade(req, { data: {
           connectedAt: new Date().toISOString(),
           kind: "daemon-protocol",
-          accessToken: resolved.identity.accessToken,
-          masterToken: resolved.identity.masterToken,
+          ...resolved.identity,
           session: null,
         } })) return undefined;
         return Response.json({ error: "websocket upgrade failed" }, { status: 400 });
@@ -1518,6 +1557,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
               authenticated: authorization.authenticated,
               userId: authorization.userId,
               accessToken: authorization.accessToken,
+              jwtDigest: authorization.jwtDigest,
+              rootProof: authorization.rootProof,
               streamEndpoint: "trace" as const,
             },
           });
@@ -1539,6 +1580,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
               authenticated: authorization.authenticated,
               userId: authorization.userId,
               accessToken: authorization.accessToken,
+              jwtDigest: authorization.jwtDigest,
+              rootProof: authorization.rootProof,
               streamEndpoint: "log" as const,
             },
           });
@@ -1567,16 +1610,13 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
           // A v2 session answers every frame itself; nothing is sent here,
           // because the daemon speaks first and one greeting must not race
           // another.
-          ws.data.session = daemonProtocol.openSession(sessionSocket(ws), {
-            accessToken: ws.data.accessToken,
-            masterToken: ws.data.masterToken,
-          });
+          ws.data.session = daemonProtocol.openSession(sessionSocket(ws), ws.data);
           return;
         }
         if (ws.data.authenticated) {
-          registerBrowserWebSocketClient(browserWebSockets, ws);
-          registerBrowserUserWebSocketClient(browserUserWebSockets, ws);
-          ws.sendText(JSON.stringify({ type: "auth_ack" }));
+          registerBrowserWebSocketClient(browserWebSockets, jwtBrowserClient(ws));
+          registerBrowserUserWebSocketClient(browserUserWebSockets, jwtBrowserClient(ws));
+          jwtBrowserClient(ws).sendText(JSON.stringify({ type: "auth_ack" }));
         }
       },
       async message(ws, message) {
@@ -1589,31 +1629,33 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
           if (!ws.data.authenticated) {
             const authorization = await authorizeBrowserWebSocketAuthFrame(event, store, authToken, ws.data.workspaceId);
             if ("error" in authorization) {
-              ws.sendText(JSON.stringify({ error: authorization.error }));
+              jwtBrowserClient(ws).sendText(JSON.stringify({ error: authorization.error }));
               ws.close();
               return;
             }
             ws.data.authenticated = true;
             ws.data.userId = authorization.userId;
             ws.data.accessToken = authorization.accessToken;
-            registerBrowserWebSocketClient(browserWebSockets, ws);
-            registerBrowserUserWebSocketClient(browserUserWebSockets, ws);
-            ws.sendText(JSON.stringify({ type: "auth_ack" }));
+            ws.data.jwtDigest = authorization.jwtDigest;
+            ws.data.rootProof = authorization.rootProof;
+            registerBrowserWebSocketClient(browserWebSockets, jwtBrowserClient(ws));
+            registerBrowserUserWebSocketClient(browserUserWebSockets, jwtBrowserClient(ws));
+            jwtBrowserClient(ws).sendText(JSON.stringify({ type: "auth_ack" }));
             return;
           }
           // MUL-438 v2 frames. Each endpoint serves exactly one stream kind:
           // `/ws` carries `log:*`, `/api/trace/ws` carries `trace:*`.
           if (event.type === "stream.subscribe") {
             const handler = ws.data.streamEndpoint === "trace" ? traceStreams : browserStreams;
-            await handler.handleSubscribe(ws, event);
+            await handler.handleSubscribe(jwtBrowserClient(ws), event);
             return;
           }
           if (event.type === "stream.unsubscribe") {
             const handler = ws.data.streamEndpoint === "trace" ? traceStreams : browserStreams;
-            handler.handleUnsubscribe(ws, event);
+            handler.handleUnsubscribe(jwtBrowserClient(ws), event);
             return;
           }
-          if (event.type === "ping") ws.sendText(JSON.stringify({ type: "pong" }));
+          if (event.type === "ping") jwtBrowserClient(ws).sendText(JSON.stringify({ type: "pong" }));
           return;
         }
       },
@@ -1623,7 +1665,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
         if (ws.data.kind === "daemon-protocol") ws.data.session?.handleDrain();
         if (ws.data.kind === "browser") {
           const handler = ws.data.streamEndpoint === "trace" ? traceStreams : browserStreams;
-          handler.notifyDrain(ws);
+          handler.notifyDrain(jwtBrowserClient(ws));
         }
       },
       close(ws) {
@@ -1631,10 +1673,10 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
         realtimeState.connections = Math.max(0, realtimeState.connections - 1);
         if (ws.data.kind === "daemon-protocol") ws.data.session?.handleSocketClose();
         else {
-          unregisterBrowserWebSocketClient(browserWebSockets, ws);
-          unregisterBrowserUserWebSocketClient(browserUserWebSockets, ws);
-          browserStreams.disposeClient(ws);
-          traceStreams.disposeClient(ws);
+          unregisterBrowserWebSocketClient(browserWebSockets, jwtBrowserClient(ws));
+          unregisterBrowserUserWebSocketClient(browserUserWebSockets, jwtBrowserClient(ws));
+          browserStreams.disposeClient(jwtBrowserClient(ws));
+          traceStreams.disposeClient(jwtBrowserClient(ws));
         }
       },
     },

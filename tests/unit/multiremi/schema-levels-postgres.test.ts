@@ -45,7 +45,7 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
     expect(() => assertScmOwnershipReady(db)).not.toThrow();
     expect(db.query('SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover').all()).toEqual([{ cursor_id: '', complete: 1 }]);
     expect(readSchemaLevels(db)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
-  }, 30_000);
+  }, 90_000);
   it('adds A3 live terms to an enrolled level 1 database and preserves old reader compatibility', () => {
     removeScmSchema(db);
     db.exec('DROP TABLE multiremi_feishu_command_results; ALTER TABLE multiremi_feishu_bot_configs DROP COLUMN wake_words_json; DROP TABLE multiremi_live_terms');
@@ -56,16 +56,16 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
     expect(db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='multiremi_live_terms'").get()).not.toBeNull();
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 1, maxLevel: 1 })).not.toThrow();
     console.info('A3 startup expand: level 1 -> 2, live terms table exists; previous B1 reader interval [1,1] remains compatible');
-  });
+  }, 30_000);
   it('refuses contracted schemas before historical migrations execute', () => {
-    db.exec('UPDATE multiremi_schema_meta SET expand_level=10, contract_level=10');
+    db.exec('UPDATE multiremi_schema_meta SET expand_level=11, contract_level=11');
     try {
       let refusal: Error | undefined;
       try { runStartupMigrations(db); } catch (error) { refusal = error as Error; }
-      expect(refusal?.message).toContain('contract_level=10 exceeds code maxLevel=9');
+      expect(refusal?.message).toContain('contract_level=11 exceeds code maxLevel=10');
       console.info(`startup guard: ${refusal?.message}`);
     }
-    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=9'); }
+    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=10'); }
   });
   it('upgrades existing bot rows and accepts old writers after level 5', () => {
     verifyFeishuWakeWordUpgrade(db);

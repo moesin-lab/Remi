@@ -1,5 +1,7 @@
 // Runtime and daemon request plumbing: provider validation, the ownership-scoped runtime loaders,
 // the daemon install instructions, and the registration/deregistration paths the daemon calls.
+import { SecurityAbort } from "@multiremi/store/security-write.js";
+import type { CredentialProof } from "@multiremi/store/root-authority-contract.js";
 import type { Context } from "hono";
 import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection.js";
 import { MultiremiStore, daemonRuntimeId } from "@multiremi/store/store.js";
@@ -316,7 +318,7 @@ export function registerDaemonRuntimes(
   body: DaemonRegisterRequestBody,
   auth: { ownerId: string | null } = { ownerId: null },
   includeRelay = false,
-  options: { allowLegacyDaemonMigration?: boolean } = {},
+  options: { allowLegacyDaemonMigration?: boolean; authorization?: (runtimeId: string) => { proof: CredentialProof | null; version: number } } = {},
 ):
   | {
     runtimes: ReturnType<typeof daemonRuntimeResponse>[];
@@ -400,11 +402,12 @@ export function registerDaemonRuntimes(
   try {
     savedRuntimes = store.registerDaemonRuntimeBatch(
       registrations.map((entry) => entry.input),
-      { displayName: deviceName },
+      { displayName: deviceName, ...options.authorization?.(registrations[0]!.id) },
     );
   } catch (error) {
     if (
-      error instanceof DaemonRetiredError
+      error instanceof SecurityAbort
+      || error instanceof DaemonRetiredError
       || error instanceof DaemonIdentityOwnerConflictError
       || error instanceof RuntimeRegistrationIdentityConflictError
     ) throw error;

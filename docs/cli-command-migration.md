@@ -471,6 +471,7 @@ mean Feishu has acknowledged delivery. The current conversation comes from CLI c
 
 ```text
 remi context
+remi root
 remi workspace
 remi account
 remi workspace operator
@@ -516,6 +517,45 @@ remi lark
 Use `remi help <path>` or `remi <path> --help` for the registered positional and
 option contract. All capability commands declare their authentication identities,
 mutation class, and `table|json|jsonl` output contract in the Registry.
+
+### System root authority and dynamic capabilities (MUL-1)
+
+System root is orthogonal to `normal`, `maintainer`, and `supervisor` Agent roles.
+The `remi root` domain exposes explicit system root inspection and management:
+
+```text
+remi root context
+remi root grant list [--subject-type user|agent] [--subject-id <id>] [--status active|revoked|expired]
+remi root grant preview --agent-id <id> --runtime-trust <id>...
+remi root agent-configuration approve --agent-id <id> --file <file>
+remi root grant create --subject-type user|agent --subject-id <id> --reason <text> --expected-revision <n> [--idempotency-key <key>] [--expires-at <iso>] [--runtime-trust <id>...] [--accepted-dependency-digest <digest>]
+remi root grant revoke <grant> --reason <text> --expected-revision <n> [--reason-code <code>] [--idempotency-key <key>] --yes
+remi root agent-pat create --expires-at <iso> [--idempotency-key <key>]
+remi root delegation revoke --origin-id <id> --file <file> --yes
+remi root runtime-trust list [--runtime <id>] [--status active|revoked|expired]
+remi root runtime-trust get <runtime>
+remi root runtime-trust grant <runtime> --daemon <id> --incarnation <id> --recipient-key-id <id> --recipient-key-fingerprint <fp> --reason <text> --expected-revision <n>
+remi root runtime-trust revoke <trust> --reason <text> --expected-revision <n> [--reason-code <code>] --yes
+remi root credential-family revoke <family> --reason-code <code> --reason <text> --expected-revision <n> --yes
+remi root audit list [--action <action>] [--target-type <type>] [--target-id <id>] [--actor-id <id>]
+```
+
+For a root attempt, `remi message send` and `remi turn retry` accept `--approved-input-messages` as a JSON array of reviewed conversation message IDs and versions. The server resolves the actual content and execution sources in the admission transaction.
+
+Static human-only commands that an eligible effective root task may execute
+(including `agent.role.set` and `agent.supervisor.set`) remain `auth: ["human"]`
+for ordinary tasks and declare `root_conditional: true` in the Registry and
+`cli-capabilities.json`. `CliApiClient.requireCapability` reads dynamic server
+capabilities, invalidates cached capabilities after HTTP 401/403 or TTL expiry,
+and reports `root_attempt_not_eligible` when an Agent holds a root grant but the
+current attempt was created before authorization (requiring a new authorized
+attempt rather than token renewal or same-attempt resume). Agent create, update,
+and template commands reject read-only root fields. Root runs use the immutable
+per-run env carrier (`MULTIREMI_ROOT_CARRIER=immutable_run_env`) and fail closed
+if `MULTIREMI_TASK_CONTEXT_FILE` is inherited or `MULTIREMI_TOKEN` is missing.
+These CLI declarations target the `/api/root/*` contract; live execution requires
+the corresponding server route handlers and security activation to be wired on the
+integration branch.
 
 Password authentication uses `remi context auth password --file -` with JSON
 containing `email` and `password` on standard input. It saves the returned session

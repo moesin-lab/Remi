@@ -23,7 +23,7 @@ SQLite 历史升级仍须由离线工具调用 `runMigrations(db, { historicalMa
 `multiremi_schema_steps` 记录步骤 ID、phase、level、首次发布版本和完成时间。
 缺少元数据表示历史 level 0；空行、非法值或损坏元数据拒绝启动，不自动重置。
 [声明文件](../../packages/server/src/store/schema-compatibility.json) 同时供运行时代码、打包与 updater 读取。
-当前 `{minLevel: 9, maxLevel: 9}`、expand 9、contract 0。
+当前 `{minLevel: 10, maxLevel: 10}`、expand 10、contract 0。
 level 6 新增 `multiremi_feishu_command_results`。以 workspace、domain、app 和消息 ID 唯一保存 `/new`、`/stop` 的紧凑结果。写入与命令共用事务，结果持续保留，支持长期 pending 恢复。先升级 server 并完成 expand，再升级 daemon。新 daemon 连接旧 server 时，写命令返回 endpoint unsupported，须升级 server 后重试；不会回退到无幂等保证的旧写接口。
 level 5 在飞书机器人配置表新增 `wake_words_json TEXT NOT NULL DEFAULT '[]'`。旧行和省略该列的旧 writer 均使用空数组，旧 writer 更新其他列时保留响应词。
 正式 SCM 步骤 7/8/9 分别建立关联归属、回退停写与审核代次。历史 SCM 4/5 与 main 4/5 使用不同步骤 ID；有既有来源或检查点的库保持停写，见 [SCM 离线维护](./scm-checks.md#scm-归属切换)。
@@ -32,6 +32,8 @@ level 1 是 schema 协议登记；level 2 为 A3 的 `multiremi_live_terms` 加�
 level 3 为 planned restart 的表、索引及 daemon drain_id：先补 drain identity，再建 planned restart 表；
 历史两条入口仍保留 ensureDaemonDrains → ensurePlannedRestarts 顺序，已登记 level 2 库只走版本化 expand。
 level 4 为工作区 System Prompt 的独立文档、不可变版本与 attempt binding 新表；不迁移既有 appendix，不修改冻结 bootstrap。
+level 10 为 MUL-1 系统 root 的 `multiremi_security_state` 单例门闩（`singleton = 1`，`security_revision = 0`，`bootstrap_completed = 0`，`feature_activation = 0`），
+在版本化 expand 事务内加法建表并初始化禁用态，不激活任何 root 权限或创建授权。
 旧代码允许更高 expand，contract floor 仍为 0；历史 DDL allowlist 与 legacy 指纹输入列表不增加。
 
 - `expand_level >= minLevel`：代码需要的加法结构已存在；旧库可以先执行本版 expand。

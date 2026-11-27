@@ -9,6 +9,7 @@ import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution,
   RESTART_RECOVERY_LIMIT_MS, RESTART_RECOVERY_MAX_ATTEMPTS, type PlannedRestartRemote } from "@multiremi/worker/planned-restart-journal.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+import { fixtureDeliveryTuple, fixtureExecutionLocator, fixtureDeliveryStatusResponse } from '../../fixtures/root-authority.js';
 
 const execution: RestartExecution = { workspace_id: "ws_test", daemon_id: "daemon_test", runtime_id: "rt_test",
   turn_id: "turn_test", attempt_id: "attempt_test", handoff_id: "handoff_test", generation: 0 };
@@ -22,6 +23,27 @@ afterEach(() => {
 });
 function root() { const path = mkdtempSync(join(tmpdir(), "planned-restart-journal-")); roots.push(path); return path; }
 function journal(path = ":memory:") { const value = new PlannedRestartJournal(path); journals.push(value); return value; }
+
+it('preserves one receiver and launch identity across journal connections and ordered installation steps', () => {
+  const path = join(root(), 'receipts.db');
+  const first = journal(path), second = journal(path);
+  const tuple = fixtureDeliveryTuple, digest = fixtureDeliveryStatusResponse.envelope_digest;
+  const received = first.receiveRootExecution(tuple, digest);
+  expect(second.receiveRootExecution(tuple, digest)).toEqual(received);
+  expect(() => second.receiveRootExecution({ ...tuple, receipt_id: 'different' }, digest)).toThrow('receipt_conflict');
+  expect(() => second.receiveRootExecution({ ...tuple, delivery_version: 0 }, digest)).toThrow('receipt_conflict');
+  expect(() => second.receiveRootExecution(tuple, 'sha256:' + '0'.repeat(64))).toThrow('receipt_conflict');
+  const locator = { ...fixtureExecutionLocator, launch_identity: received.launchIdentity };
+  expect(() => second.advanceRootExecution(tuple, digest, locator, 'confirmed')).toThrow('receipt_conflict');
+  first.advanceRootExecution(tuple, digest, locator, 'installed');
+  second.advanceRootExecution(tuple, digest, locator, 'installed');
+  expect(() => second.advanceRootExecution(tuple, digest, { ...locator, execution_id: 'replacement' }, 'confirmed')).toThrow('receipt_conflict');
+  first.advanceRootExecution(tuple, digest, locator, 'confirmed');
+  const started = { ...locator, started_at: new Date().toISOString() };
+  second.advanceRootExecution(tuple, digest, started, 'started');
+  expect(journal(path).receiveRootExecution(tuple, digest)).toEqual({ ...received, state: 'started', locator: started });
+  expect(() => first.advanceRootExecution(tuple, digest, locator, 'installed')).toThrow('receipt_conflict');
+});
 const remote = (): PlannedRestartRemote => ({ suspend: async () => {}, resume: async entry => ({ generation: entry.execution.generation + 1 }) });
 
 it('pre-scans a co-resident damaged journal before recovering unread input or sending imported reports', async () => {
@@ -60,6 +82,22 @@ it('pre-scans a co-resident damaged journal before recovering unread input or se
     restart.entries(); restart.remove(execution.handoff_id);
     expect(evidence.query('SELECT payload,consumer_id FROM planned_restart_journal').get()).toEqual({payload:'{}',consumer_id:entry.consumer_id});
   } finally {await outbox.close(); db.close(); evidence.close();}
+});
+
+it('rejects delayed receives and installation transitions after a newer run is journaled', () => {
+  const path = join(root(), 'receipts.db');
+  const original = journal(path), recovered = journal(path);
+  const tuple = fixtureDeliveryTuple, digest = fixtureDeliveryStatusResponse.envelope_digest;
+  const first = original.receiveRootExecution(tuple, digest);
+  const locator = { ...fixtureExecutionLocator, launch_identity: first.launchIdentity };
+  original.advanceRootExecution(tuple, digest, locator, 'installed');
+  const next = { ...tuple, receipt_id: 'next', run_generation: tuple.run_generation + 1, material_version: tuple.material_version + 1 };
+  const current = recovered.receiveRootExecution(next, digest);
+  expect(() => original.receiveRootExecution(tuple, digest)).toThrow('stale_execution');
+  expect(() => original.advanceRootExecution(tuple, digest, locator, 'confirmed')).toThrow('receipt_conflict');
+  expect(() => recovered.receiveRootExecution({ ...next, receipt_id: 'rollback', run_generation: next.run_generation + 1,
+    material_version: tuple.material_version }, digest)).toThrow('stale_execution');
+  expect(journal(path).receiveRootExecution(next, digest)).toEqual(current);
 });
 
 it("journals only after provider/report/trace quiescence, and only acknowledges a committed remote checkpoint", async () => {

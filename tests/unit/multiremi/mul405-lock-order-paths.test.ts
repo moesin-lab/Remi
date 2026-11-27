@@ -253,7 +253,7 @@ function expectDepthOne(): void {
  * participate in a cycle, so only the first is ordered here. Consumers that must
  * not silently lose a lock assert its presence separately per path.
  */
-const RANK: Record<LockClass, number> = { F: -1, W: 0, N: 1, D: 2 };
+const RANK: Record<LockClass, number> = { F: 0, S: 1, W: 2, N: 3, D: 4 };
 
 function firstAcquisitions(trace: LockRecordingDatabase["trace"]): LockRecordingDatabase["trace"] {
   const seen = new Set<LockClass>();

@@ -55,6 +55,7 @@ export type BrowserStreamEndpoint = HubStreamName;
 
 export interface BrowserStreamHandlerDeps {
   hub: LiveHub & Partial<Pick<HubImpl, "subscribeWithSink">>;
+  hasRootAccess?: (client: MultiremiWebSocketClient, stream: HubStreamName, id: string) => boolean;
   auth: StreamAuthReader;
   /** The kind this socket accepts; the other one answers `wrong_endpoint`. */
   endpoint: BrowserStreamEndpoint;
@@ -194,7 +195,7 @@ export function createBrowserStreamHandler(deps: BrowserStreamHandlerDeps): Brow
     client: MultiremiWebSocketClient,
     stream: HubStreamName,
     id: string,
-  ): Promise<{ ok: true } | { ok: false; code: string }> => {
+  ): Promise<{ ok: true; root?: true } | { ok: false; code: string }> => {
     if (client.data.kind !== "browser" || !client.data.authenticated) {
       return { ok: false, code: "forbidden" };
     }
@@ -202,11 +203,15 @@ export function createBrowserStreamHandler(deps: BrowserStreamHandlerDeps): Brow
     if (stream === "log") {
       const facts = await deps.auth.logFacts(id, subject);
       if (!facts.ok) return { ok: false, code: facts.code };
-      return decideLogSubscription(subject, facts.facts);
+      const regular = decideLogSubscription(subject, facts.facts);
+      if (regular.ok && client.data.accessToken?.type !== 'task') return regular;
+      return facts.facts && deps.hasRootAccess?.(client, stream, id) ? { ok: true, root: true } : { ok: false, code: 'forbidden' };
     }
     const facts = await deps.auth.traceFacts(id, subject);
     if (!facts.ok) return { ok: false, code: facts.code };
-    return decideTraceSubscription(subject, facts.facts);
+    const regular = decideTraceSubscription(subject, facts.facts);
+    if (regular.ok && client.data.accessToken?.type !== 'task') return regular;
+    return facts.facts && deps.hasRootAccess?.(client, stream, id) ? { ok: true, root: true } : { ok: false, code: 'forbidden' };
   };
 
   return {
@@ -238,7 +243,7 @@ export function createBrowserStreamHandler(deps: BrowserStreamHandlerDeps): Brow
       // and disposal invalidate its identity even before an active handle exists.
       const request = Symbol(key);
       pending.set(key, request);
-      let authorized: { ok: true } | { ok: false; code: string };
+      let authorized: Awaited<ReturnType<typeof authorize>>;
       try {
         authorized = await authorize(client, parsed.stream, parsed.id);
       } catch {
@@ -270,6 +275,22 @@ export function createBrowserStreamHandler(deps: BrowserStreamHandlerDeps): Brow
       let alive = true;
       let delivery = Promise.resolve();
       let projectionBytes = 0;
+      const sendAuthorized = (type: string, payload: unknown): void => {
+        if (authorized.root) {
+          let failure = 'forbidden';
+          try {
+            if (deps.hasRootAccess?.(client, parsed.stream, parsed.id)) {
+              sendFrame(client, type, payload);
+              return;
+            }
+          } catch { failure = 'unavailable'; }
+          active.get(key)?.unsubscribe();
+          active.delete(key);
+          sendError(client, parsed.stream, parsed.id, failure);
+          return;
+        }
+        sendFrame(client, type, payload);
+      };
       const buffered: Array<() => void> = [];
       const emit = (deliver: () => void | Promise<void>) => {
         if (!alive) return;
@@ -295,7 +316,7 @@ export function createBrowserStreamHandler(deps: BrowserStreamHandlerDeps): Brow
             try {
               const frames = parsed.stream === "log" && deps.projectLogFrames
                 ? await projectLog(client, parsed.id, batch, () => alive) : batch;
-              if (alive && frames.length) sendFrame(client, "stream.data", { stream: parsed.stream, id: parsed.id, frames });
+              if (alive && frames.length) sendAuthorized("stream.data", { stream: parsed.stream, id: parsed.id, frames });
             } finally {
               projectionBytes -= bytes;
               // A queued read counts as backpressure until its frames reach the socket.
@@ -303,8 +324,8 @@ export function createBrowserStreamHandler(deps: BrowserStreamHandlerDeps): Brow
             }
           });
         },
-        gap: (from, to) => emit(() => sendStreamGap(client, parsed.stream, parsed.id, from, to)),
-        closed: (head) => emit(() => sendFrame(client, "stream.closed", {
+        gap: (from, to) => emit(() => sendAuthorized("stream.gap", { stream: parsed.stream, id: parsed.id, from, to })),
+        closed: (head) => emit(() => sendAuthorized("stream.closed", {
           stream: parsed.stream, id: parsed.id, head_seq: head,
         })),
       };
@@ -326,7 +347,7 @@ export function createBrowserStreamHandler(deps: BrowserStreamHandlerDeps): Brow
         unsubscribe: () => { alive = false; subscription.unsubscribe(); },
         notifyDrain: () => subscription.notifyDrain?.(),
       });
-      sendFrame(client, "stream.ack", {
+      sendAuthorized("stream.ack", {
         stream: parsed.stream,
         id: parsed.id,
         first_seq: subscription.first_seq,

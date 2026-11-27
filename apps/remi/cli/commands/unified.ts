@@ -18,6 +18,18 @@ const textOptions: CliOptionSpec[] = [
 ];
 const ref = (name: string, required = true) => ({ name, required });
 const option = (name: string, type: CliOptionSpec["type"] = "string"): CliOptionSpec => ({ name, type });
+const approvedInputsOption: CliOptionSpec = { name: "approved-input-messages", type: "string", valueName: "json",
+  description: "JSON array of reviewed conversation message IDs and versions for root admission" };
+
+function approvedInputMessages(invocation: CommandInvocation): unknown[] | undefined {
+  const raw = stringOption(invocation, approvedInputsOption.name);
+  if (raw === null) return undefined;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (Array.isArray(value)) return value;
+  } catch {}
+  throw new CliError("usage", "--approved-input-messages must be a JSON array");
+}
 
 function spec(path: string[], mutation: CommandSpec["mutation"], positionals: CommandSpec["positionals"], options: CliOptionSpec[], run: CommandSpec["run"]): CommandSpec {
   return { id: path.join("."), path, description: descriptions[path.join(".")]!, capability: path.join("."),
@@ -37,7 +49,7 @@ export function unifiedCommandSpecs(): CommandSpec[] {
   return [
     ...["message", "turn"].map((domain): CommandSpec => ({ id: `${domain}.group`, path: [domain], description: domain === "message" ? "Send and manage conversation messages" : "Inspect and control turns", parse: "passthrough", run: async () => { throw new CliError("usage", `usage: remi ${domain} <command>`); } })),
     spec(["message", "send"], "write", [ref("conversation", false)], [
-      ...textOptions, option("to"), option("to-type"), option("kind"), option("wake"), option("reply-to"),
+      ...textOptions, option("to"), option("to-type"), option("kind"), option("wake"), option("reply-to"), approvedInputsOption,
       { ...option("response"), description: "JSON permission or question response", conflictsWith: ["option"] },
       { ...option("revision", "integer"), description: "Expected route revision when replying to an original Q; read message question get first" },
       { ...option("answer-revision", "integer"), description: "Expected answer revision for an explicit Q revision" },
@@ -125,9 +137,10 @@ export function unifiedCommandSpecs(): CommandSpec[] {
       const result = await client.request({ method: "GET", path: turnPath(i), query: { input: i.options.input === true, attempts: i.options.attempts === true } });
       new CliRenderer().render(result.data, { mode: outputMode(i) });
     }),
-    ...(["cancel", "wrap-up", "retry"] as const).map((action) => spec(["turn", action], action === "wrap-up" ? "write" : "destructive", [ref("turn")], [option("reason"), ...(action === "retry" ? [option("cold", "boolean")] : []), ...(action === "wrap-up" ? [] : [YES_OPTION])], async (i) => {
+    ...(["cancel", "wrap-up", "retry"] as const).map((action) => spec(["turn", action], action === "wrap-up" ? "write" : "destructive", [ref("turn")], [option("reason"), ...(action === "retry" ? [option("cold", "boolean"), approvedInputsOption] : []), ...(action === "wrap-up" ? [] : [YES_OPTION])], async (i) => {
       if (action !== "wrap-up") requireConfirmation(i);
-      renderResource(i, await request(i, "POST", `${turnPath(i)}/${action}`, { reason: stringOption(i, "reason") ?? undefined, ...(action === "retry" ? { cold: i.options.cold === true } : {}) }));
+      renderResource(i, await request(i, "POST", `${turnPath(i)}/${action}`, { reason: stringOption(i, "reason") ?? undefined,
+        ...(action === "retry" ? { cold: i.options.cold === true, approved_input_messages: approvedInputMessages(i) } : {}) }));
     })),
     spec(["turn", "trace", "read"], "read", [ref("turn")], [option("attempt"), ...TRACE_READ_OPTIONS], async (i) => {
       const client = await clientFor(i);
@@ -159,6 +172,7 @@ async function send(i: CommandInvocation): Promise<void> {
   if (routeRevision !== null && (!Number.isSafeInteger(routeRevision) || routeRevision < 1)) throw new CliError("usage", "--revision must be a positive route revision");
   if (i.options.revise === true && (routeRevision === null || answerRevision === null || !Number.isSafeInteger(answerRevision) || answerRevision < 0 || !stringOption(i, "reason")?.trim())) throw new CliError("usage", "Question revision requires --revision, --answer-revision and --reason");
   const payload = { body_md: body, to, message_kind: kind, wake_requested: wake, reply_to_id: stringOption(i, "reply-to"),
+    approved_input_messages: approvedInputMessages(i),
     ...(routeRevision !== null ? { expected_route_revision: routeRevision } : {}),
     ...(i.options.revise === true ? { revise: true, expected_answer_revision: answerRevision, reason: stringOption(i, "reason") } : {}),
     dedupe_key: stringOption(i, "dedupe-key"), ...(response ? { response } : {}), ...(kind === "decision" ? { options: selected.map(decisionOption) } : selected.length ? { metadata: { selected_options: selected } } : {}) };

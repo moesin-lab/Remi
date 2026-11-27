@@ -57,10 +57,21 @@ describe('schema compatibility protocol', () => {
     expect(database.query('SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover').all()).toEqual([{ cursor_id: '', complete: 1 }]);
     expect(readSchemaLevels(database)).toEqual({ expandLevel: SCHEMA_EXPAND_LEVEL, contractLevel: 0 });
     runMigrations(database);
-    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(SCHEMA_EXPAND_LEVEL);
-    database.exec('UPDATE multiremi_schema_meta SET expand_level=10, contract_level=10');
+    const steps = database.query('SELECT id FROM multiremi_schema_steps').all();
+    expect(steps).toHaveLength(23);
+    expect(steps).toContainEqual({ id:'20261126_agent_source_approvals' });
+    expect(steps).toContainEqual({ id: '20261126_durable_delegations' });
+    expect(steps).toContainEqual({ id: '20261126_agent_grant_dependencies' });
+    expect(steps).toContainEqual({ id: '20261126_machine_deployment_roots' });
+    expect(database.query('SELECT attempt_id FROM multiremi_attempt_eligibility').all()).toEqual([]);
+    expect(database.query('SELECT attempt_id FROM multiremi_current_task_leases').all()).toEqual([]);
+    expect(database.query('SELECT domain_id FROM multiremi_jwt_signing_domains').all()).toEqual([]);
+    expect(database.query('SELECT credential_id FROM multiremi_jwt_current').all()).toEqual([]);
+    expect(database.query('SELECT grant_id FROM multiremi_root_grants').all()).toEqual([]);
+    expect(database.query('SELECT active_grant_id FROM multiremi_root_subject_state').all()).toEqual([]);
+    database.exec('UPDATE multiremi_schema_meta SET expand_level=11, contract_level=11');
     const before = database.query('SELECT total_changes() AS count').get();
-    expect(() => runMigrations(database)).toThrow('contract_level=10 exceeds code maxLevel=9');
+    expect(() => runMigrations(database)).toThrow('contract_level=11 exceeds code maxLevel=10');
     expect(database.query('SELECT total_changes() AS count').get()).toEqual(before);
   });
   it('requires maintenance for populated pre-protocol databases and never replays enrolled history', () => {

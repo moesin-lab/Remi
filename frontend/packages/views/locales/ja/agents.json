@@ -520,5 +520,12 @@
     "model_routing": "モデルルーティング · {{provider}}",
     "model_routing_hint": "選択したモデルと思考レベルに合う実行グループと Runtime を選びます。モデル未指定時は互換 Runtime の既定モデルを使います。",
     "fixed_group": "固定実行グループ · {{group}}"
+  },
+  "root": {
+    "badge_effective": "システム Root",
+    "badge_granted_ineffective": "Root 付与済（新規 attempt で有効）",
+    "tooltip_effective": "システム root 第 {{generation}} 世代が有効です（normal/maintainer/supervisor ロールとは独立）。",
+    "tooltip_attempt_not_eligible": "Agent には root が付与されていますが、この attempt は付与前に作成されました。新しい attempt を開始してください。",
+    "tooltip_ineffective_reason": "Agent には root が付与されていますが現在無効です（{{reason}}）。"
   }
 }

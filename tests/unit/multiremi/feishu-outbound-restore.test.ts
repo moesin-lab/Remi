@@ -145,8 +145,8 @@ describe("C5 physical restore on SQLite", () => {
     } finally { db.close(); }
   });
 
-  it("reports each undrained condition without changing the live table", () => {
-    for (const violation of ["missing-result", "nonterminal", "deferred"] as const) {
+  for (const violation of ["missing-result", "nonterminal", "deferred"] as const) {
+    it(`reports ${violation} without changing the live table`, () => {
       const db = openSqliteDatabase(":memory:");
       try {
         seed(db);
@@ -162,8 +162,8 @@ describe("C5 physical restore on SQLite", () => {
         expect(db.query("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' ORDER BY name").all()).toEqual(indexes);
         expect(db.query(`SELECT name FROM sqlite_master WHERE name = ?`).get(archive)).toBeNull();
       } finally { db.close(); }
-    }
-  });
+    });
+  }
 
   it.skipIf(!Bun.which("sqlite3"))("stops the default sqlite3 CLI on a failed guard", () => {
     const directory = mkdtempSync(join(tmpdir(), "m447-c5-sqlite-"));

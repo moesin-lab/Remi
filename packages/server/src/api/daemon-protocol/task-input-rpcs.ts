@@ -9,8 +9,12 @@ import type { DaemonTurnBridge, DaemonTurnRpc } from "./turn-bridge.js";
 import { fitRestartResumeToBudget } from "./offer-budget.js";
 import { samePolicyOffer, type SystemPromptPolicyBinding } from '@multiremi/contracts/system-prompt-policy.js';
 import { hashSystemPromptContent } from '@shared/system-prompt-policy-hash.js';
+import { assertRootWirePayloadHasNoPlaintextSecrets, classifyDaemonRestartResumeRequest, type RootDeliveryInstallAckRequest, type RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
 
 const denied = (code = "invalid_report") => ({ ok: false, code, retryable: false });
+
+const record = (value: unknown): value is Record<string,unknown> => !!value && typeof value==='object' && !Array.isArray(value);
+const text = (value: unknown): value is string => typeof value==='string' && value.length>0 && value.length<=512;
 
 export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: MultiremiStore, kick: (runtimeId: string) => void,
   turns: DaemonTurnBridge = store.getDaemonTurnBridge(),
@@ -21,6 +25,64 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
       masterToken: session.ownerAccessToken === null }, session.daemonId, frame.rt);
     return runtime.ok;
   };
+  layer.registerRpcHandler('delivery.receipt.challenge', async (frame, session) => {
+    const { action, attempt_id, consumer_id, receipt_id, handoff_id } = frame.payload;
+    if (session.ownerAccessToken?.type !== 'daemon' || !frame.rt || !await authorized(frame, session)) return denied('authority_revoked');
+    if ((action !== 'status' && action !== 'replay' && action !== 'install_ack' && action !== 'start') ||
+        !text(attempt_id) || !text(consumer_id) || (receipt_id != null && !text(receipt_id)) || (handoff_id != null && !text(handoff_id))) return denied();
+    try {
+      const receipts = store.rootReceipts;
+      const id = receipts.findReceipt({attempt_id, handoff_id, receipt_id}, frame.rt, consumer_id);
+      if (!id) return denied('authority_revoked');
+      const plan = receipts.planRecovery(id);
+      const challenge = store.withSecurityWrite(plan.fenceTerm, plan, tx => receipts.challengeSession(tx, session, frame.rt!, action, id));
+      return {ok: true, challenge};
+    } catch {
+      return denied('authority_revoked');
+    }
+  });
+  for (const action of ['status','replay','install_ack'] as const) {
+    layer.registerRpcHandler(`delivery.receipt.${action}`,async(frame,session)=>{
+      const payload=frame.payload;
+      const proof=payload.machine_proof as RootDeliveryMachineProof | undefined;
+      if (session.ownerAccessToken?.type!=='daemon' || !frame.rt || !proof || proof.runtime_id!==frame.rt || proof.daemon_id!==session.daemonId ||
+          !await authorized(frame,session)) return denied('authority_revoked');
+      try {
+        assertRootWirePayloadHasNoPlaintextSecrets(payload);
+        if (![proof.consumer_id,proof.incarnation,proof.recipient_key_id,proof.recipient_key_fingerprint,proof.nonce,proof.signature,proof.signed_at]
+          .every(value=>typeof value==='string' && value.length>0 && value.length<=4096)) return denied();
+        const receipts=store.rootReceipts;
+        let receiptId: unknown=payload.receipt_id;
+        if (action==='status') {
+          const key=payload.execution_key;
+          if (!record(key) || !text(key.attempt_id) || (key.handoff_id!=null && !text(key.handoff_id)) ||
+              (key.receipt_id!=null && !text(key.receipt_id))) return denied();
+          receiptId=receipts.findReceipt({attempt_id:key.attempt_id,handoff_id:key.handoff_id,receipt_id:key.receipt_id},frame.rt,proof.consumer_id);
+        } else if (action==='install_ack') {
+          if (!record(payload.tuple) || !record(payload.execution_locator) || !text(payload.envelope_digest) ||
+              !text(payload.installed_at) || !Number.isFinite(Date.parse(payload.installed_at))) return denied();
+          receiptId=payload.tuple.receipt_id;
+        }
+        if (!text(receiptId)) return denied('authority_revoked');
+        const id=receiptId;
+        const plan=receipts.planRecovery(id);
+        return store.withSecurityWrite(plan.fenceTerm,plan,tx=>{
+          const machine=receipts.authenticateConnection(tx,session,action,id,proof);
+          if (action==='status') return receipts.status(tx,machine,id);
+          if (action==='replay') {
+            const {expected_receipt_version,expected_delivery_version,run_lease_id,fence_term}=payload;
+            if (typeof expected_receipt_version!=='number' || typeof expected_delivery_version!=='number' || !text(run_lease_id) || !text(fence_term)) return denied();
+            return {ok:true,replay:true,...receipts.replay(tx,machine,{receipt_id:id,expected_receipt_version,expected_delivery_version,run_lease_id,fence_term})};
+          }
+          return receipts.acknowledge(tx,machine,payload as unknown as RootDeliveryInstallAckRequest);
+        });
+      } catch (error) {
+        if (error instanceof Error && (error.message==='receipt_conflict' || error.message==='stale_execution')) return denied(error.message);
+        if (error instanceof Error && error.message==='security_state_unavailable') return {ok:false,code:'security_state_unavailable',retryable:true};
+        return denied('authority_revoked');
+      }
+    });
+  }
   for (const type of ["turn.input", "turn.decision", "turn.decision.get", "turn.decision.expire", "turn.decision.consume"] as const) {
     layer.registerRpcHandler(type, async (frame, session) => {
       if (!await authorized(frame, session)) return denied("authority_revoked");
@@ -69,6 +131,8 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
   for (const method of ['turn.restart.resume','turn.restart.resume_bound']) layer.registerRpcHandler(method, async (frame, session) => {
     if (!await authorized(frame, session)) return denied("authority_revoked");
     const p = frame.payload;
+    const delivery = classifyDaemonRestartResumeRequest(p);
+    if (delivery.kind !== 'standard') return denied(delivery.kind === 'root' ? 'root_delivery_unsupported' : delivery.code);
     if (typeof p.attempt_id !== "string" || typeof p.handoff_id !== "string"
       || typeof p.consumer_id !== "string" || p.consumer_id.length < 16 || p.consumer_id.length > 256 || !prepareResume) return denied();
     const task = store.getTaskWithAgent(p.attempt_id);
@@ -99,12 +163,16 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
             || policy.contentHash !== proof.content_hash || hashSystemPromptContent(policy.content) !== proof.content_hash) throw new PlannedRestartError('restart_policy_mismatch');
         }
       };
-      const receipt = store.plannedRestarts().resume(task.id, p.handoff_id, p.consumer_id, scope, (generation, checkpoint) => {
+      const consumerId = p.consumer_id;
+      const receipt = store.plannedRestarts().resume(task.id, p.handoff_id, consumerId, scope, (generation, checkpoint, phase) => {
         // Check the complete, current package under the CAS locks. A capacity
         // failure rolls back Q preparation and generation before any run grant.
         delivery(generation, checkpoint);
-        store.reportTaskUsageSnapshot(task.id, { version: 2, runId: p.consumer_id as string,
-          revision: 0, complete: false, units: [] }, scope);
+        if (phase === 'activate') {
+          store.reportTaskUsageSnapshot(task.id, { version: 2, runId: consumerId,
+            revision: 0, complete: false, units: [] }, scope);
+        }
+        if (!store.isTaskUsageExecutionAuthorized(task.id, consumerId, scope.runtimeId)) throw new PlannedRestartError('stale_execution');
       }, bound ? current => {
         const proof = current.checkpoint?.policy_receipt;
         const policy = offer.system_prompt_policy as SystemPromptPolicyBinding | undefined;
@@ -113,12 +181,7 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
           || proof.runtime_id !== scope.runtimeId || proof.daemon_id !== scope.daemonId || !policy || policy.workspaceId !== proof.workspace_id
           || policy.contentHash !== proof.content_hash || hashSystemPromptContent(policy.content) !== proof.content_hash
           || store.systemPromptsRepo().offerStatus(proof) !== 'adopted') throw new PlannedRestartError('restart_policy_mismatch');
-        if (['resuming','running'].includes(current.state) && current.consumer_id === p.consumer_id) delivery(current.generation,current.checkpoint!);
       } : undefined);
-      if (!store.isTaskUsageExecutionAuthorized(task.id, p.consumer_id, frame.rt!)) return denied("stale_execution");
-      // The idempotent path does not execute authorize. Rebuild current inputs
-      // and questions as they can change while a committed reply is lost.
-      if (!reply) delivery(receipt.generation, receipt.checkpoint!);
       return bound ? { ...(reply as Record<string,unknown> | null), policy_receipt:receipt.checkpoint!.policy_receipt } : reply;
     } catch (error) {
       // Completion can win while asynchronous offer preparation is in flight.

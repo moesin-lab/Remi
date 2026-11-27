@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import type { RouterDeps } from "./deps.js";
+import { guardRootResourceWrite } from "../helpers/root-access.js";
 import type { SystemPromptActor, SystemPromptContent, SystemPromptEditInput, SystemPromptRestoreInput, SystemPromptWriteInput } from "@multiremi/contracts/system-prompt-policy.js";
 import { denyCurrentUserWorkspaceAccess, requireHumanWorkspaceAdmin, readJsonStrict, isJsonApiError } from "../helpers.js";
 import { authenticatedRequestUserId, currentRequestUserId, currentTaskAccessToken } from "../wire/context.js";
@@ -24,6 +25,10 @@ export function registerSystemPromptRoutes(app: Hono, { store }: RouterDeps): vo
     return c.json({ error: error.message, code: error.code,
       ...(error.currentRevision !== undefined ? { currentRevision: error.currentRevision } : {}) }, status);
   }
+  function writePrompt<T>(c: Context, version: number, operation: () => T): T {
+    const workspaceId = c.req.param('id')!;
+    return guardRootResourceWrite(c, store, workspaceId, 'system-prompt', workspaceId, operation, { version });
+  }
   app.get("/api/workspaces/:id/system-prompt", c => {
     const denied = access(c);
     if (denied) return denied;
@@ -44,7 +49,7 @@ export function registerSystemPromptRoutes(app: Hono, { store }: RouterDeps): vo
     if (denied) return denied;
     const body = await readJsonStrict<SystemPromptEditInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError, code: "invalid_system_prompt" }, body.statusCode);
-    try { return c.json(store.editSystemPrompt(c.req.param("id"), body, actor(c))); }
+    try { return c.json(writePrompt(c, body.expectedRevision, () => store.editSystemPrompt(c.req.param("id"), body, actor(c)))); }
     catch (error) { return failure(c, error); }
   });
   app.post("/api/workspaces/:id/system-prompt/reset", async c => {
@@ -52,7 +57,7 @@ export function registerSystemPromptRoutes(app: Hono, { store }: RouterDeps): vo
     if (denied) return denied;
     const body = await readJsonStrict<SystemPromptWriteInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError, code: "invalid_system_prompt" }, body.statusCode);
-    try { return c.json(store.resetSystemPrompt(c.req.param("id"), body, actor(c))); }
+    try { return c.json(writePrompt(c, body.expectedRevision, () => store.resetSystemPrompt(c.req.param("id"), body, actor(c)))); }
     catch (error) { return failure(c, error); }
   });
   app.post("/api/workspaces/:id/system-prompt/restore", async c => {
@@ -60,7 +65,7 @@ export function registerSystemPromptRoutes(app: Hono, { store }: RouterDeps): vo
     if (denied) return denied;
     const body = await readJsonStrict<SystemPromptRestoreInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError, code: "invalid_system_prompt" }, body.statusCode);
-    try { return c.json(store.restoreSystemPrompt(c.req.param("id"), body, actor(c))); }
+    try { return c.json(writePrompt(c, body.expectedRevision, () => store.restoreSystemPrompt(c.req.param("id"), body, actor(c)))); }
     catch (error) { return failure(c, error); }
   });
   app.get("/api/workspaces/:id/system-prompt/versions", c => {

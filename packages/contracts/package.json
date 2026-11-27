@@ -34,7 +34,9 @@
     "./slash-commands": "./src/slash-commands.ts",
     "./trace-file": "./src/trace-file.ts",
     "./external-chats": "./src/external-chats.ts",
-    "./planned-restart": "./src/planned-restart.ts"
+    "./planned-restart": "./src/planned-restart.ts",
+    "./root-authority": "./src/root-authority.ts",
+    "./root-delivery": "./src/root-delivery.ts"
   },
   "dependencies": {}
 }

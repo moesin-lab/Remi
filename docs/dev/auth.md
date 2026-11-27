@@ -8,6 +8,22 @@ summary: 区分平台登录账号与统一工作区操作者，说明历史数�
 
 Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后的人类操作者共享全部工作区。工作区内统一使用 `local` 操作身份，每个工作区有一个稳定的内部 operator 记录，成员角色不再决定人类权限。本页描述实现契约，不代表已完成所有路由的安全审计或生产登录验证。
 
+## Root 内核事务接口
+
+`store.rootManagement.registeredCredentials.verify(raw)` 校验已登记的 PAT 或 task 材料；`verifyJwt(compact, signing)` 校验登记过的 dashboard JWT。证明仅在创建它的 `RootManagement` 实例内有效。读取使用 `resolveCurrent(proof, use)`。写入先取 `plan(proof, use)`，以 `plan.fenceTerm` 进入同一个 Store 连接上的 `withSecurityWrite`，再调用 `authorizeWrite(tx, proof, use)`。在实际写入处调用 `requireMutationActor(tx, actor, use)` 复核 action、use、目标类型和 ID。其 `credentialOrigin` 提供材料 ID/version、family 和来源节点。授权检查保留实际 transport 与 subject。
+
+路由可直接调用 `store.withAuthorizedMutation(proof, use, plan, (tx, actor) => ..., fence?)`，传入资源的 workspace、编号键和域目标计划。Store 合并凭据检查的域目标，并在自己的连接上完成授权和回调。投递方使用 `store.withSecurityWrite(fence, plan, callback)` 及同一 Store 的 `readAttemptEligibility(tx, id)`、`readCurrentTaskLease(tx, id)`、`writeCurrentTaskLease(tx, expectedVersion, lease)`。
+
+管理调用传 `use: 'management'` 和实际目标。`grant` 创建人类 grant 时保存签发凭据 ID、family 及证明节点，`revokeGrant`、`grantRuntimeTrust`、`revokeRuntimeTrust`、`revokeFamily` 把锁内复核的证明节点写入 `multiremi_root_management_events.proof_node_id`。事件的 `actor_grant_id` 与 `actor_generation` 标识真实签发主体及其授权代次。登记凭据通过 `credentialOrigin.node` 关联证明，独立密码通过已验证的密码版本节点关联证明。Runtime trust 还需当前机器登记与已验证的 challenge。
+
+首次授予前，显式 root 可调用 `rootManagement.reviewAgentGrantRuntimeTrusts(proof, agentId, [trustId])` 审查指定的 Runtime。它在同一 `SecurityTx` 中检查真实 Agent 的工作区、执行组或固定 Runtime、信任代次、机器登记和持续祖先，返回 `checkedRevision` 及每个 `runtimeId` 的 trust ID、代次、daemon 与 incarnation。调用无需创建 attempt。该结果用于展示 Runtime 审查事实，完整依赖清单及受保护引用仍须在 grant 写事务中建立。
+
+`planAttemptAdmission` 规划首次创建或直接重试的锁。`verifyAttemptInvocation` 核验真实调用者与目标 turn；`approveAttemptInputs` 在同一事务中冻结目标、新执行及获准输入。`withAttemptAdmission` 在真实 INSERT 前后分别调用 `admitAttempt` 与 `consumeAdmission`。后者核对已存行和当前来源，消费限当前事务的一次性 ticket。level 10 的 `multiremi_attempt_input_approvals` 保存获准快照与持续来源，`multiremi_attempt_eligibility` 按 attempt 唯一记录初始资格。历史缺行、普通 attempt 和 resume 均不能据此取得新资格。
+
+`readAttemptEligibility(db, tx, attemptId)` 和 `readCurrentTaskLease(db, tx, attemptId)` 使用同一个 `attempt:<id>` 域目标。`writeCurrentTaskLease(db, tx, expectedVersion, lease)` 需要最外层以当前 background term 取得 F，再取得 S；首次 dispatched 使用版本 0，后续 CAS 返回新版本。`multiremi_current_task_leases` 按 attempt 唯一绑定 consumer、run generation、runtime/daemon/incarnation、lease、fence 与过期时间。pending-start 只使用首次 receipt 的固定 deadline，running 复核实时 lease。收据留存的历史 lease/fence 不充当当前授权。
+
+已确认的 running receipt 在 Turn 进入 `awaiting_human` 后继续核验当前 attempt、run、机器、lease、fence 和授权来源。Turn 的 `waiting_on_message_id` 必须指向同一会话、执行范围、Agent 和 attempt 的待答原生问题或权限请求，且原 runtime 仍持有该等待。解除绑定或转入 restart handoff 后，此等待不能再作为恢复依据。
+
 ## 登录与请求身份
 
 - [登录路由](../../packages/server/src/api/routers/auth.ts)把飞书 `open_id`、`union_id` 交给 [WorkspacesRepo.getOrCreateUser](../../packages/server/src/store/repos/workspaces-repo.ts)。身份按 `union_id`、`open_id` 解析；兼容邮箱匹配时不会复用已绑定其他外部身份的用户；否则创建独立用户记录。
@@ -60,7 +76,7 @@ daemon 的 HTTP token 校验同时验证工作区仍存在，工作区删除后�
 
 收藏按工作区合并，同一目标只显示一次，读取不删除历史行；重排同步同目标旧行，明确取消收藏时才删除这些行。通知配置由工作区共同管理，历史个人通知渠道参与共享路由，task 凭据仍不能配置外部目的地。通知偏好优先使用 operator 已保存值，再用旧工作区默认值，最后使用最近一次历史设置；首次保存后统一生效，原历史设置保留。
 
-`/api/me`、密码/SSO 登录、PAT 签发与撤销仍绑定实际账号。共享工作区不授予其他登录账号的凭据管理权，也不把 task/daemon 变成人类操作者。CLI 使用 `remi account get|update|onboarding` 管理入口账号，`remi workspace operator` 查看内部操作身份；详见[CLI 契约](../cli-command-migration.md)。
+`/api/me`、密码/SSO 登录、PAT 签发与撤销仍绑定实际账号。`GET /api/me` 只为已验证的登录 JWT 或兼容人类会话凭据补发浏览器 Cookie，个人 PAT 仍可查询账号。共享工作区不授予其他登录账号的凭据管理权，也不把 task/daemon 变成人类操作者。CLI 使用 `remi account get|update|onboarding` 管理入口账号，`remi workspace operator` 查看内部操作身份；详见[CLI 契约](../cli-command-migration.md)。
 
 ## Issue 关系与跨工作区移动
 
@@ -97,6 +113,65 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 [startMultiremiServer](../../packages/server/src/api/server.ts)调用 [evaluateStartupEnv](../../packages/server/src/config/startup-env.ts)：生产模式要求 `MULTIREMI_DATABASE_URL`、`MULTIREMI_TOKEN`、`JWT_SECRET`，缺项会拒绝启动。显式 development/test 作为本地模式；否则 production 或已配置数据库 URL 会触发生产要求。
 
 应用工厂保留本地无鉴权模式并打印警告，这不等于生产入口允许忽略配置。[jwtSecret](../../packages/server/src/api/helpers/jwt.ts)仅在精确的 `NODE_ENV=development/test` 下允许开发默认密钥，其他环境未设密钥时拒绝 JWT；启动配置检查与 JWT 校验是两个不同入口。
+
+## 系统 Root 公开契约与客户端边界（MUL-1）
+
+- 系统级 root 权限与既有 Agent 业务角色（`normal` / `maintainer` / `supervisor`）正交，不引入第四种业务角色。公开 DTO、错误信封与只读字段边界定义在 [root-authority.ts](../../packages/contracts/src/root-authority.ts)，A2 机器投递收据、首次 `task.offer` / `turn.restart.resume` 的 typed root delivery 载体（`delivery_mode: "root_envelope"`、`root_delivery_protocol: 1`、`carrier_mode: "immutable_run_env"`、复用不可变 `RootDeliveryEnvelopePayload`）及能力协商规则（`hello.caps`/`welcome.caps` 协商 `root.delivery` + Runtime 能力 `root_delivery_protocol`/`root_carrier_modes` + 服务端显式活动 Runtime 与 consumer 信任 `runtime_trusted === true && consumer_trusted === true`，缺项或畸形输入 fail-closed 拒绝且禁止退化为普通 offer/resume）定义在 [root-delivery.ts](../../packages/contracts/src/root-delivery.ts)、[daemon-compatibility.ts](../../packages/contracts/src/daemon-compatibility.ts) 与 [daemon-protocol.ts](../../packages/contracts/src/daemon-protocol.ts)。内部事务句柄、已认证证明及原始密钥摘要不进入公开 DTO、日志或 UI。
+- 公开错误信封统一为 `{error: {code, message, retryable, requestId, currentRevision?}}`，覆盖 `root_required`、`root_attempt_not_eligible`、`root_authority_revoked`、`root_runtime_untrusted`、`root_invoker_untrusted`、`root_input_unapproved`、`root_execution_protected`、`authority_revision_conflict`、`credential_version_conflict`、`receipt_conflict`、`authority_depth_exceeded` 与 `security_state_unavailable`；daemon 协议新增非重试拒绝码 `root_delivery_unsupported` 与 `root_delivery_invalid`。
+- 公开上下文区分 `transport_identity`、`authenticated_subject`（真实 `user:<id>` 或 `agent:<id>`）、`is_agent_origin`、`agent_granted_root` 与 `current_attempt_effective_root` / `effective_reason_code`。任务与 Agent 派生 PAT 保留 Agent 身份标记，不显示为真实人类登录会话；旧 attempt 不因后续授予而升权。
+- root 执行在 CLI 与共享承载层固定走本 run 不可变进程环境（`MULTIREMI_ROOT_CARRIER=immutable_run_env`，见 [task-context-file.ts](../../packages/shared/src/task-context-file.ts) 的 `resolveTaskContext`/`buildRootImmutableRunEnv`/`assertOrdinaryTaskContextOnly` 与 [task-context.ts](../../apps/remi/cli/core/task-context.ts)），不读取也不回退旧 `MULTIREMI_TASK_CONTEXT_FILE` 磁盘上下文文件；缺失或违规载体按 fail-closed 拒绝。
+- `GET /api/config` 新增只读布尔字段 `jwt_registration_required`（从主库 `multiremi_security_state.feature_activation` 读取，读取故障返回 `503`；不新增路由或公开错误码；前端 `AppConfigSchema` 仅接受精确布尔值，缺失或畸形保留 `undefined`，绝不默认按 `false` 处理）。`scripts/local-profile.mjs <stable|dev> token` 离线签发前强制探测所选 profile 的 `http://127.0.0.1:16120/api/config`（`stable`）或 `http://127.0.0.1:16220/api/config`（`dev`），5 秒超时、`redirect: "error"`，绝不根据本地 env 自断关闭态：仅在 `jwt_registration_required === false` 时保留旧 24 小时离线 `local` JWT 签发；网络/非成功响应报错 `Cannot verify JWT registration state; start the selected profile API and authenticate online`，`true`/缺失/unknown 报错 `Offline JWT mint is disabled when registration is required or unknown; use online authentication with a trusted source adapter`。在激活域内，HTTP/Cookie 与浏览器 WebSocket（含最终 `sendText`）按主库登记材料的当前版本与祖先校验精确 compact JWT；`POST /auth/password` 首次密码登录在后端整合后将经持久 `RootManagement` 验证密码并登记 exact compact JWT，而续期/派生/PAT/daemon 签发在对应可信来源适配器落地前仍保持 `503` 门禁。
+- `/api/root/context` 显示当前传输身份与有效授权。管理面提供 grant、revoke、Runtime trust、credential family revoke 及审计查询。系统 root 写入在 Store 同连接获取当前 actor，核对实际目标，并保存凭据来源。管理面和 root 订阅均受主库当前 grant、凭据来源与任务资格约束。部署 master 与无认证本机兼容请求可以读取权限上下文，管理操作需要登记凭据。
+- HTTP root 后备授权已接入工作区详情、Agent 详情、平台状态等只读路径，以及工作区基础元数据更新、删除和平台操作创建、取消。注册任务使用真实 attempt 与 Agent 权限，保留 daemon、updater、保护配置和维护检查。跨工作区 log/trace 订阅在确认目标存在后校验 root，并在每个受 root 约束的帧发出前重新检查，包括异步日志投影完成后。
+- Agent 目标 grant 仍需授权时固化实际依赖与受保护引用。Agent 来源持久 PAT 与子 grant 仍需独立于正常任务终态、可撤销的委派来源及真实主体绑定。其他业务写入点、B 线生产首次投递及真实浏览器联调仍随整合分支推进。
+
+### Agent grant 的依赖绑定
+
+生产 Store 通过 `AgentDependencies.resolveAgentDependencies` 读取真实 Agent、工作区、指令、运行时/profile、插件、技能、执行来源与间接引用。受保护的配置先由已验证 root 在 `root.agent-configuration.approve` 写事务调用 `approveAgentConfiguration(tx,actor,agentId,expectedEpoch,approval)`；首次传 `null`，后续使用当前 epoch。输入为版本化的 `sources` 和 `executions`，不接受调用方指定的 authority 父节点。服务器校验材料摘要，并在同一事务用实际解析器复查。审批或读源失败回滚全部材料。`previewAgentGrant(proof,agentId,trustIds)` 返回实际摘要，客户端只提交明确选择的 trust IDs 与该摘要。审批来源撤销或配置代际变化会使旧来源失效。
+
+`new RootManagement(db, resolveAgentDependencies)` 在服务端注入与 admission 共用的依赖解析器。未装配解析器时 Agent grant 拒绝签发。人类 root 使用 `planAgentGrant(proof, agentId, trustIds)` 并在同一事务传入 `grant(tx, actor, {subject:{type:'agent',id:agentId}, runtime_trust_ids, accepted_dependency_digest, expected_revision, idempotency_key, reason})`。内核验证当前 trust，原子记录 grant 代际、配置 epoch、信任版本和逐项引用。新 attempt 从该快照复核实际选择的 runtime trust。
+
+配置与共享资源写入器使用 `guardProtectedMutation(tx, actor, request, expectedVersion)`，`request.actualTarget` 为真实资源的种类和 ID。写入与守卫共用事务。命中引用时必须使用已绑定该写动作的 root actor，版本不符回滚；核验成功同步推进 epoch 并撤销旧授权节点，需要重新批准才能使用新配置。
+
+保存执行组时，守卫在工作区写锁内读取原成员，将实际加入或移除的 Runtime、组本身及本次覆写的共享 profile 一并校验。删除执行组时，全部原成员均按移除处理。组与成员 Runtime 使用请求的 `If-Match` 版本，共享 profile 使用事务内读取的 revision。同一 Agent 或 grant 命中多条引用只失效一次，成员关系未变的 Runtime 不因该成员写入失效。
+
+### Agent 来源的持久委派
+
+`resolveDurableDelegation(tx, actor, use, beneficiary)` 只接受已准入、当前运行中的 task。`use` 绑定 `action`、`actualTarget`、`use`、`idempotencyKey`、`requestDigest` 与 `expiresAtMs`。内核存储真实 Agent、grant generation、attempt、run、lease/fence、credential version 和 family。原 task 材料是 evidence，持续来源包含当前 grant、trust 和输入批准的来源。正常 run 结束后子项仍可通过自身来源验证。
+
+签发 `personal` PAT 时先 `const candidate = PreparedAgentPat.prepare()`，将 `credential:<candidate.credentialId>` 加入真实操作的锁计划。事务内执行 `root.issue(tx, {kind:'delegated-pat', actor, use, beneficiary, candidate})`。最外层提交后 `candidate.takeCommittedToken()` 才能取出 raw，且只能取一次。读写管理入口用 `root.registeredCredentials.verify(raw)` 与 `resolveCurrent` / `authorizeWrite` 核验，返回 `transport='agent_pat'`、真实 Agent subject 和凭证来源。历史 `verifyAccessToken` 的 PAT 消费者会走 human/local 分支，因此这一入口拒绝 Agent PAT。接入方应将已验证的 Agent subject 传给相应的身份与路由守卫。
+
+子 grant 仍使用 `grant(tx,actor,input)`，Agent 来源必须指定有限 `expires_at`。`revokeDurableDelegation(tx,actor,nodeId,input)` 单独撤销一条来源；`revokeAttemptDelegations(tx,attemptId,reason)` 供执行安全终止事务调用，对应 attempt 的已签发后代随即失效。正常终态不调用安全撤销接口。
+
+生产 HTTP 使用 `POST /api/root/agents/:agentId/configuration/approve` 提交 `expected_epoch`、`sources`、`executions`。首次审批使用 `expected_epoch: null`。通过 `GET /api/root/agents/:agentId/grant-preview` 对重复的 `runtime_trust_id` 查询参数取预览，再将返回的 `digest`、`expected_revision` 与这些 trust ID 提交到 `POST /api/root/grants`。审批与签发均在事务内重读实际依赖。
+
+已准入的 running task 可向 `POST /api/root/agent-pats` 提交有限的 `expires_at` 和 `idempotency_key`。成功提交后响应一次性交付 `token`、`family_id` 和 `origin_id`。重复签发请求返回凭据版本冲突。Agent PAT 以真实 Agent 身份访问 root 管理与 CLI 能力查询，普通 PAT 路由维持既有凭据边界。`POST /api/root/delegations/:nodeId/revoke` 使用审计原因、原因代码、期望安全 revision 与幂等键撤销指定来源。
+
+受保护资源写入保留路由原有权限检查，并在写事务中检查已登记 root proof 与依赖版本。系统提示词使用请求的 `expectedRevision`，执行端点和 Profile 使用资源自身 revision，其余已接线的配置写入口使用 `If-Match: "<version>"` 与审批或预览的引用版本对应。成功的受保护写推进配置 epoch，让旧审批和 grant 失效。普通仓库列表遇到受保护的分支信息时直接读取现有数据。
+
+Runtime 的 `execute` 审批使用 `runtimeExecutionFields` 加登记的 `incarnation`。摘要包括 daemon 绑定、provider、运行模式、工作区、owner、可见性、执行组、并发数、设备信息、模型目录和 metadata。模型按 ID 排序，忽略目录采集时间。`external_chats` 和 `external_chat_models` 仅用于外部聊天界面，可以随观测更新。心跳上报的 `health`（磁盘健康状态、原因和容量）也不计入摘要。心跳能力的明确关闭值与缺省关闭等价；启用能力、修改协议版本以及未知 metadata 仍参与摘要。普通 daemon 可以重报相同目录，修改已受保护的执行字段需经 root 授权写。摘要格式变更后需重新审批才能用新摘要签发。
+
+替换 Skill 文件按路径保留未变文件的 ID、内容与时间戳。事务同时核验父 Skill 及受影响的 `skill-file` 引用，归档也核验变得不可用的文件。`If-Match` 可指定共同版本；版本不同时，请用 `X-Skill-File-Versions` 提交按文件 ID 索引的 JSON 版本对象。任一受保护引用版本不匹配会回滚整个请求。一次写入对每个受影响 Agent 只推进一次 epoch。
+
+新 root attempt 通过 `POST /api/sessions/:sessionId/messages` 的直接 Agent `request`（`wake_requested: "now"`）和 `POST /api/turns/:id/retry` 的成员重试进入准入。`approved_input_messages` 接收已审阅的 `{id, version}` 列表。服务端从主库读取消息、执行来源和当前 grant，并在同一次事务冻结输入与 attempt。新任务的请求作者来自登记凭证绑定的实际工作区成员。附加输入、checkpoint 与恢复状态需要独立的证明路径。
+
+### 已准入 attempt 的首次 offer
+
+机器投递使用 `await PreparedRootDelivery.prepare(tuple, payload, publicKey)` 生成不可替换的候选。调用方先用 `rootManagement.planFirstOffer(candidate)` 合并自己的 run/Q 锁计划，再在带当前 fence 的 `withSecurityWrite` 中调用 `rootReceipts.activate(tx, candidate, lease, callback)`。`callback(activeTx, prepared)` 在同一事务完成 run/Q CAS 后返回 `rootManagement.issue(activeTx, prepared)`。只有实际 `activate` 回调中的原始对象能签发。发送方在最外层事务提交后才能交付 envelope。
+
+签发器从主库读取 attempt 的 Agent、grant 代际、输入批准与连续来源、运行时 trust 和当前 run。`activate` 写入材料版本、lease 和 receipt，并在提交前重新验证。首次 offer 的材料版本为 1。重复的 offer 由调用方通过已提交 receipt 恢复；重新构造候选不能覆盖原材料。
+
+`RootReceiptStore.commitFirstOffer(candidate, lease)` 已封装首次 run/Q CAS、事务内签发以及提交回复丢失后的复查与重放。并发的两个调用会获得相同 envelope、原始版本、期限和 lease。调用者不应再次创建 run 或另行插入 token。
+
+### 机器登记与退役
+
+部署方离线配置 `multiremi_machine_deployment_roots`，将部署的 `deployment_origin` 节点与部署审批、宿主验证两把 Ed25519 公钥绑定。空表时无法登记。宿主验证方确认执行进程不能访问密钥服务、控制端点或同级进程秘密，并验证 immutable carrier 后，才签署 `machineEnrollmentPayload('attestation', binding, report, expectedGeneration)`。部署方对同一材料的 `deployment` 用途签名。签名使用 base64url。
+
+`RootManagement.enrollMachine(tx, deploymentProof, report, binding, expectedGeneration)` 在同一安全事务中校验双签、运行时、daemon 凭据与有效期，返回 `{ nodeId, generation }`。首次登记传 0。事务预规划工作区、`machine:<runtimeId>`、部署 authority 节点和轮换前的 authority 节点。`retireMachine(tx, deploymentProof, deploymentId, runtimeId, incarnation, expectedGeneration)` 使用 `machineRetirementPayload` 的独立签名。同一代的重复轮换或退役返回冲突。旧代节点撤销后，现有凭证、trust 与 receipt 在下次核验时失效。
+
+运维使用 `remi db enroll-machine --bundle enrollment.json`，通过 `MULTIREMI_DATABASE_URL` 选择 PostgreSQL。SQLite 使用 `--sqlite-file /absolute/path/to/server.sqlite`。JSON 包含 `deploymentProof`、`attestation`（含宿主签名）、`binding`（仅含公开绑定）和 `expectedGeneration`。命令从主库规划工作区和 authority 锁，在一个事务内复验签名及代际，成功输出节点 ID 和新代际。
+
+对 Agent 签发 grant 时，内核从当前已批准配置读取所选 runtime trust 的 `provider-trust/execute` 与 `checkpoint-policy/restore` 引用，逐项匹配冻结摘要，并在 grant 事务内签发 `provider_trust` 与 `checkpoint_trust`。节点 ID 由 grant ID、trust ID 和完整版本化引用派生，代际等于 grant generation，连续父节点为当前 grant 和 runtime trust。B 的 admission facade 在新 attempt 上解析该 provider 节点；全新运行的 `checkpointTrust` 为 `null`。撤销任一持续来源后，两类节点的下次祖先核验失败。
 
 ## 验证入口
 

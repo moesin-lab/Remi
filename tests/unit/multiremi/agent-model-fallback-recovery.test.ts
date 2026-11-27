@@ -262,6 +262,9 @@ describe("MUL-336 model fallback recovery chain", () => {
   ])("switches once on unavailable model/server errors: %s", (error, reason) => {
     const { store, runtime, agent, issue } = fixture();
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Recover availability" });
+    db!.exec(`CREATE TEMP TRIGGER verify_replacement_execution BEFORE INSERT ON multiremi_turn_attempts
+      WHEN NEW.attempt_no > 1 AND (NEW.execution_model IS NOT 'fallback-deepseek' OR NEW.fallback_switched IS NOT 1 OR NEW.session_id IS NOT NULL)
+      BEGIN SELECT RAISE(ABORT, 'Replacement inserted before resolving final execution'); END`);
     failClaimed(store, runtime.id, task.id, error);
     expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: reason });
     const retry = successor(store, task.id)!;

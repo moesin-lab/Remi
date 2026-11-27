@@ -997,6 +997,7 @@ const ID_BY_COLLECTION: Record<string, keyof SeedRefs> = {
 };
 
 const BY_NAME: Record<string, keyof SeedRefs> = {
+  agentId: "agentId",
   attachmentId: "attachmentId",
   chatSessionId: "chatSessionId",
   decisionId: "decisionId",
@@ -1022,6 +1023,7 @@ const BY_NAME: Record<string, keyof SeedRefs> = {
 
 function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
   if (name === "id" && pattern.startsWith("/api/runtime-workspaces/")) return "rws_snapshot";
+  if (name === "nodeId" && pattern.startsWith("/api/root/delegations/")) return "origin_snapshot";
   switch (name) {
     case "number":
       return "42";
@@ -1990,6 +1992,17 @@ flow("pins", async (rec, refs) => {
 });
 
 // -- tokens -----------------------------------------------------------------
+flow("root-management", async (rec) => {
+  const routes = ["/api/root/grants", "/api/root/grants/grant_snapshot/revoke", "/api/root/runtime-trust",
+    "/api/root/runtime-trust/trust_snapshot/revoke", "/api/root/credential-families/family_snapshot/revoke"];
+  for (const path of routes) {
+    const response = await rec.json("POST", path, {});
+    if (response.status !== 403 || response.body?.error?.code !== "root_required") {
+      throw new Error("Root management requires a registered credential");
+    }
+  }
+});
+
 flow("tokens", async (rec, refs) => {
   const compat = await rec.json("POST", "/api/tokens", { name: "compat token", type: "pat" });
   await rec.json("POST", "/api/tokens/current/renew", {});

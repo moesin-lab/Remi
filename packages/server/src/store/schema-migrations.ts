@@ -2,6 +2,18 @@ import type { SqlDatabase } from './db/postgres.js';
 import { ensureSystemPrompts } from "./system-prompt-schema.js";
 import { ensureDaemonDrainIdentity, ensurePlannedRestarts } from "./planned-restart-schema.js";
 import { LIVE_TERM_SCHEMA } from './live-term-fence.js';
+import { expandSecurityState } from './security-state-schema.js';
+import { expandAuthorityProvenance } from './authority-provenance-schema.js';
+import { expandRootGrants } from './root-grant-schema.js';
+import { expandRootManagement } from './root-management-schema.js';
+import { expandBootstrapAuthorizations } from './root-bootstrap-schema.js';
+import { expandMachineDeploymentRoots, expandRuntimeTrust } from './runtime-trust-schema.js';
+import { expandCredentialVersionBindings, expandRootReceipts } from './root-receipt-schema.js';
+import { expandTaskAuthority } from './task-authority-schema.js';
+import { expandAgentGrantDependencies } from './agent-grant-dependencies.js';
+import { expandDurableDelegations } from './durable-delegation.js';
+import { expandAgentSourceApprovals } from './agent-source-approvals.js';
+import { expandJwtMaterials } from './jwt-material-schema.js';
 import type { SchemaMigration } from './schema-migration-runner.js';
 
 const historicalScmSteps = ['20261124_scm_link_ownership', '20261124_scm_rollback_review', '20261124_scm_audit_generations'];
@@ -130,4 +142,46 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
         THEN 'initial' ELSE 'unknown' END) ON CONFLICT(singleton) DO NOTHING`,
       [firstCut ? 'initial' : 'unknown']);
   },
+}, {
+  id: '20261124_security_state', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandSecurityState,
+}, {
+  id: '20261124_authority_provenance', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandAuthorityProvenance,
+}, {
+  id: '20261124_root_grants', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandRootGrants,
+}, {
+  id: '20261124_root_management', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandRootManagement,
+}, {
+  id: '20261124_bootstrap_authorizations', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandBootstrapAuthorizations,
+}, {
+  id: '20261124_runtime_trust', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandRuntimeTrust,
+}, {
+  id: '20261124_root_receipts', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandRootReceipts,
+}, {
+  id: '20261124_credential_version_bindings', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandCredentialVersionBindings,
+}, {
+  id: '20261124_dashboard_jwt_materials', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandJwtMaterials,
+}, {
+  id: '20261126_task_authority', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandTaskAuthority,
+}, {
+  id: '20261126_machine_deployment_roots', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandMachineDeploymentRoots,
+}, {
+  id: '20261126_agent_grant_dependencies', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandAgentGrantDependencies,
+}, {
+  id: '20261126_durable_delegations', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandDurableDelegations,
+}, {
+  id: '20261126_agent_source_approvals', phase: 'expand', level: 10,
+  expandRelease: '0.2.95', release: '0.2.95', run: expandAgentSourceApprovals,
 }];

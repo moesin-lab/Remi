@@ -1,6 +1,8 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import type { Agent, Skill } from "../types";
+import { rootContextOptions } from "../root/queries";
 import { useCurrentMember } from "./use-current-member";
 import {
   canAssignAgentToIssue,
@@ -36,7 +38,16 @@ export function useAgentPermissions(
   canAssign: Decision;
 } {
   const { userId, role } = useCurrentMember(wsId);
-  const ctx = { userId, role };
+  const needsRootCheck = agent?.root?.granted === true;
+  const { data: rootContext } = useQuery({
+    ...rootContextOptions(),
+    enabled: needsRootCheck,
+  });
+  const ctx = {
+    userId,
+    role,
+    canEditRootExecution: rootContext?.capabilities.can_edit_root_execution === true,
+  };
   if (agent === null) {
     return { canEdit: PENDING, canAssign: PENDING };
   }

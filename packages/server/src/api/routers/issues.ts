@@ -4,6 +4,7 @@ import { readSessionLogRange } from "../session-log-range.js";
 import type { Context, Hono } from "hono";
 import { loadConversation, messageResponse, conversationEntryVisibility } from "../helpers/conversations.js";
 import { assertRuntimeWorkspaceAccess } from "../helpers/runtime-workspaces.js";
+import { guardRootResourceWrite } from "../helpers/root-access.js";
 import {
   assigneeFrequencyQuery,
   canCurrentUserAccessAgent,
@@ -420,7 +421,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       ttl_ms: Number(ttlMs),
       sweep_interval_ms: Number(sweepIntervalMs),
     };
-    store.updateWorkspace(workspaceId, { settings });
+    guardRootResourceWrite(c, store, workspaceId, 'workspace', workspaceId, () => store.updateWorkspace(workspaceId, { settings }));
     return c.json({ config: issueArchiveSettingsResponse(workspaceId) });
   });
 

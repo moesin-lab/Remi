@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { migratedStoreBackend, type MigratedStore } from "../../helpers/migrated-store-backends.js";
 import { configureKindBot } from "./feishu-outbound-kind-fixture.js";
@@ -12,16 +12,20 @@ for (const backend of ["sqlite", "postgres"] as const) {
   const suite = backend === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL ? describe.skip : describe;
   suite(`Autopilot delivery configuration (${backend})`, () => {
     const factory = migratedStoreBackend(backend, { prefix: "mul32_config", fixture: "autopilot-delivery-configuration" });
-    factory.install();
     let f: MigratedStore;
     let previousKey: string | undefined;
-    beforeEach(async () => {
+    beforeAll(() => {
       previousKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
       process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 32).toString("base64");
+    });
+    factory.install();
+    beforeEach(async () => {
       f = await factory.open();
     });
     afterEach(async () => {
       await f?.close();
+    });
+    afterAll(() => {
       if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
       else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
     });

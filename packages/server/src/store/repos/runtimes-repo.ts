@@ -306,6 +306,8 @@ const BOT_MENU_PUBLISH_REQUESTS: RuntimeRequestSpec<MultiremiBotMenuPublishReque
   hydrate: toBotMenuPublishRequest,
 };
 
+type GuardHeartbeatWrite = (runtimeId: string, write: () => MultiremiDaemonHeartbeatAck) => MultiremiDaemonHeartbeatAck;
+
 export class RuntimesRepo {
   private readonly modelListQueue: RuntimeRequestQueue<MultiremiRuntimeModelListRequest>;
   private readonly directoryScanQueue: RuntimeRequestQueue<MultiremiRuntimeDirectoryScanRequest>;
@@ -315,7 +317,7 @@ export class RuntimesRepo {
   private readonly localSkillImportQueue: RuntimeRequestQueue<MultiremiRuntimeLocalSkillImportRequest>;
   private readonly commandQueue: RuntimeRequestQueue<MultiremiRuntimeCommandRequest>;
   private readonly botMenuPublishQueue: RuntimeRequestQueue<MultiremiBotMenuPublishRequest>;
-  constructor(private ctx: StoreContext) {
+  constructor(private ctx: StoreContext, private readonly guardHeartbeatWrite?: GuardHeartbeatWrite) {
     this.modelListQueue = new RuntimeRequestQueue(ctx.db, MODEL_LIST_REQUESTS);
     this.directoryScanQueue = new RuntimeRequestQueue(ctx.db, DIRECTORY_SCAN_REQUESTS);
     this.gcRunQueue = new RuntimeRequestQueue(ctx.db, GC_RUN_REQUESTS);
@@ -529,8 +531,8 @@ export class RuntimesRepo {
   }
 
   /** Dispatch needs current capabilities and group/protocol state, without historical accounting. */
-  getRuntimeForDispatch(id: string): MultiremiRuntime | null {
-    const row = this.readRuntimeRow(id);
+  getRuntimeForDispatch(id: string, refresh = false): MultiremiRuntime | null {
+    const row = this.readRuntimeRow(id, refresh);
     return row ? withRuntimeLiveness(this.hydrateRuntime(toRuntime(row), false)) : null;
   }
 
@@ -2537,10 +2539,11 @@ export class RuntimesRepo {
     // The heartbeat reads the Runtime row and its own columns; `getRuntime` would also run
     // the usage scan, execution-group membership and model catalog, which this method never
     // reads and which the route reads again for its response.
-    return this.heartbeatFromRow(runtimeId, options, this.readRuntimeRow(runtimeId));
+    return this.heartbeatFromRow(runtimeId, options, this.readRuntimeRow(runtimeId), this.guardHeartbeatWrite);
   }
 
-  private heartbeatFromRow(runtimeId: string, options: NonNullable<Parameters<RuntimesRepo['heartbeatRuntime']>[1]>, initialRow: Row | null): MultiremiDaemonHeartbeatAck {
+  private heartbeatFromRow(runtimeId: string, options: NonNullable<Parameters<RuntimesRepo['heartbeatRuntime']>[1]>, initialRow: Row | null,
+    guardWrite?: GuardHeartbeatWrite): MultiremiDaemonHeartbeatAck {
     if (!initialRow) {
       return { runtime_id: runtimeId, status: "runtime_gone", runtime_gone: true };
     }
@@ -2585,8 +2588,12 @@ export class RuntimesRepo {
     const reportedAgentPluginProtocol = normalizeAgentPluginProtocol(options.agentPluginProtocol ?? 0);
     // A capable daemon advances pending Plugin reconciliation on every heartbeat.
     // A silent or legacy daemon only needs the transaction once to clear a stored capability.
-    if (options.agentPluginProtocol !== undefined
-      && (reportedAgentPluginProtocol > 0 || (previousAgentPluginProtocol ?? 0) > 0)) {
+    const reconcilePlugins = options.agentPluginProtocol !== undefined
+      && (reportedAgentPluginProtocol > 0 || (previousAgentPluginProtocol ?? 0) > 0);
+    if (guardWrite && (hasMetadataPatch || reconcilePlugins)) {
+      return guardWrite(runtimeId, () => this.heartbeatFromRow(runtimeId, options, this.readRuntimeRow(runtimeId, true)));
+    }
+    if (reconcilePlugins) {
       const workspaceId = runtime.workspaceId ?? "local";
       const result = this.ctx.db.transaction(() => {
         this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);

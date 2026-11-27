@@ -70,8 +70,9 @@ export class InboxRepo {
   getMessage(id:string) { return getMessage(this.ctx,id); }
   getMessages(ids:readonly string[]) { return getMessages(this.ctx,ids); }
   sendMessageWithinTransaction(input:import("@multiremi/contracts/unified-model.js").SendMessageInput,events:CommitEventQueue,
-    authorizeRecipient?:(agent:import("@multiremi/contracts/types.js").MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:import("@multiremi/contracts/types.js").MultiremiAgent|null)=>void) {
-    return sendMessageWithinTransaction(this.ctx,input,events,{},authorizeRecipient,authorizeConversation);
+    authorizeRecipient?:(agent:import("@multiremi/contracts/types.js").MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:import("@multiremi/contracts/types.js").MultiremiAgent|null)=>void,
+    attempt?: Pick<import("@multiremi/contracts/types.js").CreateTaskInput, 'id' | 'runtimeId'>) {
+    return sendMessageWithinTransaction(this.ctx,input,events,attempt,authorizeRecipient,authorizeConversation);
   }
 
   private issueRecipient(issueId: string, agentId?: string, issueSessionId?: string, executionScope = ""): EnvelopeRecipient {

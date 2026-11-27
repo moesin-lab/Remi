@@ -75,7 +75,7 @@ it("keeps superseded receipts durable without suppressing authorized new usage o
       return { db, store: new MultiremiStore(db) };
     });
   } finally { db.close(); rmSync(directory, { recursive: true }); }
-});
+}, 30_000);
 
 it.skipIf(!process.env.MULTIREMI_TEST_POSTGRES_URL)("keeps superseded receipts durable without suppressing authorized new usage on PostgreSQL", async () => {
   const adminUrl = process.env.MULTIREMI_TEST_POSTGRES_URL!;

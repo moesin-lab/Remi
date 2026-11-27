@@ -9,6 +9,7 @@ import type { PlatformSchemaContractFailure } from './platform-failure.js';
 import type { RuntimeCodexProfile } from "./codex-profile.js";
 import type { RuntimeClaudeProfile } from "./claude-profile.js";
 import type { RuntimeProtocolStatus } from "./runtime-protocol.js";
+import type { RootRuntimeTrustSummary, RootSubjectProjection, RootSubjectRef } from "./root-authority.js";
 import type { GcRunMode, SubjectSnapshot } from "./storage.js";
 
 export type MultiremiAgentProvider = "claude" | "codex" | string;
@@ -107,6 +108,8 @@ export interface MultiremiAgent {
   issue_creation_requires_proposal?: boolean;
   role: MultiremiAgentRole;
   supervisor?: boolean;
+  /** Read-only system root projection orthogonal to `role` (MUL-1 §3, §8.2). */
+  readonly root?: RootSubjectProjection;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -657,6 +660,9 @@ export interface CreateRuntimeWorkspaceInput {
 export interface MultiremiRuntime {
   daemonProtocolVersion?: number | null;
   protocol?: RuntimeProtocolStatus;
+  /** Read-only root Runtime trust projection (MUL-1 §7.1). */
+  readonly rootTrust?: RootRuntimeTrustSummary | null;
+  readonly root_trust?: RootRuntimeTrustSummary | null;
   executionGroupIds?: string[];
   executionGroupId?: string | null;
   execution_group_id?: string | null;
@@ -5198,6 +5204,17 @@ export interface MultiremiAccessToken {
   expiresAt: string | null;
   revokedAt: string | null;
   createdAt: string;
+  /** Non-secret provenance identifiers for credential family revocation & UI attribution (MUL-1 §5.4). */
+  readonly familyId?: string | null;
+  readonly family_id?: string | null;
+  readonly originAttemptId?: string | null;
+  readonly origin_attempt_id?: string | null;
+  readonly authenticatedSubject?: RootSubjectRef | null;
+  readonly authenticated_subject?: RootSubjectRef | null;
+  readonly beneficiaryUserId?: string | null;
+  readonly beneficiary_user_id?: string | null;
+  readonly isAgentOrigin?: boolean;
+  readonly is_agent_origin?: boolean;
 }
 
 export interface MultiremiCreatedAccessToken extends MultiremiAccessToken {

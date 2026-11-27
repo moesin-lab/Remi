@@ -18,6 +18,32 @@ export function databaseCommandSpecs(adoptInventory: (file: string) => Promise<u
       } finally { db.close(); }
     },
   }, {
+    id: 'db.enroll-machine', path: ['db', 'enroll-machine'],
+    description: 'Register or rotate a machine using a signed deployment and host attestation bundle',
+    mutation: 'destructive', outputs: ['json'],
+    options: [
+      { name: 'bundle', type: 'string', required: true, description: 'Signed machine enrollment JSON file' },
+      { name: 'sqlite-file', type: 'string', description: 'Existing absolute SQLite Server database file' },
+    ],
+    run: async ({ options }) => {
+      const { RootManagement } = await import('@multiremi/store/root-management.js');
+      const request = JSON.parse(readFileSync(String(options.bundle), 'utf8'));
+      const enroll = (db: SqlDatabase) => {
+        const node = new RootManagement(db).enrollDeploymentMachine(request.deploymentProof, request.attestation, request.binding, request.expectedGeneration);
+        console.log(JSON.stringify(node));
+      };
+      if (options['sqlite-file']) {
+        const path = String(options['sqlite-file']);
+        if (process.env.MULTIREMI_DATABASE_URL?.trim() || !isAbsolute(path) || !statSync(path).isFile()) throw new Error('Select one existing database using an absolute --sqlite-file path or MULTIREMI_DATABASE_URL');
+        const { openSqliteDatabase } = await import('@multiremi/store/db/sqlite.js');
+        const db = openSqliteDatabase(path, { readwrite: true, create: false });
+        try { enroll(db); } finally { db.close(); }
+      } else {
+        const db = await openDatabase();
+        try { enroll(db); } finally { db.close(); }
+      }
+    },
+  }, {
     id: 'db.prepare', path: ['db', 'prepare'],
     description: 'Prepare a historical PostgreSQL schema offline; completed steps resume on retry',
     mutation: 'destructive', outputs: ['json'],

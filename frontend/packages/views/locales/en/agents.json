@@ -532,5 +532,12 @@
     "model_routing": "Model routing · {{provider}}",
     "model_routing_hint": "Match the selected model and thinking level across available execution groups and Runtimes. With no model selected, use a compatible Runtime default.",
     "fixed_group": "Fixed execution group · {{group}}"
+  },
+  "root": {
+    "badge_effective": "System Root",
+    "badge_granted_ineffective": "Root (Pending New Attempt)",
+    "tooltip_effective": "System root grant generation {{generation}} is active (orthogonal to normal/maintainer/supervisor role).",
+    "tooltip_attempt_not_eligible": "Agent has a system root grant, but this attempt was created before authorization. Start a new authorized attempt.",
+    "tooltip_ineffective_reason": "Agent has a system root grant, currently not effective ({{reason}})."
   }
 }

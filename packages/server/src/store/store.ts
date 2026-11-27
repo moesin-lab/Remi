@@ -2,6 +2,15 @@ import { scmOwnershipReady } from "./scm-ownership.js";
 import { listProjectActivity, type ProjectActivityScope } from "./project-activity.js";
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
+import { JwtMaterials, JwtMaterialUnavailable, type JwtSigningDomain } from './jwt-materials.js';
+import { RootManagement } from './root-management.js';
+import { AgentDependencies, agentDependencyDigest, runtimeExecutionFields } from './agent-dependencies.js';
+import { RootReceiptStore } from './root-receipts.js';
+import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
+import { createRootAttempt, retryRootAttempt, sendRootRequest, type RootAttemptApproval } from './root-attempt-inputs.js';
+import { SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from './security-write.js';
+import type { AuthorityKernel, AuthorityUse, CredentialProof } from './root-authority-contract.js';
+import { readAttemptEligibility, readCurrentTaskLease, writeCurrentTaskLease, type TaskLease } from './task-authority.js';
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
@@ -538,6 +547,10 @@ export class MultiremiStore {
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
   private accessTokens: AccessTokensRepo;
+  readonly jwtMaterials: JwtMaterials;
+  readonly rootManagement: RootManagement;
+  readonly resolveAgentDependencies: AgentDependencies['resolveAgentDependencies'];
+  readonly rootReceipts: RootReceiptStore;
   private passwordAccounts: PasswordAccountsRepo;
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
@@ -615,7 +628,12 @@ export class MultiremiStore {
     this.db = liveTermDatabase(this.fenceDatabase);
     this.ctx = new StoreContext(this.db, () => this);
     this.feedback = new FeedbackRepo(this.db);
-    this.accessTokens = new AccessTokensRepo(this.db);
+    this.jwtMaterials = new JwtMaterials(this.db);
+    const dependencies = new AgentDependencies(this.ctx);
+    this.resolveAgentDependencies = dependencies.resolveAgentDependencies.bind(dependencies);
+    this.rootManagement = new RootManagement(this.db,this.resolveAgentDependencies);
+    this.accessTokens = new AccessTokensRepo(this.db,this.rootManagement);
+    this.rootReceipts = new RootReceiptStore(this.db,this.rootManagement);
     this.issueShares = new IssueSharesRepo(this.db);
     this.notificationChannels = new NotificationChannelsRepo(this.ctx);
     this.notificationDispatcher = new OutboundNotificationDispatcher({
@@ -660,7 +678,7 @@ export class MultiremiStore {
     this.issueWorkspaces = new IssueWorkspacesRepo(this.ctx);
     this.storage = new StorageRepo(this.ctx, this.issueWorkspaces);
     this.taskTraces = new TaskTracesRepo(this.ctx, options.taskTraceQuery);
-    this.runtimes = new RuntimesRepo(this.ctx);
+    this.runtimes = new RuntimesRepo(this.ctx, (runtimeId, write) => this.guardOrdinaryResource('runtime', runtimeId, write));
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
     this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
     this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
@@ -1095,8 +1113,9 @@ runMigrations(this.db);
     workspaceId: string,
     input: import("@multiremi/contracts/execution-profile.js").ExecutionGroupInput,
     id = createId("eg"),
+    authorization?: { proof: CredentialProof | null; version: number },
   ) {
-    return this.db.transaction(() => {
+    const save = this.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       let profileId = input.profile_id;
       if (input.connection !== undefined) {
@@ -1115,15 +1134,32 @@ runMigrations(this.db);
       const result = saveExecutionGroup(this.db, workspaceId, id, { ...input, profile_id: profileId });
       this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
       return result;
-    })();
+    });
+    const profileId = input.connection !== undefined && typeof input.profile_id === 'string' ? input.profile_id : null;
+    return this.mutateExecutionGroup(workspaceId, id, input.runtime_ids, profileId, authorization, save);
   }
-  deleteExecutionGroup(id: string, workspaceId: string) {
-    return this.db.transaction(() => {
+  private mutateExecutionGroup<T>(workspaceId: string, id: string, nextMembers: readonly string[], profileId: string | null,
+    authorization: { proof: CredentialProof | null; version: number } | undefined, operation: () => T): T {
+    if (!this.jwtMaterials.isActive()) return operation();
+    const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'execution-group', id } };
+    const targets = [`management:execution-group:${id}`, ...(profileId ? [`management:profile:${profileId}`] : [])];
+    return this.withResourceWrite(workspaceId, targets, authorization?.proof, use, tx => {
+      const previous = new Set(this.getExecutionGroup(id, workspaceId)?.runtimeIds ?? []);
+      const next = new Set(nextMembers);
+      const changed = [...new Set([...previous, ...next])].filter(runtimeId => previous.has(runtimeId) !== next.has(runtimeId));
+      const profile = profileId ? withSecurityTarget(this.db, tx, `management:profile:${profileId}`, () => this.getExecutionProfile(profileId, workspaceId)) : null;
+      const actor = authorization?.proof ? this.rootManagement.authorizeWrite(tx, authorization.proof, use) : null;
+      this.rootManagement.guardProtectedMutation(tx, actor, use, authorization?.version ?? NaN, profile ?? undefined, changed);
+      return operation();
+    });
+  }
+  deleteExecutionGroup(id: string, workspaceId: string, authorization?: { proof: CredentialProof | null; version: number }) {
+    return this.mutateExecutionGroup(workspaceId, id, [], null, authorization, this.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const result = deleteExecutionGroup(this.db, id, workspaceId);
       this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
       return result;
-    })();
+    }));
   }
   listExecutionGroups(workspaceId: string) {
     return listExecutionGroups(this.db, workspaceId);
@@ -1222,15 +1258,15 @@ runMigrations(this.db);
   }
 
   updateSkill(id: string, input: UpdateSkillInput): MultiremiSkill {
-    return this.agents.updateSkill(id, input);
+    return this.guardOrdinaryResource('skill', id, () => this.agents.updateSkill(id, input));
   }
 
   upsertSkill(input: CreateSkillInput & { id: string }): MultiremiSkill {
-    return this.agents.upsertSkill(input);
+    return this.guardOrdinaryResource('skill', input.id, () => this.agents.upsertSkill(input));
   }
 
   archiveSkill(id: string): MultiremiSkill {
-    return this.agents.archiveSkill(id);
+    return this.guardOrdinaryResource('skill', id, () => this.agents.archiveSkill(id));
   }
 
   listSkills(workspaceId?: string | null, options: { includeArchived?: boolean; includeFiles?: boolean } = {}): MultiremiSkill[] {
@@ -1246,11 +1282,11 @@ runMigrations(this.db);
   }
 
   upsertSkillFile(skillId: string, file: MultiremiSkillFile): MultiremiSkillFile {
-    return this.agents.upsertSkillFile(skillId, file);
+    return this.guardOrdinaryResource('skill', skillId, () => this.agents.upsertSkillFile(skillId, file));
   }
 
   deleteSkillFile(skillId: string, fileId: string): boolean {
-    return this.agents.deleteSkillFile(skillId, fileId);
+    return this.guardOrdinaryResource('skill', skillId, () => this.agents.deleteSkillFile(skillId, fileId));
   }
 
   listAgentSkills(agentId: string, options: { includeFiles?: boolean } = {}): MultiremiSkill[] {
@@ -1515,6 +1551,27 @@ runMigrations(this.db);
 
   loginWithPassword(email: string, password: string) {
     return this.passwordAccounts.login(email, password);
+  }
+
+  async loginWithRegisteredPassword(email: string, password: string, signing: JwtSigningDomain) {
+    try {
+      const credential = this.db.query('SELECT user_id FROM multiremi_password_credentials WHERE login_email = ?').get(email);
+      if (!credential) return null;
+      const user = this.workspaces.getUser(credential.user_id);
+      if (!user) return null;
+      const proof = await this.rootManagement.verifyIndependentPassword(user.id, password);
+      if (proof.kind !== 'independent') return null;
+      const ceiling = this.db.query(`SELECT MIN(n.expires_at_ms) AS ceiling FROM multiremi_authority_nodes n
+        JOIN multiremi_password_authority_versions p ON n.node_id IN (p.identity_node_id,p.password_node_id)
+        WHERE p.user_id = ? AND p.version = ?`).get(user.id, proof.proofVersion.version);
+      const expiresAtMs = Math.floor(Math.min(Number(ceiling?.ceiling), Date.now() + 30 * 24 * 60 * 60_000) / 1000) * 1000;
+      const token = this.rootManagement.issueIndependentDashboardSession(proof, expiresAtMs,
+        (tx, source, claims) => this.jwtMaterials.issue(tx, source, claims, signing));
+      return { user, token };
+    } catch (error) {
+      if (error instanceof SecurityAbort || error instanceof JwtMaterialUnavailable) throw error;
+      throw new JwtMaterialUnavailable();
+    }
   }
 
   getUser(id: string): MultiremiUser | null {
@@ -3046,6 +3103,10 @@ runMigrations(this.db);
   }
 
   registerRuntime(input: RegisterRuntimeInput): MultiremiRuntime {
+    return input.id ? this.guardOrdinaryResource('runtime',input.id,()=>this.registerRuntimeWithLifecycle(input)) : this.registerRuntimeWithLifecycle(input);
+  }
+
+  private registerRuntimeWithLifecycle(input: RegisterRuntimeInput): MultiremiRuntime {
     const daemonId = String(input.daemonId ?? input.daemon_id ?? "").trim();
     if (!daemonId) {
       const runtime = this.runtimes.registerRuntime(input);
@@ -3080,7 +3141,7 @@ runMigrations(this.db);
 
   registerDaemonRuntimeBatch(
     inputs: RegisterRuntimeInput[],
-    options: { displayName?: string | null } = {},
+    options: { displayName?: string | null; proof?: CredentialProof | null; version?: number } = {},
   ): MultiremiRuntime[] {
     if (inputs.length === 0) return [];
     const first = inputs[0];
@@ -3095,7 +3156,7 @@ runMigrations(this.db);
       }
     }
 
-    const runtimes = this.db.transaction(() => {
+    const register = this.db.transaction(() => {
       this.daemonRetirement.lockLifecycle(workspaceId, daemonId);
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       this.agentPlugins.lockAgentPluginWorkspace(workspaceId);
@@ -3120,7 +3181,21 @@ runMigrations(this.db);
       }));
       this.agentPlugins.reconcileAgentPluginDesiredStateWithinLock(workspaceId);
       return runtimes;
-    })();
+    });
+    const ids = [...new Set(inputs.map(input=>input.id).filter((id): id is string=>!!id))].sort();
+    const useFor = (id: string): AuthorityUse => ({action:'protected-resource.write',use:'write',actualTarget:{type:'runtime',id}});
+    const runtimes = ids.length && this.jwtMaterials.isActive() ? this.withResourceWrite(workspaceId,
+      ids.map(id=>`management:runtime:${id}`), options.proof, useFor(ids[0]!), tx=>{
+      const before = ids.map(id=>this.runtimeDependencyDigest(id));
+      const result = register();
+      ids.forEach((id,index)=>{
+        if (before[index]===this.runtimeDependencyDigest(id)) return;
+        const use = useFor(id);
+        const actor = options.proof ? this.rootManagement.authorizeWrite(tx, options.proof, use) : null;
+        this.rootManagement.guardProtectedMutation(tx,actor,use,options.version ?? NaN);
+      });
+      return result;
+    }) : register();
     for (const runtime of runtimes) this.runtimeProvisions.enqueueRuntimeOnRegister(runtime.id);
     return runtimes;
   }
@@ -3410,9 +3485,20 @@ runMigrations(this.db);
   }
 
   updateRuntime(id: string, input: UpdateRuntimeInput): MultiremiRuntime {
-    const runtime = this.runtimes.updateRuntime(id, input);
-    this.publishDaemonDispatchConditionsChanged(runtime.workspaceId ?? "local");
-    return runtime;
+    return this.guardOrdinaryResource('runtime', id, () => {
+      const runtime = this.runtimes.updateRuntime(id, input);
+      this.publishDaemonDispatchConditionsChanged(runtime.workspaceId ?? "local");
+      return runtime;
+    });
+  }
+
+  recordExternalChatCapabilities(id: string, external_chats: number, external_chat_models: number): void {
+    this.guardOrdinaryResource('runtime', id, () => {
+      const runtime = this.getRuntimeLite(id);
+      if (runtime && (runtime.metadata.external_chats !== external_chats || runtime.metadata.external_chat_models !== external_chat_models)) {
+        this.updateRuntime(id, {metadata: {...runtime.metadata, external_chats, external_chat_models}});
+      }
+    });
   }
 
   setRuntimeOffline(id: string): MultiremiRuntime | null {
@@ -3502,7 +3588,7 @@ runMigrations(this.db);
   }
 
   updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[], modelProfile?: RuntimeConnectionProfile | null): MultiremiRuntimeModel[] {
-    return this.runtimes.updateRuntimeModels(runtimeId, models, modelProfile);
+    return this.guardOrdinaryResource('runtime',runtimeId,()=>this.runtimes.updateRuntimeModels(runtimeId, models, modelProfile));
   }
 
   createRuntimeModelListRequest(runtimeId: string): MultiremiRuntimeModelListRequest {
@@ -3518,7 +3604,7 @@ runMigrations(this.db);
   }
 
   reportRuntimeModelListResult(runtimeId: string, requestId: string, input: ReportRuntimeModelListInput): MultiremiRuntimeModelListRequest {
-    return this.runtimes.reportRuntimeModelListResult(runtimeId, requestId, input);
+    return this.guardOrdinaryResource('runtime',runtimeId,()=>this.runtimes.reportRuntimeModelListResult(runtimeId, requestId, input));
   }
 
   createRuntimeDirectoryScanRequest(runtimeId: string, params: { root?: string; maxDepth?: number; mode?: "scan" | "browse" } = {}): MultiremiRuntimeDirectoryScanRequest {
@@ -5778,6 +5864,84 @@ runMigrations(this.db);
     return this.chat.getChatMessage(id);
   }
 
+  withAttemptAdmission<T>(fence: string | undefined, plan: SecurityLockPlan, write: AttemptWrite, operation: () => T): T {
+    return withAttemptAdmission(this.db, fence, plan, write, operation);
+  }
+
+  createAdmittedTask(input: CreateTaskInput, proof: CredentialProof, approval: RootAttemptApproval) {
+    return createRootAttempt(this.db, this, input, proof, approval);
+  }
+
+  retryAdmittedTurn(turnId: string, previousAttemptId: string, proof: CredentialProof, approval: RootAttemptApproval,
+    cold = false, authorizeConversation?: (sessionId: string) => void) {
+    return retryRootAttempt(this.db, this, turnId, previousAttemptId, proof, approval, cold, authorizeConversation);
+  }
+
+  withSecurityWrite<T>(fence:string|undefined, plan:SecurityLockPlan, operation:(tx:SecurityTx)=>T):T {
+    return withSecurityWrite(this.db,fence,plan,operation);
+  }
+
+  private withResourceWrite<T>(workspaceId: string, targets: string[], proof: CredentialProof | null | undefined, use: AuthorityUse,
+    operation: (tx: SecurityTx) => T): T {
+    const plan = proof ? this.rootManagement.plan(proof, use) : {
+      fenceTerm: undefined, expectedRevision: this.rootManagement.readContext(null, 'open_local').security_revision, workspaceIds: [], numberKeys: [], domainTargets: [],
+    };
+    return this.withSecurityWrite(plan.fenceTerm, { ...plan, workspaceIds: [...new Set([...plan.workspaceIds, workspaceId])].sort(),
+      domainTargets: [...new Set([...plan.domainTargets, ...targets])].sort() }, operation);
+  }
+
+  private readonly observedResources = new Set<string>();
+
+  private guardOrdinaryResource<T>(type: 'runtime'|'skill', id: string, operation: () => T): T {
+    const target = `management:${type}:${id}`;
+    if (this.observedResources.has(target) || !this.jwtMaterials.isActive()) return operation();
+    const workspace = type === 'runtime' ? this.getRuntimeLite(id)?.workspaceId : this.agents.getSkill(id)?.workspaceId;
+    const use: AuthorityUse = {action:'protected-resource.write', use:'write', actualTarget:{type,id}};
+    const expectedRevision = this.rootManagement.readContext(null,'open_local').security_revision;
+    return this.withSecurityWrite(undefined,{expectedRevision,workspaceIds:[workspace ?? 'local'],domainTargets:[target],numberKeys:[]},
+      tx=>this.mutateProtectedResource(tx,null,use,NaN,operation));
+  }
+
+  private runtimeDependencyDigest(id: string) {
+    const runtime=this.runtimes.getRuntimeForDispatch(id,true);
+    return runtime && agentDependencyDigest(runtimeExecutionFields(runtime));
+  }
+
+  mutateProtectedResource<T>(tx:SecurityTx, actor:ReturnType<AuthorityKernel['authorizeWrite']>|null, use:AuthorityUse,
+    version:number, operation:()=>T, forceGuard=false, fileVersions?: ReadonlyMap<string,number>):T {
+    const {type,id} = use.actualTarget;
+    const target = `management:${type}:${id}`;
+    return withSecurityTarget(this.db,tx,target,()=>{
+      const run = () => {
+        this.observedResources.add(target);
+        try { return operation(); } finally { this.observedResources.delete(target); }
+      };
+      if (type==='skill') return this.rootManagement.mutateSkill(tx,actor,use,version,run,fileVersions);
+      if (type==='runtime' && !forceGuard) {
+        const before=this.runtimeDependencyDigest(id);
+        const result=run();
+        if (before!==this.runtimeDependencyDigest(id)) this.rootManagement.guardProtectedMutation(tx,actor,use,version);
+        return result;
+      }
+      this.rootManagement.guardProtectedMutation(tx,actor,use,version);
+      return operation();
+    });
+  }
+
+  withAuthorizedMutation<T>(proof:CredentialProof, use:AuthorityUse, plan:SecurityLockPlan,
+    operation:(tx:SecurityTx, actor:ReturnType<AuthorityKernel['authorizeWrite']>)=>T, fence?:string):T {
+    if (use.use==='read') throw new SecurityAbort('root_required');
+    const authority=this.rootManagement.plan(proof,use);
+    if (authority.expectedRevision!==plan.expectedRevision) throw new SecurityAbort('authority_revision_conflict');
+    if (fence && authority.fenceTerm && authority.fenceTerm!==fence) throw new SecurityAbort('security_tx_invalid');
+    const domainTargets=[...new Set([...plan.domainTargets,...authority.domainTargets])].sort();
+    return this.withSecurityWrite(fence??authority.fenceTerm,{...plan,domainTargets},tx=>operation(tx,this.rootManagement.authorizeWrite(tx,proof,use)));
+  }
+
+  readAttemptEligibility(tx:SecurityTx,attemptId:string) { return readAttemptEligibility(this.db,tx,attemptId); }
+  readCurrentTaskLease(tx:SecurityTx,attemptId:string) { return readCurrentTaskLease(this.db,tx,attemptId); }
+  writeCurrentTaskLease(tx:SecurityTx,expectedVersion:number,lease:TaskLease) { return writeCurrentTaskLease(this.db,tx,expectedVersion,lease); }
+
   createTask(input: CreateTaskInput, options?: { requireIdleIssue?: boolean }): MultiremiTask {
     return this.tasks.createTask(input, options);
   }
@@ -5850,21 +6014,50 @@ runMigrations(this.db);
   enqueueQuestionPresentationWithinTransaction(id: string) { return this.feishuBot.enqueueQuestionPresentationWithinTransaction(id); }
   continueQuestion(...args: Parameters<Questions['continue']>) { return new Questions(this.ctx).continue(...args); }
   closeQuestion(...args: Parameters<Questions['close']>) { return new Questions(this.ctx).close(...args); }
-  reconcileQuestionWaits(...args: Parameters<Questions['reconcileRuntimeWaits']>) { return new Questions(this.ctx).reconcileRuntimeWaits(...args); }
+  reconcileQuestionWaits(runtimeId: string, reported: Parameters<Questions['reconcileRuntimeWaits']>[1], machineCredentialId?: string | null) {
+    const questions = new Questions(this.ctx);
+    if (!machineCredentialId) return questions.reconcileRuntimeWaits(runtimeId, reported);
+    const waits = [...reported];
+    const receipts = this.db.query(`SELECT r.receipt_id,r.attempt_id FROM multiremi_delivery_receipts r
+      JOIN multiremi_attempt_eligibility e ON e.attempt_id=r.attempt_id AND e.eligibility='root'
+      JOIN multiremi_machine_enrollments m ON m.incarnation=e.incarnation AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id
+      JOIN multiremi_turn_attempts a ON a.id=r.attempt_id AND a.status='running'
+      WHERE e.runtime_id=? AND m.credential_id=? AND m.retired_at_ms IS NULL AND r.run_state='running' AND r.ack_state='confirmed'
+        AND r.execution_locator_json IS NOT NULL AND EXISTS(SELECT 1 FROM multiremi_conversation_log q
+          WHERE q.task_id=a.turn_id AND q.message_kind='decision' AND q.deleted_at IS NULL)`).all(runtimeId,machineCredentialId);
+    for (const receipt of receipts) {
+      try {
+        const plan = this.rootReceipts.planRecovery(receipt.receipt_id);
+        const live = this.withSecurityWrite(plan.fenceTerm,plan,tx => {
+          this.rootManagement.requireReceiptAuthority(tx,receipt.receipt_id);
+          return questions.plannedRestartWaits(receipt.attempt_id).flatMap(message => {
+            const record = message.metadata.question as {wait?: {wait_id?: string; runtime_id?: string}} | undefined;
+            const wait = record?.wait;
+            return wait?.runtime_id === runtimeId && wait.wait_id ? [{message_id:message.id,attempt_id:String(receipt.attempt_id),wait_id:wait.wait_id}] : [];
+          });
+        });
+        waits.push(...live);
+      } catch (error) {
+        if (!(error instanceof SecurityAbort && ['root_authority_revoked','root_runtime_untrusted','credential_version_conflict'].includes(error.code))) throw error;
+      }
+    }
+    return questions.reconcileRuntimeWaits(runtimeId, waits);
+  }
   getMessage(...args: Parameters<InboxRepo["getMessage"]>) { return this.inbox.getMessage(...args); }
   /** `getMessage` for many ids in bounded batches; ids without a message are absent. */
   getMessages(...args: Parameters<InboxRepo["getMessages"]>) { return this.inbox.getMessages(...args); }
   getDaemonTurnBridge() {return new DaemonTurnBridge(this.ctx);}
   sendMessage(input:import("@multiremi/contracts/unified-model.js").SendMessageInput, uploads: CreateAttachmentInput[] = [],
-    authorizeRecipient?:(agent:MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:MultiremiAgent|null)=>void) {
+    authorizeRecipient?:(agent:MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:MultiremiAgent|null)=>void,
+    admission?: { proof: CredentialProof; approval: RootAttemptApproval }) {
     const events=createCommitEventQueue();
-    const result=this.db.transaction(()=>{
+    const write = (attempt?: Pick<CreateTaskInput, 'id' | 'runtimeId'>) => this.db.transaction(()=>{
       if (uploads.length) this.ctx.lockWorkspaceRuntimeLifecycle(uploads[0]!.workspaceId!);
       if (input.dedupe_key && this.db.query("SELECT id FROM multiremi_conversation_log WHERE session_id=? AND dedupe_key=?").get(input.session_id, input.dedupe_key)) {
         return this.inbox.sendMessageWithinTransaction(input, events, authorizeRecipient, authorizeConversation);
       }
       const attachmentIds = uploads.map(upload => this.createAttachment(upload).id);
-      const sent = this.inbox.sendMessageWithinTransaction({ ...input, attachment_ids: [...(input.attachment_ids ?? []), ...attachmentIds] },events,authorizeRecipient,authorizeConversation);
+      const sent = this.inbox.sendMessageWithinTransaction({ ...input, attachment_ids: [...(input.attachment_ids ?? []), ...attachmentIds] },events,authorizeRecipient,authorizeConversation,attempt);
       for (const id of attachmentIds) {
         const attachment = this.getAttachment(id);
         if (attachment && attachment.commentId !== sent.message.id && attachment.chatMessageId !== sent.message.id) this.deleteAttachment(id);
@@ -5877,6 +6070,7 @@ runMigrations(this.db);
       }
       return sent;
     })();
+    const result = admission ? sendRootRequest(this.db, this, input, admission.proof, admission.approval, write) : write();
     afterCommit(this.db,()=>this.ctx.emitCommitEvents(events));
     return result;
   }
@@ -6083,11 +6277,26 @@ runMigrations(this.db);
   }
 
   startTask(taskId: string, usageRunId?: string, expectedRuntimeId?: string): MultiremiTask {
+    this.requireStandardTaskStart(taskId);
     return this.tasks.startTask(taskId, usageRunId, expectedRuntimeId);
   }
 
   startTaskFromDaemon(taskId: string, authority: Parameters<TasksRepo["startTaskFromDaemon"]>[1], usageRunId?: string): "started" | "replayed" {
+    this.requireStandardTaskStart(taskId);
     return this.tasks.startTaskFromDaemon(taskId, authority, usageRunId);
+  }
+
+  private requireStandardTaskStart(taskId: string): void {
+    if (this.db.query("SELECT 1 FROM multiremi_attempt_eligibility WHERE attempt_id=? AND eligibility='root'").get(taskId)) {
+      throw new SecurityAbort('root_authority_revoked');
+    }
+  }
+
+  startRootTaskFromDaemon(tx: SecurityTx, machine: Parameters<RootReceiptStore['start']>[1], receiptId: string,
+    locator: Parameters<RootReceiptStore['start']>[3], leaseExpiresAtMs: number) {
+    return this.rootReceipts.start(tx,machine,receiptId,locator,leaseExpiresAtMs,tuple=>{
+      this.tasks.startTask(tuple.attempt_id,undefined,tuple.runtime_id);
+    });
   }
 
   completeTaskFromDaemon(taskId: string, input: Parameters<TasksRepo["completeTask"]>[1],

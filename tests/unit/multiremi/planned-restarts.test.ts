@@ -187,14 +187,19 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     expect(() => x.planned().resume(x.task.id, h.handoff_id, "consumer-00000001", x.scope, () => {})).toThrow("resume_fenced");
     x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
     let authorized = 0;
-    const resume = () => x.planned().resume(x.task.id, h.handoff_id, "consumer-00000001", x.scope, (generation, checkpoint) => {
-      expect(generation).toBe(1); expect(checkpoint).toEqual(x.checkpoint); authorized++;
+    const phases: string[] = [];
+    const resume = () => x.planned().resume(x.task.id, h.handoff_id, "consumer-00000001", x.scope, (generation, checkpoint, phase) => {
+      expect(x.f.db.inTransaction).toBe(true);
+      phases.push(phase);
+      expect(generation).toBe(1); expect(checkpoint).toEqual(x.checkpoint);
+      if (phase === 'activate') authorized++;
     });
     const resumed = resume();
     expect(resumed).toMatchObject({ generation: 1, state: "resuming", consumer_id: "consumer-00000001" });
     expect(resume()).toEqual(resumed);
     expect(() => x.planned().resume(x.task.id, h.handoff_id, "consumer-00000002", x.scope, () => {})).toThrow("stale_execution");
     expect(authorized).toBe(1);
+    expect(phases).toEqual(['activate', 'replay']);
     expect(() => x.f.transaction(() => x.planned().assertExecutionWithinTransaction(x.task.id, 1))).not.toThrow();
     expect(() => x.f.transaction(() => x.planned().assertExecutionWithinTransaction(x.task.id, 0))).toThrow("stale_execution");
     expect(() => x.f.transaction(() => x.planned().assertExecutionWithinTransaction(x.task.id, undefined))).toThrow("stale_execution");
@@ -279,7 +284,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
     const consumer = "lost-response-consumer";
     let authorizations = 0;
-    const resume = () => x.planned().resume(x.task.id, h.handoff_id, consumer, x.scope, () => { authorizations++; });
+    const resume = () => x.planned().resume(x.task.id, h.handoff_id, consumer, x.scope, (_generation, _checkpoint, phase) => { if (phase === 'activate') authorizations++; });
     expect(resume().state).toBe("resuming");
     expect(x.f.store.recoverOrphans(x.scope.runtimeId)).toEqual({ orphaned: 0, retried: 0 });
     expect(resume().generation).toBe(1);
@@ -296,7 +301,8 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     const x = setup(3), h = x.suspend();
     x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
     const consumer = "expired-resume-consumer";
-    const resume = () => x.planned().resume(x.task.id, h.handoff_id, consumer, x.scope, () => {
+    const resume = () => x.planned().resume(x.task.id, h.handoff_id, consumer, x.scope, (_generation, _checkpoint, phase) => {
+      if (phase === 'replay') return;
       x.f.store.reportTaskUsageSnapshot(x.task.id, { version: 2, runId: consumer, revision: 0, complete: false, units: [] }, x.scope);
     });
     resume();
@@ -482,7 +488,7 @@ it("recovers daemon journal and server checkpoint across real SQLite close/open 
     const remote: PlannedRestartRemote = {
       suspend: async entry => { store.plannedRestarts().suspend(task.id, entry.execution.handoff_id, entry.execution.generation, entry.checkpoint, scope); },
       resume: async entry => {
-        const result = store.plannedRestarts().resume(task.id, entry.execution.handoff_id, entry.consumer_id, scope, () => { authorizations++; });
+        const result = store.plannedRestarts().resume(task.id, entry.execution.handoff_id, entry.consumer_id, scope, (_generation, _checkpoint, phase) => { if (phase === 'activate') authorizations++; });
         if (loseResumeResponse) { loseResumeResponse = false; throw new Error("response lost after authorization"); }
         return { generation: result.generation };
       },

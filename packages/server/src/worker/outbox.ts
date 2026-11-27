@@ -144,6 +144,7 @@ export class MultiremiTaskReportOutbox {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_outbox_task_seq ON outbox_events(task_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_outbox_task_id ON outbox_events(task_id, id);
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_events(status);
       CREATE TABLE IF NOT EXISTS policy_offer_receipts (
         workspace_id TEXT NOT NULL, daemon_id TEXT NOT NULL, runtime_id TEXT NOT NULL,

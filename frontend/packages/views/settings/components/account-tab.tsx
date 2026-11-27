@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Save } from "lucide-react";
+import { Save, ShieldCheck } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
 import { Button } from "@multiremi/ui/components/ui/button";
@@ -10,6 +11,7 @@ import { Textarea } from "@multiremi/ui/components/ui/textarea";
 import { toast } from "sonner";
 import { useAuthStore } from "@multiremi/core/auth";
 import { api } from "@multiremi/core/api";
+import { rootContextOptions } from "@multiremi/core/root";
 import { resolvePublicFileUrl } from "@multiremi/core/workspace/avatar-url";
 import { AvatarUploadButton } from "../../common/avatar-upload-button";
 import { useT } from "../../i18n";
@@ -24,6 +26,8 @@ export function AccountTab() {
   const { t } = useT("settings");
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
+  const rootContextQuery = useQuery(rootContextOptions());
+  const rootContext = rootContextQuery.data;
 
   const [profileName, setProfileName] = useState(user?.name ?? "");
   const [profileDescription, setProfileDescription] = useState(
@@ -98,6 +102,28 @@ export function AccountTab() {
               <div className="text-xs text-muted-foreground">
                 {t(($) => $.account.click_avatar_hint)}
               </div>
+            </div>
+
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-1" data-testid="account-real-identity">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-muted-foreground">{t(($) => $.account.real_user_id_label)}</span>
+                <span className="font-mono" data-testid="account-real-user-id">
+                  {rootContext?.authenticated_subject
+                    ? `${rootContext.authenticated_subject.type}:${rootContext.authenticated_subject.id}`
+                    : user?.id ?? "-"}
+                </span>
+              </div>
+              {rootContext?.is_agent_origin && (
+                <div className="text-amber-700 dark:text-amber-300" data-testid="account-agent-origin-notice">
+                  {t(($) => $.account.agent_origin_notice)}
+                </div>
+              )}
+              {rootContext?.effective_root && (
+                <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-300" data-testid="account-root-active">
+                  <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t(($) => $.account.root_active_badge)}</span>
+                </div>
+              )}
             </div>
 
             <div data-perf-item={user ? "setting" : undefined} data-perf-key="account-name">

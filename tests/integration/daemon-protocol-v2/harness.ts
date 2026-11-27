@@ -195,7 +195,7 @@ export class DaemonProtocolHarness {
 
   static async create(options: {
     manualOfferClock?: boolean;
-    database?: "sqlite";
+    database?: "sqlite" | "migrated";
     providers?: string[];
     runtimeId?: string;
     daemonOptions?: Pick<MultiremiDaemonOptions,
@@ -218,7 +218,7 @@ export class DaemonProtocolHarness {
     onReady?: (daemon: MultiremiDaemon, harness: DaemonProtocolHarness) => void;
     onRoundCard?: (taskId: string) => void;
   } = {}): Promise<DaemonProtocolHarness> {
-    const h = new DaemonProtocolHarness(process.env.MULTIREMI_TEST_POSTGRES_URL && options.database !== "sqlite"
+    const h = new DaemonProtocolHarness(options.database === "migrated" || (process.env.MULTIREMI_TEST_POSTGRES_URL && options.database !== "sqlite")
       ? await openIntegrationDatabase() : undefined);
     try {
       h.store.ensureLocalWorkspace();

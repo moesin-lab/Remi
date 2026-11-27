@@ -216,8 +216,8 @@ describe("MUL-464 serialized platform-operation invariants", () => {
     } finally { f.close(); }
   });
 
-  test("a terminal operation ignores subsequent reports for every contract status", () => {
-    for (const terminal of terminalStatuses) {
+  for (const terminal of terminalStatuses) {
+    test(`a ${terminal} operation ignores subsequent reports for every contract status`, () => {
       const f = repoFixture();
       try {
         const operation = f.repo.create({ kind: "restart" }, "local");
@@ -232,8 +232,8 @@ describe("MUL-464 serialized platform-operation invariants", () => {
         expect(f.audit.writes, terminal).toEqual([]);
         expect(f.row(operation.id).active_slot, terminal).toBeNull();
       } finally { f.close(); }
-    }
-  });
+    });
+  }
 
   test("cancelling a queued operation releases the slot and is irreversible", () => {
     const f = repoFixture();

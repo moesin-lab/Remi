@@ -9,6 +9,7 @@ import type {
   UpdateSkillInput,
 } from "@multiremi/contracts/types.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
+import { SecurityAbort } from "@multiremi/store/security-write.js";
 import type { Context } from "hono";
 import { cleanString, parseOptionalInt } from "./context.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
@@ -66,6 +67,7 @@ export function skillCompatibilityErrorResponse(
     store?: MultiremiStore;
   } = {},
 ): Response {
+  if (error instanceof SecurityAbort) throw error;
   const message = error instanceof Error ? error.message : String(error);
   if (message.startsWith("Skill not found")) return c.json({ error: "skill not found" }, 404);
   if (message.startsWith("Agent not found")) return c.json({ error: "agent not found" }, 404);

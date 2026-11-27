@@ -48,6 +48,56 @@ import type {
   TraceTurnPage,
 } from "./trace.js";
 import type { MultiremiChatSessionStatus, MultiremiDaemonHeartbeatAck, MultiremiDaemonSshMeshStatus } from "./types.js";
+import type { RootCarrierMode } from "./root-delivery.js";
+export {
+  assertFrozenBusinessPayloadHasNoTransportSecrets,
+  buildDaemonRootRestartResumeReply,
+  buildDaemonRootTaskOfferPayload,
+  classifyDaemonRestartResumeReply,
+  classifyDaemonRestartResumeRequest,
+  classifyDaemonTaskOfferPayload,
+  evaluateRootDeliveryNegotiation,
+  findForbiddenBusinessPayloadField,
+  ROOT_DELIVERY_CAPABILITY,
+  ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS,
+  ROOT_DELIVERY_MODE,
+  ROOT_DELIVERY_PROTOCOL_VERSION,
+  STANDARD_DELIVERY_MODE,
+} from "./root-delivery.js";
+export type {
+  DaemonDeliveryMode,
+  DaemonRestartResumeReplyClassification,
+  DaemonRestartResumeReplyPayload,
+  DaemonRestartResumeRequestClassification,
+  DaemonRestartResumeRequestPayload,
+  DaemonRootRestartResumeReply,
+  DaemonRootRestartResumeRequest,
+  DaemonRootTaskOfferPayload,
+  DaemonRootWireRejectCode,
+  DaemonStandardRestartResumeReply,
+  DaemonStandardRestartResumeRequest,
+  DaemonStandardTaskOfferPayload,
+  DaemonTaskOfferClassification,
+  DaemonTaskOfferPayload,
+  RootCarrierMode,
+  RootDeliveryActivationResponse,
+  RootDeliveryEnvelopePayload,
+  RootDeliveryInstallAckRequest,
+  RootDeliveryInstallAckResponse,
+  RootDeliveryJournalEntry,
+  RootDeliveryJweProtectedHeader,
+  RootDeliveryMachineProof,
+  RootDeliveryNegotiationErrorCode,
+  RootDeliveryNegotiationInput,
+  RootDeliveryNegotiationResult,
+  RootDeliveryReplayRequest,
+  RootDeliveryReplayResponse,
+  RootDeliveryRuntimeCapabilities,
+  RootDeliveryStatusRequest,
+  RootDeliveryStatusResponse,
+  RootDeliveryTuple,
+  RootExecutionLocator,
+} from "./root-delivery.js";
 import type {
   BackgroundLaneReleaseReason,
   BackgroundLaneState,
@@ -169,6 +219,10 @@ export const DAEMON_UPLINK_RPC_FRAMES = [
   "gc.check_task",
   "gc.subject_reclaimed",
   "lane.background_wake",
+  "delivery.receipt.status",
+  "delivery.receipt.challenge",
+  "delivery.receipt.replay",
+  "delivery.receipt.install_ack",
 ] as const;
 
 /**
@@ -355,6 +409,10 @@ export interface DaemonRuntimeCapabilities {
   feishu_concierge_protocol?: number;
   feishu_decision_card?: number;
   feishu_issue_decision_card?: number;
+  /** MUL-1 A2: root delivery protocol version (must match ROOT_DELIVERY_PROTOCOL_VERSION). Missing means unsupported. */
+  root_delivery_protocol?: number;
+  /** MUL-1 A2: root execution carrier modes supported by this runtime (must include "immutable_run_env"). */
+  root_carrier_modes?: readonly RootCarrierMode[];
 }
 
 export interface DaemonHelloRuntime {
@@ -951,6 +1009,13 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   // lane.background_wake (PR 6)
   "lane_moved",
   "session_closed",
+  // root delivery receipts (MUL-1 A2)
+  "receipt_conflict",
+  "root_authority_revoked",
+  "root_runtime_untrusted",
+  "root_delivery_unsupported",
+  "root_delivery_invalid",
+  "security_state_unavailable",
   // transport
   "ack_timeout",
   "protocol_violation",
@@ -964,6 +1029,7 @@ export type DaemonProtocolErrorCode = (typeof DAEMON_PROTOCOL_ERROR_CODES)[numbe
 export const DAEMON_RETRYABLE_ERROR_CODES = [
   "daemon_busy",
   "daemon_timeout",
+  "security_state_unavailable",
   "server_error",
 ] as const satisfies readonly DaemonProtocolErrorCode[];
 
@@ -1086,6 +1152,8 @@ export const DAEMON_PROTOCOL_CAPS = [
    * hold it, and otherwise stops tasks at the attempt's end.
    */
   "lane.background",
+  /** MUL-1 A2: daemon supports recipient-bound JWE delivery receipts and immutable run env carrier. */
+  "root.delivery",
 ] as const;
 
 export type DaemonProtocolCap = (typeof DAEMON_PROTOCOL_CAPS)[number] | import("./daemon-compatibility.js").DaemonCapabilityName;

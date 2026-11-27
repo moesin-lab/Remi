@@ -74,7 +74,7 @@ export function snapshotSchemaCatalog(db: SqlDatabase): SchemaCatalog {
     for (const r of db.query(`SELECT n.nspname,c.relname,a.attname,a.attnum,
       pg_catalog.format_type(a.atttypid,a.atttypmod) AS data_type,a.attnotnull,a.attidentity,a.attgenerated,
       cn.nspname AS collation_schema,co.collname,
-      ${acl('a.attacl', 'c', 'c.relowner')} AS acl,
+      CASE WHEN a.attacl IS NULL THEN '{}' ELSE ${acl('a.attacl', 'c', 'c.relowner')} END AS acl,
       CASE WHEN a.attgenerated<>'' THEN pg_catalog.pg_get_expr(d.adbin,d.adrelid) END AS generated_expression
       FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
       JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace

@@ -1,3 +1,6 @@
+import { effectiveRootProof, requestHasRootRead, runRootMutation } from '../helpers/root-access.js';
+import { SecurityAbort } from '@multiremi/store/security-write.js';
+import { rootError } from './root.js';
 import { readCurrentDaemonBuild } from "../../releases/current-daemon-build.js";
 import { isPlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import type { Context, Hono } from "hono";
@@ -48,13 +51,13 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
 
   app.get("/api/multiremi/platform/config", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    if (requester instanceof Response && !requestHasRootRead(c, store, 'platform.config.read', 'platform', 'local')) return requester;
     return c.json({ degradations: deps.startupDegradations });
   });
 
   app.get("/api/multiremi/platform/status", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    if (requester instanceof Response && !requestHasRootRead(c, store, 'platform.status.read', 'platform', 'local')) return requester;
     const state = store.getPlatformState();
     const heartbeatAge = state.updaterHeartbeatAt
       ? Date.now() - new Date(state.updaterHeartbeatAt).getTime()
@@ -84,13 +87,15 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
 
   app.get("/api/multiremi/platform/operations", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    if (requester instanceof Response && !requestHasRootRead(c, store, 'platform.operations.read', 'platform', 'local')) return requester;
     return c.json({ operations: store.listPlatformOperations(Number(c.req.query("limit") ?? 20)) });
   });
 
   app.post("/api/multiremi/platform/operations", async (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    const use = { action: 'platform.operation.create', actualTarget: { type: 'platform', id: 'local' }, use: 'write' };
+    const proof = effectiveRootProof(c, store, use);
+    if (requester instanceof Response && !proof) return requester;
     const body = await readJson<CreatePlatformOperationInput>(c);
     if (!OPERATION_KINDS.has(body.kind)) return c.json({ error: "invalid platform operation kind" }, 400);
     const requestId = clean(body.requestId);
@@ -100,38 +105,50 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     if ((body.kind === "update" || body.kind === "rollback") && !clean(body.targetRef) && !clean(body.targetVersion)) {
       return c.json({ error: "targetVersion or targetRef is required" }, 400);
     }
-    const existingRequest = requestId && store.findPlatformOperationByRequestId(currentRequestUserId(c), requestId);
-    if (!existingRequest && body.kind !== "check_updates") {
-      const state = store.getPlatformState();
-      if (!state.updaterHeartbeatAt || Date.now() - Date.parse(state.updaterHeartbeatAt) > 90_000) {
-        return c.json({ error: "updater is offline or stale; run an update check first" }, 409);
+    const create = (requestedBy: string) => {
+      const existingRequest = requestId && store.findPlatformOperationByRequestId(requestedBy, requestId);
+      if (!existingRequest && body.kind !== "check_updates") {
+        const state = store.getPlatformState();
+        if (!state.updaterHeartbeatAt || Date.now() - Date.parse(state.updaterHeartbeatAt) > 90_000) {
+          return c.json({ error: "updater is offline or stale; run an update check first" }, 409);
+        }
+        if (!hasFreshPreflight(state.preflight)) {
+          return c.json({ error: "update preflight is missing, expired, or blocked; run an update check first" }, 409);
+        }
       }
-      if (!hasFreshPreflight(state.preflight)) {
-        return c.json({ error: "update preflight is missing, expired, or blocked; run an update check first" }, 409);
-      }
-    }
-    try {
       const operation = store.createPlatformOperation({
         kind: body.kind,
         requestId,
         targetVersion: clean(body.targetVersion),
         targetRef: clean(body.targetRef),
         targetManifest: body.targetManifest ?? {},
-      }, currentRequestUserId(c));
+      }, requestedBy);
       return c.json({ operation }, 202);
+    };
+    try {
+      if (!proof) return create(currentRequestUserId(c));
+      return runRootMutation(store, proof, use, (_tx, _actor, current) => {
+        if (!current.subject) throw new SecurityAbort('root_required');
+        return create(current.subject.id);
+      });
     } catch (error) {
       if (error instanceof PlatformOperationIdempotencyConflictError) {
         return c.json({ error: error.message, code: error.code }, 409);
       }
+      const response = rootError(c, error);
+      if (response) return response;
       throw error;
     }
   });
 
   app.post("/api/multiremi/platform/operations/:id/cancel", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
-    if (requester instanceof Response) return requester;
+    const id = c.req.param('id');
+    const use = { action: 'platform.operation.cancel', actualTarget: { type: 'platform_operation', id }, use: 'write' };
+    const proof = effectiveRootProof(c, store, use);
+    if (requester instanceof Response && !proof) return requester;
     try {
-      const operation = store.cancelPlatformOperation(c.req.param("id"));
+      const operation = proof ? runRootMutation(store, proof, use, () => store.cancelPlatformOperation(id)) : store.cancelPlatformOperation(id);
       // A queued operation cancels immediately and may still hold a drain from
       // a previous claim attempt; release is idempotent either way.
       if (operation.status === "cancelled") store.releasePlatformDrain(operation.id);
@@ -140,6 +157,8 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       if (error instanceof PlatformOperationNotCancellableError) {
         return c.json({ error: error.message, code: error.code }, 409);
       }
+      const response = rootError(c, error);
+      if (response) return response;
       throw error;
     }
   });

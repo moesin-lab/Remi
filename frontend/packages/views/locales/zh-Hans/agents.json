@@ -520,5 +520,12 @@
     "model_routing": "模型路由 · {{provider}}",
     "model_routing_hint": "按所选模型和思考等级，跨可用能力组与 Runtime 动态匹配；未选模型时使用兼容 Runtime 的默认模型。",
     "fixed_group": "固定能力组 · {{group}}"
+  },
+  "root": {
+    "badge_effective": "系统 Root",
+    "badge_granted_ineffective": "已授 Root（待新尝试生效）",
+    "tooltip_effective": "系统 root 授予第 {{generation}} 代已生效（与 normal/maintainer/supervisor 角色正交）。",
+    "tooltip_attempt_not_eligible": "该 Agent 已获系统 root 授予，但当前 attempt 建于授权之前，需通过合法路径新建 attempt 生效。",
+    "tooltip_ineffective_reason": "该 Agent 已获系统 root 授予，当前未生效（{{reason}}）。"
   }
 }

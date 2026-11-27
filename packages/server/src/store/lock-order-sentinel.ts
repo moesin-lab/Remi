@@ -1,5 +1,6 @@
 /**
- * Whole-suite enforcement of the lock order (F -> W -> N -> D).
+ * Whole-suite enforcement of the lock order (F -> S -> W -> N -> D).
+ * S is the security state singleton row.
  * F is the MUL-169 background live-term row, always acquired before domain work.
  *
  * The contract lives in `./advisory-locks.ts`: a transaction takes the
@@ -48,9 +49,9 @@
  * cached boolean read when off, so production pays nothing.
  */
 
-export type LockOrderClass = "F" | "W" | "N" | "D";
+export type LockOrderClass = "F" | "S" | "W" | "N" | "D";
 
-const RANK: Record<LockOrderClass, number> = { F: -1, W: 0, N: 1, D: 2 };
+const RANK: Record<LockOrderClass, number> = { F: 0, S: 1, W: 2, N: 3, D: 4 };
 
 /** The workspace lifecycle row lock (`StoreContext.lockWorkspaceRuntimeLifecycle`). */
 const WORKSPACE_ROW_LOCK = /UPDATE\s+multiremi_workspaces\s+SET\s+updated_at\s*=\s*updated_at/i;
@@ -165,6 +166,7 @@ const FROM_END = new Set(["where", "group", "having", "window", "order", "limit"
 const ALIAS_END = new Set([...FROM_END, "join", "inner", "left", "right", "full", "cross", "natural", "outer", "on", "using", "tablesample", "set"]);
 
 function rowLockClass(table: string): LockOrderClass {
+  if (table === "multiremi_security_state") return "S";
   if (table === "multiremi_live_terms") return "F";
   return table === "multiremi_workspaces" ? "W" : "D";
 }
@@ -336,11 +338,21 @@ function classifyExplain(nodes: SqlNode[]): LockOrderClass[] {
 
 function classifyStatementNodes(nodes: SqlNode[]): LockOrderClass[] {
   if (nodes.length === 0 || keyword(nodes[0], "pragma")) return [];
+  if (nodes.length === 2 && keyword(nodes[0], "show") && keyword(nodes[1], "standard_conforming_strings")) return [];
   if (keyword(nodes[0], "explain")) return classifyExplain(nodes);
   // Transaction characteristics do not acquire row locks (e.g. S9-3a snapshots).
   if (keyword(nodes[0], "set") && keyword(nodes[1], "transaction")) return [];
   if (keyword(nodes[0], "select") || keyword(nodes[0], "with")) {
     return [...new Set(selectLocks(nodes).classes)];
+  }
+  const createTable = keyword(nodes[0], "create") && keyword(nodes[1], "table");
+  if (createTable || keyword(nodes[0], "update") || keyword(nodes[0], "insert") && keyword(nodes[1], "into")
+    || keyword(nodes[0], "delete") && keyword(nodes[1], "from")) {
+    let target = keyword(nodes[0], "update") ? 1 : 2;
+    if (createTable && keyword(nodes[2], "if") && keyword(nodes[3], "not") && keyword(nodes[4], "exists")) target = 5;
+    if (keyword(nodes[target], "only")) target++;
+    while (identifier(nodes[target]) && symbol(nodes[target + 1], ".")) target += 2;
+    if (identifier(nodes[target]) === "multiremi_security_state") return ["S"];
   }
   const text = nodes.map((node) => "text" in node ? node.text : "()").join(" ");
   if (/^(?:update|insert into|delete from) multiremi_live_terms\b/i.test(text)) return ["F"];
@@ -425,7 +437,7 @@ function record(frame: Frame, cls: LockOrderClass, detail: string): void {
     const order = [...frame.trace, `${cls} ${trimmed}`].join("\n  ");
     throw new Error(
       `MUL-405 lock order violated: first ${cls} acquisition comes after a higher class ` +
-        `(F -> W -> N -> D required).\nTrace:\n  ${order}\nStack:\n${new Error().stack ?? "(no stack)"}`,
+        `(F -> S -> W -> N -> D required).\nTrace:\n  ${order}\nStack:\n${new Error().stack ?? "(no stack)"}`,
     );
   }
   frame.acquired.add(cls);

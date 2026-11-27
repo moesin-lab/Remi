@@ -1,22 +1,22 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 854,
+    "routeCount": 868,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 608,
+      "compat": 622,
       "root": 20
     },
-    "getRoutes": 371,
-    "getRoutesWithBody": 367,
+    "getRoutes": 377,
+    "getRoutesWithBody": 373,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 483,
-    "mutationRoutesCovered": 299,
+    "mutationRoutes": 491,
+    "mutationRoutesCovered": 304,
     "flows": [
       "agents-compat",
       "agents-native",
@@ -50,6 +50,7 @@
       "project-docs",
       "projects",
       "responsibility-retired-routes",
+      "root-management",
       "runtimes",
       "settings-misc",
       "skills-compat",
@@ -388,6 +389,12 @@
     "GET /api/remi/releases/download/:tag/:filename",
     "GET /api/remi/releases/latest/:filename",
     "GET /api/remi/releases/latest/version",
+    "GET /api/root/agents/:agentId/grant-preview",
+    "GET /api/root/audit",
+    "GET /api/root/context",
+    "GET /api/root/grants",
+    "GET /api/root/runtime-trust",
+    "GET /api/root/runtime-trust/:runtimeId",
     "GET /api/runtime-workspaces",
     "GET /api/runtime-workspaces/:id",
     "GET /api/runtimes",
@@ -773,6 +780,14 @@
     "POST /api/projects/:id/knowledge/publish",
     "POST /api/projects/:id/resources",
     "POST /api/projects/:id/restore",
+    "POST /api/root/agent-pats",
+    "POST /api/root/agents/:agentId/configuration/approve",
+    "POST /api/root/credential-families/:familyId/revoke",
+    "POST /api/root/delegations/:nodeId/revoke",
+    "POST /api/root/grants",
+    "POST /api/root/grants/:id/revoke",
+    "POST /api/root/runtime-trust",
+    "POST /api/root/runtime-trust/:id/revoke",
     "POST /api/runtimes/:id/archive-agents-and-delete",
     "POST /api/runtimes/:id/commands",
     "POST /api/runtimes/:id/directory-scans",
@@ -1222,6 +1237,12 @@
     "GET /api/remi/releases/download/:tag/:filename",
     "GET /api/remi/releases/latest/:filename",
     "GET /api/remi/releases/latest/version",
+    "GET /api/root/agents/:agentId/grant-preview",
+    "GET /api/root/audit",
+    "GET /api/root/context",
+    "GET /api/root/grants",
+    "GET /api/root/runtime-trust",
+    "GET /api/root/runtime-trust/:runtimeId",
     "GET /api/runtime-workspaces",
     "GET /api/runtime-workspaces/:id",
     "GET /api/runtimes",
@@ -1524,6 +1545,11 @@
     "POST /api/projects",
     "POST /api/projects/:id/docs",
     "POST /api/projects/:id/resources",
+    "POST /api/root/credential-families/:familyId/revoke",
+    "POST /api/root/grants",
+    "POST /api/root/grants/:id/revoke",
+    "POST /api/root/runtime-trust",
+    "POST /api/root/runtime-trust/:id/revoke",
     "POST /api/runtimes/:id/archive-agents-and-delete",
     "POST /api/runtimes/:id/commands",
     "POST /api/runtimes/:id/directory-scans",
@@ -10193,6 +10219,160 @@
             "allowed": true
           },
           {
+            "id": "root.agent-configuration.approve",
+            "command": "remi root agent-configuration approve",
+            "capability": "root.agent-configuration.approve",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.agent-pat.create",
+            "command": "remi root agent-pat create",
+            "capability": "root.agent-pat.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": false
+          },
+          {
+            "id": "root.audit.list",
+            "command": "remi root audit list",
+            "capability": "root.audit.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.context",
+            "command": "remi root context",
+            "capability": "root.context",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.credential-family.revoke",
+            "command": "remi root credential-family revoke",
+            "capability": "root.credential-family.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.delegation.revoke",
+            "command": "remi root delegation revoke",
+            "capability": "root.delegation.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.create",
+            "command": "remi root grant create",
+            "capability": "root.grant.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.list",
+            "command": "remi root grant list",
+            "capability": "root.grant.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.preview",
+            "command": "remi root grant preview",
+            "capability": "root.grant.preview",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.revoke",
+            "command": "remi root grant revoke",
+            "capability": "root.grant.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.get",
+            "command": "remi root runtime-trust get",
+            "capability": "root.runtime-trust.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.grant",
+            "command": "remi root runtime-trust grant",
+            "capability": "root.runtime-trust.grant",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.list",
+            "command": "remi root runtime-trust list",
+            "capability": "root.runtime-trust.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.revoke",
+            "command": "remi root runtime-trust revoke",
+            "capability": "root.runtime-trust.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "runtime.activity",
             "command": "remi runtime activity",
             "capability": "runtime.activity",
@@ -12917,6 +13097,7 @@
       "path": "/api/config",
       "status": 200,
       "body": {
+        "jwt_registration_required": false,
         "cdn_domain": "",
         "allow_signup": true,
         "google_client_id": "snapshot-google-client",
@@ -21883,6 +22064,109 @@
       }
     },
     {
+      "key": "get-sweep GET /api/root/agents/:agentId/grant-preview",
+      "route": "GET /api/root/agents/:agentId/grant-preview",
+      "path": "/api/root/agents/agt_snapshot/grant-preview",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000003"
+        }
+      }
+    },
+    {
+      "key": "get-sweep GET /api/root/audit",
+      "route": "GET /api/root/audit",
+      "path": "/api/root/audit",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000004"
+        }
+      }
+    },
+    {
+      "key": "get-sweep GET /api/root/context",
+      "route": "GET /api/root/context",
+      "path": "/api/root/context",
+      "status": 200,
+      "body": {
+        "security_revision": 0,
+        "feature_activation": false,
+        "bootstrap_completed": false,
+        "transport_identity": "open_local",
+        "authenticated_subject": null,
+        "beneficiary_user_id": null,
+        "is_agent_origin": false,
+        "credential_id": null,
+        "family_id": null,
+        "origin_attempt_id": null,
+        "current_attempt_id": null,
+        "agent_granted_root": false,
+        "current_attempt_effective_root": false,
+        "effective_root": false,
+        "effective_reason_code": "feature_disabled",
+        "grant_id": null,
+        "grant_generation": null,
+        "capabilities": {
+          "can_manage_root": false,
+          "can_edit_root_execution": false,
+          "can_manage_runtime_trust": false,
+          "can_revoke_credential_family": false,
+          "can_read_root_audit": false
+        },
+        "allowed_operations": []
+      }
+    },
+    {
+      "key": "get-sweep GET /api/root/grants",
+      "route": "GET /api/root/grants",
+      "path": "/api/root/grants",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000005"
+        }
+      }
+    },
+    {
+      "key": "get-sweep GET /api/root/runtime-trust",
+      "route": "GET /api/root/runtime-trust",
+      "path": "/api/root/runtime-trust",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000006"
+        }
+      }
+    },
+    {
+      "key": "get-sweep GET /api/root/runtime-trust/:runtimeId",
+      "route": "GET /api/root/runtime-trust/:runtimeId",
+      "path": "/api/root/runtime-trust/rt_snapshot",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000007"
+        }
+      }
+    },
+    {
       "key": "get-sweep GET /api/runtime-workspaces",
       "route": "GET /api/runtime-workspaces",
       "path": "/api/runtime-workspaces",
@@ -29565,6 +29849,76 @@
       "body": {
         "code": "route_retired",
         "replacement": "remi issue status <child> done（父单执行负责人直接关闭子单；成员可关闭任何 Issue）"
+      }
+    },
+    {
+      "key": "root-management#000 POST /api/root/grants",
+      "route": "POST /api/root/grants",
+      "path": "/api/root/grants",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000003"
+        }
+      }
+    },
+    {
+      "key": "root-management#001 POST /api/root/grants/:id/revoke",
+      "route": "POST /api/root/grants/:id/revoke",
+      "path": "/api/root/grants/grant_snapshot/revoke",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000004"
+        }
+      }
+    },
+    {
+      "key": "root-management#002 POST /api/root/runtime-trust",
+      "route": "POST /api/root/runtime-trust",
+      "path": "/api/root/runtime-trust",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000005"
+        }
+      }
+    },
+    {
+      "key": "root-management#003 POST /api/root/runtime-trust/:id/revoke",
+      "route": "POST /api/root/runtime-trust/:id/revoke",
+      "path": "/api/root/runtime-trust/trust_snapshot/revoke",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000006"
+        }
+      }
+    },
+    {
+      "key": "root-management#004 POST /api/root/credential-families/:familyId/revoke",
+      "route": "POST /api/root/credential-families/:familyId/revoke",
+      "path": "/api/root/credential-families/family_snapshot/revoke",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "root_required",
+          "message": "root_required",
+          "retryable": false,
+          "requestId": "00000000-0000-4000-8000-000000000007"
+        }
       }
     },
     {

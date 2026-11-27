@@ -1,4 +1,5 @@
 import type { Context, Hono } from "hono";
+import { guardRootResourceWrite } from "../helpers/root-access.js";
 import {
   denyCurrentUserWorkspaceAccess,
   isJsonApiError,
@@ -36,6 +37,9 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  function writeSkill<T>(c: Context, skill: NonNullable<ReturnType<typeof store.getSkill>>, operation: () => T, didWrite?: (result: T) => boolean): T {
+    return guardRootResourceWrite(c, store, skillWorkspaceId(skill), 'skill', skill.id!, operation, { didWrite });
+  }
 
   // Source identity is scoped to the selected workspace, independently of the
   // imported display name. Fetching the complete bundle precedes this write.
@@ -51,13 +55,13 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     }
     const sanitized = sanitizeSkillFilesForCompatibility(input);
     const skill = existing
-      ? store.updateSkill(existing.id!, withSkillUpdateRequestContext(existing, {
+      ? writeSkill(c, existing, () => store.updateSkill(existing.id!, withSkillUpdateRequestContext(existing, {
         name: sanitized.name,
         description: sanitized.description,
         content: sanitized.content,
         files: sanitized.files,
         config: { ...existing.config, origin },
-      }))
+      })))
       : store.createSkill(sanitized);
     return { skill, updated: Boolean(existing) };
   }
@@ -122,7 +126,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<UpdateSkillInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const skill = store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body)));
+      const skill = writeSkill(c, loaded.skill, () => store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body))));
       publishWorkspaceEvent(c, store, "skill:updated", skillWorkspaceId(skill), { skill: skillWithFilesCompatibilityResponse(skill) });
       return c.json({ skill });
     } catch (error) {
@@ -135,7 +139,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<UpdateSkillInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const skill = store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body)));
+      const skill = writeSkill(c, loaded.skill, () => store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body))));
       publishWorkspaceEvent(c, store, "skill:updated", skillWorkspaceId(skill), { skill: skillWithFilesCompatibilityResponse(skill) });
       return c.json({ skill });
     } catch (error) {
@@ -146,7 +150,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadSkillForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     try {
-      const skill = store.archiveSkill(loaded.skill.id!);
+      const skill = writeSkill(c, loaded.skill, () => store.archiveSkill(loaded.skill.id!));
       publishWorkspaceEvent(c, store, "skill:deleted", skillWorkspaceId(loaded.skill), { skill_id: loaded.skill.id ?? c.req.param("id") });
       return c.json({ skill });
     } catch (error) {
@@ -213,7 +217,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<UpdateSkillInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const skill = store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body)));
+      const skill = writeSkill(c, loaded.skill, () => store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body))));
       const response = skillWithFilesCompatibilityResponse(skill);
       publishWorkspaceEvent(c, store, "skill:updated", skillWorkspaceId(skill), { skill: response });
       return c.json(response);
@@ -227,7 +231,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<UpdateSkillInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const skill = store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body)));
+      const skill = writeSkill(c, loaded.skill, () => store.updateSkill(loaded.skill.id!, sanitizeSkillFilesForCompatibility(withSkillUpdateRequestContext(loaded.skill, body))));
       const response = skillWithFilesCompatibilityResponse(skill);
       publishWorkspaceEvent(c, store, "skill:updated", skillWorkspaceId(skill), { skill: response });
       return c.json(response);
@@ -239,7 +243,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadSkillForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     try {
-      store.archiveSkill(loaded.skill.id!);
+      writeSkill(c, loaded.skill, () => store.archiveSkill(loaded.skill.id!));
       publishWorkspaceEvent(c, store, "skill:deleted", skillWorkspaceId(loaded.skill), { skill_id: loaded.skill.id ?? c.req.param("id") });
       return c.body(null, 204);
     } catch (error) {
@@ -261,7 +265,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrict<MultiremiSkillFile>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      return c.json(skillFileCompatibilityResponse(store.upsertSkillFile(loaded.skill.id!, body)));
+      return c.json(skillFileCompatibilityResponse(writeSkill(c, loaded.skill, () => store.upsertSkillFile(loaded.skill.id!, body))));
     } catch (error) {
       return skillCompatibilityErrorResponse(c, error);
     }
@@ -270,7 +274,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadSkillForCurrentManager(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     try {
-      const deleted = store.deleteSkillFile(loaded.skill.id!, c.req.param("fileId"));
+      const deleted = writeSkill(c, loaded.skill, () => store.deleteSkillFile(loaded.skill.id!, c.req.param("fileId")), Boolean);
       if (!deleted) return c.json({ error: "skill file not found" }, 404);
       return c.body(null, 204);
     } catch (error) {

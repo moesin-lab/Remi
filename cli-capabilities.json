@@ -5,6 +5,7 @@
   "domains": [
     "context",
     "db",
+    "root",
     "workspace",
     "account",
     "member",
@@ -51,6 +52,18 @@
       "auth": [],
       "capability": null,
       "mutation": "read",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "db.enroll-machine": {
+      "command": "remi db enroll-machine",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
       "output": [
         "json"
       ],
@@ -172,6 +185,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.create",
       "mutation": "write",
       "output": [
@@ -205,6 +219,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.delete",
       "mutation": "destructive",
       "output": [
@@ -374,6 +389,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.organizer.update",
       "mutation": "write",
       "output": [
@@ -407,6 +423,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.issue-topics.set",
       "mutation": "write",
       "output": [
@@ -440,6 +457,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.ssh-mesh.update",
       "mutation": "write",
       "output": [
@@ -456,6 +474,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.ssh-mesh.rotate",
       "mutation": "write",
       "output": [
@@ -574,6 +593,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.relay.reveal",
       "mutation": "write",
       "output": [
@@ -675,6 +695,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.bot-menu.update",
       "mutation": "write",
       "output": [
@@ -691,6 +712,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.bot-menu.publish",
       "mutation": "write",
       "output": [
@@ -707,6 +729,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.bot-menu.publish-status",
       "mutation": "read",
       "output": [
@@ -723,6 +746,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.list",
       "mutation": "read",
       "output": [
@@ -739,6 +763,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.create",
       "mutation": "write",
       "output": [
@@ -755,6 +780,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.get",
       "mutation": "read",
       "output": [
@@ -771,6 +797,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.status",
       "mutation": "read",
       "output": [
@@ -787,6 +814,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.candidates",
       "mutation": "read",
       "output": [
@@ -803,6 +831,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.audit",
       "mutation": "read",
       "output": [
@@ -819,6 +848,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.sender.list",
       "mutation": "read",
       "output": [
@@ -835,6 +865,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.sender.allow",
       "mutation": "write",
       "output": [
@@ -851,6 +882,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.sender.revoke",
       "mutation": "write",
       "output": [
@@ -867,6 +899,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.set",
       "mutation": "write",
       "output": [
@@ -883,6 +916,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.test",
       "mutation": "write",
       "output": [
@@ -899,6 +933,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.deploy",
       "mutation": "write",
       "output": [
@@ -915,6 +950,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.stop",
       "mutation": "write",
       "output": [
@@ -931,6 +967,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.register",
       "mutation": "write",
       "output": [
@@ -947,6 +984,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.register-status",
       "mutation": "read",
       "output": [
@@ -963,6 +1001,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.register-cancel",
       "mutation": "destructive",
       "output": [
@@ -979,6 +1018,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.delete",
       "mutation": "destructive",
       "output": [
@@ -1012,6 +1052,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.system-prompt.set",
       "mutation": "write",
       "output": [
@@ -1028,6 +1069,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.system-prompt.reset",
       "mutation": "write",
       "output": [
@@ -1078,6 +1120,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.system-prompt.restore",
       "mutation": "write",
       "output": [
@@ -1230,6 +1273,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.storage.set",
       "mutation": "write",
       "output": [
@@ -1258,6 +1302,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.operator",
       "mutation": "read",
       "output": [
@@ -1276,6 +1321,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.get",
       "mutation": "read",
       "output": [
@@ -1294,6 +1340,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.update",
       "mutation": "write",
       "output": [
@@ -1312,6 +1359,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.update",
       "mutation": "write",
       "output": [
@@ -1330,6 +1378,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.complete",
       "mutation": "write",
       "output": [
@@ -1348,6 +1397,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.cloud-waitlist",
       "mutation": "write",
       "output": [
@@ -1366,6 +1416,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.runtime-bootstrap",
       "mutation": "write",
       "output": [
@@ -1384,6 +1435,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.no-runtime-bootstrap",
       "mutation": "write",
       "output": [
@@ -1400,6 +1452,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "member.get",
       "mutation": "read",
       "output": [
@@ -1438,6 +1491,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.list",
       "mutation": "read",
       "output": [
@@ -1454,6 +1508,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.create",
       "mutation": "write",
       "output": [
@@ -1470,6 +1525,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.renew",
       "mutation": "write",
       "output": [
@@ -1486,6 +1542,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.delete",
       "mutation": "destructive",
       "output": [
@@ -1920,6 +1977,268 @@
       ],
       "capability": "repo.checkout",
       "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root": {
+      "command": "remi root",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.context": {
+      "command": "remi root context",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task",
+        "daemon",
+        "share"
+      ],
+      "capability": "root.context",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.grant.list": {
+      "command": "remi root grant list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.grant.preview": {
+      "command": "remi root grant preview",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.preview",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.agent-configuration.approve": {
+      "command": "remi root agent-configuration approve",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.agent-configuration.approve",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.agent-pat.create": {
+      "command": "remi root agent-pat create",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.agent-pat.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.delegation.revoke": {
+      "command": "remi root delegation revoke",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.delegation.revoke",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.grant.create": {
+      "command": "remi root grant create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.grant.revoke": {
+      "command": "remi root grant revoke",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.revoke",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.runtime-trust.list": {
+      "command": "remi root runtime-trust list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.runtime-trust.get": {
+      "command": "remi root runtime-trust get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.runtime-trust.grant": {
+      "command": "remi root runtime-trust grant",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.grant",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.runtime-trust.revoke": {
+      "command": "remi root runtime-trust revoke",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.revoke",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.credential-family.revoke": {
+      "command": "remi root credential-family revoke",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.credential-family.revoke",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "root.audit.list": {
+      "command": "remi root audit list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.audit.list",
+      "mutation": "read",
       "output": [
         "table",
         "json",
@@ -3910,6 +4229,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.get",
       "mutation": "read",
       "output": [
@@ -3926,6 +4246,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.create",
       "mutation": "write",
       "output": [
@@ -3942,6 +4263,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.extend",
       "mutation": "write",
       "output": [
@@ -3958,6 +4280,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.delete",
       "mutation": "destructive",
       "output": [
@@ -4385,6 +4708,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "message.question.continue",
       "mutation": "write",
       "output": [
@@ -4428,6 +4752,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.sources",
       "mutation": "read",
       "output": [
@@ -4444,6 +4769,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.models",
       "mutation": "read",
       "output": [
@@ -4460,6 +4786,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.list",
       "mutation": "read",
       "output": [
@@ -4476,6 +4803,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.get",
       "mutation": "read",
       "output": [
@@ -4492,6 +4820,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.send",
       "mutation": "write",
       "output": [
@@ -4508,6 +4837,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.receipt",
       "mutation": "read",
       "output": [
@@ -4524,6 +4854,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.interrupt",
       "mutation": "write",
       "output": [
@@ -4540,6 +4871,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.respond",
       "mutation": "write",
       "output": [
@@ -4642,6 +4974,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "agent.supervisor.set",
       "mutation": "write",
       "output": [
@@ -4658,6 +4991,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "agent.role.set",
       "mutation": "write",
       "output": [
@@ -5880,6 +6214,7 @@
         "human",
         "daemon"
       ],
+      "root_conditional": true,
       "capability": "runtime.codex-profile.get",
       "mutation": "read",
       "output": [
@@ -5896,6 +6231,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.codex-profile.set",
       "mutation": "write",
       "output": [
@@ -5913,6 +6249,7 @@
         "human",
         "daemon"
       ],
+      "root_conditional": true,
       "capability": "runtime.claude-profile.get",
       "mutation": "read",
       "output": [
@@ -5929,6 +6266,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.claude-profile.set",
       "mutation": "write",
       "output": [
@@ -5962,6 +6300,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.workspace.create",
       "mutation": "write",
       "output": [
@@ -5995,6 +6334,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.workspace.rename",
       "mutation": "write",
       "output": [
@@ -6011,6 +6351,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.workspace.archive",
       "mutation": "write",
       "output": [
@@ -6064,6 +6405,7 @@
         "human",
         "daemon"
       ],
+      "root_conditional": true,
       "capability": "runtime.create",
       "mutation": "write",
       "output": [
@@ -6097,6 +6439,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.delete",
       "mutation": "destructive",
       "output": [
@@ -6113,6 +6456,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.archive-agents-and-delete",
       "mutation": "destructive",
       "output": [
@@ -6199,6 +6543,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.release.start",
       "mutation": "write",
       "output": [
@@ -6233,6 +6578,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.command.run",
       "mutation": "write",
       "output": [
@@ -6266,6 +6612,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.gc",
       "mutation": "write",
       "output": [
@@ -6511,6 +6858,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.status",
       "mutation": "read",
       "output": [
@@ -6527,6 +6875,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.health",
       "mutation": "read",
       "output": [
@@ -6543,6 +6892,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.ready",
       "mutation": "read",
       "output": [
@@ -6559,6 +6909,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.list",
       "mutation": "read",
       "output": [
@@ -6575,6 +6926,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.create",
       "mutation": "write",
       "output": [
@@ -6591,6 +6943,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.delete",
       "mutation": "destructive",
       "output": [
@@ -6607,6 +6960,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.start",
       "mutation": "write",
       "output": [
@@ -6623,6 +6977,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.stop",
       "mutation": "write",
       "output": [
@@ -6639,6 +6994,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.reboot",
       "mutation": "write",
       "output": [
@@ -6655,6 +7011,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.status",
       "mutation": "read",
       "output": [
@@ -6671,6 +7028,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.exec",
       "mutation": "write",
       "output": [
@@ -6687,6 +7045,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "daemon.drain",
       "mutation": "write",
       "output": [
@@ -6720,6 +7079,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "daemon.undrain",
       "mutation": "write",
       "output": [
@@ -6848,6 +7208,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "daemon.retire",
       "mutation": "destructive",
       "output": [
@@ -6994,6 +7355,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "autopilot.delivery-targets",
       "mutation": "read",
       "output": [
@@ -7282,6 +7644,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "autopilot.trigger.rotate-token",
       "mutation": "destructive",
       "output": [
@@ -7298,6 +7661,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "autopilot.trigger.set-secret",
       "mutation": "write",
       "output": [
@@ -7684,6 +8048,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.add",
       "mutation": "write",
       "output": [
@@ -7717,6 +8082,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.authorization.start",
       "mutation": "write",
       "output": [
@@ -7733,6 +8099,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.authorization.get",
       "mutation": "read",
       "output": [
@@ -7749,6 +8116,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.update",
       "mutation": "write",
       "output": [
@@ -7765,6 +8133,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.delete",
       "mutation": "destructive",
       "output": [
@@ -7781,6 +8150,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.check",
       "mutation": "write",
       "output": [
@@ -7848,6 +8218,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.add",
       "mutation": "write",
       "output": [
@@ -7864,6 +8235,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.update",
       "mutation": "write",
       "output": [
@@ -7880,6 +8252,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.delete",
       "mutation": "destructive",
       "output": [
@@ -7896,6 +8269,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.available-conversations",
       "mutation": "read",
       "output": [
@@ -8031,6 +8405,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.message.create-issue",
       "mutation": "write",
       "output": [
@@ -8064,6 +8439,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.proposal.approve",
       "mutation": "write",
       "output": [
@@ -8080,6 +8456,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.proposal.reject",
       "mutation": "write",
       "output": [
@@ -8106,6 +8483,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.route.list",
       "mutation": "read",
       "output": [
@@ -8122,6 +8500,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.route.set",
       "mutation": "write",
       "output": [
@@ -8138,6 +8517,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.route.unset",
       "mutation": "write",
       "output": [
@@ -8154,6 +8534,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.chat.list",
       "mutation": "read",
       "output": [
@@ -8221,6 +8602,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.add",
       "mutation": "write",
       "output": [
@@ -8237,6 +8619,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.update",
       "mutation": "write",
       "output": [
@@ -8253,6 +8636,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.delete",
       "mutation": "destructive",
       "output": [
@@ -8269,6 +8653,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.endpoint.list",
       "mutation": "read",
       "output": [
@@ -8285,6 +8670,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.endpoint.check",
       "mutation": "write",
       "output": [
@@ -8301,6 +8687,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.available-chats",
       "mutation": "read",
       "output": [
@@ -8385,6 +8772,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.messages.create-issue",
       "mutation": "write",
       "output": [
@@ -8452,6 +8840,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.proposals.approve",
       "mutation": "write",
       "output": [
@@ -8468,6 +8857,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.proposals.reject",
       "mutation": "write",
       "output": [
@@ -8545,6 +8935,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.channel.create",
       "mutation": "write",
       "output": [
@@ -8561,6 +8952,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.channel.update",
       "mutation": "write",
       "output": [
@@ -8577,6 +8969,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.channel.delete",
       "mutation": "destructive",
       "output": [
@@ -8610,6 +9003,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.delivery.retry",
       "mutation": "write",
       "output": [
@@ -9098,6 +9492,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "platform.settings.update",
       "mutation": "destructive",
       "output": [
@@ -9210,6 +9605,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.balance",
       "mutation": "read",
       "output": [
@@ -9226,6 +9622,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.transaction.list",
       "mutation": "read",
       "output": [
@@ -9242,6 +9639,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.batch.list",
       "mutation": "read",
       "output": [
@@ -9258,6 +9656,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.topup.list",
       "mutation": "read",
       "output": [
@@ -9274,6 +9673,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.tier.list",
       "mutation": "read",
       "output": [
@@ -9290,6 +9690,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.checkout.create",
       "mutation": "write",
       "output": [
@@ -9306,6 +9707,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.checkout.get",
       "mutation": "read",
       "output": [
@@ -9322,6 +9724,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.portal.create",
       "mutation": "write",
       "output": [
@@ -9365,6 +9768,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.install.begin",
       "mutation": "write",
       "output": [
@@ -9398,6 +9802,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.installation.delete",
       "mutation": "destructive",
       "output": [
@@ -9414,6 +9819,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.binding.redeem",
       "mutation": "write",
       "output": [
@@ -9430,6 +9836,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.daemon.install",
       "mutation": "destructive",
       "output": [
@@ -9446,6 +9853,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.daemon.status",
       "mutation": "read",
       "output": [
@@ -9462,6 +9870,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.password",
       "mutation": "write",
       "output": [
@@ -9478,6 +9887,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.password-account.set",
       "mutation": "write",
       "output": [
@@ -9494,6 +9904,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.lark",
       "mutation": "read",
       "output": [
@@ -9510,6 +9921,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.google",
       "mutation": "write",
       "output": [
@@ -9526,6 +9938,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.send-code",
       "mutation": "write",
       "output": [
@@ -9542,6 +9955,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.verify-code",
       "mutation": "write",
       "output": [
@@ -9558,6 +9972,7 @@
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.logout",
       "mutation": "destructive",
       "output": [
@@ -12744,6 +13159,24 @@
     "GET /api/remi/releases/latest/version": {
       "command": "platform.release.version"
     },
+    "GET /api/root/agents/:agentId/grant-preview": {
+      "command": "root.grant.preview"
+    },
+    "GET /api/root/audit": {
+      "command": "root.audit.list"
+    },
+    "GET /api/root/context": {
+      "command": "root.context"
+    },
+    "GET /api/root/grants": {
+      "command": "root.grant.list"
+    },
+    "GET /api/root/runtime-trust": {
+      "command": "root.runtime-trust.list"
+    },
+    "GET /api/root/runtime-trust/:runtimeId": {
+      "command": "root.runtime-trust.get"
+    },
     "GET /api/runtime-workspaces": {
       "command": "runtime.workspace.list"
     },
@@ -14104,6 +14537,30 @@
     },
     "POST /api/projects/:id/restore": {
       "command": "project.restore"
+    },
+    "POST /api/root/agent-pats": {
+      "command": "root.agent-pat.create"
+    },
+    "POST /api/root/agents/:agentId/configuration/approve": {
+      "command": "root.agent-configuration.approve"
+    },
+    "POST /api/root/credential-families/:familyId/revoke": {
+      "command": "root.credential-family.revoke"
+    },
+    "POST /api/root/delegations/:nodeId/revoke": {
+      "command": "root.delegation.revoke"
+    },
+    "POST /api/root/grants": {
+      "command": "root.grant.create"
+    },
+    "POST /api/root/grants/:id/revoke": {
+      "command": "root.grant.revoke"
+    },
+    "POST /api/root/runtime-trust": {
+      "command": "root.runtime-trust.grant"
+    },
+    "POST /api/root/runtime-trust/:id/revoke": {
+      "command": "root.runtime-trust.revoke"
     },
     "POST /api/runtimes/:id/archive-agents-and-delete": {
       "command": "runtime.archive-agents-and-delete"

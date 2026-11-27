@@ -717,6 +717,7 @@ export interface RedispatchTaskResult {
 class AgentPluginReadinessChangedError extends Error {}
 
 export interface ClaimTaskOptions {
+  rootMachineCredentialId?: string | null;
   policyProtocol?: 'legacy' | 'adopt';
   policyCapableRuntimeIds?: readonly string[];
   policyLegacyRuntimeIds?: readonly string[];
@@ -1649,9 +1650,11 @@ export class TasksRepo {
       try { return this.createTaskWithinTransaction(input, childStatusChanges, deferredEvents, options); }
       catch(error){if(!(error as any)?.message_result)throw error;unscheduled=error;return null;}
     })();
-    if(unscheduled){this.ctx.emitCommitEvents(deferredEvents);throw unscheduled;}
-    this.runChildStatusChanges(childStatusChanges);
-    this.ctx.emitCommitEvents(deferredEvents);
+    if(unscheduled){afterCommit(this.ctx.db,()=>this.ctx.emitCommitEvents(deferredEvents));throw unscheduled;}
+    afterCommit(this.ctx.db,()=>{
+      this.runChildStatusChanges(childStatusChanges);
+      this.ctx.emitCommitEvents(deferredEvents);
+    });
     return task!;
   }
 
@@ -3527,6 +3530,7 @@ export class TasksRepo {
           excludedTaskIds,
           Boolean(options.policyProtocol),
           historicalChat,
+          options.rootMachineCredentialId,
         );
       if (!candidate) return null;
       // One hydration for the selected task. `snapshotTaskExecution` re-reads the Agent row
@@ -4349,6 +4353,7 @@ ${routing.sql}
     const expired = this.ctx.db.query(`SELECT a.id, ${field('offerGeneration')} AS generation FROM multiremi_turn_attempts a
       JOIN multiremi_attempt_system_prompts b ON b.task_id=a.id WHERE a.runtime_id=? AND a.status='accepted'
       AND ${field('dispatch.protocol')}='adopt' AND ${field('dispatch.state')}='proposed'
+      AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e WHERE e.attempt_id=a.id AND e.eligibility='root')
       AND COALESCE(a.offered_at,b.created_at) <= ? ORDER BY b.created_at,a.id LIMIT 32`)
       .all(runtimeId, cutoff);
     for (const row of expired) this.requeueTaskOffer(String(row.id), runtimeId, 'unknown', String(row.generation));
@@ -4364,6 +4369,7 @@ ${routing.sql}
       WHERE claim_attempt.status = 'accepted' AND t.status = 'dispatched'
         AND t.runtime_id = ? AND t.started_at IS NULL
         AND t.dispatched_at IS NOT NULL AND t.dispatched_at < ?
+        AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e WHERE e.attempt_id=claim_attempt.id AND e.eligibility='root')
         AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_system_prompts b WHERE b.task_id=claim_attempt.id
           AND ${this.ctx.db.dialect === 'postgres' ? "b.binding_json::jsonb->>'dispatch'" : "json_extract(b.binding_json,'$.dispatch')"} IS NOT NULL)
         ${leases.length ? `AND t.id NOT IN (${leases.map(() => "?").join(", ")})` : ""}
@@ -4794,9 +4800,14 @@ ${placementAfter.sql}
     return covered >= wakeSeq && this.unreadNowMessageSeq(task.issueSessionId, task.agentId, scope, covered) === null ? covered : null;
   }
 
-  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean, historicalChat: boolean): MultiremiTask | null {
+  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[], excludedTargets: ExecutionTargetExclusion[], excludedTaskIds: string[], negotiated:boolean, historicalChat: boolean, rootCredential?: string | null): MultiremiTask | null {
     const { sql, params, now } = this.candidateSelection(runtime, excludedAgentIds, excludedTargets, excludedTaskIds, negotiated);
-    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql}${historicalChat ? `\n         AND ${freshIndependentChatSql}` : ''}
+    const rootFilter = `AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_eligibility e
+      WHERE e.attempt_id=claim_attempt.id AND e.eligibility='root' AND NOT EXISTS (SELECT 1 FROM multiremi_machine_enrollments m
+        WHERE m.runtime_id=? AND m.runtime_id=e.runtime_id AND m.daemon_id=e.daemon_id AND m.incarnation=e.incarnation
+          AND m.retired_at_ms IS NULL AND m.credential_id=?))`;
+    params.push(runtime.id,rootCredential ?? null);
+    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`${sql} ${rootFilter}${historicalChat ? `\n         AND ${freshIndependentChatSql}` : ''}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
       ${this.ctx.db.dialect === 'postgres' ? 'FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED' : ''}`));
@@ -6267,19 +6278,10 @@ ${placementAfter.sql}
       }
     }
     const created=createReplacementAttemptWithinTransaction(this.ctx.db,row.turn_id,{
+      execution: input,
       previousStatus:redispatch?(parent.status==='failed'?'failed':'cancelled'):parent.failureReason==='runtime_recovery'?'lost':'failed',
       reason:redispatch?'redispatch':parent.failureReason??'retry',cold:Boolean(input.resetProviderSession),allowCancelledTurn:redispatch,
     });
-    const mapping:Record<string,string>={runtimeId:'runtime_id',provider:'provider',sessionId:'session_id',workDir:'work_dir',
-      codexProfile:'codex_profile',claudeProfile:'claude_profile',executionConnection:'execution_connection',executionFingerprint:'execution_fingerprint',
-      executionModel:'execution_model',executionThinkingLevel:'execution_thinking_level',fallbackSwitched:'fallback_switched',
-      switchReason:'switch_reason',nextRetryAt:'next_retry_at',projectionDegradeLevel:'projection_degrade_level',pluginSnapshot:'plugin_snapshot'};
-    const fields:Record<string,unknown>={};
-    for(const[key,column]of Object.entries(mapping))if((input as any)[key]!==undefined){let value=(input as any)[key];
-      if(['pluginSnapshot','codexProfile','claudeProfile','executionConnection'].includes(key)&&value!=null)value=toJson(value);
-      if(key==='fallbackSwitched')value=value?1:0;fields[column]=value;}
-    const keys=Object.keys(fields);
-    if(keys.length)this.ctx.db.run(`UPDATE multiremi_turn_attempts SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,[...keys.map(k=>fields[k]),created.attempt_id]);
     if(input.maxAttempts)this.ctx.db.run('UPDATE multiremi_turns SET max_attempts=? WHERE id=?',[input.maxAttempts,row.turn_id]);
     if(input.pluginSnapshot)this.replaceTaskPluginSnapshotIndex(created.attempt_id,input.pluginSnapshot,nowIso());
     return this.getTask(created.attempt_id)!;

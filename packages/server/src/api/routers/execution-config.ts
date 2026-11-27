@@ -290,7 +290,8 @@ export function registerExecutionConfigRoutes(
       if (loaded instanceof Response) return loaded;
     }
     try {
-      guardRootResourceWrite(c, store, ws, 'execution-group', group.id, () => store.deleteExecutionGroup(group.id, ws));
+      const proof = effectiveRootProof(c, store, { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'execution-group', id: group.id } });
+      store.deleteExecutionGroup(group.id, ws, { proof, version: protectedWriteVersion(c) });
       return c.json({ ok: true });
     } catch (error) {
       return failure(c, error);

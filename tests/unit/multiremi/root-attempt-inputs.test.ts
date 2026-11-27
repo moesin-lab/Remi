@@ -21,14 +21,18 @@ import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
 pendingTurnBackendTests('production root attempt inputs', fixture => {
-  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch','protected writes','runtime reports','shared skill files','archive agent','delete agent','cascade runtime','delete runtime','daemon register','runtime upsert'])('admits frozen inputs for %s', async scenario => {
+  it.each(['admission','first WS offer','retry WS offer','forged source','concurrent dispatch','protected writes','runtime reports','shared skill files','archive agent','delete agent','cascade runtime','delete runtime','daemon register','runtime upsert','group add','group remove','group delete'])('admits frozen inputs for %s', async scenario => {
     const { store, createIssue } = fixture();
     const { db } = store as unknown as { db: SqlDatabase };
     const runtime = store.registerRuntime({ id: daemonRuntimeId('worker','codex'), name: 'worker', provider: 'codex', workspaceId: 'local', daemonId: 'worker' });
-    const removable = scenario==='delete runtime' || scenario==='cascade runtime'
+    const membership = scenario.startsWith('group ');
+    const removable = membership ? store.registerRuntime({id:'member',name:'member',provider:'codex',workspaceId:'local',daemonId:'member-worker'}) : scenario==='delete runtime' || scenario==='cascade runtime'
       ? store.registerRuntime({name:'referenced worker',provider:'claude',workspaceId:'local',daemonId:'worker'}) : null;
     const active = removable && scenario==='cascade runtime' ? store.createAgent({name:'cascade',provider:'claude',runtimeId:removable.id}) : null;
     const agent = store.createAgent({ name: 'reviewer', provider: 'codex', runtimeId: runtime.id });
+    const stableMembers = scenario==='group delete' ? [] : [runtime.id];
+    const group = membership ? store.saveExecutionGroup('local', {name:'membership',provider:'codex',
+      runtime_ids: scenario==='group add' ? stableMembers : [...stableMembers,removable!.id]}) : null;
     const models = [{id:'first',label:'First',provider:'codex',default:true}];
     if (scenario==='runtime reports') store.updateRuntimeModels(runtime.id,models);
     const skill = scenario==='shared skill files' ? store.createSkill({workspaceId:'local',name:'shared',content:'instructions',
@@ -43,7 +47,7 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
     const bearer = service.issueIndependentDashboardSession(proof, (Math.floor(Date.now() / 1000) + 300) * 1000,
       (tx, source, claims) => new JwtMaterials(db).issue(tx, source, claims, jwtSigning));
     const api = rootClient(store, jwtSigning);
-    const http = ['retry WS offer','protected writes','runtime reports','shared skill files','archive agent','delete agent','cascade runtime','delete runtime','daemon register','runtime upsert'].includes(scenario);
+    const http = membership || ['retry WS offer','protected writes','runtime reports','shared skill files','archive agent','delete agent','cascade runtime','delete runtime','daemon register','runtime upsert'].includes(scenario);
     if (http) store.createWorkspaceMember({ workspaceId: 'local', userId: login.userId, name: 'Root reviewer', role: 'admin' });
     const expiry = Date.now() + 3_600_000;
     const hash = createHash('sha256').update('test-daemon').digest('hex');
@@ -69,7 +73,7 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
 
     const {sources, executions: [execution]} = agentApproval(store, agent, sourceFile);
     if (removable) {
-      const fields = runtimeExecutionFields(removable);
+      const fields = runtimeExecutionFields(store.getRuntime(removable.id)!);
       const ref = { kind:'runtime',id:removable.id,use:'execute',version:1,digest:agentDependencyDigest(fields) };
       sources.push({ref,content:JSON.stringify(fields),dependencies:[]});
       const index = sources.findIndex(source=>source.ref.use==='instructions');
@@ -99,6 +103,36 @@ pendingTurnBackendTests('production root attempt inputs', fixture => {
       withSecurityWrite(db, undefined, plan, tx => service.grant(tx,service.authorizeWrite(tx,proof,{action:'root.grant.create',use:'management',actualTarget:scope}),grantInput));
     const effective = async (id: string) => (await (await api(`/api/root/grants?subject_id=${id}`,bearer)).json()).grants[0].effective;
     const epoch = (id: string) => Number(db.query('SELECT config_epoch FROM multiremi_agent_config_epochs WHERE agent_id=?').get(id).config_epoch);
+    if (group && removable) {
+      const independent = store.createAgent({name:'independent',provider:'codex',runtimeId:runtime.id});
+      const approval = await api(`/api/root/agents/${independent.id}/configuration/approve`,bearer,{...agentApproval(store,independent),expected_epoch:null});
+      expect(approval.status,await approval.clone().text()).toBe(200);
+      const created = await api('/api/root/grants',bearer,{...grantInput,subject:{type:'agent',id:independent.id},
+        accepted_dependency_digest:(await approval.json()).digest,expected_revision:(await (await api('/api/root/context',bearer)).json()).security_revision,idempotency_key:independent.id});
+      expect(created.status,await created.text()).toBe(200);
+      expect(db.query("SELECT 1 FROM multiremi_agent_grant_protected_refs WHERE kind='execution-group' AND resource_id=?").get(group.id)).toBeNull();
+      const next = scenario==='group add' ? [...stableMembers,removable.id] : stableMembers;
+      const deleting = scenario==='group delete';
+      const mutate = (token: string | undefined, version: number) => api(`/api/execution-groups/${group.id}`, token,
+        deleting ? undefined : {name:'updated',provider:'codex',runtime_ids:next}, deleting ? 'DELETE' : 'PUT', {'If-Match':`"${version}"`});
+      for (const [token,version,status] of [[undefined,1,403],[bearer,0,409]] as const) {
+        const denied = await mutate(token,version);
+        expect(denied.status,await denied.clone().text()).toBe(status);
+        expect((await denied.json()).error.code).toBe(status===403 ? 'root_required' : 'authority_revision_conflict');
+        expect(store.getExecutionGroup(group.id)).toEqual(group);
+        expect(epoch(agent.id)).toBe(0);
+        expect(await effective(agent.id)).toBe(true);
+      }
+      const committed = await mutate(bearer,1);
+      expect(committed.status,await committed.text()).toBe(200);
+      if (deleting) expect(store.getExecutionGroup(group.id)).toBeNull();
+      else expect(store.getExecutionGroup(group.id)?.runtimeIds).toEqual([...next].sort());
+      expect(epoch(agent.id)).toBe(1);
+      expect(await effective(agent.id)).toBe(false);
+      expect(epoch(independent.id)).toBe(0);
+      expect(await effective(independent.id)).toBe(true);
+      return;
+    }
     if (['archive agent','delete agent','cascade runtime','delete runtime'].includes(scenario)) {
       const match = {'If-Match':'"1"'};
       const response = scenario==='archive agent' ? await api(`/api/agents/${agent.id}/archive`,bearer,{},'POST',match)

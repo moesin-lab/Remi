@@ -586,11 +586,12 @@ export class RootManagement {
     });
   }
 
-  guardProtectedMutation(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number, profile?: { id: string; revision: number }): void {
-    if (profile && request.actualTarget.type !== 'execution-group') throw new SecurityAbort('security_target_unplanned');
-    this.guardMutationSet(tx, actor, request, expectedVersion, profile && {
-      kind: 'profile', versions: new Map([[profile.id, profile.revision]]),
-    });
+  guardProtectedMutation(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number, profile?: { id: string; revision: number }, changedRuntimeIds: readonly string[] = []): void {
+    if ((profile || changedRuntimeIds.length) && request.actualTarget.type !== 'execution-group') throw new SecurityAbort('security_target_unplanned');
+    const related = new Map<string, ReadonlyMap<string, number>>();
+    if (profile) related.set('profile', new Map([[profile.id, profile.revision]]));
+    if (changedRuntimeIds.length) related.set('runtime', new Map(changedRuntimeIds.map(id => [id, expectedVersion])));
+    this.guardMutationSet(tx, actor, request, expectedVersion, related);
   }
 
   mutateSkill<T>(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, version: number, operation: () => T, fileVersions?: ReadonlyMap<string,number>): T {
@@ -604,23 +605,23 @@ export class RootManagement {
       const result = operation();
       const after = files();
       const changed = [...new Set([...before.keys(),...after.keys()])].filter(key => before.get(key)!==after.get(key));
-      this.guardMutationSet(tx, actor, request, version, { kind: 'skill-file',
-        versions: new Map(changed.map(id => [id, fileVersions?.get(id) ?? version])),
-      });
+      this.guardMutationSet(tx, actor, request, version, new Map([
+        ['skill-file', new Map(changed.map(id => [id, fileVersions?.get(id) ?? version]))],
+      ]));
       return result;
     });
   }
 
   private guardMutationSet(tx: SecurityTx, actor: Actor | null, request: AuthorityUse, expectedVersion: number,
-    related?: {kind: 'skill-file' | 'profile'; versions: ReadonlyMap<string, number>}): void {
+    related: ReadonlyMap<string, ReadonlyMap<string, number>>): void {
     const {type,id} = request.actualTarget;
     withSecurityTarget(this.db,tx,`management:${type}:${id}`,()=>{
       const ids = this.db.dialect === 'postgres' ? 'SELECT jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB))' : 'SELECT value FROM json_each(?)';
       let matches = 'r.kind=? AND r.resource_id=?';
       const params = [type,id];
-      if (related?.versions.size) {
+      for (const [kind, versions] of related) {
         matches = `(${matches}) OR (r.kind=? AND r.resource_id IN (${ids}))`;
-        params.push(related.kind, JSON.stringify([...related.versions.keys()]));
+        params.push(kind, JSON.stringify([...versions.keys()]));
       }
       const affected = this.db.query(`SELECT DISTINCT g.grant_id,g.subject_id,g.authority_node_id,g.generation,r.kind,r.resource_id,r.resource_version FROM multiremi_agent_grant_protected_refs r
         JOIN multiremi_agent_grant_dependencies d ON d.grant_id=r.grant_id AND d.invalidated_revision IS NULL
@@ -631,7 +632,7 @@ export class RootManagement {
       if (!affected.length && !snapshots.length) return;
       if (!actor || request.use!=='write') throw new SecurityAbort('root_required');
       this.requireMutationActor(tx,actor,request);
-      if ([...affected,...snapshots].some(row=>Number(row.resource_version)!==(related && row.kind===related.kind ? related.versions.get(row.resource_id) : expectedVersion))) {
+      if ([...affected,...snapshots].some(row=>Number(row.resource_version)!==(related.get(row.kind)?.get(row.resource_id) ?? expectedVersion))) {
         throw new SecurityAbort('authority_revision_conflict');
       }
       const revision = this.advanceSecurityRevision();

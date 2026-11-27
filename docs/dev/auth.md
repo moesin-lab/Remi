@@ -133,6 +133,8 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 配置与共享资源写入器使用 `guardProtectedMutation(tx, actor, request, expectedVersion)`，`request.actualTarget` 为真实资源的种类和 ID。写入与守卫共用事务。命中引用时必须使用已绑定该写动作的 root actor，版本不符回滚；核验成功同步推进 epoch 并撤销旧授权节点，需要重新批准才能使用新配置。
 
+保存执行组时，守卫在工作区写锁内读取原成员，将实际加入或移除的 Runtime、组本身及本次覆写的共享 profile 一并校验。删除执行组时，全部原成员均按移除处理。组与成员 Runtime 使用请求的 `If-Match` 版本，共享 profile 使用事务内读取的 revision。同一 Agent 或 grant 命中多条引用只失效一次，成员关系未变的 Runtime 不因该成员写入失效。
+
 ### Agent 来源的持久委派
 
 `resolveDurableDelegation(tx, actor, use, beneficiary)` 只接受已准入、当前运行中的 task。`use` 绑定 `action`、`actualTarget`、`use`、`idempotencyKey`、`requestDigest` 与 `expiresAtMs`。内核存储真实 Agent、grant generation、attempt、run、lease/fence、credential version 和 family。原 task 材料是 evidence，持续来源包含当前 grant、trust 和输入批准的来源。正常 run 结束后子项仍可通过自身来源验证。

@@ -1135,24 +1135,31 @@ runMigrations(this.db);
       this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
       return result;
     });
-    if (!this.jwtMaterials.isActive()) return save();
-    const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'execution-group', id } };
     const profileId = input.connection !== undefined && typeof input.profile_id === 'string' ? input.profile_id : null;
+    return this.mutateExecutionGroup(workspaceId, id, input.runtime_ids, profileId, authorization, save);
+  }
+  private mutateExecutionGroup<T>(workspaceId: string, id: string, nextMembers: readonly string[], profileId: string | null,
+    authorization: { proof: CredentialProof | null; version: number } | undefined, operation: () => T): T {
+    if (!this.jwtMaterials.isActive()) return operation();
+    const use: AuthorityUse = { action: 'protected-resource.write', use: 'write', actualTarget: { type: 'execution-group', id } };
     const targets = [`management:execution-group:${id}`, ...(profileId ? [`management:profile:${profileId}`] : [])];
     return this.withResourceWrite(workspaceId, targets, authorization?.proof, use, tx => {
+      const previous = new Set(this.getExecutionGroup(id, workspaceId)?.runtimeIds ?? []);
+      const next = new Set(nextMembers);
+      const changed = [...new Set([...previous, ...next])].filter(runtimeId => previous.has(runtimeId) !== next.has(runtimeId));
       const profile = profileId ? withSecurityTarget(this.db, tx, `management:profile:${profileId}`, () => this.getExecutionProfile(profileId, workspaceId)) : null;
       const actor = authorization?.proof ? this.rootManagement.authorizeWrite(tx, authorization.proof, use) : null;
-      this.rootManagement.guardProtectedMutation(tx, actor, use, authorization?.version ?? NaN, profile ?? undefined);
-      return save();
+      this.rootManagement.guardProtectedMutation(tx, actor, use, authorization?.version ?? NaN, profile ?? undefined, changed);
+      return operation();
     });
   }
-  deleteExecutionGroup(id: string, workspaceId: string) {
-    return this.db.transaction(() => {
+  deleteExecutionGroup(id: string, workspaceId: string, authorization?: { proof: CredentialProof | null; version: number }) {
+    return this.mutateExecutionGroup(workspaceId, id, [], null, authorization, this.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const result = deleteExecutionGroup(this.db, id, workspaceId);
       this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
       return result;
-    })();
+    }));
   }
   listExecutionGroups(workspaceId: string) {
     return listExecutionGroups(this.db, workspaceId);

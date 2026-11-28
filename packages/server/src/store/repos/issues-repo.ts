@@ -51,7 +51,7 @@ import { createId, nowIso } from "@multiremi/ids.js";
 import { COMMENT_DISPATCH_REPLAY_DELAY_MS, COMMENT_DISPATCH_REPLAY_MAX_AGE_MS,
   commentDispatchReplayEnabled } from "@multiremi/store/re-ring-sweep.js";
 import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
-import { advisoryXactLock, afterCommit } from "@multiremi/store/db/postgres.js";
+import { advisoryXactLock, afterCommit, postgresReplyMaxBytes } from "@multiremi/store/db/postgres.js";
 import { createLogger } from "@shared/logger.js";
 import { resolveIssueArchiveSettings } from "@multiremi/store/issue-archive.js";
 import { INBOX_LEDGER_TYPES, isInboxLedgerType, issueActivityDetails, type IssueActivityEntry } from "@multiremi/contracts";
@@ -1373,6 +1373,39 @@ export class IssuesRepo {
     return { deleted };
   }
 
+  /**
+   * Run issue search (candidate discovery, `total`, page hydration, labels, and
+   * comment snippet reads) inside a single read snapshot.
+   *
+   * - Top-level calls open `BEGIN DEFERRED` on SQLite WAL or
+   *   `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY` on PostgreSQL.
+   * - When called inside an already-open outer transaction (`db.inTransaction`):
+   *   - SQLite reuses the outer transaction directly (zero extra SQL).
+   *   - PostgreSQL verifies `current_setting('transaction_isolation')` and only
+   *     reuses the outer transaction under `REPEATABLE READ` or `SERIALIZABLE`
+   *     isolation; calling `searchIssues` inside an outer `READ COMMITTED`
+   *     transaction throws to prevent cross-statement snapshot tearing.
+   */
+  private withIssueSearchReadSnapshot<T>(fn: () => T): T {
+    if (this.ctx.db.inTransaction) {
+      if (this.ctx.db.dialect === "postgres") {
+        const row = this.ctx.db.query("SELECT current_setting('transaction_isolation') AS iso").get() as Row | null;
+        const iso = String(row?.iso ?? "").trim().toLowerCase();
+        if (iso !== "repeatable read" && iso !== "serializable") {
+          throw new Error("searchIssues inside an open PostgreSQL transaction requires REPEATABLE READ or SERIALIZABLE isolation");
+        }
+      }
+      return fn();
+    }
+    const snapshot = this.ctx.db.transaction(() => {
+      if (this.ctx.db.dialect === "postgres") {
+        this.ctx.db.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      }
+      return fn();
+    });
+    return (snapshot.deferred ?? snapshot)();
+  }
+
   searchIssues(input: {
     q: string;
     workspaceId?: string | null;
@@ -1388,46 +1421,644 @@ export class IssuesRepo {
     const includeCommentBodies = input.includeCommentBodies !== false;
     const limit = clampSearchLimit(input.limit);
     const offset = Math.max(0, Number(input.offset ?? 0));
-    const rows = this.listIssues({ includeArchived: true }).map((issue) => ({
-      issue,
-      matchedCommentSnippet: includeCommentBodies
-        ? this.searchIssueCommentSnippet(issue.id, query)
-        : null,
-    })).filter(({ issue, matchedCommentSnippet }) => {
-      if (issue.workspaceId !== workspaceId) return false;
-      if (!includeClosed && CLOSED_ISSUE_STATUSES.has(issue.status) && !issue.archivedAt) return false;
-      return searchMatch(issue.key, query)
-        || searchMatch(issue.title, query)
-        || searchMatch(issue.description ?? "", query)
-        || matchedCommentSnippet !== null;
-    }).map(({ issue, matchedCommentSnippet }) => {
-      const matchSource = searchMatch(issue.key, query)
-        ? "key"
-        : searchMatch(issue.title, query)
-          ? "title"
-          : searchMatch(issue.description ?? "", query)
-            ? "description"
-            : "comment";
-      const result: MultiremiIssueSearchResult = {
-        ...issue,
-        matchSource,
-      };
-      if (matchSource === "description" && issue.description) result.matchedDescriptionSnippet = extractSearchSnippet(issue.description, query);
-      if (matchedCommentSnippet !== null) {
-        result.matchedCommentSnippet = matchedCommentSnippet;
-        if (matchSource === "comment") result.matchedSnippet = matchedCommentSnippet;
+    const terms = extractSearchTerms(query);
+    if (terms.length === 0) return { issues: [], total: 0 };
+
+    return this.withIssueSearchReadSnapshot(() => {
+      const isPostgres = this.ctx.db.dialect === "postgres";
+      const hasNulTerm = terms.some((term) => term.includes("\u0000"));
+      if (hasNulTerm && isPostgres) {
+        // PostgreSQL TEXT columns cannot store U+0000 and reject NUL in UTF-8 bind params;
+        // matches baseline JS searchMatch() across PG rows (always 0 hits).
+        return { issues: [], total: 0 };
       }
-      return result;
-    }).sort((left, right) => searchRank(left.matchSource) - searchRank(right.matchSource) || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-    return { issues: rows.slice(offset, offset + limit), total: rows.length };
+      const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
+      const issueTieBreakCol = isPostgres ? "i.id" : "i.rowid";
+      const patterns = terms.map((term) => `%${escapeSearchLikeTerm(term)}%`);
+      const canPushLike = !hasNulTerm
+        && terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS
+        && !terms.some(hasNonAsciiCasedChar)
+        && !/[\uD800-\uDFFF]/.test(query)
+        && (isPostgres || !/[\uFFFD-\uFFFF]/.test(query))
+        && patterns.every((pattern) => Buffer.byteLength(pattern, "utf8") <= ISSUE_SEARCH_MAX_SQL_PATTERN_BYTES);
+      if (!canPushLike) {
+        return this.searchIssuesWorkspaceScanFallback({
+          query,
+          workspaceId,
+          includeClosed,
+          closedFilterSql,
+          isPostgres,
+          includeCommentBodies,
+          limit,
+          offset,
+        });
+      }
+
+      const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, terms);
+      const titleLikeSql = buildSearchLikeAllTermsSql("i.title", terms);
+      const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", terms);
+      const sqliteFieldNeedsFallbackSql = isPostgres
+        ? ""
+        : `,
+               CASE
+                 WHEN INSTR(COALESCE(i.id, ''), CHAR(0)) > 0
+                   OR INSTR(COALESCE(i.issue_key, ''), CHAR(0)) > 0
+                   OR INSTR(COALESCE(i.title, ''), CHAR(0)) > 0
+                   OR (i.description IS NOT NULL AND INSTR(i.description, CHAR(0)) > 0)
+                   OR ${buildSqliteUtf16ReversedBomSql("COALESCE(i.title, '')")}
+                   OR (i.description IS NOT NULL AND ${buildSqliteUtf16ReversedBomSql("i.description")})
+                   OR TYPEOF(i.id) = 'blob'
+                   OR TYPEOF(i.issue_key) = 'blob'
+                   OR TYPEOF(i.title) = 'blob'
+                   OR TYPEOF(i.description) = 'blob'
+                 THEN 1
+                 ELSE 0
+               END AS needs_fallback`;
+
+      let candidateRows: Row[];
+      if (includeCommentBodies) {
+        const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
+        const sqliteCommentNeedsFallbackSql =
+          `INSTR(COALESCE(l.body_md, ''), CHAR(0)) > 0 OR TYPEOF(l.body_md) = 'blob' OR ${buildSqliteUtf16ReversedBomSql("COALESCE(l.body_md, '')")}`;
+        // Materialize workspace_issues once (preserving database-native ORDER BY updated_at DESC
+        // via ROW_NUMBER() + id/rowid) and materialize matched_comments before UNION ALL.
+        // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
+        // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
+        // probes an index on session_id even when table statistics are stale (reltuples = 0).
+        // On SQLite, text LIKE/LOWER operators truncate at U+0000, UTF-16 reversed-BOM (U+FFFE)
+        // prefixes can scramble UTF-16->UTF-8 conversion, and raw BLOB columns coerce differently
+        // from JS toIssue()/String(). Piggybacking those checks in the same candidate query
+        // triggers a same-snapshot JS fallback only when such rows exist (zero extra SQL or rows
+        // on normal workspaces).
+        const matchedCommentsSql = isPostgres
+          ? `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
+             FROM workspace_issues wi
+             JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
+             CROSS JOIN LATERAL (
+               SELECT 1 AS hit
+               FROM multiremi_conversation_log l
+               WHERE l.session_id = s.id
+                 AND l.visibility = 'shown'
+                 AND l.kind = 'message'
+                 AND l.deleted_at IS NULL
+                 AND (${commentLikeSql})
+               LIMIT 1
+             ) cm`
+          : `SELECT
+               wi.id,
+               wi.updated_at,
+               wi.issue_ord,
+               MAX(CASE WHEN ${sqliteCommentNeedsFallbackSql} THEN 1 ELSE 0 END) AS needs_fallback
+             FROM workspace_issues wi
+             JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
+             JOIN multiremi_conversation_log l ON l.session_id = s.id
+             WHERE l.visibility = 'shown'
+               AND l.kind = 'message'
+               AND l.deleted_at IS NULL
+               AND ((${commentLikeSql}) OR (${sqliteCommentNeedsFallbackSql}))
+             GROUP BY wi.id, wi.updated_at, wi.issue_ord`;
+        const unionSelectSql = isPostgres
+          ? `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
+             FROM workspace_issues
+             WHERE match_rank IS NOT NULL
+             UNION ALL
+             SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank
+             FROM matched_comments`
+          : `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank, needs_fallback
+             FROM workspace_issues
+             WHERE match_rank IS NOT NULL OR needs_fallback = 1
+             UNION ALL
+             SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank, needs_fallback
+             FROM matched_comments`;
+        candidateRows = this.ctx.db.query(
+          `WITH workspace_issues AS MATERIALIZED (
+             SELECT
+               i.id,
+               i.updated_at,
+               ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
+               CASE
+                 WHEN (${keyLikeSql}) THEN 0
+                 WHEN (${titleLikeSql}) THEN 1
+                 WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
+                 ELSE NULL
+               END AS match_rank${sqliteFieldNeedsFallbackSql}
+             FROM multiremi_issues i
+             WHERE i.workspace_id = ?${closedFilterSql}
+           ),
+           matched_comments AS MATERIALIZED (
+             ${matchedCommentsSql}
+           )
+           ${unionSelectSql}`,
+        ).all(...patterns, ...patterns, ...patterns, workspaceId, ...patterns) as Row[];
+      } else {
+        candidateRows = this.ctx.db.query(
+          `WITH workspace_issues AS (
+             SELECT
+               i.id,
+               i.updated_at,
+               ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
+               0 AS has_comment_match,
+               CASE
+                 WHEN (${keyLikeSql}) THEN 0
+                 WHEN (${titleLikeSql}) THEN 1
+                 WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
+                 ELSE NULL
+               END AS match_rank${sqliteFieldNeedsFallbackSql}
+             FROM multiremi_issues i
+             WHERE i.workspace_id = ?${closedFilterSql}
+           )
+           SELECT id, updated_at, issue_ord, has_comment_match, match_rank${isPostgres ? "" : ", needs_fallback"}
+           FROM workspace_issues
+           WHERE match_rank IS NOT NULL${isPostgres ? "" : " OR needs_fallback = 1"}`,
+        ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
+      }
+
+      if (!isPostgres && candidateRows.some((row) => Number(row.needs_fallback) === 1)) {
+        return this.searchIssuesWorkspaceScanFallback({
+          query,
+          workspaceId,
+          includeClosed,
+          closedFilterSql,
+          isPostgres,
+          includeCommentBodies,
+          limit,
+          offset,
+        });
+      }
+
+      const mergedById = new Map<string, IssueSearchCandidate>();
+      for (const row of candidateRows) {
+        const id = String(row.id);
+        const updatedAt = String(row.updated_at);
+        const issueOrd = Number(row.issue_ord ?? 0);
+        const matchRank = Number(row.match_rank);
+        const hasCommentMatch = Number(row.has_comment_match) === 1;
+        const existing = mergedById.get(id);
+        if (existing) {
+          existing.matchRank = Math.min(existing.matchRank, matchRank);
+          existing.hasCommentMatch = existing.hasCommentMatch || hasCommentMatch;
+        } else {
+          mergedById.set(id, { id, updatedAt, issueOrd, matchRank, hasCommentMatch });
+        }
+      }
+      const candidates = [...mergedById.values()].sort(compareIssueSearchCandidates);
+
+      const total = candidates.length;
+      const page = candidates.slice(offset, offset + limit);
+      if (page.length === 0) return { issues: [], total };
+
+      const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id), closedFilterSql);
+      const commentPageIds = includeCommentBodies
+        ? page.filter((item) => item.hasCommentMatch).map((item) => item.id)
+        : [];
+      const commentSnippetsByIssueId = commentPageIds.length > 0
+        ? this.searchIssueCommentSnippets(commentPageIds, query, terms, patterns, isPostgres)
+        : new Map<string, string>();
+
+      const issues: MultiremiIssueSearchResult[] = [];
+      for (const item of page) {
+        const issue = hydratedById.get(item.id);
+        if (!issue) continue;
+        if (!includeClosed && CLOSED_ISSUE_STATUSES.has(issue.status) && !issue.archivedAt) continue;
+        const built = buildIssueSearchResult(issue, query, commentSnippetsByIssueId.get(item.id) ?? null);
+        if (built) issues.push(built);
+      }
+      return { issues, total };
+    });
   }
 
-  private searchIssueCommentSnippet(issueId: string, query: string): string | null {
+  private hydrateIssuesByIdsInWorkspace(
+    workspaceId: string,
+    issueIds: string[],
+    closedFilterSql = "",
+  ): Map<string, MultiremiIssue> {
+    const byId = new Map<string, MultiremiIssue>();
+    if (issueIds.length === 0) return byId;
+    const placeholders = issueIds.map(() => "?").join(", ");
     const rows = this.ctx.db.query(
-      "SELECT body FROM multiremi_issue_message_records WHERE issue_id = ? ORDER BY created_at DESC",
-    ).all(issueId) as Row[];
-    const match = rows.find((row) => searchMatch(String(row.body ?? ""), query));
-    return match ? extractSearchSnippet(String(match.body ?? ""), query) : null;
+      `SELECT i.* FROM multiremi_issues i WHERE i.workspace_id = ? AND i.id IN (${placeholders})${closedFilterSql}`,
+    ).all(workspaceId, ...issueIds) as Row[];
+    for (const issue of this.hydrateIssues(rows.map((row) => toIssue(row)))) {
+      byId.set(issue.id, issue);
+    }
+    return byId;
+  }
+
+  /**
+   * Read a single oversized conversation log `body_md` in bounded chunks so each
+   * bridge reply stays strictly below `postgresReplyMaxBytes()`.
+   *
+   * - PostgreSQL slices by Unicode code points via `SUBSTR(COALESCE(body_md, ''), ?, ?)`.
+   * - SQLite slices raw database-encoded bytes via `SUBSTR(CAST(body_md AS BLOB), ?, ?)`
+   *   (with `body_md IS NOT NULL`, avoiding `COALESCE` text-expression coercion) using even
+   *   byte chunks, detects the database encoding (`UTF-8` / `UTF-16le` / `UTF-16be`) in the
+   *   same query via `HEX(CAST('A' AS BLOB))`, and decodes once after concatenation with
+   *   `{ ignoreBOM: true }` so embedded `U+0000`, multi-byte UTF-8 / UTF-16 surrogate pairs,
+   *   leading `U+FEFF` (BOM), and leading `U+FFFE` code points are preserved identically to
+   *   baseline.
+   */
+  private readConversationLogBodyBounded(logId: string, isPostgres: boolean): string {
+    const ceiling = postgresReplyMaxBytes();
+    if (!isPostgres) {
+      const chunkBytes = Math.max(64, Math.floor((Math.max(256, ceiling) - 192) / 6) & ~1);
+      const chunks: Uint8Array[] = [];
+      let encoding: "utf-8" | "utf-16le" | "utf-16be" = "utf-8";
+      let startByte = 1;
+      while (true) {
+        const row = this.ctx.db.query(
+          "SELECT SUBSTR(CAST(body_md AS BLOB), ?, ?) AS c, HEX(CAST('A' AS BLOB)) AS enc FROM multiremi_conversation_log WHERE id = ? AND body_md IS NOT NULL",
+        ).get(startByte, chunkBytes, logId) as Row | null;
+        if (!row || row.c == null) break;
+        if (startByte === 1) {
+          const encHex = String(row.enc ?? "").toUpperCase();
+          encoding = encHex === "4100" ? "utf-16le" : encHex === "0041" ? "utf-16be" : "utf-8";
+        }
+        const raw = row.c;
+        const chunk = raw instanceof Uint8Array
+          ? raw
+          : typeof raw === "string"
+            ? Buffer.from(raw, "utf8")
+            : new Uint8Array(raw as ArrayBufferLike);
+        if (chunk.byteLength === 0) break;
+        chunks.push(chunk);
+        startByte += chunk.byteLength;
+        if (chunk.byteLength < chunkBytes) break;
+      }
+      return new TextDecoder(encoding, { ignoreBOM: true }).decode(Buffer.concat(chunks));
+    }
+
+    const chunkChars = Math.max(16, Math.floor((Math.max(256, ceiling) - 192) / 6));
+    const parts: string[] = [];
+    let start = 1;
+    while (true) {
+      const row = this.ctx.db.query(
+        "SELECT SUBSTR(COALESCE(body_md, ''), ?, ?) AS c FROM multiremi_conversation_log WHERE id = ?",
+      ).get(start, chunkChars, logId) as Row | null;
+      if (!row) break;
+      const chunk = String(row.c ?? "");
+      if (!chunk) break;
+      parts.push(chunk);
+      const cpLen = Array.from(chunk).length;
+      start += cpLen;
+      if (cpLen < chunkChars) break;
+    }
+    return parts.join("");
+  }
+
+  /**
+   * Fetch the latest matching visible issue-session comment snippet per issue,
+   * paginating by `postgresReplyMaxBytes()` (and chunking any single oversized
+   * comment body via `SUBSTR`) so a single bridge reply never exceeds the
+   * configured reply ceiling.
+   * Tie-breaking contract: when multiple matching comments for the same issue share
+   * an identical `created_at`, deterministic ordering uses
+   * `ORDER BY l.created_at DESC, l.seq DESC, l.id DESC` (latest session sequence first).
+   */
+  private searchIssueCommentSnippets(
+    issueIds: string[],
+    query: string,
+    terms: string[],
+    patterns: string[],
+    isPostgres: boolean,
+  ): Map<string, string> {
+    const snippets = new Map<string, string>();
+    const uniqueIssueIds = [...new Set(issueIds)];
+    if (uniqueIssueIds.length === 0) return snippets;
+    const placeholders = uniqueIssueIds.map(() => "?").join(", ");
+    const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
+    const budgetBytes = issueSearchReplyBudgetBytes();
+    const rowBytesSql = buildCommentSnippetRowBytesSql(isPostgres);
+    let afterIssueId: string | null = null;
+    let processedIssueCount = 0;
+
+    while (true) {
+      const afterClause = afterIssueId !== null ? " AND s.issue_id > ?" : "";
+      const params: unknown[] = afterIssueId !== null
+        ? [...uniqueIssueIds, afterIssueId, ...patterns, budgetBytes, budgetBytes, budgetBytes, budgetBytes]
+        : [...uniqueIssueIds, ...patterns, budgetBytes, budgetBytes, budgetBytes, budgetBytes];
+      const rows = this.ctx.db.query(
+        `WITH latest_per_issue AS (
+           SELECT
+             s.issue_id AS issue_id,
+             l.id AS id,
+             ${rowBytesSql} AS row_bytes,
+             ROW_NUMBER() OVER (PARTITION BY s.issue_id ORDER BY l.created_at DESC, l.seq DESC, l.id DESC) AS issue_rn
+           FROM multiremi_conversation_log l
+           JOIN multiremi_issue_sessions s ON s.id = l.session_id
+           WHERE s.issue_id IN (${placeholders})${afterClause}
+             AND s.chat_id IS NULL
+             AND l.kind = 'message'
+             AND l.visibility = 'shown'
+             AND l.deleted_at IS NULL
+             AND (${commentLikeSql})
+         ),
+         sized AS (
+           SELECT
+             issue_id,
+             id,
+             row_bytes,
+             ROW_NUMBER() OVER (ORDER BY issue_id ASC) AS rn,
+             SUM(row_bytes) OVER (
+               ORDER BY issue_id ASC
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS cum_bytes
+           FROM latest_per_issue
+           WHERE issue_rn = 1
+         )
+         SELECT
+           sized.issue_id AS issue_id,
+           sized.id AS id,
+           CASE WHEN sized.cum_bytes > ? THEN NULL ELSE (SELECT l2.body_md FROM multiremi_conversation_log l2 WHERE l2.id = sized.id) END AS body_md,
+           CASE WHEN sized.rn = 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
+           CASE WHEN sized.rn > 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS truncated
+         FROM sized
+         WHERE sized.rn = 1 OR (sized.cum_bytes - sized.row_bytes) <= ?
+         ORDER BY sized.rn ASC`,
+      ).all(...params) as Row[];
+
+      if (rows.length === 0) break;
+
+      let truncated = false;
+      let hadOversize = false;
+      let lastIssueId: string | null = null;
+      for (const row of rows) {
+        if (Number(row.truncated) === 1) {
+          truncated = true;
+          break;
+        }
+        const issueId = String(row.issue_id);
+        lastIssueId = issueId;
+        processedIssueCount += 1;
+        const isOversize = Number(row.oversize) === 1;
+        if (isOversize) hadOversize = true;
+        const body = isOversize
+          ? this.readConversationLogBodyBounded(String(row.id), isPostgres)
+          : String(row.body_md ?? "");
+        if (searchMatch(body, query)) {
+          snippets.set(issueId, extractSearchSnippet(body, query));
+        }
+      }
+      if ((!truncated && !hadOversize) || lastIssueId === null || processedIssueCount >= uniqueIssueIds.length) break;
+      afterIssueId = lastIssueId;
+    }
+
+    return snippets;
+  }
+
+  /**
+   * Scan visible issue-session comments in deterministic
+   * `(s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC)` order using a
+   * cumulative wire-byte window capped by `postgresReplyMaxBytes()`. Any single
+   * comment exceeding the batch budget is read via bounded `SUBSTR` chunks.
+   * Under normal datasets (< budgetBytes and < 2000 rows), completes in 1 SQL query.
+   */
+  private scanIssueCommentsBounded(input: {
+    scope:
+      | { kind: "workspace"; workspaceId: string; closedFilterSql: string }
+      | { kind: "issue_ids"; issueIds: string[] };
+    query: string;
+    isPostgres: boolean;
+    snippets: Map<string, string>;
+  }): void {
+    const { scope, query, isPostgres, snippets } = input;
+    if (scope.kind === "issue_ids" && scope.issueIds.length === 0) return;
+
+    const fromAndJoinSql = scope.kind === "workspace"
+      ? `multiremi_issues i
+         JOIN multiremi_issue_sessions s ON s.issue_id = i.id
+         JOIN multiremi_conversation_log l ON l.session_id = s.id`
+      : `multiremi_issue_sessions s
+         JOIN multiremi_conversation_log l ON l.session_id = s.id`;
+    const scopeWhereSql = scope.kind === "workspace"
+      ? `i.workspace_id = ?${scope.closedFilterSql}`
+      : `s.issue_id IN (${scope.issueIds.map(() => "?").join(", ")})`;
+    const baseParams: unknown[] = scope.kind === "workspace"
+      ? [scope.workspaceId]
+      : [...scope.issueIds];
+
+    const budgetBytes = issueSearchReplyBudgetBytes();
+    const batchLimit = Math.max(2, Math.min(ISSUE_SEARCH_COMMENT_BATCH_ROWS, Math.ceil(budgetBytes / 128) + 2));
+    const rowBytesSql = buildCommentRowBytesSql(isPostgres);
+    let cursor: CommentScanCursor | null = null;
+
+    while (true) {
+      const cursorClause = buildCommentScanCursorSql(cursor);
+      const batchRows = this.ctx.db.query(
+        `WITH batch AS (
+           SELECT
+             s.issue_id AS issue_id,
+             l.created_at AS created_at,
+             l.seq AS seq,
+             l.id AS id,
+             ${rowBytesSql} AS row_bytes
+           FROM ${fromAndJoinSql}
+           WHERE ${scopeWhereSql}
+             AND s.chat_id IS NULL
+             AND l.kind = 'message'
+             AND l.visibility = 'shown'
+             AND l.deleted_at IS NULL${cursorClause.sql}
+           ORDER BY s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC
+           LIMIT ?
+         ),
+         sized AS (
+           SELECT
+             issue_id,
+             created_at,
+             seq,
+             id,
+             row_bytes,
+             ROW_NUMBER() OVER (ORDER BY issue_id ASC, created_at DESC, seq DESC, id DESC) AS rn,
+             SUM(row_bytes) OVER (
+               ORDER BY issue_id ASC, created_at DESC, seq DESC, id DESC
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS cum_bytes
+           FROM batch
+         )
+         SELECT
+           sized.issue_id AS issue_id,
+           sized.created_at AS created_at,
+           sized.seq AS seq,
+           sized.id AS id,
+           CASE WHEN sized.cum_bytes > ? THEN NULL ELSE (SELECT l2.body_md FROM multiremi_conversation_log l2 WHERE l2.id = sized.id) END AS body_md,
+           CASE WHEN sized.rn = 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
+           CASE WHEN sized.rn > 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS truncated
+         FROM sized
+         WHERE sized.rn = 1 OR (sized.cum_bytes - sized.row_bytes) <= ?
+         ORDER BY sized.rn ASC`,
+      ).all(
+        ...baseParams,
+        ...cursorClause.params,
+        batchLimit,
+        budgetBytes,
+        budgetBytes,
+        budgetBytes,
+        budgetBytes,
+      ) as Row[];
+
+      if (batchRows.length === 0) break;
+
+      let truncated = false;
+      let hadOversize = false;
+      let lastFullRow: { issueId: string; createdAt: string; seq: number; id: string } | null = null;
+      for (const row of batchRows) {
+        if (Number(row.truncated) === 1) {
+          truncated = true;
+          break;
+        }
+        const issueId = String(row.issue_id);
+        const logId = String(row.id);
+        lastFullRow = {
+          issueId,
+          createdAt: String(row.created_at),
+          seq: Number(row.seq),
+          id: logId,
+        };
+        const isOversize = Number(row.oversize) === 1;
+        if (isOversize) hadOversize = true;
+        if (snippets.has(issueId)) continue;
+        const body = isOversize
+          ? this.readConversationLogBodyBounded(logId, isPostgres)
+          : String(row.body_md ?? "");
+        if (searchMatch(body, query)) {
+          snippets.set(issueId, extractSearchSnippet(body, query));
+        }
+      }
+
+      if (!truncated && !hadOversize && batchRows.length < batchLimit) break;
+      if (!lastFullRow) break;
+
+      cursor = snippets.has(lastFullRow.issueId)
+        ? { kind: "after_issue", issueId: lastFullRow.issueId }
+        : {
+            kind: "after_row",
+            issueId: lastFullRow.issueId,
+            createdAt: lastFullRow.createdAt,
+            seq: lastFullRow.seq,
+            id: lastFullRow.id,
+          };
+    }
+  }
+
+  private searchIssuesWorkspaceScanFallback(input: {
+    query: string;
+    workspaceId: string;
+    includeClosed: boolean;
+    closedFilterSql: string;
+    isPostgres: boolean;
+    includeCommentBodies: boolean;
+    limit: number;
+    offset: number;
+  }): { issues: MultiremiIssueSearchResult[]; total: number } {
+    const { query, workspaceId, includeClosed, closedFilterSql, isPostgres, includeCommentBodies, limit, offset } = input;
+    const issueTieBreakCol = isPostgres ? "i.id" : "i.rowid";
+    const rows = this.ctx.db.query(
+      `SELECT i.id, i.issue_number, i.issue_key, i.title, i.description, i.updated_at
+       FROM multiremi_issues i
+       WHERE i.workspace_id = ?${closedFilterSql}
+       ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC`,
+    ).all(workspaceId) as Row[];
+
+    // Evaluate key/title/description matches in memory first: field-matched rows already have
+    // a fixed matchRank (0/1/2), so candidate discovery only needs comment scans for rows that
+    // did not match key/title/description. Field-matched rows on the final page fetch their
+    // comment snippets afterwards (bounded by `limit <= 100` and `postgresReplyMaxBytes()`).
+    const scannedRows: Array<{
+      id: string;
+      updatedAt: string;
+      issueOrd: number;
+      fieldMatchSource: "key" | "title" | "description" | null;
+    }> = [];
+    const fieldMatchedIds: string[] = [];
+    const nonFieldMatchedIds: string[] = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]!;
+      const id = String(row.id);
+      const number = Number(row.issue_number ?? 0);
+      const key = String(row.issue_key || (number > 0 ? formatIssueKey(number) : id));
+      const title = String(row.title);
+      const description = nullableString(row.description) ?? "";
+      const fieldMatchSource = searchMatch(key, query)
+        ? "key"
+        : searchMatch(title, query)
+          ? "title"
+          : searchMatch(description, query)
+            ? "description"
+            : null;
+      scannedRows.push({
+        id,
+        updatedAt: String(row.updated_at),
+        issueOrd: index,
+        fieldMatchSource,
+      });
+      if (fieldMatchSource) fieldMatchedIds.push(id);
+      else nonFieldMatchedIds.push(id);
+    }
+
+    const commentSnippetByIssueId = new Map<string, string>();
+    let fieldMatchedCommentsScanned = false;
+    if (includeCommentBodies && rows.length > 0) {
+      if (nonFieldMatchedIds.length > 0) {
+        if (fieldMatchedIds.length === 0 || nonFieldMatchedIds.length > ISSUE_SEARCH_MAX_ISSUE_ID_FILTER) {
+          this.scanIssueCommentsBounded({
+            scope: { kind: "workspace", workspaceId, closedFilterSql },
+            query,
+            isPostgres,
+            snippets: commentSnippetByIssueId,
+          });
+          fieldMatchedCommentsScanned = true;
+        } else {
+          this.scanIssueCommentsBounded({
+            scope: { kind: "issue_ids", issueIds: nonFieldMatchedIds },
+            query,
+            isPostgres,
+            snippets: commentSnippetByIssueId,
+          });
+        }
+      }
+    }
+
+    const candidates: IssueSearchCandidate[] = [];
+    for (const row of scannedRows) {
+      const hasComment = commentSnippetByIssueId.has(row.id);
+      const matchSource = row.fieldMatchSource ?? (hasComment ? "comment" : null);
+      if (!matchSource) continue;
+      candidates.push({
+        id: row.id,
+        matchRank: searchRank(matchSource),
+        updatedAt: row.updatedAt,
+        issueOrd: row.issueOrd,
+        hasCommentMatch: hasComment,
+      });
+    }
+    candidates.sort(compareIssueSearchCandidates);
+    const total = candidates.length;
+    const page = candidates.slice(offset, offset + limit);
+    if (page.length === 0) return { issues: [], total };
+
+    if (includeCommentBodies && !fieldMatchedCommentsScanned) {
+      const pageFieldMatchedIds = page
+        .filter((item) => item.matchRank < 3)
+        .map((item) => item.id);
+      if (pageFieldMatchedIds.length > 0) {
+        this.scanIssueCommentsBounded({
+          scope: { kind: "issue_ids", issueIds: pageFieldMatchedIds },
+          query,
+          isPostgres,
+          snippets: commentSnippetByIssueId,
+        });
+      }
+    }
+
+    const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id), closedFilterSql);
+    const issues: MultiremiIssueSearchResult[] = [];
+    for (const item of page) {
+      const issue = hydratedById.get(item.id);
+      if (!issue) continue;
+      if (!includeClosed && CLOSED_ISSUE_STATUSES.has(issue.status) && !issue.archivedAt) continue;
+      const built = buildIssueSearchResult(issue, query, commentSnippetByIssueId.get(item.id) ?? null);
+      if (built) issues.push(built);
+    }
+    return { issues, total };
   }
 
   private sameWorkspaceParent(issue: MultiremiIssue): MultiremiIssue | null {
@@ -6584,6 +7215,185 @@ export class IssuesRepo {
 
 function formatIssueKey(number: number): string {
   return `MUL-${number}`;
+}
+
+const ISSUE_SEARCH_EFFECTIVE_KEY_SQL =
+  "CASE WHEN i.issue_key IS NOT NULL AND i.issue_key <> '' THEN i.issue_key " +
+  "WHEN COALESCE(i.issue_number, 0) > 0 THEN 'MUL-' || CAST(i.issue_number AS TEXT) " +
+  "ELSE i.id END";
+
+const ISSUE_SEARCH_CLOSED_NORMALIZED_SQL = [...CLOSED_ISSUE_STATUSES]
+  .filter((status) => (ISSUE_STATUSES as readonly string[]).includes(status))
+  .map((status) => `'${status}'`)
+  .join(", ");
+
+// All 25 ECMAScript WhiteSpace + LineTerminator code points stripped by String.prototype.trim()
+// so SQL closed-status filtering matches normalizeIssueStatus(row.status) on SQLite and PostgreSQL.
+const ECMA_WHITESPACE_CHARS =
+  "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+function buildIssueSearchExcludeUnarchivedClosedSql(isPostgres: boolean): string {
+  const normalizedStatusSql = isPostgres
+    ? `BTRIM(COALESCE(i.status, 'todo'), '${ECMA_WHITESPACE_CHARS}')`
+    : `TRIM(COALESCE(i.status, 'todo'), '${ECMA_WHITESPACE_CHARS}')`;
+  // Baseline toIssue(row) maps archivedAt via nullableString(row.archived_at), so only non-empty text
+  // counts as archived (non-text SQLite affinities such as BLOB evaluate as !issue.archivedAt).
+  const archivedExemptionSql = isPostgres
+    ? "(i.archived_at IS NOT NULL AND i.archived_at <> '')"
+    : "(TYPEOF(i.archived_at) = 'text' AND i.archived_at <> '')";
+  return ` AND (${normalizedStatusSql} NOT IN (${ISSUE_SEARCH_CLOSED_NORMALIZED_SQL}) OR ${archivedExemptionSql})`;
+}
+
+interface IssueSearchCandidate {
+  id: string;
+  updatedAt: string;
+  issueOrd: number;
+  matchRank: number;
+  hasCommentMatch: boolean;
+}
+
+function compareIssueSearchCandidates(left: IssueSearchCandidate, right: IssueSearchCandidate): number {
+  const rankDiff = left.matchRank - right.matchRank;
+  if (rankDiff !== 0) return rankDiff;
+  const timeDiff = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  if (timeDiff) return timeDiff;
+  // Tie-breaker: rely on the database's native `ORDER BY i.updated_at DESC, <i.id | i.rowid> ASC`
+  // rank (`issueOrd`) instead of JS UTF-16 code-unit comparison so equal-instant ISO variants
+  // follow native DB collation (SQLite BINARY, PostgreSQL locale collation such as en_US.utf8),
+  // while identical `updated_at` strings break ties deterministically by `i.rowid ASC` on SQLite
+  // and logical primary key `i.id ASC` on PostgreSQL (avoiding physical heap/ctid drift).
+  const ordDiff = left.issueOrd - right.issueOrd;
+  if (ordDiff !== 0) return ordDiff;
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
+const ISSUE_SEARCH_MAX_SQL_TERMS = 50;
+const ISSUE_SEARCH_MAX_SQL_PATTERN_BYTES = 4096;
+const ISSUE_SEARCH_COMMENT_BATCH_ROWS = 2000;
+const ISSUE_SEARCH_MAX_ISSUE_ID_FILTER = 500;
+
+type CommentScanCursor =
+  | { kind: "after_issue"; issueId: string }
+  | { kind: "after_row"; issueId: string; createdAt: string; seq: number; id: string };
+
+function issueSearchReplyBudgetBytes(): number {
+  const ceiling = postgresReplyMaxBytes();
+  const wrapperReserve = Math.max(512, Math.min(64 * 1024, Math.floor(ceiling / 4)));
+  return Math.max(256, ceiling - wrapperReserve);
+}
+
+function buildCommentRowBytesSql(isPostgres: boolean): string {
+  return isPostgres
+    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(to_json(COALESCE(s.issue_id, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.created_at, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.id, ''))::text) + 160"
+    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + LENGTH(COALESCE(l.created_at, '')) + LENGTH(COALESCE(l.id, '')) + 160";
+}
+
+function buildCommentSnippetRowBytesSql(isPostgres: boolean): string {
+  return isPostgres
+    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(to_json(COALESCE(s.issue_id, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.id, ''))::text) + 128"
+    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + LENGTH(COALESCE(l.id, '')) + 128";
+}
+
+function buildCommentScanCursorSql(cursor: CommentScanCursor | null): { sql: string; params: unknown[] } {
+  if (!cursor) return { sql: "", params: [] };
+  if (cursor.kind === "after_issue") {
+    return { sql: " AND s.issue_id > ?", params: [cursor.issueId] };
+  }
+  return {
+    sql: ` AND (
+             s.issue_id > ?
+             OR (
+               s.issue_id = ?
+               AND (
+                 l.created_at < ?
+                 OR (
+                   l.created_at = ?
+                   AND (
+                     l.seq < ?
+                     OR (l.seq = ? AND l.id < ?)
+                   )
+                 )
+               )
+             )
+           )`,
+    params: [
+      cursor.issueId,
+      cursor.issueId,
+      cursor.createdAt,
+      cursor.createdAt,
+      cursor.seq,
+      cursor.seq,
+      cursor.id,
+    ],
+  };
+}
+
+function extractSearchTerms(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
+}
+
+function escapeSearchLikeTerm(term: string): string {
+  return term.replace(/[\\%_]/gu, (character) => `\\${character}`);
+}
+
+function hasNonAsciiCasedChar(value: string): boolean {
+  for (const ch of value) {
+    if (ch.charCodeAt(0) > 0x7f && ch.toLowerCase() !== ch.toUpperCase()) return true;
+  }
+  return false;
+}
+
+function buildSqliteUtf16ReversedBomSql(columnSql: string): string {
+  // Detect a leading U+FFFE (reversed BOM) in UTF-16le ('FEFF') or UTF-16be ('FFFE')
+  // SQLite databases using standard HEX(...) rather than X'...' hex literals so the
+  // expression stays within schema-ddl.ts's SQL lexical allowlist.
+  return `((HEX(CAST('A' AS BLOB)) = '4100' AND HEX(SUBSTR(CAST(${columnSql} AS BLOB), 1, 2)) = 'FEFF') OR (HEX(CAST('A' AS BLOB)) = '0041' AND HEX(SUBSTR(CAST(${columnSql} AS BLOB), 1, 2)) = 'FFFE'))`;
+}
+
+function buildSearchLikeAllTermsSql(columnSql: string, terms: string[]): string {
+  // Across all Unicode (U+0080..U+10FFFF), ECMAScript String.prototype.toLowerCase()
+  // folds only two non-ASCII code points into ASCII or uncased characters:
+  //   - U+212A ('K' Kelvin Sign) -> 'k' (SQLite LOWER() leaves U+212A unchanged)
+  //   - U+0130 ('İ' Latin Capital I With Dot Above) -> 'i\u0307' (PG en_US.utf8 LOWER() drops '\u0307' -> 'i')
+  // Expanding U+0130 whenever any term contains 'i' OR '\u0307' keeps both SQLite and PostgreSQL
+  // exact-equivalent with JS searchMatch() without losing O(1) SQL pushdown.
+  let normalizedColumnSql = columnSql;
+  if (terms.some((term) => term.includes("k"))) {
+    normalizedColumnSql = `REPLACE(${normalizedColumnSql}, '\u212A', 'k')`;
+  }
+  if (terms.some((term) => term.includes("i") || term.includes("\u0307"))) {
+    normalizedColumnSql = `REPLACE(${normalizedColumnSql}, '\u0130', 'i\u0307')`;
+  }
+  return terms.map(() => `LOWER(${normalizedColumnSql}) LIKE ? ESCAPE '\\'`).join(" AND ");
+}
+
+function buildIssueSearchResult(
+  issue: MultiremiIssue,
+  query: string,
+  matchedCommentSnippet: string | null,
+): MultiremiIssueSearchResult | null {
+  const matchSource = searchMatch(issue.key, query)
+    ? "key"
+    : searchMatch(issue.title, query)
+      ? "title"
+      : searchMatch(issue.description ?? "", query)
+        ? "description"
+        : matchedCommentSnippet !== null
+          ? "comment"
+          : null;
+  if (!matchSource) return null;
+  const result: MultiremiIssueSearchResult = {
+    ...issue,
+    matchSource,
+  };
+  if (matchSource === "description" && issue.description) {
+    result.matchedDescriptionSnippet = extractSearchSnippet(issue.description, query);
+  }
+  if (matchedCommentSnippet !== null) {
+    result.matchedCommentSnippet = matchedCommentSnippet;
+    if (matchSource === "comment") result.matchedSnippet = matchedCommentSnippet;
+  }
+  return result;
 }
 
 function escapeDependencyCheckEventIdForLike(value: string): string {
